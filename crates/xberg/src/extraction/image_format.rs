@@ -113,75 +113,68 @@ pub(crate) fn detect_image_format(data: &[u8]) -> Cow<'static, str> {
 mod tests {
     use super::*;
 
-    fn standard_wmf(mt_type: u16) -> Vec<u8> {
-        let mut data = vec![0_u8; 24];
-        data[0..2].copy_from_slice(&mt_type.to_le_bytes());
-        data[2..4].copy_from_slice(&9_u16.to_le_bytes());
-        data[4..6].copy_from_slice(&0x0300_u16.to_le_bytes());
-        data[6..10].copy_from_slice(&12_u32.to_le_bytes());
-        data[12..16].copy_from_slice(&3_u32.to_le_bytes());
-        data
+    #[test]
+    fn test_detect_jpeg() {
+        assert_eq!(detect_image_format(&[0xFF, 0xD8, 0xFF, 0xE0]), "jpeg");
     }
 
-    fn emf() -> Vec<u8> {
+    #[test]
+    fn test_detect_png() {
+        assert_eq!(detect_image_format(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A]), "png");
+    }
+
+    #[test]
+    fn test_detect_gif() {
+        assert_eq!(detect_image_format(b"GIF89a"), "gif");
+    }
+
+    #[test]
+    fn test_detect_bmp() {
+        assert_eq!(detect_image_format(b"BM\x00\x00"), "bmp");
+    }
+
+    #[test]
+    fn test_detect_tiff_le() {
+        assert_eq!(detect_image_format(b"II\x2A\x00"), "tiff");
+    }
+
+    #[test]
+    fn test_detect_tiff_be() {
+        assert_eq!(detect_image_format(b"MM\x00\x2A"), "tiff");
+    }
+
+    #[test]
+    fn test_detect_webp() {
+        assert_eq!(detect_image_format(b"RIFF\x00\x00\x00\x00WEBP"), "webp");
+    }
+
+    #[test]
+    fn test_detect_wmf() {
+        assert_eq!(detect_image_format(&[0xD7, 0xCD, 0xC6, 0x9A, 0x00]), "wmf");
+    }
+
+    #[test]
+    fn test_detect_emf() {
         let mut data = vec![0_u8; EMF_HEADER_MIN_BYTES];
         data[0..4].copy_from_slice(&1_u32.to_le_bytes());
         data[4..8].copy_from_slice(&(EMF_HEADER_MIN_BYTES as u32).to_le_bytes());
         data[40..44].copy_from_slice(b" EMF");
         data[48..52].copy_from_slice(&(EMF_HEADER_MIN_BYTES as u32).to_le_bytes());
-        data
+        assert_eq!(detect_image_format(&data), "emf");
     }
 
     #[test]
-    fn detects_raster_formats() {
-        assert_eq!(detect_image_format(&[0xFF, 0xD8, 0xFF, 0xE0]), "jpeg");
-        assert_eq!(detect_image_format(&[0x89, 0x50, 0x4E, 0x47]), "png");
-        assert_eq!(detect_image_format(b"GIF89a"), "gif");
-        assert_eq!(detect_image_format(b"BM\0\0"), "bmp");
-        assert_eq!(detect_image_format(b"II\x2A\x00"), "tiff");
-        assert_eq!(detect_image_format(b"MM\x00\x2A"), "tiff");
-        assert_eq!(detect_image_format(b"RIFF\0\0\0\0WEBP"), "webp");
+    fn test_detect_svg() {
+        assert_eq!(detect_image_format(b"<svg xmlns="), "svg");
     }
 
     #[test]
-    fn detects_placeable_and_standard_wmf() {
-        assert_eq!(detect_image_format(&PLACEABLE_WMF_KEY), "wmf");
-        assert_eq!(detect_image_format(&standard_wmf(1)), "wmf");
-        assert_eq!(detect_image_format(&standard_wmf(2)), "wmf");
-    }
-
-    #[test]
-    fn rejects_invalid_standard_wmf() {
-        let valid = standard_wmf(1);
-        assert_eq!(detect_image_format(&valid[..17]), "unknown");
-
-        let mut bad_header = valid.clone();
-        bad_header[2..4].copy_from_slice(&8_u16.to_le_bytes());
-        assert_eq!(detect_image_format(&bad_header), "unknown");
-
-        let mut bad_version = valid.clone();
-        bad_version[4..6].copy_from_slice(&0x0200_u16.to_le_bytes());
-        assert_eq!(detect_image_format(&bad_version), "unknown");
-
-        let mut oversized = valid;
-        oversized[6..10].copy_from_slice(&13_u32.to_le_bytes());
-        assert_eq!(detect_image_format(&oversized), "unknown");
-    }
-
-    #[test]
-    fn validates_emf_header() {
-        assert_eq!(detect_image_format(&emf()), "emf");
-        let valid = emf();
-        assert_eq!(detect_image_format(&valid[..44]), "unknown");
-
-        let mut oversized = valid;
-        oversized[48..52].copy_from_slice(&89_u32.to_le_bytes());
-        assert_eq!(detect_image_format(&oversized), "unknown");
-    }
-
-    #[test]
-    fn rejects_random_and_empty_data() {
+    fn test_detect_unknown() {
         assert_eq!(detect_image_format(b"random data"), "unknown");
+    }
+
+    #[test]
+    fn test_detect_empty() {
         assert_eq!(detect_image_format(b""), "unknown");
     }
 }

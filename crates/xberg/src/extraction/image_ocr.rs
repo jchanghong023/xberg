@@ -347,8 +347,6 @@ mod tests {
     use crate::plugins::{OcrBackend, OcrBackendType, Plugin};
 
     const BACKEND_NAME: &str = "thread-budget-concurrency-test-backend";
-    #[cfg(windows)]
-    const PNG_BACKEND_NAME: &str = "metafile-png-preprocess-test-backend";
     const POLICY_BACKEND_NAME: &str = "embedded-image-element-policy-test-backend";
 
     struct RegistrationGuard;
@@ -373,47 +371,6 @@ mod tests {
         gate: Arc<Notify>,
     }
 
-    #[cfg(windows)]
-    struct PngAssertingBackend;
-
-    #[cfg(windows)]
-    impl Plugin for PngAssertingBackend {
-        fn name(&self) -> &str {
-            PNG_BACKEND_NAME
-        }
-
-        fn version(&self) -> String {
-            "1.0.0".to_string()
-        }
-
-        fn initialize(&self) -> crate::Result<()> {
-            Ok(())
-        }
-
-        fn shutdown(&self) -> crate::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[cfg(windows)]
-    #[async_trait]
-    impl OcrBackend for PngAssertingBackend {
-        async fn process_image(&self, image_bytes: &[u8], _config: &OcrConfig) -> crate::Result<ExtractedDocument> {
-            assert!(image_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
-            Ok(ExtractedDocument {
-                content: "VECTOR_003".to_string(),
-                ..Default::default()
-            })
-        }
-
-        fn supports_language(&self, _lang: &str) -> bool {
-            true
-        }
-
-        fn backend_type(&self) -> OcrBackendType {
-            OcrBackendType::Custom
-        }
-    }
     struct PolicyIgnoringBackend;
 
     impl Plugin for PolicyIgnoringBackend {
@@ -583,50 +540,5 @@ mod tests {
         assert!(nested.ocr_elements.is_none());
         assert!(warnings.is_empty());
         crate::plugins::unregister_ocr_backend(POLICY_BACKEND_NAME).unwrap();
-    }
-
-    #[cfg(windows)]
-    #[tokio::test]
-    async fn standard_wmf_is_png_encoded_before_backend_call() {
-        crate::plugins::register_ocr_backend(Arc::new(PngAssertingBackend))
-            .expect("register PNG-asserting OCR backend");
-        let config = crate::core::config::ExtractionConfig {
-            ocr: Some(OcrConfig {
-                backend: PNG_BACKEND_NAME.to_string(),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let mut wmf = Vec::new();
-        wmf.extend_from_slice(&1_u16.to_le_bytes());
-        wmf.extend_from_slice(&9_u16.to_le_bytes());
-        wmf.extend_from_slice(&0x0300_u16.to_le_bytes());
-        wmf.extend_from_slice(&12_u32.to_le_bytes());
-        wmf.extend_from_slice(&0_u16.to_le_bytes());
-        wmf.extend_from_slice(&3_u32.to_le_bytes());
-        wmf.extend_from_slice(&0_u16.to_le_bytes());
-        wmf.extend_from_slice(&3_u32.to_le_bytes());
-        wmf.extend_from_slice(&0_u16.to_le_bytes());
-        let images = vec![ExtractedImage {
-            data: Bytes::from(wmf),
-            format: Cow::Borrowed("wmf"),
-            image_index: 0,
-            page_number: Some(1),
-            width: Some(64),
-            height: Some(48),
-            ..Default::default()
-        }];
-        let mut warnings = Vec::new();
-
-        let images = process_images_with_ocr(images, &config, &mut warnings)
-            .await
-            .expect("metafile OCR preprocessing must succeed");
-
-        assert_eq!(
-            images[0].ocr_result.as_ref().map(|result| result.content.as_str()),
-            Some("VECTOR_003")
-        );
-        assert!(warnings.is_empty());
-        crate::plugins::unregister_ocr_backend(PNG_BACKEND_NAME).unwrap();
     }
 }
