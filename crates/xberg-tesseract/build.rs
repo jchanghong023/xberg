@@ -560,7 +560,7 @@ mod build_tesseract {
 
         let leptonica_install_dir = out_dir.join("leptonica");
         let leptonica_link_name = build_static_library("leptonica", &leptonica_install_dir, || {
-            let mut leptonica_config = Config::new(&leptonica_dir);
+            let mut leptonica_config = Config::new(cmake_compatible_path(&leptonica_dir));
 
             let leptonica_src_dir = leptonica_dir.join("src");
             let environ_h_path = leptonica_src_dir.join("environ.h");
@@ -719,7 +719,7 @@ mod build_tesseract {
 
             std::fs::write(&cmakelists_path, cmakelists).expect("Failed to write CMakeLists.txt");
 
-            let mut tesseract_config = Config::new(&tesseract_dir);
+            let mut tesseract_config = Config::new(cmake_compatible_path(&tesseract_dir));
             if windows_target {
                 if mingw_target {
                     tesseract_config.generator("Unix Makefiles");
@@ -1071,8 +1071,36 @@ mod build_tesseract {
         )))
     }
 
+    /// CMake cannot reliably enumerate sources through Windows verbatim paths
+    /// (`\\?\C:\...`). `std::fs::canonicalize` returns that form on Windows,
+    /// so remove only the verbatim prefix before handing a path to CMake.
+    #[cfg(windows)]
+    fn cmake_compatible_path(path: &Path) -> PathBuf {
+        use std::ffi::OsString;
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+        let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+        const VERBATIM_PREFIX: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
+        const UNC_PREFIX: &[u16] = &[b'U' as u16, b'N' as u16, b'C' as u16, b'\\' as u16];
+
+        let Some(remainder) = wide.strip_prefix(VERBATIM_PREFIX) else {
+            return path.to_path_buf();
+        };
+        if let Some(unc_path) = remainder.strip_prefix(UNC_PREFIX) {
+            let mut normalized = vec![b'\\' as u16, b'\\' as u16];
+            normalized.extend_from_slice(unc_path);
+            return PathBuf::from(OsString::from_wide(&normalized));
+        }
+        PathBuf::from(OsString::from_wide(remainder))
+    }
+
+    #[cfg(not(windows))]
+    fn cmake_compatible_path(path: &Path) -> PathBuf {
+        path.to_path_buf()
+    }
+
     fn normalize_cmake_path(path: &Path) -> String {
-        path.to_string_lossy().replace('\\', "/")
+        cmake_compatible_path(path).to_string_lossy().replace('\\', "/")
     }
 
     /// Apply the WASM patch to Tesseract source. Uses `git apply` if available, falls back to manual application.
@@ -1428,7 +1456,7 @@ namespace this_thread {
         let sysroot = wasi_sdk_dir.join("share/wasi-sysroot");
         let clang = wasi_sdk_dir.join("bin/clang");
 
-        let mut config = Config::new(leptonica_src);
+        let mut config = Config::new(cmake_compatible_path(leptonica_src));
 
         config.target("wasm32-wasi");
         if cfg!(target_os = "windows") {
@@ -1577,7 +1605,7 @@ Installation instructions:
         let clang = wasi_sdk_dir.join("bin/clang");
         let clangxx = wasi_sdk_dir.join("bin/clang++");
 
-        let mut config = Config::new(src_dir);
+        let mut config = Config::new(cmake_compatible_path(src_dir));
 
         config.target("wasm32-wasi");
         if cfg!(target_os = "windows") {

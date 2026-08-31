@@ -13,12 +13,7 @@ concurrency:
 jobs:
   build-windows-cli:
     name: Build CLI binary (x86_64-pc-windows-msvc)
-    # windows-latest currently selects the VS 18/2026 image. The bundled
-    # Leptonica build used by xberg-tesseract fails during CMake generation
-    # there ("No SOURCES given to target: leptonica"). Pin the VS 17/2022
-    # image for this release-compatible Windows build until upstream supports
-    # the newer generator.
-    runs-on: windows-2022
+    runs-on: windows-latest
     timeout-minutes: 120
     env:
       TARGET: x86_64-pc-windows-msvc
