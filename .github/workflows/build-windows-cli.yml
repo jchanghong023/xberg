@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-windows-cli-${{ github.ref }}
@@ -100,3 +100,47 @@ jobs:
           path: xberg-cli-x86_64-pc-windows-msvc.zip
           if-no-files-found: error
           retention-days: 14
+
+      - name: Generate timestamped release version
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $chinaTimeZone = [TimeZoneInfo]::FindSystemTimeZoneById("China Standard Time")
+          $releaseTime = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $chinaTimeZone)
+          $version = $releaseTime.ToString("yyyy.M.d-HHmm", [Globalization.CultureInfo]::InvariantCulture)
+          $tag = "v$version"
+
+          gh api --silent "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$tag" 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            $tag = "$tag-run$env:GITHUB_RUN_NUMBER.$env:GITHUB_RUN_ATTEMPT"
+            $version = $tag.Substring(1)
+          }
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "release_time=$($releaseTime.ToString("yyyy-MM-dd HH:mm zzz"))" >> $env:GITHUB_OUTPUT
+
+      - name: Create timestamped GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_TIME: ${{ steps.release.outputs.release_time }}
+        run: |
+          set -euo pipefail
+          ASSET="xberg-cli-${TARGET}.zip"
+          gh release create "$RELEASE_TAG" \
+            "$ASSET#Xberg Windows CLI (${TARGET})" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_TAG" \
+            --latest \
+            --notes "Automated Windows CLI release.
+
+          **Version:** ${RELEASE_VERSION}
+          **Commit:** ${GITHUB_SHA}
+          **Release time:** ${RELEASE_TIME}
+          **Workflow run:** https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
