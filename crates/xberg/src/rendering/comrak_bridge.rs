@@ -45,6 +45,45 @@ fn mk_text<'a>(arena: &'a comrak::Arena<'a>, text: &str) -> &'a AstNode<'a> {
     mk(arena, NodeValue::Text(Cow::Owned(normalized)))
 }
 
+fn code_fence_length(text: &str) -> usize {
+    let mut longest = 0;
+    let mut current = 0;
+    for byte in text.bytes() {
+        if byte == b'`' {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    3.max(longest.saturating_add(1))
+}
+
+pub(crate) fn literal_fenced_block(text: &str, language: &str) -> String {
+    let fence = "`".repeat(code_fence_length(text));
+    let trailing_newline = if text.ends_with('\n') { "" } else { "\n" };
+    format!("{fence}{language}\n{text}{trailing_newline}{fence}")
+}
+
+fn append_literal_code_block<'a>(arena: &'a comrak::Arena<'a>, parent: &'a AstNode<'a>, text: &str, language: &str) {
+    parent.append(mk(
+        arena,
+        NodeValue::CodeBlock(Box::new(NodeCodeBlock {
+            fenced: true,
+            fence_char: b'`',
+            fence_length: code_fence_length(text),
+            fence_offset: 0,
+            info: language.to_string(),
+            literal: text.to_string(),
+            closed: true,
+        })),
+    ));
+}
+
+fn append_image_ocr_literal_block<'a>(arena: &'a comrak::Arena<'a>, parent: &'a AstNode<'a>, text: &str) {
+    append_literal_code_block(arena, parent, text, "text");
+}
+
 /// Collapse multiple consecutive spaces into a single space.
 fn normalize_text(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
@@ -774,19 +813,7 @@ pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Ar
                 let lang = elem_attributes
                     .and_then(|attrs| attrs.get("language").map(|s| s.as_str()))
                     .unwrap_or("");
-                let code_block = mk(
-                    arena,
-                    NodeValue::CodeBlock(Box::new(NodeCodeBlock {
-                        fenced: true,
-                        fence_char: b'`',
-                        fence_length: 3,
-                        fence_offset: 0,
-                        info: lang.to_string(),
-                        literal: elem_text.to_string(),
-                        closed: true,
-                    })),
-                );
-                parent.append(code_block);
+                append_literal_code_block(arena, parent, elem_text, lang);
             }
 
             ElementKind::Formula => {
@@ -831,6 +858,19 @@ pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Ar
 
             ElementKind::Image { image_index } => {
                 let image = doc.images.get(image_index as usize);
+                let image_ocr_text = render_image_ocr
+                    .then(|| image.and_then(|img| img.ocr_result.as_ref()))
+                    .flatten()
+                    .map(|result| result.content.as_str())
+                    .filter(|content| !content.trim().is_empty());
+
+                if doc.ocr_text_only {
+                    if let Some(content) = image_ocr_text {
+                        append_image_ocr_literal_block(arena, parent, content);
+                    }
+                    continue;
+                }
+
                 let desc = image.and_then(|img| img.description.as_deref()).unwrap_or("");
                 let url = match image {
                     None => {
@@ -842,7 +882,7 @@ pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Ar
                     Some(img) => {
                         if !img.data.is_empty() {
                             format!("image_{}.{}", image_index, img.format)
-                        } else if let Some(ref path) = img.source_path {
+                        } else if let Some(path) = &img.source_path {
                             path.clone()
                         } else {
                             format!("image_{}.bin", image_index)
@@ -850,38 +890,23 @@ pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Ar
                     }
                 };
 
-                let has_ocr = render_image_ocr
-                    && image
-                        .and_then(|img| img.ocr_result.as_ref())
-                        .is_some_and(|result| !result.content.is_empty());
+                let para = mk(arena, NodeValue::Paragraph);
+                let img_node = mk(
+                    arena,
+                    NodeValue::Image(Box::new(NodeLink {
+                        url,
+                        title: String::new(),
+                    })),
+                );
+                img_node.append(mk_text(arena, desc));
+                para.append(img_node);
+                parent.append(para);
 
-                if doc.ocr_text_only && has_ocr {
-                    let ocr_result = image.and_then(|img| img.ocr_result.as_ref()).unwrap();
-                    let ocr_para = mk(arena, NodeValue::Paragraph);
-                    ocr_para.append(mk_text(arena, &ocr_result.content));
-                    parent.append(ocr_para);
-                } else {
-                    let para = mk(arena, NodeValue::Paragraph);
-                    let img_node = mk(
-                        arena,
-                        NodeValue::Image(Box::new(NodeLink {
-                            url,
-                            title: String::new(),
-                        })),
-                    );
-                    img_node.append(mk_text(arena, desc));
-                    para.append(img_node);
-                    parent.append(para);
-
-                    if render_image_ocr
-                        && doc.append_ocr_text
-                        && let Some(ocr_result) = image.and_then(|img| img.ocr_result.as_ref())
-                        && !ocr_result.content.is_empty()
-                    {
-                        let ocr_para = mk(arena, NodeValue::Paragraph);
-                        ocr_para.append(mk_text(arena, &ocr_result.content));
-                        parent.append(ocr_para);
-                    }
+                if render_image_ocr
+                    && doc.append_ocr_text
+                    && let Some(content) = image_ocr_text
+                {
+                    append_image_ocr_literal_block(arena, parent, content);
                 }
             }
 
@@ -1997,5 +2022,55 @@ mod tests {
             out.contains("Before degenerate table."),
             "surrounding content must still render; got: {out:?}"
         );
+    }
+    #[test]
+    fn ocr_text_only_never_falls_back_to_image_metadata() {
+        let mut builder = InternalDocumentBuilder::new("pptx");
+        builder.push_element(InternalElement::text(ElementKind::Image { image_index: 0 }, "", 0));
+        let mut document = builder.build();
+        document.ocr_text_only = true;
+        document.images.push(crate::types::ExtractedImage {
+            description: Some("ALT_SENTINEL".to_string()),
+            source_path: Some("../media/image_0.emf".to_string()),
+            ..Default::default()
+        });
+
+        let output = render(&document);
+        for forbidden in ["![", "<img", "ALT_SENTINEL", "image_0", "../media"] {
+            assert!(!output.contains(forbidden), "unexpected {forbidden:?} in {output:?}");
+        }
+    }
+
+    #[test]
+    fn image_ocr_literal_block_preserves_long_structural_text() {
+        let mut lines: Vec<String> = (0..120).map(|index| format!("LINE_{index:03}  VALUE")).collect();
+        lines.extend([
+            String::new(),
+            "# heading".to_string(),
+            "---".to_string(),
+            "<img src=\"data:image/png;base64,ALT_SENTINEL\">".to_string(),
+            "``` and ````".to_string(),
+            "X".repeat(240),
+        ]);
+        let content = lines.join("\n");
+        let mut builder = InternalDocumentBuilder::new("pptx");
+        builder.push_element(InternalElement::text(ElementKind::Image { image_index: 0 }, "", 0));
+        let mut document = builder.build();
+        document.ocr_text_only = true;
+        document.images.push(crate::types::ExtractedImage {
+            ocr_result: Some(Box::new(crate::types::ExtractedDocument {
+                content: content.clone(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+
+        let output = render(&document);
+        assert!(output.starts_with("````` text\n") || output.starts_with("`````text\n"));
+        assert!(output.contains("LINE_000  VALUE\nLINE_001  VALUE"));
+        assert!(output.contains("\n\n# heading\n---\n"));
+        assert!(output.contains(&"X".repeat(240)));
+        assert_eq!(output.matches("LINE_").count(), 120);
+        assert!(!output.contains("\n# heading\n\n"));
     }
 }

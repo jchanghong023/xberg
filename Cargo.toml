@@ -15,6 +15,7 @@ members = [
     "crates/xberg-php",
     "crates/xberg-py",
     "crates/xberg-tesseract",
+    "crates/xberg-windows-metafile",
     "crates/xberg-wasm",
     "packages/dart/rust",
     "packages/swift/rust",

@@ -1328,11 +1328,9 @@ fn test_append_ocr_text_for_pptx_images() {
     doc.append_ocr_text = true;
     doc.elements
         .push(InternalElement::text(ElementKind::Paragraph, "Before image.", 0));
-    doc.elements.push(InternalElement::text(
-        ElementKind::Paragraph,
-        "![img](../media/image-1.jpeg)",
-        0,
-    ));
+    let mut placeholder = InternalElement::text(ElementKind::Paragraph, "![img](../media/image-1.jpeg)", 0);
+    placeholder.page = Some(1);
+    doc.elements.push(placeholder);
     doc.elements
         .push(InternalElement::text(ElementKind::Paragraph, "After image.", 0));
 
@@ -1353,7 +1351,7 @@ fn test_append_ocr_text_for_pptx_images() {
             ..Default::default()
         })),
         bounding_box: None,
-        source_path: None,
+        source_path: Some("../media/image-1.jpeg".to_string()),
         image_kind: None,
         kind_confidence: None,
         cluster_id: None,
@@ -1364,15 +1362,179 @@ fn test_append_ocr_text_for_pptx_images() {
 
     super::append_embedded_image_ocr_text(&mut doc);
 
-    assert_eq!(
-        doc.elements.len(),
-        4,
-        "should have 4 elements (original 3 + 1 OCR paragraph)"
-    );
+    assert_eq!(doc.elements.len(), 4, "should append one OCR code block");
+    assert_eq!(doc.elements[2].kind, ElementKind::Code);
     assert_eq!(doc.elements[2].text, "OCR text here");
 
     let rendered = crate::rendering::render_markdown(&doc);
     assert!(rendered.contains("OCR text here"));
+}
+
+#[test]
+fn standalone_image_target_parser_rejects_inline_syntax() {
+    assert_eq!(
+        super::markdown_image_target("![ALT_SENTINEL](../media/image-a.png)"),
+        Some("../media/image-a.png")
+    );
+    assert_eq!(
+        super::markdown_image_target("prefix ![ALT_SENTINEL](../media/image-a.png)"),
+        None
+    );
+    assert_eq!(
+        super::markdown_image_target("![ALT_SENTINEL](../media/image-a.png) suffix"),
+        None
+    );
+}
+
+#[test]
+fn pptx_target_association_does_not_shift_after_missing_placement() {
+    use crate::types::internal::{ElementKind, InternalDocument, InternalElement};
+
+    fn placeholder(target: &str) -> InternalElement {
+        let mut element = InternalElement::text(ElementKind::Paragraph, format!("![ALT_SENTINEL]({target})"), 0);
+        element.page = Some(1);
+        element
+    }
+
+    fn image(target: &str, text: &str, index: u32) -> crate::types::ExtractedImage {
+        crate::types::ExtractedImage {
+            image_index: index,
+            page_number: Some(1),
+            source_path: Some(target.to_string()),
+            ocr_result: Some(Box::new(crate::types::ExtractedDocument {
+                content: text.to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    let mut document = InternalDocument::new("pptx");
+    document.ocr_text_only = true;
+    document.elements = vec![
+        placeholder("../media/a.png"),
+        placeholder("../media/missing.png"),
+        placeholder("../media/b.png"),
+    ];
+    document.images = vec![
+        image("../media/a.png", "IMG_A_001", 0),
+        image("../media/b.png", "IMG_B_002", 1),
+    ];
+
+    super::replace_embedded_image_markdown_with_ocr(&mut document);
+
+    assert_eq!(document.elements[0].kind, ElementKind::Code);
+    assert_eq!(document.elements[0].text, "IMG_A_001");
+    assert!(document.elements[1].text.is_empty());
+    assert_eq!(document.elements[2].kind, ElementKind::Code);
+    assert_eq!(document.elements[2].text, "IMG_B_002");
+    assert!(
+        document
+            .processing_warnings
+            .iter()
+            .any(|warning| { warning.message.contains("stage=placement_association") })
+    );
+}
+
+#[test]
+fn pptx_empty_target_never_uses_sequence_fallback() {
+    use crate::types::internal::{ElementKind, InternalDocument, InternalElement};
+
+    let mut missing = InternalElement::text(ElementKind::Paragraph, "![ALT_SENTINEL]()", 0);
+    missing.page = Some(1);
+    let mut present = InternalElement::text(ElementKind::Paragraph, "![ALT_SENTINEL](../media/IMG_B_002.png)", 0);
+    present.page = Some(1);
+    let mut document = InternalDocument::new("pptx");
+    document.ocr_text_only = true;
+    document.elements = vec![missing, present];
+    document.images.push(crate::types::ExtractedImage {
+        image_index: 0,
+        page_number: Some(1),
+        source_path: Some("../media/IMG_B_002.png".to_string()),
+        ocr_result: Some(Box::new(crate::types::ExtractedDocument {
+            content: "IMG_B_002".to_string(),
+            ..Default::default()
+        })),
+        ..Default::default()
+    });
+
+    super::replace_embedded_image_markdown_with_ocr(&mut document);
+
+    assert!(document.elements[0].text.is_empty());
+    assert_eq!(document.elements[1].kind, ElementKind::Code);
+    assert_eq!(document.elements[1].text, "IMG_B_002");
+}
+#[test]
+fn repeated_target_consumes_each_placement_once() {
+    use crate::types::internal::{ElementKind, InternalDocument, InternalElement};
+
+    let mut document = InternalDocument::new("pptx");
+    document.ocr_text_only = true;
+    for _ in 0..2 {
+        let mut element = InternalElement::text(ElementKind::Paragraph, "![ALT_SENTINEL](../media/shared.png)", 0);
+        element.page = Some(2);
+        document.elements.push(element);
+    }
+    for index in 0..2 {
+        document.images.push(crate::types::ExtractedImage {
+            image_index: index,
+            page_number: Some(2),
+            source_path: Some("../media/shared.png".to_string()),
+            ocr_result: Some(Box::new(crate::types::ExtractedDocument {
+                content: "IMG_A_001".to_string(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+    }
+
+    super::replace_embedded_image_markdown_with_ocr(&mut document);
+
+    assert_eq!(
+        document
+            .elements
+            .iter()
+            .filter(|element| element.text == "IMG_A_001")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn ole_warning_remains_independent_from_preview_ocr() {
+    use crate::types::internal::{ElementKind, InternalDocument, InternalElement};
+
+    let mut document = InternalDocument::new("pptx");
+    document.ocr_text_only = true;
+    let mut preview = InternalElement::text(ElementKind::Paragraph, "![ALT_SENTINEL](../media/VECTOR_003.emf)", 0);
+    preview.page = Some(1);
+    document.elements.push(preview);
+    document.images.push(crate::types::ExtractedImage {
+        image_index: 0,
+        page_number: Some(1),
+        format: std::borrow::Cow::Borrowed("emf"),
+        source_path: Some("../media/VECTOR_003.emf".to_string()),
+        ocr_result: Some(Box::new(crate::types::ExtractedDocument {
+            content: "VECTOR_003".to_string(),
+            ..Default::default()
+        })),
+        ..Default::default()
+    });
+    document.processing_warnings.push(crate::types::ProcessingWarning {
+        source: std::borrow::Cow::Borrowed("pptx"),
+        message: std::borrow::Cow::Borrowed("Skipped OLE compound file: format identification not supported"),
+    });
+
+    super::replace_embedded_image_markdown_with_ocr(&mut document);
+
+    assert_eq!(document.elements[0].kind, ElementKind::Code);
+    assert_eq!(document.elements[0].text, "VECTOR_003");
+    assert!(
+        document
+            .processing_warnings
+            .iter()
+            .any(|warning| { warning.message.contains("Skipped OLE compound file") })
+    );
 }
 
 #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
