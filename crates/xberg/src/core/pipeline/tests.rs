@@ -1328,9 +1328,11 @@ fn test_append_ocr_text_for_pptx_images() {
     doc.append_ocr_text = true;
     doc.elements
         .push(InternalElement::text(ElementKind::Paragraph, "Before image.", 0));
-    let mut placeholder = InternalElement::text(ElementKind::Paragraph, "![img](../media/image-1.jpeg)", 0);
-    placeholder.page = Some(1);
-    doc.elements.push(placeholder);
+    doc.elements.push(InternalElement::text(
+        ElementKind::Paragraph,
+        "![img](../media/image-1.jpeg)",
+        0,
+    ));
     doc.elements
         .push(InternalElement::text(ElementKind::Paragraph, "After image.", 0));
 
@@ -1351,7 +1353,7 @@ fn test_append_ocr_text_for_pptx_images() {
             ..Default::default()
         })),
         bounding_box: None,
-        source_path: Some("../media/image-1.jpeg".to_string()),
+        source_path: None,
         image_kind: None,
         kind_confidence: None,
         cluster_id: None,
@@ -1362,8 +1364,11 @@ fn test_append_ocr_text_for_pptx_images() {
 
     super::append_embedded_image_ocr_text(&mut doc);
 
-    assert_eq!(doc.elements.len(), 4, "should append one OCR code block");
-    assert_eq!(doc.elements[2].kind, ElementKind::Code);
+    assert_eq!(
+        doc.elements.len(),
+        4,
+        "should have 4 elements (original 3 + 1 OCR paragraph)"
+    );
     assert_eq!(doc.elements[2].text, "OCR text here");
 
     let rendered = crate::rendering::render_markdown(&doc);

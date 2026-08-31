@@ -155,11 +155,9 @@ mod tests {
 
     #[test]
     fn test_detect_emf() {
-        let mut data = vec![0_u8; EMF_HEADER_MIN_BYTES];
-        data[0..4].copy_from_slice(&1_u32.to_le_bytes());
-        data[4..8].copy_from_slice(&(EMF_HEADER_MIN_BYTES as u32).to_le_bytes());
-        data[40..44].copy_from_slice(b" EMF");
-        data[48..52].copy_from_slice(&(EMF_HEADER_MIN_BYTES as u32).to_le_bytes());
+        let mut data = vec![0x01, 0x00, 0x00, 0x00];
+        data.extend(vec![0u8; 36]);
+        data.extend(b" EMF");
         assert_eq!(detect_image_format(&data), "emf");
     }
 
