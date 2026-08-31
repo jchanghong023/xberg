@@ -973,11 +973,13 @@ fn take_image_placement(
     allow_legacy_fallback: bool,
 ) -> Option<usize> {
     if !target.is_empty() {
-        return images.iter().enumerate().position(|(index, image)| {
+        let exact = images.iter().enumerate().position(|(index, image)| {
             !used[index] && image.page_number == page_number && image.source_path.as_deref() == Some(target)
         });
-    }
-    if !allow_legacy_fallback {
+        if exact.is_some() || !allow_legacy_fallback {
+            return exact;
+        }
+    } else if !allow_legacy_fallback {
         return None;
     }
 
