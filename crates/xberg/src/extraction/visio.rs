@@ -26,7 +26,7 @@ pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Resu
     let mut compound_file = cfb::CompoundFile::open(Cursor::new(content))
         .map_err(|error| XbergError::parsing(format!("Failed to open VSD as OLE container: {error}")))?;
 
-    let mut stream = compound_file
+    let stream = compound_file
         .open_stream("/VisioDocument")
         .or_else(|_| compound_file.open_stream("VisioDocument"))
         .map_err(|error| XbergError::parsing(format!("Failed to open VisioDocument stream: {error}")))?;

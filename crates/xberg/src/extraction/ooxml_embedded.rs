@@ -298,7 +298,7 @@ fn read_ole_stream(
 ) -> Option<Vec<u8>> {
     let read_limit = max_bytes.saturating_add(1);
     for name in names {
-        let Ok(mut stream) = compound_file.open_stream(name) else {
+        let Ok(stream) = compound_file.open_stream(name) else {
             continue;
         };
         let mut data = Vec::new();
