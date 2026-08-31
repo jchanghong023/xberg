@@ -3057,7 +3057,7 @@ pub(crate) fn merge_ocr_pages_into_native(
 }
 
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
-fn destructive_ocr_information_loss(
+pub(super) fn destructive_ocr_information_loss(
     native_page: &str,
     ocr_text: &str,
     thresholds: &OcrQualityThresholds,
