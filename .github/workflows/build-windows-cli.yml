@@ -109,14 +109,11 @@ jobs:
         run: |
           $chinaTimeZone = [TimeZoneInfo]::FindSystemTimeZoneById("China Standard Time")
           $releaseTime = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $chinaTimeZone)
+          # The run number plus attempt makes the tag collision-free without an
+          # API probe whose expected 404 aborts PowerShell before it can branch.
           $version = $releaseTime.ToString("yyyy.M.d-HHmm", [Globalization.CultureInfo]::InvariantCulture)
+          $version = "$version-run$env:GITHUB_RUN_NUMBER.$env:GITHUB_RUN_ATTEMPT"
           $tag = "v$version"
-
-          gh api --silent "repos/$env:GITHUB_REPOSITORY/git/ref/tags/$tag" 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            $tag = "$tag-run$env:GITHUB_RUN_NUMBER.$env:GITHUB_RUN_ATTEMPT"
-            $version = $tag.Substring(1)
-          }
 
           "tag=$tag" >> $env:GITHUB_OUTPUT
           "version=$version" >> $env:GITHUB_OUTPUT
