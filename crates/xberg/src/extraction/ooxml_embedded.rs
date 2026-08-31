@@ -165,7 +165,7 @@ pub(crate) async fn extract_ooxml_embedded_objects(
 
         let is_ole_binary = data.len() >= 4 && data[0..4] == [0xD0, 0xCF, 0x11, 0xE0];
         if is_ole_binary {
-            match extract_ole_embedded_object(&data) {
+            match extract_ole_embedded_object(&data, &filename, embedded_capacity_cap) {
                 Some((inner_bytes, inner_mime)) => {
                     match crate::core::extractor::extract_bytes(&inner_bytes, &inner_mime, &child_config).await {
                         Ok(result) => {
@@ -243,42 +243,45 @@ pub(crate) async fn extract_ooxml_embedded_objects(
 
 /// Attempt to identify and unwrap an OLE (CFB) compound-file embedded object.
 ///
-/// Two shapes are recognized:
-/// - A "Package" stream: the OLE wrapper carries a modern Office document (e.g. an
-///   embedded `.xlsx` chart source) verbatim as an OPC/ZIP package in a stream named
-///   `Package`. The stream bytes are returned as-is with their detected MIME type.
-/// - A legacy binary root stream (`WordDocument`, `PowerPoint Document`, `Workbook`, or
-///   `Book`): the OLE container itself *is* the legacy `.doc`/`.ppt`/`.xls` document, so
-///   the original bytes are handed back with the matching legacy MIME type for the
-///   existing OLE-aware extractors to parse.
+/// OLE embeds modern packages in a `Package` stream, native files in an
+/// `Ole10Native` stream, and legacy Office/Visio documents in their own root
+/// streams. All stream reads are bounded by the caller's archive budget before
+/// they are handed to a format extractor.
 ///
-/// Returns `None` when the container can't be opened or none of the above streams are
-/// present, so the caller can fall back to a "format identification not supported"
-/// warning instead of silently dropping the object.
-///
-/// Only compiled when the `cfb` dependency is guaranteed active (via `office`, `hwp`, or
-/// `email`); other feature combinations (e.g. `excel` alone, which also calls this
-/// module) keep the pre-existing warn-and-skip behavior.
+/// Returns `None` when the container can't be opened or none of the supported
+/// streams contains a recognizable payload.
 #[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
-fn extract_ole_embedded_object(data: &[u8]) -> Option<(Vec<u8>, String)> {
+fn extract_ole_embedded_object(data: &[u8], source_name: &str, max_bytes: u64) -> Option<(Vec<u8>, String)> {
     let mut compound_file = cfb::CompoundFile::open(Cursor::new(data)).ok()?;
 
-    if compound_file.exists("Package") {
-        let mut stream = compound_file.open_stream("Package").ok()?;
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).ok()?;
-        if buf.is_empty() {
-            return None;
-        }
-        let mime = crate::core::mime::detect_mime_type_from_bytes(&buf).ok()?;
-        return Some((buf, mime));
+    let native_names = ["/\x01Ole10Native", "\x01Ole10Native", "Ole10Native"];
+    if let Some(native) = read_ole_stream(&mut compound_file, &native_names, max_bytes)
+        && let Some((payload, name_hint)) = parse_ole10_native(&native)
+        && let Some(result) = identify_ole_payload(payload, name_hint.as_deref().or(Some(source_name)))
+    {
+        return Some(result);
     }
 
-    let legacy_mime = if compound_file.exists("WordDocument") {
-        "application/msword"
-    } else if compound_file.exists("PowerPoint Document") {
-        "application/vnd.ms-powerpoint"
-    } else if compound_file.exists("Workbook") || compound_file.exists("Book") {
+    if let Some(package) = read_ole_stream(&mut compound_file, &["Package", "/Package"], max_bytes) {
+        if let Some((payload, name_hint)) = parse_ole_package(&package)
+            && let Some(result) = identify_ole_payload(payload, name_hint.as_deref().or(Some(source_name)))
+        {
+            return Some(result);
+        }
+        if let Some(result) = identify_ole_payload(package, Some(source_name)) {
+            return Some(result);
+        }
+    }
+
+    let legacy_mime = if has_ole_stream(&compound_file, &["VisioDocument", "/VisioDocument"]) {
+        crate::core::mime::VISIO_MIME_TYPE
+    } else if has_ole_stream(&compound_file, &["WordDocument", "/WordDocument"]) {
+        crate::core::mime::LEGACY_WORD_MIME_TYPE
+    } else if has_ole_stream(&compound_file, &["PowerPoint Document", "/PowerPoint Document"]) {
+        crate::core::mime::LEGACY_POWERPOINT_MIME_TYPE
+    } else if has_ole_stream(&compound_file, &["Workbook", "/Workbook"])
+        || has_ole_stream(&compound_file, &["Book", "/Book"])
+    {
         "application/vnd.ms-excel"
     } else {
         return None;
@@ -287,11 +290,150 @@ fn extract_ole_embedded_object(data: &[u8]) -> Option<(Vec<u8>, String)> {
     Some((data.to_vec(), legacy_mime.to_string()))
 }
 
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn read_ole_stream(
+    compound_file: &mut cfb::CompoundFile<Cursor<&[u8]>>,
+    names: &[&str],
+    max_bytes: u64,
+) -> Option<Vec<u8>> {
+    let read_limit = max_bytes.saturating_add(1);
+    for name in names {
+        let Ok(mut stream) = compound_file.open_stream(name) else {
+            continue;
+        };
+        let mut data = Vec::new();
+        if stream.take(read_limit).read_to_end(&mut data).is_ok() && data.len() as u64 <= max_bytes {
+            return (!data.is_empty()).then_some(data);
+        }
+    }
+    None
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn has_ole_stream<F: Read + std::io::Seek>(compound_file: &cfb::CompoundFile<F>, names: &[&str]) -> bool {
+    names.iter().any(|name| compound_file.exists(name))
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn identify_ole_payload(mut payload: Vec<u8>, name_hint: Option<&str>) -> Option<(Vec<u8>, String)> {
+    let detected = crate::core::mime::detect_mime_type_from_bytes(&payload)
+        .ok()
+        .filter(|mime| mime != "application/octet-stream")
+        .or_else(|| {
+            name_hint
+                .and_then(|name| std::path::Path::new(name).extension())
+                .and_then(|extension| extension.to_str())
+                .and_then(|extension| mime_guess::from_ext(extension).first())
+                .map(|mime| mime.to_string())
+        })?;
+    let mime = crate::core::mime::validate_mime_type(&detected).ok()?;
+    if payload.is_empty() {
+        return None;
+    }
+    Some((std::mem::take(&mut payload), mime))
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn parse_ole10_native(data: &[u8]) -> Option<(Vec<u8>, Option<String>)> {
+    let mut offset = 4usize;
+    let _native_data_size = read_u32_le(data, 0)?;
+    let _flags = read_u16_le(data, offset)?;
+    offset += 2;
+    let filename = read_ole_c_string(data, &mut offset)?;
+    let _source_path = read_ole_c_string(data, &mut offset)?;
+    offset = offset.checked_add(8)?;
+    let _temporary_path = read_ole_c_string(data, &mut offset)?;
+    let data_len = read_u32_le(data, offset)? as usize;
+    offset += 4;
+    let end = offset.checked_add(data_len)?;
+    let payload = data.get(offset..end)?;
+    (!payload.is_empty()).then(|| (payload.to_vec(), (!filename.is_empty()).then_some(filename)))
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn parse_ole_package(data: &[u8]) -> Option<(Vec<u8>, Option<String>)> {
+    for base in [0usize, 4] {
+        let Some(mut offset) = base.checked_add(4) else {
+            continue;
+        };
+        if read_u32_le(data, base).is_none() {
+            continue;
+        }
+        let Some(label) = read_ole_c_string(data, &mut offset) else {
+            continue;
+        };
+        let Some(original_path) = read_ole_c_string(data, &mut offset) else {
+            continue;
+        };
+        let Some(after_format) = offset.checked_add(4) else {
+            continue;
+        };
+        if read_u32_le(data, after_format).is_none() {
+            continue;
+        }
+        let Some(mut offset) = after_format.checked_add(4) else {
+            continue;
+        };
+        if read_u32_le(data, offset).is_none() {
+            continue;
+        }
+        offset += 4;
+        if read_ole_c_string(data, &mut offset).is_none() {
+            continue;
+        }
+        let Some(data_len) = read_u32_le(data, offset).map(|length| length as usize) else {
+            continue;
+        };
+        let Some(payload_start) = offset.checked_add(4) else {
+            continue;
+        };
+        let Some(payload_end) = payload_start.checked_add(data_len) else {
+            continue;
+        };
+        let Some(payload) = data.get(payload_start..payload_end) else {
+            continue;
+        };
+        if payload.is_empty() {
+            continue;
+        }
+        let name_hint = if !original_path.is_empty() {
+            Some(original_path)
+        } else if !label.is_empty() {
+            Some(label)
+        } else {
+            None
+        };
+        return Some((payload.to_vec(), name_hint));
+    }
+    None
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn read_ole_c_string(data: &[u8], offset: &mut usize) -> Option<String> {
+    let rest = data.get(*offset..)?;
+    let end = rest.iter().position(|byte| *byte == 0)?;
+    let value = String::from_utf8_lossy(&rest[..end]).into_owned();
+    *offset = offset.checked_add(end + 1)?;
+    Some(value)
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn read_u16_le(data: &[u8], offset: usize) -> Option<u16> {
+    let bytes = data.get(offset..offset.checked_add(2)?)?;
+    Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn read_u32_le(data: &[u8], offset: usize) -> Option<u32> {
+    let bytes = data.get(offset..offset.checked_add(4)?)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
 /// Fallback used when the `cfb` dependency isn't active for the enabled feature set
-/// (e.g. `excel` without `office`/`hwp`/`email`): OLE objects are always reported as
-/// unidentifiable rather than attempting extraction.
+/// (e.g. `excel` without `office`/`hwp`/`email`): OLE objects are always reported
+/// as unidentifiable rather than attempting extraction.
 #[cfg(not(any(feature = "office", feature = "hwp", feature = "email")))]
-fn extract_ole_embedded_object(_data: &[u8]) -> Option<(Vec<u8>, String)> {
+fn extract_ole_embedded_object(_data: &[u8], _source_name: &str, _max_bytes: u64) -> Option<(Vec<u8>, String)> {
     None
 }
 

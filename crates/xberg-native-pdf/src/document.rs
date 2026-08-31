@@ -19,6 +19,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 pub(crate) use crate::cache::MutexExt;
 
+type McidKey = (crate::structure::McidScope, u32);
+
 /// Reading order mode for span extraction.
 ///
 /// Controls how text spans are sorted after extraction from a PDF page.
@@ -644,7 +646,7 @@ pub struct PdfDocument {
     /// is the innermost and most specific declaration for the MCID
     /// it covers, so a struct-tree-scope `/ActualText` on an ancestor
     /// element must NOT override it.
-    pub(crate) mc_actualtext_mcids: Mutex<HashMap<usize, HashSet<u32>>>,
+    pub(crate) mc_actualtext_mcids: Mutex<HashMap<usize, HashSet<McidKey>>>,
     /// `Table` structure elements bucketed by page, built once via
     /// `find_table_elements_all_pages` (one tree walk) so the converter table
     /// path does an O(1) lookup instead of walking the tree per page.
@@ -5563,6 +5565,59 @@ impl PdfDocument {
         }
         spans
     }
+    /// Return whether the trustworthy structure tree covers enough of this page's
+    /// marked-content spans to be used for reading order.
+    ///
+    /// A structurally valid tree may still be incomplete: common producers tag
+    /// only a heading or a small subset of page content. Using that sparse
+    /// traversal as if it were authoritative drops the remaining content into
+    /// numeric-MCID fallback order, which is worse than the geometric order
+    /// already available for the page. Count distinct `(scope, MCID)` keys so
+    /// split glyph spans do not distort the coverage decision.
+    fn structure_tree_covers_page(&self, page_index: usize, spans: &[TextSpan]) -> bool {
+        let ordered_content = self
+            .structure_content_cache
+            .lock_or_recover()
+            .as_ref()
+            .and_then(|cache| cache.get(&(page_index as u32)))
+            .cloned()
+            .unwrap_or_default();
+
+        let ordered_keys: HashSet<McidKey> = ordered_content
+            .iter()
+            .filter_map(|content| {
+                let mcid = content.mcid?;
+                let scope = content
+                    .mcid_scope
+                    .clone()
+                    .unwrap_or(crate::structure::McidScope::Page(content.page));
+                Some((scope, mcid))
+            })
+            .collect();
+        let page_scope = crate::structure::McidScope::Page(page_index as u32);
+        let span_keys: HashSet<McidKey> = spans
+            .iter()
+            .filter_map(|span| {
+                span.mcid
+                    .map(|mcid| (span.mcid_scope.clone().unwrap_or(page_scope.clone()), mcid))
+            })
+            .collect();
+
+        if span_keys.is_empty() {
+            return true;
+        }
+        let covered = span_keys.intersection(&ordered_keys).count();
+        let sufficient = (covered as u128) * 100 >= (span_keys.len() as u128) * 80;
+        if !sufficient {
+            tracing::debug!(
+                page = page_index,
+                covered,
+                total = span_keys.len(),
+                "structure tree coverage is insufficient; using geometric reading order"
+            );
+        }
+        sufficient
+    }
 
     fn assemble_text_from_spans(
         &self,
@@ -5633,22 +5688,27 @@ impl PdfDocument {
             }
         }
 
-        let text = if let Some(ref struct_tree) = cached_tree {
-            // Build per-page traversal cache once, then O(1) lookup per page. ~keep
-            if self.structure_content_cache.lock_or_recover().is_none() {
-                let all_content = crate::structure::traverse_structure_tree_all_pages(struct_tree);
-                *self.structure_content_cache.lock_or_recover() = Some(all_content);
-            }
+        // Build the traversal cache before measuring coverage. A valid but sparse
+        // tree must use the same geometric fallback as an untrusted tree instead
+        // of appending hundreds of unreferenced MCIDs in numeric order.
+        if let Some(struct_tree) = &cached_tree
+            && self.structure_content_cache.lock_or_recover().is_none()
+        {
+            let all_content = crate::structure::traverse_structure_tree_all_pages(struct_tree);
+            *self.structure_content_cache.lock_or_recover() = Some(all_content);
+        }
+        let use_structure_tree = cached_tree.is_some() && self.structure_tree_covers_page(page_index, &all_spans);
+
+        let text = if use_structure_tree {
             self.extract_text_structure_order_cached_with_spans(page_index, all_spans, options.include_artifacts)?
         } else {
-            // Untagged or Suspects=true PDF: use page content
+            // Untagged, Suspects=true, or insufficiently covered PDF: use page content
             // (geometric) order. Apply struct-tree-scope `/ActualText`
             // here — the structure-order assembler above handles it
             // natively for the trustworthy branch. Suspects=true
             // documents still get their producer-supplied replacement
             // because `actualtext_index()` is decoupled from
-            // `struct_tree_marked` (§14.9.4 is content replacement,
-            // not a reading-order signal). ~keep
+            // `struct_tree_marked()` (content replacement, not a reading-order signal). ~keep
             let mut spans = all_spans;
             self.apply_actualtext_to_spans(page_index, &mut spans);
 
@@ -9891,7 +9951,7 @@ impl PdfDocument {
         if idx.covered_mcids.is_empty() {
             return;
         }
-        let mc_wins: HashSet<u32> = self
+        let mc_wins: HashSet<McidKey> = self
             .mc_actualtext_mcids
             .lock_or_recover()
             .get(&page_index)
@@ -10001,7 +10061,7 @@ impl PdfDocument {
         idx: Option<&crate::structure::ActualTextIndex>,
         mcid_order: &[(crate::structure::McidScope, u32)],
         visible: F,
-        mc_wins: &HashSet<u32>,
+        mc_wins: &HashSet<McidKey>,
         glyph_text: &HashMap<(crate::structure::McidScope, u32), String>,
     ) -> HashMap<(crate::structure::McidScope, u32), ActualTextAction> {
         let mut out: HashMap<(crate::structure::McidScope, u32), ActualTextAction> = HashMap::new();
@@ -10066,14 +10126,14 @@ impl PdfDocument {
                 // came from the extractor's in-stream BDC /ActualText. ~keep
                 let mut emit_pick: Option<(crate::structure::McidScope, u32)> = None;
                 for entry in &entries[i..j] {
-                    if visible(&entry.0, entry.1) && !mc_wins.contains(&entry.1) {
+                    if visible(&entry.0, entry.1) && !mc_wins.contains(&(entry.0.clone(), entry.1)) {
                         emit_pick = Some((entry.0.clone(), entry.1));
                         break;
                     }
                 }
                 let repl_arc: std::sync::Arc<str> = std::sync::Arc::from(repl);
                 for entry in &entries[i..j] {
-                    if mc_wins.contains(&entry.1) {
+                    if mc_wins.contains(&(entry.0.clone(), entry.1)) {
                         // MC-scope wins: do not touch this MCID at all.
                         // The extractor's inline replacement reaches
                         // output unmodified. ~keep
@@ -10090,7 +10150,7 @@ impl PdfDocument {
                 // suppress_only run: every key is suppressed (no
                 // emission). MC-wins MCIDs stay untouched. ~keep
                 for entry in &entries[i..j] {
-                    if mc_wins.contains(&entry.1) {
+                    if mc_wins.contains(&(entry.0.clone(), entry.1)) {
                         continue;
                     }
                     out.insert((entry.0.clone(), entry.1), ActualTextAction::Suppress);
@@ -10174,12 +10234,14 @@ impl PdfDocument {
             all_spans.into_iter().filter(|s| s.artifact_type.is_none()).collect()
         };
 
-        let mut mcid_map: HashMap<u32, Vec<TextSpan>> = HashMap::new();
+        let default_scope = crate::structure::McidScope::Page(page_index as u32);
+        let mut mcid_map: HashMap<McidKey, Vec<TextSpan>> = HashMap::new();
         let mut spans_without_mcid: Vec<TextSpan> = Vec::new();
 
         for span in all_spans {
             if let Some(mcid) = span.mcid {
-                mcid_map.entry(mcid).or_default().push(span);
+                let scope = span.mcid_scope.clone().unwrap_or(default_scope.clone());
+                mcid_map.entry((scope, mcid)).or_default().push(span);
             } else {
                 spans_without_mcid.push(span);
             }
@@ -10201,13 +10263,12 @@ impl PdfDocument {
         // `/ActualText` keep the in-stream replacement (most specific
         // declaration) and are exempt from ancestor struct-tree
         // emissions. ~keep
-        let mc_wins: HashSet<u32> = self
+        let mc_wins: HashSet<McidKey> = self
             .mc_actualtext_mcids
             .lock_or_recover()
             .get(&page_index)
             .cloned()
             .unwrap_or_default();
-        let default_scope = crate::structure::McidScope::Page(page_index as u32);
         let mcid_order: Vec<(crate::structure::McidScope, u32)> = ordered_content
             .iter()
             .filter_map(|c| {
@@ -10215,18 +10276,18 @@ impl PdfDocument {
                     .map(|m| (c.mcid_scope.clone().unwrap_or(default_scope.clone()), m))
             })
             .collect();
-        // Per-key rendered glyph text for the §14.9.4 conformance gate. ~keep
-        let mut glyph_text: HashMap<(crate::structure::McidScope, u32), String> = HashMap::new();
+        let mut glyph_text: HashMap<McidKey, String> = HashMap::new();
         for (scope, m) in &mcid_order {
-            if let Some(sp) = mcid_map.get(m) {
+            let key = (scope.clone(), *m);
+            if let Some(sp) = mcid_map.get(&key) {
                 let joined: String = sp.iter().map(|s| s.text.as_str()).collect();
-                glyph_text.entry((scope.clone(), *m)).or_default().push_str(&joined);
+                glyph_text.entry(key).or_default().push_str(&joined);
             }
         }
         let actions = Self::actualtext_actions_for_page(
             at_index.as_deref(),
             &mcid_order,
-            |_scope, m| mcid_map.contains_key(&m),
+            |scope, m| mcid_map.contains_key(&(scope.clone(), m)),
             &mc_wins,
             &glyph_text,
         );
@@ -10242,7 +10303,7 @@ impl PdfDocument {
         let mut text = String::with_capacity(mcid_map.len() * 50);
         let mut prev_span: Option<TextSpan> = None;
         let mut prev_in_table = false;
-        let mut consumed_mcids: HashSet<u32> = HashSet::new();
+        let mut consumed_mcids: HashSet<McidKey> = HashSet::new();
 
         for content in ordered_content {
             if content.is_word_break {
@@ -10255,22 +10316,18 @@ impl PdfDocument {
             let Some(mcid) = content.mcid else {
                 continue;
             };
-            // ISO 32000-1 §14.7: a marked-content sequence's MCID is unique
-            // within its content stream and is referenced from the structure
-            // hierarchy at most once. A malformed struct tree that re-references
-            // the same MCID multiple times would otherwise emit that MCID's
-            // glyphs once per reference. Emit each MCID once. (A destructive
-            // /ActualText replacement — now declined by the §14.9.4 conformance
-            // gate — can mask this by collapsing each consecutive run to a
-            // single emit.) ~keep
-            if !consumed_mcids.insert(mcid) {
+            let mcid_scope_key = content.mcid_scope.clone().unwrap_or(default_scope.clone());
+            let mcid_key = (mcid_scope_key, mcid);
+            // ISO 32000-1 §14.7: an MCID is unique within its own
+            // content stream and is referenced from the structure
+            // hierarchy at most once. Scope the deduplication as well:
+            // two Form XObjects may both legitimately use MCID 0.
+            if !consumed_mcids.insert(mcid_key.clone()) {
                 continue;
             }
-            let mcid_scope_key = content.mcid_scope.clone().unwrap_or(default_scope.clone());
 
-            match actions.get(&(mcid_scope_key, mcid)) {
+            match actions.get(&mcid_key) {
                 Some(ActualTextAction::EmitAndSuppress(repl)) => {
-                    consumed_mcids.insert(mcid);
                     if !text.is_empty() && !text.ends_with(' ') && !text.ends_with('\n') {
                         text.push('\n');
                     }
@@ -10278,14 +10335,12 @@ impl PdfDocument {
                     continue;
                 }
                 Some(ActualTextAction::Suppress) => {
-                    consumed_mcids.insert(mcid);
                     continue;
                 }
                 None => {}
             }
 
-            if let Some(spans) = mcid_map.get(&mcid) {
-                consumed_mcids.insert(mcid);
+            if let Some(spans) = mcid_map.get(&mcid_key) {
                 let rtl_run = Self::mcid_run_is_pure_rtl(spans);
                 // Repair the cross-span Arabic glyph-interleave defect (zero-width
                 // mark/consonant spans landing at word edges) before ordering. ~keep
@@ -10319,17 +10374,17 @@ impl PdfDocument {
             }
         }
 
-        let mut unconsumed: Vec<(&u32, &Vec<TextSpan>)> = mcid_map
+        let mut unconsumed: Vec<(&McidKey, &Vec<TextSpan>)> = mcid_map
             .iter()
-            .filter(|(mcid, _)| !consumed_mcids.contains(mcid))
+            .filter(|(key, _)| !consumed_mcids.contains(key))
             .collect();
-        unconsumed.sort_by_key(|(mcid, _)| **mcid);
+        unconsumed.sort_by_key(|(key, _)| key.1);
         if !unconsumed.is_empty() {
             tracing::warn!(
                 "Appending {} unreferenced MCIDs (e.g., from Form XObjects without StructParents)",
                 unconsumed.len()
             );
-            for (_mcid, spans) in &unconsumed {
+            for (_key, spans) in &unconsumed {
                 let rtl_run = Self::mcid_run_is_pure_rtl(spans);
                 for span in *spans {
                     if let Some(prev) = &prev_span {

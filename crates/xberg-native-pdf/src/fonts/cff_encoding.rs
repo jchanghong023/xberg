@@ -862,8 +862,13 @@ pub fn parse_cff_encoding(font_data: &[u8]) -> Option<HashMap<u8, char>> {
         return None;
     }
 
+    let sfnt_magic = u32::from_be_bytes([font_data[0], font_data[1], font_data[2], font_data[3]]);
     let cff_data = if font_data[0] != 1 {
-        if let Some(cff) = extract_cff_from_opentype(font_data) {
+        if matches!(sfnt_magic, 0x4F54544F | 0x0001_0000 | 0x7472_7565) {
+            // A FontFile3 may legally contain an sfnt wrapper. A TrueType
+            // wrapper has no CFF table, so this is a normal "no built-in
+            // CFF encoding" result rather than an unsupported CFF version.
+            let cff = extract_cff_from_opentype(font_data)?;
             tracing::debug!(
                 "Extracted CFF table ({} bytes) from OpenType wrapper ({} bytes)",
                 cff.len(),

@@ -113,6 +113,16 @@ fn build_internal_document(
                         current_list_numbering_id = None;
                         open_list_count = 0;
                     }
+                    // A bookmark may be the only meaningful payload of a
+                    // paragraph (for example a field-generated TOC target).
+                    // Preserve an addressable element instead of dropping the
+                    // target before internal relationships are resolved.
+                    if !paragraph.bookmarks.is_empty() {
+                        let elem_idx = builder.push_paragraph("", vec![], Some(current_page), None);
+                        for bookmark in &paragraph.bookmarks {
+                            bookmark_elements.entry(bookmark.clone()).or_insert(elem_idx);
+                        }
+                    }
                     continue;
                 }
 
@@ -345,7 +355,20 @@ fn build_internal_document(
                     }
                 }
                 if !cells.is_empty() {
-                    builder.push_table_from_cells(&cells, Some(current_page), None);
+                    let table_elem_idx = builder.push_table_from_cells(&cells, Some(current_page), None);
+                    // Bookmarks inside table-cell paragraphs still identify
+                    // document locations. The internal model stores the whole
+                    // table as one element, so resolve them to that table
+                    // element instead of leaving every TOC link unresolved.
+                    for row in &table.rows {
+                        for cell in &row.cells {
+                            for paragraph in &cell.paragraphs {
+                                for bookmark in &paragraph.bookmarks {
+                                    bookmark_elements.entry(bookmark.clone()).or_insert(table_elem_idx);
+                                }
+                            }
+                        }
+                    }
                 }
             }
             crate::extraction::docx::parser::DocumentElement::Drawing(idx) => {

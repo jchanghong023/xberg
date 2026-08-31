@@ -263,6 +263,7 @@ pub(crate) const POWER_POINT_MIME_TYPE: &str =
 pub(crate) const DOCX_MIME_TYPE: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 pub(crate) const LEGACY_WORD_MIME_TYPE: &str = "application/msword";
 pub(crate) const LEGACY_POWERPOINT_MIME_TYPE: &str = "application/vnd.ms-powerpoint";
+pub(crate) const VISIO_MIME_TYPE: &str = "application/vnd.visio";
 
 pub(crate) const PST_MIME_TYPE: &str = "application/vnd.ms-outlook-pst";
 pub(crate) const WPD_MIME_TYPE: &str = "application/vnd.wordperfect";
@@ -426,6 +427,11 @@ static FORMATS: &[FormatEntry] = &[
     FormatEntry {
         extensions: &["doc", "dot"],
         mime_type: "application/msword",
+        aliases: &[],
+    },
+    FormatEntry {
+        extensions: &["vsd"],
+        mime_type: VISIO_MIME_TYPE,
         aliases: &[],
     },
     FormatEntry {

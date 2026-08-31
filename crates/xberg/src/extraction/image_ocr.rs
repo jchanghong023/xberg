@@ -23,18 +23,64 @@ impl ImageOcrPreprocessError {
     }
 }
 
+fn read_i32_le(data: &[u8], offset: usize) -> Option<i64> {
+    let end = offset.checked_add(4)?;
+    let bytes = data.get(offset..end)?;
+    Some(i64::from(i32::from_le_bytes(bytes.try_into().ok()?)))
+}
+
+fn read_u16_le(data: &[u8], offset: usize) -> Option<u16> {
+    let end = offset.checked_add(2)?;
+    let bytes = data.get(offset..end)?;
+    Some(u16::from_le_bytes(bytes.try_into().ok()?))
+}
+
+fn infer_metafile_dimensions(data: &[u8], format: &str) -> Option<(u32, u32)> {
+    match format {
+        "emf" => {
+            let width = read_i32_le(data, 16)?.checked_sub(read_i32_le(data, 8)?)?.abs();
+            let height = read_i32_le(data, 20)?.checked_sub(read_i32_le(data, 12)?)?.abs();
+            Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?))
+                .filter(|(width, height)| *width > 0 && *height > 0)
+        }
+        "wmf" if data.starts_with(&[0xD7, 0xCD, 0xC6, 0x9A]) => {
+            let left = i64::from(i16::from_le_bytes([*data.get(6)?, *data.get(7)?]));
+            let top = i64::from(i16::from_le_bytes([*data.get(8)?, *data.get(9)?]));
+            let right = i64::from(i16::from_le_bytes([*data.get(10)?, *data.get(11)?]));
+            let bottom = i64::from(i16::from_le_bytes([*data.get(12)?, *data.get(13)?]));
+            let units_per_inch = u64::from(read_u16_le(data, 14)?);
+            let width_units = right.checked_sub(left)?;
+            let height_units = bottom.checked_sub(top)?;
+            if width_units <= 0 || height_units <= 0 || units_per_inch == 0 {
+                return None;
+            }
+            let to_pixels = |units: i64| {
+                u32::try_from((u64::try_from(units).ok()?.saturating_mul(96) + units_per_inch / 2) / units_per_inch)
+                    .ok()
+                    .filter(|value| *value > 0)
+            };
+            Some((to_pixels(width_units)?, to_pixels(height_units)?))
+        }
+        _ => None,
+    }
+}
+
 fn bounded_metafile_dimensions(
     image: &ExtractedImage,
     image_config: &crate::core::config::ImageExtractionConfig,
     security_limits: &crate::extractors::security::SecurityLimits,
 ) -> Result<(u32, u32), ImageOcrPreprocessError> {
+    let detected_format = crate::extraction::image_format::detect_image_format(&image.data);
+    let intrinsic = infer_metafile_dimensions(&image.data, detected_format.as_ref());
     let width = image
         .width
         .filter(|value| *value > 0)
+        .or_else(|| intrinsic.as_ref().map(|dimensions| dimensions.0))
         .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "shape width is unavailable"))?;
     let height = image
         .height
         .filter(|value| *value > 0)
+        .or_else(|| intrinsic.as_ref().map(|dimensions| dimensions.1))
         .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "shape height is unavailable"))?;
     let dpi = u64::try_from(image_config.target_dpi)
         .map_err(|_| ImageOcrPreprocessError::new("rasterize_decode", "target DPI is invalid"))?;
@@ -267,7 +313,7 @@ pub(crate) async fn process_images_with_ocr(
                                 .map(bytes::Bytes::from)
                         })
                         .await
-                        .map_err(|_error| ("rasterize_decode", "preprocessing task failed".to_string()))?
+                        .map_err(|error| ("rasterize_decode", error.to_string()))?
                         .map_err(|error| (error.stage, error.reason))?
                     } else {
                         image.data.clone()
@@ -278,12 +324,12 @@ pub(crate) async fn process_images_with_ocr(
                     let registry = registry.read();
                     registry
                         .get(&task_ocr_config.backend)
-                        .map_err(|_error| ("ocr_backend", "backend unavailable".to_string()))?
+                        .map_err(|error| ("ocr_backend", error.to_string()))?
                 };
                 backend
                     .process_image(&prepared, &task_ocr_config)
                     .await
-                    .map_err(|_error| ("ocr_backend", "backend processing failed".to_string()))
+                    .map_err(|error| ("ocr_backend", error.to_string()))
             }
             .await;
             (index, result)
@@ -317,8 +363,8 @@ pub(crate) async fn process_images_with_ocr(
                 push_image_warning(warnings, images.get(index), Some(index), stage, &reason);
                 images[index].ocr_result = None;
             }
-            Err(_error) => {
-                push_image_warning(warnings, None, None, "ocr_backend", "bounded image task failed");
+            Err(error) => {
+                push_image_warning(warnings, None, None, "ocr_backend", &error.to_string());
             }
         }
 
