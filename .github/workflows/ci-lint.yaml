@@ -1,55 +1,10 @@
 name: CI Lint
 
+# Personal fork: upstream's generated-bindings, fixture, documentation, and
+# multi-platform lint gates are not maintained here. Keep the workflow
+# available for an explicitly requested inspection, but never launch it on
+# branch updates or pull requests.
 on:
-  push:
-    branches: [main, chore/alef-fixes]
-    paths:
-      - "crates/**"
-      - "packages/**"
-      - "e2e/**"
-      - "tools/**"
-      - "docs-site/**"
-      - "scripts/**"
-      - "*.toml"
-      - "*.yaml"
-      - "*.yml"
-      - "*.md"
-      - ".github/**"
-      - ".task/**"
-      - ".gitmodules"
-      - "Taskfile.yml"
-      - "alef.toml"
-      - "pyproject.toml"
-      - "plugin/**"
-      - ".ai-rulez/**"
-      - ".claude-plugin/**"
-      - ".agents/plugins/**"
-      - "test_documents"
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    branches: [main]
-    paths:
-      - "crates/**"
-      - "packages/**"
-      - "e2e/**"
-      - "tools/**"
-      - "docs-site/**"
-      - "scripts/**"
-      - "*.toml"
-      - "*.yaml"
-      - "*.yml"
-      - "*.md"
-      - ".github/**"
-      - ".task/**"
-      - ".gitmodules"
-      - "Taskfile.yml"
-      - "alef.toml"
-      - "pyproject.toml"
-      - "plugin/**"
-      - ".ai-rulez/**"
-      - ".claude-plugin/**"
-      - ".agents/plugins/**"
-      - "test_documents"
   workflow_dispatch:
 
 concurrency:
