@@ -160,6 +160,12 @@ pub(crate) fn create_router_with_limits_and_server_config(
     limits: ApiSizeLimits,
     server_config: ServerConfig,
 ) -> Router {
+    // Initialize the shared pools before building any service state. Several
+    // model backends resolve their own thread count without receiving the
+    // request config; the active budget lets those backends inherit the
+    // configured `max_threads` instead of falling back to the host default.
+    let thread_budget = crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref());
+    crate::core::config::concurrency::init_thread_pools(thread_budget);
     // Fallback for embedders that only ever use this built-in router: install the
     // Prometheus-backed meter provider before the extraction service (and therefore the
     // `telemetry::metrics::get_metrics()` `OnceLock`) is built below. Callers who construct

@@ -165,8 +165,11 @@ fn quota_period_to_cores(quota: f64, period: f64) -> Option<usize> {
 ///
 /// User-set `max_threads` takes priority. Otherwise auto-detects from
 /// `num_cpus`, preferring a detected Linux cgroup CPU quota as the ceiling
-/// when present, and falling back to [`DEFAULT_THREAD_CAP`] otherwise. See
-/// the [`ConcurrencyConfig`] docs for the full default-budget explanation.
+/// when present, and falling back to [`DEFAULT_THREAD_CAP`] otherwise. Once
+/// the shared pools have been initialized, no-config lookups reuse that
+/// process-wide budget so lazy model backends cannot drift back to the host
+/// default. See the [`ConcurrencyConfig`] docs for the full default-budget
+/// explanation.
 ///
 /// # Example
 ///
@@ -179,6 +182,12 @@ fn quota_period_to_cores(quota: f64, period: f64) -> Option<usize> {
 /// assert!(resolve_thread_budget(None) >= 1);
 /// ```
 pub(crate) fn resolve_thread_budget(config: Option<&ConcurrencyConfig>) -> usize {
+    if config.is_none() {
+        let active_budget = ACTIVE_THREAD_BUDGET.load(Ordering::Relaxed);
+        if active_budget > 0 {
+            return active_budget;
+        }
+    }
     resolve_thread_budget_inner(config, num_cpus::get(), cgroup_cpu_quota_cores())
 }
 
