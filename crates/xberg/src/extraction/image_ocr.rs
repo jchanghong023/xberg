@@ -278,7 +278,6 @@ pub(crate) async fn process_images_with_ocr(
                     let registry = registry.read();
                     registry
                         .get(&task_ocr_config.backend)
-                        .map(Clone::clone)
                         .map_err(|_error| ("ocr_backend", "backend unavailable".to_string()))?
                 };
                 backend

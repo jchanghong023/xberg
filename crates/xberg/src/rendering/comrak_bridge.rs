@@ -46,8 +46,8 @@ fn mk_text<'a>(arena: &'a comrak::Arena<'a>, text: &str) -> &'a AstNode<'a> {
 }
 
 fn code_fence_length(text: &str) -> usize {
-    let mut longest = 0;
-    let mut current = 0;
+    let mut longest: usize = 0;
+    let mut current: usize = 0;
     for byte in text.bytes() {
         if byte == b'`' {
             current += 1;
