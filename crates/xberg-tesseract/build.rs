@@ -560,7 +560,7 @@ mod build_tesseract {
 
         let leptonica_install_dir = out_dir.join("leptonica");
         let leptonica_link_name = build_static_library("leptonica", &leptonica_install_dir, || {
-            let mut leptonica_config = Config::new(cmake_compatible_path(&leptonica_dir));
+            let mut leptonica_config = Config::new(tool_compatible_path(&leptonica_dir));
 
             let leptonica_src_dir = leptonica_dir.join("src");
             let environ_h_path = leptonica_src_dir.join("environ.h");
@@ -719,7 +719,7 @@ mod build_tesseract {
 
             std::fs::write(&cmakelists_path, cmakelists).expect("Failed to write CMakeLists.txt");
 
-            let mut tesseract_config = Config::new(cmake_compatible_path(&tesseract_dir));
+            let mut tesseract_config = Config::new(tool_compatible_path(&tesseract_dir));
             if windows_target {
                 if mingw_target {
                     tesseract_config.generator("Unix Makefiles");
@@ -802,13 +802,16 @@ mod build_tesseract {
             .file("src/shim.cpp")
             .cpp(true)
             .std("c++17")
-            .include(tesseract_install_dir.join("include"))
+            .include(tool_compatible_path(&tesseract_install_dir.join("include")))
             .compile("xberg_shim");
 
-        println!("cargo:rustc-link-search=native={}", leptonica_lib_dir.display());
         println!(
             "cargo:rustc-link-search=native={}",
-            tesseract_install_dir.join("lib").display()
+            tool_compatible_path(&leptonica_lib_dir).display()
+        );
+        println!(
+            "cargo:rustc-link-search=native={}",
+            tool_compatible_path(&tesseract_install_dir.join("lib")).display()
         );
 
         #[cfg(feature = "dynamic-linking")]
@@ -1071,11 +1074,11 @@ mod build_tesseract {
         )))
     }
 
-    /// CMake cannot reliably enumerate sources through Windows verbatim paths
+    /// Native Windows tools cannot reliably consume verbatim paths
     /// (`\\?\C:\...`). `std::fs::canonicalize` returns that form on Windows,
-    /// so remove only the verbatim prefix before handing a path to CMake.
+    /// so remove only the verbatim prefix at external tool boundaries.
     #[cfg(windows)]
-    fn cmake_compatible_path(path: &Path) -> PathBuf {
+    fn tool_compatible_path(path: &Path) -> PathBuf {
         use std::ffi::OsString;
         use std::os::windows::ffi::{OsStrExt, OsStringExt};
 
@@ -1095,12 +1098,12 @@ mod build_tesseract {
     }
 
     #[cfg(not(windows))]
-    fn cmake_compatible_path(path: &Path) -> PathBuf {
+    fn tool_compatible_path(path: &Path) -> PathBuf {
         path.to_path_buf()
     }
 
     fn normalize_cmake_path(path: &Path) -> String {
-        cmake_compatible_path(path).to_string_lossy().replace('\\', "/")
+        tool_compatible_path(path).to_string_lossy().replace('\\', "/")
     }
 
     /// Apply the WASM patch to Tesseract source. Uses `git apply` if available, falls back to manual application.
@@ -1456,7 +1459,7 @@ namespace this_thread {
         let sysroot = wasi_sdk_dir.join("share/wasi-sysroot");
         let clang = wasi_sdk_dir.join("bin/clang");
 
-        let mut config = Config::new(cmake_compatible_path(leptonica_src));
+        let mut config = Config::new(tool_compatible_path(leptonica_src));
 
         config.target("wasm32-wasi");
         if cfg!(target_os = "windows") {
@@ -1605,7 +1608,7 @@ Installation instructions:
         let clang = wasi_sdk_dir.join("bin/clang");
         let clangxx = wasi_sdk_dir.join("bin/clang++");
 
-        let mut config = Config::new(cmake_compatible_path(src_dir));
+        let mut config = Config::new(tool_compatible_path(src_dir));
 
         config.target("wasm32-wasi");
         if cfg!(target_os = "windows") {
