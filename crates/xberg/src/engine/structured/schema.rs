@@ -46,7 +46,7 @@ pub struct MergedOutput {
 ///
 /// # Arguments
 /// * `raw_responses` - Vision-LLM JSON responses (already parsed as `serde_json::Value`)
-/// * `schema` - JSON Schema (Draft 2020-12) for validation
+/// * `schema` - JSON Schema for validation; its declared `$schema` draft is honored. ~keep
 /// * `merge_mode` - Merging strategy
 ///
 /// # Behavior
@@ -69,7 +69,7 @@ pub fn validate_and_merge(
         };
     }
 
-    let validator = match jsonschema::draft202012::options().offline().build(schema) {
+    let validator = match jsonschema::options().offline().build(schema) {
         Ok(v) => v,
         Err(e) => {
             return MergedOutput {
@@ -351,6 +351,24 @@ mod tests {
 
         assert_eq!(result.outcome, Outcome::Success);
         assert_eq!(result.merged.get("key").map(|v| v.as_str()), Some(Some("value")));
+    }
+
+    #[test]
+    fn should_honor_the_schema_declared_draft() {
+        let schema = serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "type": "array",
+            "items": [
+                { "type": "string" },
+                { "type": "integer" }
+            ],
+            "additionalItems": false
+        });
+
+        let result = validate_and_merge(vec![serde_json::json!(["entry", 7])], &schema, MergeMode::ArrayConcat);
+
+        assert_eq!(result.outcome, Outcome::Success);
+        assert_eq!(result.merged, serde_json::json!(["entry", 7]));
     }
 
     #[test]

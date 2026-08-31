@@ -1,0 +1,540 @@
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+pub(super) type EncodedPage = (usize, std::sync::Arc<Vec<u8>>, u32, u32);
+/// Render only specific PDF pages to images for OCR processing.
+///
+/// `page_indices` are 0-indexed. Only the requested pages are rendered,
+/// returned as `(page_index, image)` pairs.
+// Gated to `ocr` rather than `any(ocr, ocr-pipeline)` to match its only
+// callers in the `#[cfg(all(test, feature = "ocr"))]` test module. ~keep
+#[cfg(all(test, feature = "ocr", feature = "pdf"))]
+pub(crate) fn render_selected_pages_for_ocr(
+    content: &[u8],
+    page_indices: &[usize],
+) -> crate::Result<Vec<(usize, image::DynamicImage)>> {
+    let (doc, page_count, page_rotations) = open_pdf_for_page_ocr(content)?;
+    let valid_indices = valid_page_indices(page_indices, page_count);
+    render_selected_pages_from_document(
+        &doc,
+        &page_rotations,
+        &valid_indices,
+        &crate::extractors::security::SecurityLimits::default(),
+    )
+}
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn open_pdf_for_page_ocr(content: &[u8]) -> crate::Result<(xberg_native_pdf::PdfDocument, usize, Vec<u32>)> {
+    let doc = xberg_native_pdf::PdfDocument::from_bytes(content.to_vec()).map_err(|e| crate::XbergError::Parsing {
+        message: format!("Failed to open PDF for rendering: {}", e),
+        source: None,
+    })?;
+
+    let page_count = doc.page_count().map_err(|e| crate::XbergError::Parsing {
+        message: format!("Failed to get PDF page count: {}", e),
+        source: None,
+    })?;
+
+    let page_rotations = crate::pdf::render::get_page_rotations(&doc, page_count);
+    Ok((doc, page_count, page_rotations))
+}
+/// Page MediaBox size in points, falling back to US Letter (612x792pt) when the
+/// PDF omits a MediaBox or it cannot be read.
+///
+/// Mirrors `crate::pdf::render`'s private page-dimension lookup; duplicated here
+/// (rather than made `pub(crate)` there) because that module builds DPI-safeguard
+/// logic on top of it that has no bearing on this file, and this needs only the
+/// two-line MediaBox read to convert OCR pixel bboxes back into the PDF page's own
+/// coordinate space (#1423).
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn page_dimensions_pt(doc: &xberg_native_pdf::PdfDocument, page_index: usize) -> (f32, f32) {
+    doc.get_page_media_box(page_index)
+        .map(|(llx, lly, urx, ury)| ((urx - llx).abs(), (ury - lly).abs()))
+        .unwrap_or((612.0, 792.0))
+}
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn open_pdf_for_full_ocr(content: &[u8]) -> crate::Result<(xberg_native_pdf::PdfDocument, usize, Vec<u32>)> {
+    let doc = xberg_native_pdf::PdfDocument::from_bytes(content.to_vec()).map_err(|e| crate::XbergError::Parsing {
+        message: format!("Failed to open PDF for OCR streaming: {:?}", e),
+        source: None,
+    })?;
+    let page_count = doc.page_count().map_err(|e| crate::XbergError::Parsing {
+        message: format!("Failed to get document page count: {:?}", e),
+        source: None,
+    })?;
+    let page_rotations = crate::pdf::render::get_page_rotations(&doc, page_count);
+    Ok((doc, page_count, page_rotations))
+}
+/// Luma value at or below which a sampled pixel counts as ink.
+///
+/// Mid-gray, matching the `< 128` threshold the render-path glyph-ink assertions use
+/// (`crate::pdf::render`'s `dark_pixels_in_cell`).
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) const INK_LUMA_THRESHOLD: u8 = 128;
+/// Sample every Nth pixel on both axes when probing a page raster for ink.
+///
+/// A blank-substituted page raster is uniformly white, so any subsample detects it;
+/// 4 keeps the probe at 1/16 of the pixels (≈131k samples for a 150-DPI Letter page).
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) const INK_PROBE_STRIDE: u32 = 4;
+/// Fraction of sampled pixels that must be ink for the raster to count as non-blank.
+///
+/// 0.01% of a 150-DPI Letter page's subsample is ~13 pixels — below a single glyph's
+/// ink, but far above the zero a blank-substituted raster yields.
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) const INK_BLANK_MAX_DARK_RATIO: f64 = 0.0001;
+/// Longest OCR text (in non-whitespace characters) that still justifies paying for an
+/// ink probe of the page raster.
+///
+/// The probe exists only to catch a backend that *describes* a blank page instead of
+/// returning nothing ("The image is entirely blank."), which `is_page_text_blank`'s
+/// 3-character floor reads as content. Such answers are a sentence or two; a page that
+/// was genuinely transcribed runs far longer. Gating on length keeps the PNG decode off
+/// the hot path for real pages.
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) const MAX_INK_PROBE_TEXT_CHARS: usize = 200;
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) const OCR_PNG_ENCODE_BYTES_PER_PIXEL: u64 = 4;
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) const OCR_PNG_ENCODE_FIXED_BYTES: u64 = 256 * 1024;
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn validate_png_encode_batch_peak<'a>(
+    images: impl IntoIterator<Item = &'a image::DynamicImage>,
+    parallel: bool,
+    security_limits: &crate::extractors::security::SecurityLimits,
+) -> crate::Result<()> {
+    let mut dimensions = (1, 1);
+    let mut source_bytes = 0_u64;
+    let mut output_bytes = 0_u64;
+    let mut conversion_bytes = 0_u64;
+    for image in images {
+        dimensions = (image.width(), image.height());
+        source_bytes = source_bytes
+            .checked_add(u64::try_from(image.as_bytes().len()).unwrap_or(u64::MAX))
+            .ok_or_else(|| {
+                crate::extraction::image_decode::image_dimension_error(dimensions.0, dimensions.1, u64::MAX, u64::MAX)
+            })?;
+        let conversion = crate::extraction::image_decode::decoded_byte_count(dimensions.0, dimensions.1, 3)?;
+        conversion_bytes = if parallel {
+            conversion_bytes.checked_add(conversion)
+        } else {
+            Some(conversion_bytes.max(conversion))
+        }
+        .ok_or_else(|| {
+            crate::extraction::image_decode::image_dimension_error(dimensions.0, dimensions.1, u64::MAX, u64::MAX)
+        })?;
+        let output = crate::extraction::image_decode::decoded_byte_count(
+            dimensions.0,
+            dimensions.1,
+            OCR_PNG_ENCODE_BYTES_PER_PIXEL,
+        )?
+        .checked_add(OCR_PNG_ENCODE_FIXED_BYTES)
+        .ok_or_else(|| {
+            crate::extraction::image_decode::image_dimension_error(dimensions.0, dimensions.1, u64::MAX, u64::MAX)
+        })?;
+        output_bytes = output_bytes.checked_add(output).ok_or_else(|| {
+            crate::extraction::image_decode::image_dimension_error(dimensions.0, dimensions.1, u64::MAX, u64::MAX)
+        })?;
+    }
+    let additional_bytes = conversion_bytes.checked_add(output_bytes).ok_or_else(|| {
+        crate::extraction::image_decode::image_dimension_error(dimensions.0, dimensions.1, u64::MAX, u64::MAX)
+    })?;
+    crate::extraction::image_decode::validate_image_live_bytes(
+        dimensions.0,
+        dimensions.1,
+        source_bytes,
+        additional_bytes,
+        security_limits,
+    )
+}
+
+#[cfg(all(test, any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+mod png_encode_peak_tests {
+    use super::*;
+
+    #[test]
+    fn parallel_batch_peak_counts_every_live_page_conversion() {
+        let images = [
+            image::DynamicImage::ImageRgb8(image::RgbImage::new(10, 10)),
+            image::DynamicImage::ImageRgb8(image::RgbImage::new(10, 10)),
+        ];
+        let limits = crate::extractors::security::SecurityLimits {
+            max_content_size: 526_000,
+            ..Default::default()
+        };
+
+        validate_png_encode_batch_peak(images.iter(), false, &limits)
+            .expect("the same pages encoded sequentially must fit the between-threshold budget");
+        let error = validate_png_encode_batch_peak(images.iter(), true, &limits)
+            .expect_err("parallel page conversions must be budgeted together");
+
+        assert!(matches!(error, crate::XbergError::Validation { .. }));
+    }
+}
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn clone_rgb_for_png_encode(
+    image: &image::DynamicImage,
+    security_limits: &crate::extractors::security::SecurityLimits,
+) -> crate::Result<image::RgbImage> {
+    crate::extraction::image_decode::validate_dynamic_image_additional_live_bytes(
+        image,
+        security_limits,
+        3 + OCR_PNG_ENCODE_BYTES_PER_PIXEL,
+        OCR_PNG_ENCODE_FIXED_BYTES,
+    )?;
+    Ok(image.to_rgb8())
+}
+/// Whether the rendered page raster carries essentially no ink.
+///
+/// Issue #1444: when xberg_native_pdf cannot draw a page's image XObjects it substitutes a
+/// blank white bitmap, and a chatty backend then answers with a *description* of that
+/// blankness rather than empty text — which [`is_page_text_blank`] accepts as content,
+/// suppressing the XObject fallback. Looking at the pixels the backend was actually
+/// given settles the question independently of what it said.
+///
+/// Returns `false` when `png_bytes` cannot be decoded: an undecodable raster is not
+/// evidence of blankness, and the caller must not escalate on a guess.
+///
+/// [`is_page_text_blank`]: crate::extraction::blank_detection::is_page_text_blank
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn page_raster_is_blank(
+    png_bytes: &[u8],
+    security_limits: &crate::extractors::security::SecurityLimits,
+) -> bool {
+    let Ok(luma) =
+        crate::extraction::image_decode::decode_standard_luma8_with_security_limits(png_bytes, security_limits)
+    else {
+        tracing::debug!("ink probe: page raster could not be decoded; not treating it as blank");
+        return false;
+    };
+    let (width, height) = luma.dimensions();
+    if width == 0 || height == 0 {
+        return true;
+    }
+
+    let mut sampled: u64 = 0;
+    let mut dark: u64 = 0;
+    for y in (0..height).step_by(INK_PROBE_STRIDE as usize) {
+        for x in (0..width).step_by(INK_PROBE_STRIDE as usize) {
+            sampled += 1;
+            if luma.get_pixel(x, y).0[0] < INK_LUMA_THRESHOLD {
+                dark += 1;
+            }
+        }
+    }
+
+    (dark as f64) <= (sampled as f64) * INK_BLANK_MAX_DARK_RATIO
+}
+/// Whether this page should be treated as blank for the purposes of the image-XObject
+/// OCR fallback.
+///
+/// Blank by text (the pre-existing [`is_page_text_blank`] rule) **or** blank by ink: a
+/// short OCR answer over a raster with no ink on it is a description of a blank page,
+/// not a transcription of one. The text test is free and runs first; the ink probe is
+/// additionally gated on [`MAX_INK_PROBE_TEXT_CHARS`] so a genuinely transcribed page
+/// never pays for a PNG decode.
+///
+/// [`is_page_text_blank`]: crate::extraction::blank_detection::is_page_text_blank
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn page_needs_xobject_fallback(
+    ocr_text: &str,
+    page_png: &[u8],
+    security_limits: &crate::extractors::security::SecurityLimits,
+) -> bool {
+    if crate::extraction::blank_detection::is_page_text_blank(ocr_text) {
+        return true;
+    }
+    let non_whitespace = ocr_text.chars().filter(|c| !c.is_whitespace()).count();
+    non_whitespace <= MAX_INK_PROBE_TEXT_CHARS && page_raster_is_blank(page_png, security_limits)
+}
+/// What one page's image-XObject OCR recovery attempt produced.
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+#[derive(Debug)]
+pub(super) struct XObjectRecoveryOutcome {
+    /// Concatenated OCR text of every embedded image that yielded any; empty when none did.
+    pub(super) text: String,
+    /// How many image XObjects were handed to the backend.
+    pub(super) attempted: usize,
+    /// The recovered images themselves, provenance-tagged for the output's `images` array.
+    pub(super) images: Vec<crate::types::ExtractedImage>,
+    /// LLM usage emitted while retrying the embedded image bytes.
+    pub(super) llm_usage: Vec<crate::types::LlmUsage>,
+    /// Structured tables emitted by the recovery backend.
+    pub(super) tables: Vec<crate::types::Table>,
+    /// Formulas emitted by the recovery backend.
+    pub(super) formulas: Vec<crate::types::Formula>,
+    /// First preprocessing record in paint order, matching the per-page metadata surface.
+    pub(super) image_preprocessing: Option<crate::types::ImagePreprocessingMetadata>,
+}
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) async fn recover_image_xobjects(
+    backend: &std::sync::Arc<dyn crate::plugins::OcrBackend>,
+    fallback_images: &[crate::pdf::native::images::PageFallbackImage],
+    page_idx: usize,
+    ocr_config: &crate::core::config::OcrConfig,
+    budget: &mut crate::extractors::security::SecurityBudget,
+) -> crate::Result<XObjectRecoveryOutcome> {
+    let mut outcome = XObjectRecoveryOutcome {
+        text: String::new(),
+        attempted: fallback_images.len(),
+        images: Vec::with_capacity(fallback_images.len()),
+        llm_usage: Vec::new(),
+        tables: Vec::new(),
+        formulas: Vec::new(),
+        image_preprocessing: None,
+    };
+    for (image_index, fallback) in fallback_images.iter().enumerate() {
+        budget.step()?;
+        collect_xobject_recovery_result(backend, fallback, page_idx, ocr_config, budget, &mut outcome).await?;
+        outcome.images.push(crate::types::ExtractedImage {
+            data: fallback.bytes.clone(),
+            format: std::borrow::Cow::Borrowed(fallback.format),
+            image_index: image_index as u32,
+            page_number: Some((page_idx + 1) as u32),
+            source_path: Some(format!("xobject:page{}:{}", page_idx + 1, image_index)),
+            description: Some(format!(
+                "recovered from raw image XObject ({}) after the page rasterizer produced a blank page",
+                fallback.recovery.as_str()
+            )),
+            ..Default::default()
+        });
+    }
+    Ok(outcome)
+}
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn account_xobject_structured_output(
+    result: &crate::types::ExtractedDocument,
+    retain_image_preprocessing: bool,
+    budget: &mut crate::extractors::security::SecurityBudget,
+) -> crate::Result<()> {
+    for table in &result.tables {
+        budget.account_text(table.markdown.len())?;
+        if let Some(table_id) = &table.table_id {
+            budget.account_text(table_id.len())?;
+        }
+        for column in table.columns.iter().flatten() {
+            budget.account_text(column.len())?;
+        }
+        for row in &table.cells {
+            budget.add_cells(row.len())?;
+            for cell in row {
+                budget.account_text(cell.len())?;
+            }
+        }
+    }
+    for formula in &result.formulas {
+        budget.account_text(formula.latex.len())?;
+    }
+    for usage in result.llm_usage.iter().flatten() {
+        budget.account_text(usage.model.len())?;
+        budget.account_text(usage.source.len())?;
+        if let Some(finish_reason) = &usage.finish_reason {
+            budget.account_text(finish_reason.len())?;
+        }
+    }
+    if retain_image_preprocessing && let Some(metadata) = &result.metadata.image_preprocessing {
+        budget.account_text(metadata.resample_method.len())?;
+        if let Some(resize_error) = &metadata.resize_error {
+            budget.account_text(resize_error.len())?;
+        }
+    }
+    Ok(())
+}
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) async fn collect_xobject_recovery_result(
+    backend: &std::sync::Arc<dyn crate::plugins::OcrBackend>,
+    fallback: &crate::pdf::native::images::PageFallbackImage,
+    page_idx: usize,
+    ocr_config: &crate::core::config::OcrConfig,
+    budget: &mut crate::extractors::security::SecurityBudget,
+    outcome: &mut XObjectRecoveryOutcome,
+) -> crate::Result<()> {
+    let result = match backend.process_image(&fallback.bytes, ocr_config).await {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::debug!(
+                page = page_idx,
+                "force_ocr fallback: OCR of embedded image bytes failed: {error}"
+            );
+            return Ok(());
+        }
+    };
+    if !result.content.trim().is_empty() {
+        let separator_len = usize::from(!outcome.text.is_empty()) * 2;
+        budget.account_text(separator_len.saturating_add(result.content.len()))?;
+        if separator_len != 0 {
+            outcome.text.push_str("\n\n");
+        }
+        outcome.text.push_str(&result.content);
+    }
+    account_xobject_structured_output(&result, outcome.image_preprocessing.is_none(), budget)?;
+    outcome.llm_usage.extend(result.llm_usage.unwrap_or_default());
+    if outcome.image_preprocessing.is_none() {
+        outcome.image_preprocessing = result.metadata.image_preprocessing;
+    }
+    let page_number = (page_idx + 1) as u32;
+    outcome.tables.extend(result.tables.into_iter().map(|mut table| {
+        table.page_number = page_number;
+        table
+    }));
+    outcome.formulas.extend(result.formulas.into_iter().map(|mut formula| {
+        formula.page = Some(page_number);
+        formula
+    }));
+    Ok(())
+}
+/// OCR a page's embedded image XObjects directly, bypassing the whole-page rasterizer.
+///
+/// Used when the page render came back blank (see [`page_needs_xobject_fallback`]) but the
+/// page does carry image XObjects the renderer could not paint (issue #1355/#1444).
+///
+/// Returns `None` when the page has no recoverable image XObjects at all, so the caller can
+/// tell "nothing to try" apart from "tried and got nothing" and avoid warning about a page
+/// that was simply empty.
+///
+/// Provenance: each recovered image is tagged `source_path = "xobject:page{N}:{i}"` (`N`
+/// 1-based, `i` the image's 0-based paint order on that page) with the recovery mode in
+/// `description`. This reuses the existing `source_path` convention (DOCX/ODT record
+/// `media/imageN.png` there) rather than adding a field to `ExtractedImage`, which would
+/// require regenerating every language binding.
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) async fn recover_page_text_from_image_xobjects(
+    backend: &std::sync::Arc<dyn crate::plugins::OcrBackend>,
+    render_doc: &xberg_native_pdf::PdfDocument,
+    page_idx: usize,
+    ocr_config: &crate::core::config::OcrConfig,
+    budget: &mut crate::extractors::security::SecurityBudget,
+) -> crate::Result<Option<XObjectRecoveryOutcome>> {
+    let fallback_images = crate::pdf::native::images::page_ocr_fallback_image_bytes(render_doc, page_idx);
+    if fallback_images.is_empty() {
+        return Ok(None);
+    }
+    recover_image_xobjects(backend, &fallback_images, page_idx, ocr_config, budget)
+        .await
+        .map(Some)
+}
+/// The warning that makes an image-XObject recovery visible in the output.
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn xobject_fallback_warning(page_idx: usize, attempted: usize) -> crate::types::ProcessingWarning {
+    crate::types::ProcessingWarning {
+        source: std::borrow::Cow::Borrowed("ocr"),
+        message: std::borrow::Cow::Owned(format!(
+            "Page {} rendered blank but contains {} image XObject(s) the PDF rasterizer \
+             could not draw; OCR was retried on the embedded image bytes.",
+            page_idx + 1,
+            attempted
+        )),
+    }
+}
+/// Lazily open — at most once — a PDF document used *only* by the image-XObject OCR
+/// fallback.
+///
+/// The main `lazy_pdf_render_state` is deliberately not opened when the caller supplied
+/// pre-rendered `images` (the layout-detection route), because its page-rotation and
+/// points-per-pixel lookups are indexed differently there. The fallback needs nothing but
+/// the page's XObject table, so it gets its own handle rather than perturbing those
+/// lookups. Opening is deferred until a page actually comes back blank, so the common
+/// case pays nothing.
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn fallback_render_document<'a>(
+    memo: &'a mut Option<Option<xberg_native_pdf::PdfDocument>>,
+    content: Option<&[u8]>,
+) -> Option<&'a xberg_native_pdf::PdfDocument> {
+    memo.get_or_insert_with(|| {
+        let bytes = content?;
+        match open_pdf_for_full_ocr(bytes) {
+            Ok((doc, _, _)) => Some(doc),
+            Err(error) => {
+                tracing::debug!("force_ocr fallback: reopening the PDF for XObject recovery failed: {error}");
+                None
+            }
+        }
+    })
+    .as_ref()
+}
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn render_full_pdf_ocr_batch(
+    doc: &xberg_native_pdf::PdfDocument,
+    page_rotations: &[u32],
+    page_range: std::ops::Range<usize>,
+    security_limits: &crate::extractors::security::SecurityLimits,
+) -> crate::Result<Vec<EncodedPage>> {
+    let mut encoded = Vec::with_capacity(page_range.len());
+    for page_idx in page_range {
+        let rendered = crate::pdf::render::render_page_with_safeguards(doc, page_idx, 150).map_err(|e| {
+            crate::XbergError::Parsing {
+                message: format!("Failed to render page {} for OCR: {:?}", page_idx, e),
+                source: None,
+            }
+        })?;
+        let rotation = page_rotations.get(page_idx).copied().unwrap_or(0);
+        let (data, width, height) = crate::pdf::render::normalize_rendered_page_for_ocr_with_security_limits(
+            rendered.data,
+            rendered.width,
+            rendered.height,
+            rotation,
+            security_limits,
+        )?;
+        encoded.push((page_idx, std::sync::Arc::new(data), width, height));
+    }
+    Ok(encoded)
+}
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn valid_page_indices(page_indices: &[usize], page_count: usize) -> Vec<usize> {
+    page_indices
+        .iter()
+        .copied()
+        .filter(|&idx| {
+            if idx < page_count {
+                true
+            } else {
+                tracing::warn!(
+                    page = idx + 1,
+                    page_count,
+                    "force_ocr_pages: page {} is out of range (document has {} pages), skipping",
+                    idx + 1,
+                    page_count
+                );
+                false
+            }
+        })
+        .collect()
+}
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn render_selected_pages_from_document(
+    doc: &xberg_native_pdf::PdfDocument,
+    page_rotations: &[u32],
+    page_indices: &[usize],
+    security_limits: &crate::extractors::security::SecurityLimits,
+) -> crate::Result<Vec<(usize, image::DynamicImage)>> {
+    let mut images = Vec::with_capacity(page_indices.len());
+    for &idx in page_indices {
+        let rendered =
+            crate::pdf::render::render_page_with_safeguards(doc, idx, 150).map_err(|e| crate::XbergError::Parsing {
+                message: format!("Failed to render PDF page {}: {}", idx + 1, e),
+                source: None,
+            })?;
+        let rotation = page_rotations.get(idx).copied().unwrap_or(0);
+        let (data, _, _) = crate::pdf::render::normalize_rendered_page_for_ocr_with_security_limits(
+            rendered.data,
+            rendered.width,
+            rendered.height,
+            rotation,
+            security_limits,
+        )?;
+        let img = crate::extraction::image_decode::decode_standard_image_with_security_limits(&data, security_limits)
+            .map_err(|e| crate::XbergError::Parsing {
+            message: format!("Failed to decode rendered page {}: {}", idx + 1, e),
+            source: None,
+        })?;
+        images.push((idx, img));
+    }
+
+    Ok(images)
+}
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn share_rendered_page_images(
+    page_images: Vec<(usize, image::DynamicImage)>,
+) -> Vec<(usize, std::sync::Arc<image::DynamicImage>)> {
+    page_images
+        .into_iter()
+        .map(|(page_idx, image)| (page_idx, std::sync::Arc::new(image)))
+        .collect()
+}

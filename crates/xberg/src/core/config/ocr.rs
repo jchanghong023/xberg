@@ -526,7 +526,10 @@ pub(crate) enum OcrPipelineSelection {
     /// only runs because the earlier stage(s) were judged inadequate — so a later
     /// non-empty result is a deliberate override, not noise, even when it scores
     /// lower than an earlier stage's output (#1341). An empty result never
-    /// overwrites a prior non-empty one.
+    /// overwrites a prior non-empty one, nor does a non-empty result that is a
+    /// materially worse replacement for an already-dense incumbent — a one-sided
+    /// quality guard, not a reversion to score-based selection (F46; see
+    /// `should_replace_best_effort_result` in `extractors::pdf::ocr`).
     PreferLastNonEmpty,
 }
 

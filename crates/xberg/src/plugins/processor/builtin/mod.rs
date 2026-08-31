@@ -43,30 +43,10 @@ type BuiltinRegistration = (&'static str, fn() -> crate::Result<()>);
 /// failures are aggregated into a single `Err` so the caller still learns that
 /// registration was incomplete — but every processor that *can* register does.
 ///
-/// #58: this is the automatic, one-time bootstrap path (`initialize_features`'s
-/// `BUILTIN_INIT`), so a name already present in the registry when it runs is
-/// left untouched instead of being replaced. Without this, a caller (or a test)
-/// that registers a custom "captioning" processor *before* the first pipeline
-/// run has it silently clobbered back to the built-in default the moment
-/// `BUILTIN_INIT` fires — a one-time, process-global `OnceLock`, so exactly
-/// which pipeline run pays that cost is a scheduling accident. Explicit,
-/// direct calls to a builtin's own `register()` (bypassing this function) are
-/// unaffected and still replace unconditionally, matching their existing
-/// hot-swap contract.
 fn register_all(entries: &[BuiltinRegistration]) -> crate::Result<()> {
-    let registry = crate::plugins::registry::get_post_processor_registry();
-    let already_registered: std::collections::HashSet<String> = registry.read().list().into_iter().collect();
-
     let mut failures: Vec<String> = Vec::new();
 
     for (name, register) in entries {
-        if already_registered.contains(*name) {
-            tracing::debug!(
-                "Skipping built-in post-processor '{name}': a processor is already registered \
-                 under that name (the automatic bootstrap never overrides an existing registration)"
-            );
-            continue;
-        }
         if let Err(e) = register() {
             tracing::error!(
                 "Failed to register built-in post-processor '{name}': {e}. Configuring this \
@@ -91,6 +71,59 @@ fn register_all(entries: &[BuiltinRegistration]) -> crate::Result<()> {
     }
 }
 
+#[cfg(any(
+    feature = "classification",
+    feature = "summarization",
+    feature = "translation",
+    feature = "captioning",
+    feature = "qr-codes",
+    feature = "ner",
+    feature = "redaction"
+))]
+fn register_builtin_processor(processor: std::sync::Arc<dyn crate::plugins::PostProcessor>) -> crate::Result<()> {
+    crate::plugins::processor::register_post_processor_if_absent(processor).map(|_| ())
+}
+
+#[cfg(feature = "classification")]
+fn register_classification() -> crate::Result<()> {
+    register_builtin_processor(std::sync::Arc::new(classification::PageClassificationProcessor))
+}
+
+#[cfg(feature = "classification")]
+fn register_chunk_classification() -> crate::Result<()> {
+    register_builtin_processor(std::sync::Arc::new(chunk_classification::ChunkClassificationProcessor))
+}
+
+#[cfg(feature = "summarization")]
+fn register_summarization() -> crate::Result<()> {
+    register_builtin_processor(std::sync::Arc::new(summarization::SummarizationProcessor))
+}
+
+#[cfg(feature = "translation")]
+fn register_translation() -> crate::Result<()> {
+    register_builtin_processor(std::sync::Arc::new(translation::TranslationProcessor))
+}
+
+#[cfg(feature = "captioning")]
+fn register_captioning() -> crate::Result<()> {
+    register_builtin_processor(std::sync::Arc::new(captioning::CaptioningProcessor))
+}
+
+#[cfg(feature = "qr-codes")]
+fn register_qr() -> crate::Result<()> {
+    register_builtin_processor(std::sync::Arc::new(qr::QrCodeProcessor))
+}
+
+#[cfg(feature = "ner")]
+fn register_ner() -> crate::Result<()> {
+    register_builtin_processor(std::sync::Arc::new(ner::NerProcessor))
+}
+
+#[cfg(feature = "redaction")]
+fn register_redaction() -> crate::Result<()> {
+    register_builtin_processor(std::sync::Arc::new(redaction::RedactionProcessor))
+}
+
 /// Register every built-in post-processor enabled by the active feature set.
 ///
 /// This is the single entry point that callers (including
@@ -111,21 +144,21 @@ pub fn register_builtin() -> crate::Result<()> {
     let mut entries: Vec<BuiltinRegistration> = Vec::new();
 
     #[cfg(feature = "classification")]
-    entries.push(("classification", classification::register));
+    entries.push(("classification", register_classification));
     #[cfg(feature = "classification")]
-    entries.push(("chunk-classification", chunk_classification::register));
+    entries.push(("chunk-classification", register_chunk_classification));
     #[cfg(feature = "summarization")]
-    entries.push(("summarization", summarization::register));
+    entries.push(("summarization", register_summarization));
     #[cfg(feature = "translation")]
-    entries.push(("translation", translation::register));
+    entries.push(("translation", register_translation));
     #[cfg(feature = "captioning")]
-    entries.push(("captioning", captioning::register));
+    entries.push(("captioning", register_captioning));
     #[cfg(feature = "qr-codes")]
-    entries.push(("qr-codes", qr::register));
+    entries.push(("qr-codes", register_qr));
     #[cfg(feature = "ner")]
-    entries.push(("ner", ner::register));
+    entries.push(("ner", register_ner));
     #[cfg(feature = "redaction")]
-    entries.push(("redaction", redaction::register));
+    entries.push(("redaction", register_redaction));
 
     register_all(&entries)
 }

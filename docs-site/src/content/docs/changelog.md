@@ -9,38 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [Unreleased]
-
-### Changed
-
-- **Breaking:** PDF backend configuration now uses `"native"` and `PdfBackend::Native` instead of
-  `"pdf_oxide"` and `PdfBackend::PdfOxide`. Update explicit configuration values; the default is
-  unchanged.
-- `security_limits.max_pages` now applies to presentations, Keynote, and multi-frame TIFF as well as
-  PDF (#1451).
-- `create_client_with_credential_provider` now returns `ManagedClient`, and an LLM concurrency limit
-  of zero is rejected.
-- DOCX, PPTX, and EPUB relationship paths are resolved relative to their package container, restoring
-  images referenced through valid parent-relative paths.
-
-### Fixed
-
-- Docker images build successfully again.
-- VLM concurrency limits no longer increase concurrent local OCR work or raster memory use (#1465).
-- Malformed PPTX image relationships now return an error instead of panicking.
-- Image paths are confined to their source directory, including bare filenames and symlinked paths.
-
-### Removed
-
-- **Breaking:** removed the unused public `BatchProcessor`, object-pooling APIs, and related batch
-  optimization modules.
-- **Breaking:** removed PDF writing, editing, building, and XFA conversion APIs from the native PDF
-  crate; read-only XFA analysis remains available.
-
 ## [1.1.0] - Unreleased
 
 ### Added
 
+- Added structural extraction for MyST Markdown syntax and MyST text notebooks, including saved
+  inline `{eval}` values in Jupyter markdown cells
+  ([#1538](https://github.com/xberg-io/xberg/issues/1538)).
+- Added extraction of Jupytext percent- and light-format notebook scripts, including
+  `text/x-python`, `text/x-r-source`, and `text/x-julia` MIME aliases
+  ([#1538](https://github.com/xberg-io/xberg/issues/1538)).
 - Added bounded, cancellable SQLite and GeoPackage table extraction with schema-based GeoPackage
   detection, `.sqlite3` and `.gpkx` filename support, and defensive handling for untrusted
   databases (#1510).
@@ -58,8 +36,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   redacted from debug output.
 - Added reasoning-effort, provider-specific request-body, and Bedrock configuration for LLM
   extraction.
-- Added `xberg doctor` and the Rust `doctor()` API for checking OCR, layout-detection, and cache
-  configuration. `xberg doctor --clean` removes stray files only from Xberg-owned caches (#1347).
+- Added `xberg doctor` and the Rust `doctor()` API for validating configuration and probing every
+  compiled OCR, VLM, layout, table, formula-recognition, and cache capability without downloading
+  models or contacting remote providers. `xberg doctor --clean` removes stray files only from
+  Xberg-owned caches (#1347).
 - Added the Sceptre EasyOCR Gen2 backend for desktop, mobile, and WebAssembly.
 - Added sparse and late-interaction embeddings to chunk output.
 - Added a Prometheus `/metrics` endpoint to the API server (#1391).
@@ -90,6 +70,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Per-page OCR recognition-noise detail (fragmented-word ratio, word count, mean confidence) now
+  reaches the page accept/reject decision and is emitted at `DEBUG` instead of being discarded one
+  frame earlier. No threshold is gated on it yet; the blended stage score alone cannot discriminate
+  noise pages.
+- **Breaking (Rust source):** `ExtractionConfig` adds `apply_notebook_cell_tags`. Notebook
+  extraction now honors MyST and Jupyter Book remove/hide cell tags by default; set the field to
+  `false` to retain all saved cell content
+  ([#1538](https://github.com/xberg-io/xberg/issues/1538)).
+- **Breaking (Rust source):** `OcrQualityThresholds` adds `discard_suspected_ocr_noise`; exhaustive
+  struct literals must set the field or use `..Default::default()`.
+- **Breaking:** configuration deserialization now rejects unknown fields in nested Xberg
+  configuration tables instead of silently ignoring misspelled settings.
 - **Breaking:** PDF backend configuration now uses `"native"` and `PdfBackend::Native` instead of
   `"pdf_oxide"` and `PdfBackend::PdfOxide`. Update explicit configuration values; the default is
   unchanged.
@@ -122,6 +114,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cross-language API documentation.
 - Corrected canonical MIME and extension routing for DBF, YAML, reStructuredText, Org, Typst,
   XHTML, Djot, JPEG 2000, HEIC/HEIF, MP4, and MPEG inputs.
+- GeoJSON extraction now returns a bounded aggregate summary by default, including feature,
+  geometry, property-key, position, and bounds metadata. Set
+  `geojson.include_full_coordinates = true` to retain the complete document and coordinate arrays.
+- `quality_score` now explicitly measures the cleanliness and readability of retained text, not
+  extraction completeness; inspect `processing_warnings` for known partial or degraded results.
+- The default `security_limits.max_table_cells` remains 100,000 aggregate cells per document;
+  limit errors now explain how to raise it for trusted inputs or reduce the source table.
 
 ### Removed
 
@@ -151,8 +150,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed URL extraction reporting internally converted HTML pages as `text/markdown`; results now
+  retain a validated, canonical source MIME type.
+- Fixed `clear_post_processors` stopping at the first failed shutdown hook and permanently removing
+  enabled built-ins; it now attempts every shutdown, returns the first error, and restores built-ins
+  before the next post-processed extraction while custom processors remain cleared.
+- Fixed VLM concurrency limits increasing concurrent local OCR work and raster memory use (#1465).
+- Fixed structured extraction forcing every caller schema to JSON Schema Draft 2020-12; validation
+  now honors the schema's declared draft while keeping external reference resolution offline
+  ([#1539](https://github.com/xberg-io/xberg/issues/1539)).
+- Fixed Windows source and Ruby package builds failing on stable Rust while validating the
+  identity of staged Tesseract source directories.
+- Fixed GCC 12+ WordPerfect builds by adding the standard header that declares `size_t` before
+  compiling the pinned libwpd source.
+- Fixed Ruby source-package installation by aligning the Gemfile and lockfile with the gemspec's
+  supported `rb_sys` range.
+- Fixed generated Ruby development commands so Bundler and its tools use the active Ruby
+  interpreter, avoiding native-extension ABI conflicts on systems with multiple Ruby versions.
+- Fixed generated Python optional constructor arguments so Pyrefly receives precise keyword types
+  without unused helper declarations.
+- Fixed generated Dart tests for nested tagged unions, nullable payloads, and Flutter Rust Bridge
+  tuple accessors; added e2e analyzer coverage and refreshed the Dart lock file to the generated
+  Flutter Rust Bridge version.
+- Fixed compressed image inputs with oversized declared dimensions exhausting memory during OCR,
+  layout and QR detection, image classification, re-encoding, HEIF conversion, or structured-image
+  rasterization; decoded allocations now obey `security_limits.max_content_size` and are rejected
+  from the image header before pixel decode.
+- Fixed PDF OCR fallback being suppressed for image-only pages when dot leaders or other
+  non-textual native content pushed the document below the alphanumeric-ratio threshold.
+- Fixed process-global native PDF font-cache collisions that made glyph spacing, geometry, and
+  batch output depend on document order and concurrency when fonts used indirect width tables.
+- Fixed Markdown OCR metadata so word counts and confidence statistics describe only text retained
+  after dictionary filtering; fully filtered output now reports zero words and omits confidence
+  quantiles.
+- Fixed repeated bold PDF presenter labels and same-row legend keys being promoted to headings,
+  which could invert document hierarchy and fragment retrieval chunks.
+- Fixed PDF OCR so fragmented, low-confidence, and dictionary-suspect non-empty text is retained
+  with a processing warning by default instead of silently emptying pages. Set
+  `ocr.quality_thresholds.discard_suspected_ocr_noise = true` (or the equivalent pipeline quality
+  threshold) to opt into the previous destructive filtering behavior.
+- Fixed hybrid PDF OCR dropping surrounding prose when a table-bearing bare-text page was
+  restructured alongside geometry-backed pages.
+- Fixed automatic PDF OCR fallback reporting an empty success when OCR failed and no native text
+  remained; recoverable failures still return available native text with a warning.
+- Fixed degraded VLM fallback output replacing denser OCR text, while abstaining from the density
+  comparison for short text and non-space-delimited CJK or kana content.
 - Fixed runtime crashes in system-linked Tesseract OCR builds by linking the required native exception-safety
   shim.
+- Fixed `xberg batch` so mixed-success runs emit every successful document and every attributed
+  per-input error before returning a nonzero status; JSON and TOON timing slots remain aligned with
+  inputs, and TOON now uses the documented batch envelope.
+- Fixed `xberg extract --ocr false` so it authoritatively disables implicit OCR fallback, overrides
+  conflicting loaded OCR routing, and rejects contradictory OCR flags.
+- Fixed Tesseract preprocessing so deskew, denoise, contrast enhancement, and Otsu, adaptive, and
+  Sauvola binarization settings transform the OCR raster on native and WebAssembly backends;
+  `none` (with `off` as an alias) preserves unthresholded grayscale when deskew is disabled,
+  sparse receipt-image fallback and faint colored text no longer lose content to global
+  thresholding, dark labels over bright map fills still receive Otsu preprocessing without
+  isolated or clustered dark artifacts triggering it, and
+  WebAssembly Tesseract now rejects images exceeding 4096 × 4096 pixels before decoding.
+- Fixed OCR measurement tooling so line-filter comparisons score the intended ground-truth lines
+  and report filtering regressions accurately.
 - Fixed the OpenAPI document's dangling Djot attribute reference so schema validators and client generators can
   resolve every advertised component (#1505).
 - XML and JSON content with unsupported specialized extensions now routes through the supported generic extractor
@@ -174,8 +232,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed PDF OCR and rendering for highly compressed scans, CCITT images, CFF fonts, maximum-size font
   tables, malformed embedded fonts, rotated content, missing glyph warnings, and concurrent Pdfium
   extraction.
+- Fixed native PDF tracing so corrupt optional content is reported as a recoverable warning, while
+  mandatory cross-reference failures emit a single operation-boundary error without changing the returned error type.
+- Fixed annotation-only PDFs so visible FreeText content is recovered into page-aware document text,
+  including when OCR replaces the page text, without exposing hidden, transparent, cropped, or
+  disabled annotations when annotation extraction is off.
+- Fixed the Swift package manifest so SwiftPM no longer warns about a nonexistent target-relative license file.
+- Fixed scanned PDF extraction so CCITT parameters align with their filter in multi-filter streams,
+  referenced JBIG2 image masks are available to OCR, and stencil-mask polarity renders text as opaque.
 - Fixed PDF reading order for dense two-column layouts, hanging clause numbers, split list markers,
   and modest font-size changes on one baseline.
+- Fixed PDF heading recovery for repeated bold section titles set at body font size while retaining
+  short bold labels, presenter attributions, and calendar legends as body text (#1513).
 - Fixed PDF table extraction so multi-word cells, rule-less prose regions, OCR-derived tables, and
   page-local table failures are handled correctly (#688, #1358).
 - Fixed PDF Markdown and Djot output so native text is retained when structured conversion is
@@ -186,6 +254,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounding boxes, page boundaries, and partial page results are preserved consistently across output
   formats and OCR backends (#1444).
 - Fixed Tesseract caching, configuration, preprocessing, page segmentation, and font-size extraction.
+- Tesseract Markdown extraction now reports a `ProcessingWarning` when dictionary filtering removes
+  physical text lines, including the number removed.
 - OCR element hierarchy output now honors `build_hierarchy` and contains only resolvable parent
   references.
 - Fixed Sceptre and PaddleOCR line grouping, region ordering, per-page resizing, table validation,
@@ -230,6 +300,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed extraction configuration validation so invalid nested values, including OCR quality and
   scanned-page thresholds, are rejected consistently by every public entry point.
 - Fixed error classification so callers can distinguish all documented extraction failure categories.
+- Built-in path and byte extraction now always reports a recognized `extraction_method`; custom
+  extractors retain explicit provenance and otherwise leave it unspecified.
 - Fixed owned document classification so detected labels are written back to the returned document.
 - Fixed `ContentFilterConfig.include_watermarks` so enabling it retains watermark content.
 - Fixed `JsonExtractionConfig.flatten_nested_objects` so disabling it preserves nested objects instead of
@@ -246,6 +318,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Pinned downloaded Tesseract, Leptonica, and English tessdata inputs to immutable revisions with
+  verified sizes and SHA-256 digests, race-safe content-addressed caches, private build directories,
+  and bounded fail-closed archive extraction.
+- Structured extraction now resolves caller-provided JSON Schemas strictly offline and rejects
+  external HTTP and file references without performing I/O.
 - REST and MCP requests can no longer override LLM credentials, provider registrations, or other
   server-controlled settings.
 - Hardened ZIP accounting against overflow, impossible sizes, and compression-ratio bypasses.

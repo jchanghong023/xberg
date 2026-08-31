@@ -846,7 +846,7 @@ static FORMATS: &[FormatEntry] = &[
     FormatEntry {
         extensions: &[],
         mime_type: "text/x-source-code",
-        aliases: &[],
+        aliases: &["text/x-python", "text/x-r-source", "text/x-julia"],
     },
 ];
 
@@ -3222,6 +3222,9 @@ mod tests {
         );
         assert!(SUPPORTED_MIME_TYPES.contains("text/rtf"), "rtf alias");
         assert!(SUPPORTED_MIME_TYPES.contains("text/x-typst"), "typst alias");
+        assert!(SUPPORTED_MIME_TYPES.contains("text/x-python"), "Python source alias");
+        assert!(SUPPORTED_MIME_TYPES.contains("text/x-r-source"), "R source alias");
+        assert!(SUPPORTED_MIME_TYPES.contains("text/x-julia"), "Julia source alias");
     }
 
     /// Every alias in [`FORMATS`] must route to the same extractor as its canonical MIME

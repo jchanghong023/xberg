@@ -265,6 +265,19 @@ pub struct ExtractionConfig {
     #[serde(default)]
     pub jupyter_cell_rendering: JupyterCellRendering,
 
+    /// Apply Jupyter Book/MyST cell visibility tags while rendering notebooks.
+    ///
+    /// When enabled, `remove-cell`/`hide-cell`, `remove-input`/`hide-input`,
+    /// and `remove-output`/`hide-output` suppress the corresponding saved
+    /// source or output. Cells are never executed, and their metadata remains
+    /// available even when their rendered content is suppressed.
+    ///
+    /// Defaults to `true`. Set this to `false` to preserve all saved notebook
+    /// content regardless of cell tags. ~keep
+    #[serde(default = "default_true")]
+    #[cfg_attr(feature = "alef-meta", alef(since = "1.1.0"))]
+    pub apply_notebook_cell_tags: bool,
+
     /// Layout detection configuration (None = layout detection disabled).
     ///
     /// When set, PDF pages and images are analyzed for document structure
@@ -557,6 +570,7 @@ impl Default for ExtractionConfig {
             escape_markdown: true,
             table_anchors: false,
             jupyter_cell_rendering: JupyterCellRendering::Both,
+            apply_notebook_cell_tags: true,
             include_document_structure: false,
             acceleration: None,
             cache_namespace: None,

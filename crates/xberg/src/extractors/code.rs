@@ -5,6 +5,7 @@
 //! or shebang line.
 
 use std::borrow::Cow;
+use std::io::Read;
 use std::path::Path;
 
 use async_trait::async_trait;
@@ -13,6 +14,7 @@ use tree_sitter_language_pack as tslp;
 use crate::Result;
 use crate::core::config::{CodeContentMode, ExtractionConfig};
 use crate::core::mime::SOURCE_CODE_MIME_TYPE;
+use crate::extractors::security::SecurityBudget;
 use crate::internal_builder::InternalDocumentBuilder;
 use crate::plugins::InternalDocumentExtractor;
 use crate::plugins::Plugin;
@@ -36,6 +38,14 @@ pub(crate) const CODE_INTELLIGENCE_SCRATCH_KEY: &str = "__xberg_code_intelligenc
 
 /// `ProcessingWarning::source` for every warning this extractor emits (#171).
 const CODE_WARNING_SOURCE: &str = "code";
+
+/// Canonical source-code MIME plus common language-specific notebook aliases. ~keep
+const CODE_MIME_TYPES: &[&str] = &[
+    SOURCE_CODE_MIME_TYPE,
+    "text/x-python",
+    "text/x-julia",
+    "text/x-r-source",
+];
 
 #[cfg_attr(alef, alef(skip))]
 /// Source code extractor using tree-sitter language pack.
@@ -230,26 +240,45 @@ impl CodeExtractor {
         Ok(doc)
     }
 
-    /// Detect language and read source from a file path.
-    ///
-    /// Returns `(language, source)`. Reads the file at most once.
-    fn read_and_detect(path: &Path) -> Result<(String, String)> {
+    /// Detect a source language using a path first, then its content. ~keep
+    fn detect_language(path: &Path, source: &str) -> Result<String> {
         let path_str = path.to_string_lossy();
 
         if let Some(lang) = tslp::detect_language_from_path(&path_str) {
-            let source = std::fs::read_to_string(path)?;
-            return Ok((lang.to_string(), source));
+            return Ok(lang.to_string());
         }
 
-        let source = std::fs::read_to_string(path)?;
-        if let Some(lang) = tslp::detect_language_from_content(&source) {
-            return Ok((lang.to_string(), source));
+        if let Some(lang) = tslp::detect_language_from_content(source) {
+            return Ok(lang.to_string());
         }
 
         Err(crate::XbergError::UnsupportedFormat(format!(
             "Cannot detect programming language for: {}",
             path.display()
         )))
+    }
+
+    fn language_from_mime(mime_type: &str) -> Option<&'static str> {
+        match mime_type {
+            "text/x-python" => Some("python"),
+            "text/x-julia" => Some("julia"),
+            "text/x-r-source" => Some("r"),
+            _ => None,
+        }
+    }
+
+    #[cfg(feature = "notebook")]
+    fn extract_text_notebook(
+        source: &str,
+        mime_type: &str,
+        config: &ExtractionConfig,
+        budget: &mut SecurityBudget,
+    ) -> Result<Option<InternalDocument>> {
+        let Some(notebook) = crate::extractors::myst::parse_text_notebook(source, budget)? else {
+            return Ok(None);
+        };
+        crate::extractors::jupyter::JupyterExtractor::render_text_notebook(notebook, mime_type, config, budget)
+            .map(Some)
     }
 }
 
@@ -285,10 +314,12 @@ impl InternalDocumentExtractor for CodeExtractor {
     async fn extract_content(
         &self,
         content: &[u8],
-        _mime_type: &str,
+        mime_type: &str,
         config: &ExtractionConfig,
     ) -> Result<InternalDocument> {
         tracing::debug!(format = "code", size_bytes = content.len(), "extraction starting");
+        let mut budget = SecurityBudget::from_config(config);
+        budget.account_text(content.len())?;
         let source = String::from_utf8_lossy(content);
         // `Cow::Owned` here means `from_utf8_lossy` had to allocate a replacement copy,
         // which it only does when it found at least one undecodable byte sequence to
@@ -296,8 +327,14 @@ impl InternalDocumentExtractor for CodeExtractor {
         // `Cow::Borrowed` (#171). ~keep
         let decoded_lossily = matches!(source, Cow::Owned(_));
 
+        #[cfg(feature = "notebook")]
+        if let Some(document) = Self::extract_text_notebook(&source, mime_type, config, &mut budget)? {
+            return Ok(document);
+        }
+
         let language = tslp::detect_language_from_content(&source)
             .or_else(|| config.source_name.as_deref().and_then(tslp::detect_language_from_path))
+            .or_else(|| Self::language_from_mime(mime_type))
             .ok_or_else(|| {
                 crate::XbergError::UnsupportedFormat(
                     "Cannot detect programming language from content (no shebang line). \
@@ -323,12 +360,29 @@ impl InternalDocumentExtractor for CodeExtractor {
     }
 
     async fn extract_path(&self, path: &Path, _mime_type: &str, config: &ExtractionConfig) -> Result<InternalDocument> {
-        let (language, source) = Self::read_and_detect(path)?;
+        let mut budget = SecurityBudget::from_config(config);
+        let file = std::fs::File::open(path)?;
+        let declared_size = usize::try_from(file.metadata()?.len()).unwrap_or(usize::MAX);
+        budget.account_text(declared_size)?;
+        let max_content_size = config
+            .security_limits
+            .as_ref()
+            .map(|limits| limits.max_content_size)
+            .unwrap_or_else(|| crate::extractors::security::SecurityLimits::default().max_content_size);
+        let max_read = u64::try_from(max_content_size).unwrap_or(u64::MAX).saturating_add(1);
+        let mut source = String::with_capacity(declared_size);
+        file.take(max_read).read_to_string(&mut source)?;
+        budget.account_text(source.len().saturating_sub(declared_size))?;
+        #[cfg(feature = "notebook")]
+        if let Some(document) = Self::extract_text_notebook(&source, _mime_type, config, &mut budget)? {
+            return Ok(document);
+        }
+        let language = Self::detect_language(path, &source)?;
         Self::extract_with_language(&source, &language, config)
     }
 
     fn supported_mime_types(&self) -> &[&str] {
-        &[SOURCE_CODE_MIME_TYPE]
+        CODE_MIME_TYPES
     }
 
     fn priority(&self) -> i32 {
@@ -368,6 +422,21 @@ mod tests {
     use super::*;
     #[cfg(not(target_arch = "wasm32"))]
     use std::path::PathBuf;
+
+    #[test]
+    fn should_claim_common_text_notebook_mime_aliases() {
+        let extractor = CodeExtractor::new();
+        let supported = extractor.supported_mime_types();
+        assert_eq!(
+            supported,
+            [
+                SOURCE_CODE_MIME_TYPE,
+                "text/x-python",
+                "text/x-julia",
+                "text/x-r-source"
+            ]
+        );
+    }
 
     /// `grammar_cache_pack_config` must return `None` when no config is
     /// supplied at all — there is nothing to configure.
@@ -471,6 +540,46 @@ mod tests {
             "valid UTF-8 source must not warn, got {:?}",
             code_warnings(&doc)
         );
+    }
+
+    #[cfg(feature = "notebook")]
+    #[tokio::test]
+    async fn text_notebook_should_share_code_extraction_security_budget() {
+        let source = "# %% [markdown]\n# first\n# %%\nx = 1\n";
+        let mut config = disabled_tree_sitter_config("test.py");
+        config.security_limits = Some(crate::extractors::security::SecurityLimits {
+            max_content_size: source.len() * 4,
+            max_iterations: 1,
+            ..crate::extractors::security::SecurityLimits::default()
+        });
+
+        let error = CodeExtractor::new()
+            .extract_content(source.as_bytes(), "text/x-python", &config)
+            .await
+            .expect_err("text-notebook parsing must reuse the CodeExtractor security budget");
+
+        assert!(error.to_string().contains("Too many iterations"));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[tokio::test]
+    async fn path_extraction_should_reject_declared_size_before_reading() {
+        use std::io::Write as _;
+
+        let mut file = tempfile::NamedTempFile::new().expect("temporary source file");
+        file.write_all(&[b'x'; 128]).expect("write source fixture");
+        let mut config = disabled_tree_sitter_config("test.py");
+        config.security_limits = Some(crate::extractors::security::SecurityLimits {
+            max_content_size: 16,
+            ..crate::extractors::security::SecurityLimits::default()
+        });
+
+        let error = CodeExtractor::new()
+            .extract_path(file.path(), SOURCE_CODE_MIME_TYPE, &config)
+            .await
+            .expect_err("oversized source path must fail before reading the full file");
+
+        assert!(error.to_string().contains("Content too large"));
     }
 
     /// Disabled tree-sitter config must skip TSLP processing entirely and emit the

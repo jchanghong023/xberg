@@ -46,8 +46,11 @@
 //! ```
 
 use crate::Result;
+#[cfg(any(feature = "keywords-yake", feature = "keywords-rake"))]
 use crate::plugins::registry::get_post_processor_registry;
+#[cfg(any(feature = "keywords-yake", feature = "keywords-rake"))]
 use once_cell::sync::OnceCell;
+#[cfg(any(feature = "keywords-yake", feature = "keywords-rake"))]
 use std::sync::Arc;
 
 pub mod config;
@@ -130,6 +133,7 @@ pub fn extract_keywords(text: &str, config: &KeywordConfig) -> Result<Vec<Keywor
 ///
 /// Set to `()` once registration succeeds. If registration fails the cell remains
 /// empty, allowing the next call to retry.
+#[cfg(any(feature = "keywords-yake", feature = "keywords-rake"))]
 static PROCESSOR_INITIALIZED: OnceCell<()> = OnceCell::new();
 
 /// Ensure the keyword processor is registered.
@@ -147,6 +151,7 @@ static PROCESSOR_INITIALIZED: OnceCell<()> = OnceCell::new();
 /// the keyword processor permanently missing for the rest of the process.
 /// Checking the registry directly and re-registering when the entry is gone
 /// makes this self-healing, mirroring `extractors::ensure_initialized`.
+#[cfg(any(feature = "keywords-yake", feature = "keywords-rake"))]
 pub(crate) fn ensure_initialized() -> Result<()> {
     PROCESSOR_INITIALIZED.get_or_try_init(register_keyword_processor)?;
 
@@ -187,19 +192,16 @@ pub(crate) fn ensure_initialized() -> Result<()> {
 /// # }
 /// ```
 #[cfg_attr(alef, alef(skip))]
+#[cfg(any(feature = "keywords-yake", feature = "keywords-rake"))]
 pub(crate) fn register_keyword_processor() -> Result<()> {
-    let registry = get_post_processor_registry();
-    let mut registry = registry.write();
-
-    registry.register(Arc::new(KeywordExtractor))?;
-
-    Ok(())
+    crate::plugins::processor::register_post_processor_if_absent(Arc::new(KeywordExtractor)).map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[cfg(any(feature = "keywords-yake", feature = "keywords-rake"))]
     fn post_processor_registry_lists(name: &str) -> bool {
         get_post_processor_registry()
             .read()
@@ -208,38 +210,21 @@ mod tests {
             .any(|registered| registered == name)
     }
 
-    /// #317: `ensure_initialized` registers the keyword post-processor exactly
-    /// once (via a `OnceCell`), with no re-registration path. Any code that
-    /// wipes the global post-processor registry after that first call — such
-    /// as `plugins::registry::test_support::PostProcessorRegistryGuard`,
-    /// whose `acquire`/`drop` both call `clear_post_processors` — permanently
-    /// removes the keyword processor for the rest of the process, because
-    /// `get_or_try_init` never re-runs the registrar once the cell is filled.
-    ///
-    /// This test must run in a process where `ensure_initialized` has not
-    /// already fired, so the first call below is the one that populates the
-    /// `OnceCell`. Run it in isolation (e.g. `--test-threads=1` targeting just
-    /// this test) to observe the failure deterministically.
+    #[cfg(any(feature = "keywords-yake", feature = "keywords-rake"))]
     #[test]
-    fn keyword_processor_registration_does_not_survive_a_post_processor_registry_guard_cycle() {
+    #[serial_test::serial]
+    fn keyword_processor_recovers_after_a_post_processor_registry_guard_cycle() {
         ensure_initialized().expect("first call must register the keyword processor");
         assert!(
             post_processor_registry_lists("keyword-extraction"),
             "keyword processor must be present immediately after ensure_initialized"
         );
 
-        // Simulate an unrelated test elsewhere in the binary that acquires and
-        // releases `PostProcessorRegistryGuard`. Both acquire and drop call
-        // `clear_post_processors`, wiping the registry regardless of what (if
-        // anything) the guarded test itself registers.
         {
             use crate::plugins::registry::test_support::PostProcessorRegistryGuard;
             let _guard = PostProcessorRegistryGuard::acquire();
         }
 
-        // `ensure_initialized` is backed by a `OnceCell` that is already
-        // filled, so this call is a no-op: it will NOT re-run
-        // `register_keyword_processor`, no matter how many times it's called.
         ensure_initialized().expect("ensure_initialized must remain Ok once already initialized");
 
         assert!(

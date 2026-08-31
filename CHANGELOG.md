@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Added structural extraction for MyST Markdown syntax and MyST text notebooks, including saved
+  inline `{eval}` values in Jupyter markdown cells
+  ([#1538](https://github.com/xberg-io/xberg/issues/1538)).
+- Added extraction of Jupytext percent- and light-format notebook scripts, including
+  `text/x-python`, `text/x-r-source`, and `text/x-julia` MIME aliases
+  ([#1538](https://github.com/xberg-io/xberg/issues/1538)).
 - Added bounded, cancellable SQLite and GeoPackage table extraction with schema-based GeoPackage
   detection, `.sqlite3` and `.gpkx` filename support, and defensive handling for untrusted
   databases (#1510).
@@ -62,6 +68,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Per-page OCR recognition-noise detail (fragmented-word ratio, word count, mean confidence) now
+  reaches the page accept/reject decision and is emitted at `DEBUG` instead of being discarded one
+  frame earlier. No threshold is gated on it yet; the blended stage score alone cannot discriminate
+  noise pages.
+- **Breaking (Rust source):** `ExtractionConfig` adds `apply_notebook_cell_tags`. Notebook
+  extraction now honors MyST and Jupyter Book remove/hide cell tags by default; set the field to
+  `false` to retain all saved cell content
+  ([#1538](https://github.com/xberg-io/xberg/issues/1538)).
 - **Breaking (Rust source):** `OcrQualityThresholds` adds `discard_suspected_ocr_noise`; exhaustive
   struct literals must set the field or use `..Default::default()`.
 - **Breaking:** configuration deserialization now rejects unknown fields in nested Xberg
@@ -134,6 +148,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed URL extraction reporting internally converted HTML pages as `text/markdown`; results now
+  retain a validated, canonical source MIME type.
+- Fixed `clear_post_processors` stopping at the first failed shutdown hook and permanently removing
+  enabled built-ins; it now attempts every shutdown, returns the first error, and restores built-ins
+  before the next post-processed extraction while custom processors remain cleared.
+- Fixed VLM concurrency limits increasing concurrent local OCR work and raster memory use (#1465).
+- Fixed structured extraction forcing every caller schema to JSON Schema Draft 2020-12; validation
+  now honors the schema's declared draft while keeping external reference resolution offline
+  ([#1539](https://github.com/xberg-io/xberg/issues/1539)).
+- Fixed hybrid PDF OCR dropping surrounding prose when a table-bearing bare-text page was
+  restructured alongside geometry-backed pages.
+- Fixed automatic PDF OCR fallback reporting an empty success when OCR failed and no native text
+  remained; recoverable failures still return available native text with a warning.
+- Fixed degraded VLM fallback output replacing denser OCR text, while abstaining from the density
+  comparison for short text and non-space-delimited CJK or kana content.
 - Fixed Windows source and Ruby package builds failing on stable Rust while validating the
   identity of staged Tesseract source directories.
 - Fixed GCC 12+ WordPerfect builds by adding the standard header that declares `size_t` before
@@ -287,6 +316,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Bounded DOCX image and iWork archive member reads by the member's declared uncompressed size
+  instead of trusting that declaration. A crafted document could forge a small declared size in the
+  ZIP central directory while carrying a deflate stream that inflated to multiple gigabytes,
+  exhausting memory during DOCX image extraction (`images.extract_images`) or `.pages`/`.numbers`/
+  `.key` extraction. Reported by Syed Anas Mohiuddin
+  ([GHSA-85w9-wqcq-x48r](https://github.com/xberg-io/xberg/security/advisories/GHSA-85w9-wqcq-x48r)).
 - Pinned downloaded Tesseract, Leptonica, and English tessdata inputs to immutable revisions with
   verified sizes and SHA-256 digests, race-safe content-addressed caches, private build directories,
   and bounded fail-closed archive extraction.

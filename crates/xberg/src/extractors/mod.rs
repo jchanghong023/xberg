@@ -137,6 +137,7 @@ pub mod fictionbook;
 pub mod doctags;
 
 pub mod markdown;
+pub(crate) mod myst;
 
 #[cfg(feature = "mdx")]
 pub mod mdx;

@@ -247,6 +247,7 @@ fn test_extraction_config_no_unknown_fields_in_default() {
         "escape_markdown",
         "table_anchors",
         "jupyter_cell_rendering",
+        "apply_notebook_cell_tags",
         "include_document_structure",
         "security_limits",
         "acceleration",

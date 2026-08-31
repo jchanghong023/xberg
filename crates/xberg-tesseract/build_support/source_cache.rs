@@ -4,9 +4,14 @@ use std::io::{self, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use tempfile::{Builder, NamedTempFile};
 
+#[cfg(windows)]
+use std::ffi::OsString;
+
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
+#[cfg(windows)]
+use std::os::windows::ffi::{OsStrExt, OsStringExt};
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 
@@ -19,6 +24,21 @@ type DirectoryIdentity = fs::Metadata;
 
 const SOURCE_ROOT_MARKER: &str = "CMakeLists.txt";
 const SHA256_HEX_LENGTH: usize = 64;
+#[cfg(any(test, windows))]
+const WINDOWS_SEPARATOR: u16 = b'\\' as u16;
+#[cfg(any(test, windows))]
+const WINDOWS_VERBATIM_PREFIX: [u16; 4] = [WINDOWS_SEPARATOR, WINDOWS_SEPARATOR, b'?' as u16, WINDOWS_SEPARATOR];
+#[cfg(any(test, windows))]
+const WINDOWS_VERBATIM_UNC_PREFIX: [u16; 8] = [
+    WINDOWS_SEPARATOR,
+    WINDOWS_SEPARATOR,
+    b'?' as u16,
+    WINDOWS_SEPARATOR,
+    b'U' as u16,
+    b'N' as u16,
+    b'C' as u16,
+    WINDOWS_SEPARATOR,
+];
 #[cfg(unix)]
 const PRIVATE_DIRECTORY_MODE: u32 = 0o700;
 #[cfg(unix)]
@@ -61,6 +81,38 @@ pub(crate) fn canonicalize_trusted_build_root(path: &Path) -> io::Result<PathBuf
         io::ErrorKind::InvalidData,
         format!("Cargo build root is not a regular directory: {}", path.display()),
     ))
+}
+
+#[cfg(any(test, windows))]
+pub(crate) fn windows_cmake_source_units(path: &[u16]) -> Vec<u16> {
+    if let Some(remainder) = path.strip_prefix(&WINDOWS_VERBATIM_UNC_PREFIX) {
+        let mut normalized = Vec::with_capacity(remainder.len() + 2);
+        normalized.extend_from_slice(&[WINDOWS_SEPARATOR, WINDOWS_SEPARATOR]);
+        normalized.extend_from_slice(remainder);
+        return normalized;
+    }
+    path.strip_prefix(&WINDOWS_VERBATIM_PREFIX).unwrap_or(path).to_vec()
+}
+
+#[cfg(windows)]
+pub(crate) fn cmake_source_path(path: &Path) -> io::Result<PathBuf> {
+    let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    let normalized = PathBuf::from(OsString::from_wide(&windows_cmake_source_units(&units)));
+    if same_file::is_same_file(path, &normalized)? {
+        return Ok(normalized);
+    }
+    Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!(
+            "CMake source alias does not identify the canonical source: {}",
+            path.display()
+        ),
+    ))
+}
+
+#[cfg(all(not(windows), not(test)))]
+pub(crate) fn cmake_source_path(path: &Path) -> io::Result<PathBuf> {
+    Ok(path.to_path_buf())
 }
 
 pub(crate) fn prepare_verified_artifact(

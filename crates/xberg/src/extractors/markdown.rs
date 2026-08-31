@@ -25,6 +25,8 @@ use crate::types::uri::{ExtractedUri, UriKind, classify_uri};
 use crate::types::{Metadata, Table};
 use async_trait::async_trait;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
+#[cfg(not(feature = "notebook"))]
+use std::borrow::Cow;
 
 /// Annotation tracking entry: (kind_tag, byte_start, optional link data).
 ///
@@ -77,6 +79,14 @@ pub(crate) fn normalize_fence_lang(info: &str) -> Option<String> {
         .trim()
         .trim_start_matches('.');
     if lang.is_empty() { None } else { Some(lang.to_string()) }
+}
+
+fn classify_markdown_uri(url: &str) -> UriKind {
+    if url.starts_with("cite:") {
+        UriKind::Citation
+    } else {
+        classify_uri(url)
+    }
 }
 
 /// Markdown extractor with metadata and table support.
@@ -177,13 +187,24 @@ impl MarkdownExtractor {
         let mut in_def_title = false;
         let mut in_def_desc = false;
         let mut def_buf = String::new();
-        let mut blockquote_stack: Vec<bool> = Vec::new();
+        let mut blockquote_stack: Vec<Option<u32>> = Vec::new();
+        let mut pending_anchor: Option<String> = None;
 
         let mut annotation_starts: Vec<AnnotationEntry> = Vec::new();
 
         /// Get the current length of the active text buffer as u32.
         fn active_text_offset(buf: &str) -> u32 {
             buf.len() as u32
+        }
+
+        fn apply_pending_anchor(
+            builder: &mut InternalDocumentBuilder,
+            pending_anchor: &mut Option<String>,
+            index: u32,
+        ) {
+            if let Some(anchor) = pending_anchor.take() {
+                builder.set_anchor(index, anchor);
+            }
         }
 
         for event in events {
@@ -212,6 +233,7 @@ impl MarkdownExtractor {
                             trimmed,
                         );
                         let idx = b.push_heading(heading_level, trimmed, None, None);
+                        apply_pending_anchor(&mut b, &mut pending_anchor, idx);
                         if !annotations.is_empty() {
                             b.set_annotations(idx, annotations);
                         }
@@ -235,7 +257,8 @@ impl MarkdownExtractor {
                             &paragraph_text,
                             trimmed,
                         );
-                        b.push_paragraph(trimmed, annotations, None, None);
+                        let idx = b.push_paragraph(trimmed, annotations, None, None);
+                        apply_pending_anchor(&mut b, &mut pending_anchor, idx);
                     }
                     paragraph_text.clear();
                     paragraph_annotations.clear();
@@ -437,7 +460,7 @@ impl MarkdownExtractor {
                                 None
                             };
                             if !url.is_empty() {
-                                let kind = classify_uri(&url);
+                                let kind = classify_markdown_uri(&url);
                                 b.push_uri(ExtractedUri {
                                     url,
                                     label: label_text.filter(|s| !s.is_empty()),
@@ -462,7 +485,8 @@ impl MarkdownExtractor {
                     in_code_block = false;
                     let trimmed = code_text.trim_end();
                     if !trimmed.is_empty() {
-                        b.push_code(trimmed, code_lang.as_deref(), None, None);
+                        let idx = b.push_code(trimmed, code_lang.as_deref(), None, None);
+                        apply_pending_anchor(&mut b, &mut pending_anchor, idx);
                     }
                     code_text.clear();
                     code_lang = None;
@@ -477,19 +501,18 @@ impl MarkdownExtractor {
                             pulldown_cmark::BlockQuoteKind::Warning => "warning",
                             pulldown_cmark::BlockQuoteKind::Caution => "caution",
                         };
-                        b.push_admonition(alert_kind, None, None);
-                        blockquote_stack.push(true);
+                        let idx = b.push_admonition(alert_kind, None, None);
+                        apply_pending_anchor(&mut b, &mut pending_anchor, idx);
+                        blockquote_stack.push(Some(idx));
                     } else {
                         b.push_quote_start();
-                        blockquote_stack.push(false);
+                        blockquote_stack.push(None);
                     }
                 }
-                Event::End(TagEnd::BlockQuote(_)) => {
-                    let was_alert = blockquote_stack.pop().unwrap_or(false);
-                    if !was_alert {
-                        b.push_quote_end();
-                    }
-                }
+                Event::End(TagEnd::BlockQuote(_)) => match blockquote_stack.pop() {
+                    Some(Some(_)) => {}
+                    Some(None) | None => b.push_quote_end(),
+                },
                 Event::Start(Tag::List(start)) => {
                     // A sublist nests INSIDE its parent item (`Start(Item)` -> ... -> `Start(List)`
                     // -> ... -> `End(List)` -> ... -> `End(Item)`), so the parent's text has already
@@ -558,7 +581,8 @@ impl MarkdownExtractor {
                             bounding_box: None,
                             ..Default::default()
                         };
-                        b.push_table(table, None, None);
+                        let idx = b.push_table(table, None, None);
+                        apply_pending_anchor(&mut b, &mut pending_anchor, idx);
                     }
                     table_rows.clear();
                 }
@@ -610,7 +634,8 @@ impl MarkdownExtractor {
                             (None, None) => String::new(),
                         };
                         if !display.is_empty() {
-                            b.push_paragraph(&display, vec![], None, None);
+                            let idx = b.push_paragraph(&display, vec![], None, None);
+                            apply_pending_anchor(&mut b, &mut pending_anchor, idx);
                         }
                     }
 
@@ -696,22 +721,33 @@ impl MarkdownExtractor {
                     }
                 }
                 Event::Text(s) => {
+                    let text = if let Some((kind, title, remaining)) = super::myst::myst_admonition_metadata(s) {
+                        if let Some(Some(index)) = blockquote_stack.last().copied() {
+                            b.merge_attribute(index, "kind", kind);
+                            if let Some(title) = title {
+                                b.merge_attribute(index, "title", title);
+                            }
+                        }
+                        remaining
+                    } else {
+                        s
+                    };
                     if in_code_block {
-                        code_text.push_str(s);
+                        code_text.push_str(text);
                     } else if in_heading {
-                        heading_text.push_str(s);
+                        heading_text.push_str(text);
                     } else if in_image {
-                        image_alt.push_str(s);
+                        image_alt.push_str(text);
                     } else if in_table_cell {
-                        current_cell.push_str(s);
+                        current_cell.push_str(text);
                     } else if in_list_item > 0 {
-                        list_item_text.push_str(s);
+                        list_item_text.push_str(text);
                     } else if footnote_def_label.is_some() {
-                        footnote_def_text.push_str(s);
+                        footnote_def_text.push_str(text);
                     } else if in_def_title || in_def_desc {
-                        def_buf.push_str(s);
+                        def_buf.push_str(text);
                     } else if in_paragraph {
-                        paragraph_text.push_str(s);
+                        paragraph_text.push_str(text);
                     }
                 }
                 Event::InlineMath(s) => {
@@ -744,7 +780,8 @@ impl MarkdownExtractor {
                 Event::DisplayMath(s) => {
                     let trimmed = s.trim();
                     if !trimmed.is_empty() {
-                        b.push_formula(trimmed, None, None);
+                        let idx = b.push_formula(trimmed, None, None);
+                        apply_pending_anchor(&mut b, &mut pending_anchor, idx);
                     }
                 }
                 Event::SoftBreak | Event::HardBreak => {
@@ -766,6 +803,10 @@ impl MarkdownExtractor {
                     b.push_footnote_ref(name, name, None);
                 }
                 Event::InlineHtml(s) => {
+                    if let Some(target) = super::myst::myst_target_marker(s) {
+                        pending_anchor = Some(target.to_string());
+                        continue;
+                    }
                     if in_heading {
                         heading_text.push_str(s);
                     } else if in_table_cell {
@@ -785,6 +826,10 @@ impl MarkdownExtractor {
                 // It used to be silently dropped in that case; it is now recorded as a raw block
                 // so callers can recover it. See issue #135.
                 Event::Html(s) => {
+                    if let Some(target) = super::myst::myst_target_marker(s) {
+                        pending_anchor = Some(target.to_string());
+                        continue;
+                    }
                     if in_heading {
                         heading_text.push_str(s);
                     } else if in_table_cell {
@@ -875,7 +920,25 @@ impl InternalDocumentExtractor for MarkdownExtractor {
             metadata.title = Some(title);
         }
 
-        let parser = Parser::new_ext(&remaining_content, markdown_options());
+        let text_notebook = super::myst::parse_myst_text_notebook(&text, &mut budget)?;
+        #[cfg(feature = "notebook")]
+        if let Some(notebook) = text_notebook {
+            let mut doc =
+                super::jupyter::JupyterExtractor::render_text_notebook(notebook, mime_type, config, &mut budget)?;
+            let notebook_additional = std::mem::take(&mut doc.metadata.additional);
+            doc.metadata = metadata;
+            doc.metadata.additional.extend(notebook_additional);
+            doc.processing_warnings.extend(frontmatter_warning);
+            return Ok(doc);
+        }
+
+        let preprocessed_content = if super::myst::might_contain_myst_syntax(&remaining_content) {
+            Some(super::myst::preprocess_myst(&remaining_content, &mut budget)?)
+        } else {
+            None
+        };
+        let parser_content = preprocessed_content.as_deref().unwrap_or(&remaining_content);
+        let parser = Parser::new_ext(parser_content, markdown_options());
         let events: Vec<Event> = parser.collect();
 
         // Images (including data-URI decoding) are handled in-line inside
@@ -883,6 +946,14 @@ impl InternalDocumentExtractor for MarkdownExtractor {
         // one, so no separate extraction/push pass is needed here.
         let mut doc = Self::build_internal_document(&events, &yaml);
         doc.metadata = metadata;
+        #[cfg(not(feature = "notebook"))]
+        if let Some(notebook) = text_notebook {
+            let cell_metadata = notebook.cell_metadata();
+            for (key, value) in notebook.metadata {
+                doc.metadata.additional.insert(Cow::Owned(key), value);
+            }
+            doc.metadata.additional.insert(Cow::Borrowed("cells"), cell_metadata);
+        }
         doc.mime_type = mime_type.to_string();
         doc.processing_warnings.extend(frontmatter_warning);
 

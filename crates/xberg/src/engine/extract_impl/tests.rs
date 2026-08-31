@@ -729,7 +729,7 @@ fn engine_batch_concurrency_detects_per_input_layout_override() {
 
 #[cfg(feature = "url-ingestion")]
 #[tokio::test]
-async fn url_markdown_page_runs_through_pipeline() {
+async fn url_markdown_page_runs_through_pipeline_and_preserves_source_mime() {
     let config = ExtractionConfig::default();
     let links = vec![ExtractedUri {
         url: "https://example.com/next".to_string(),
@@ -748,9 +748,25 @@ async fn url_markdown_page_runs_through_pipeline() {
     .await
     .unwrap();
 
-    assert_eq!(result.mime_type, "text/markdown");
+    assert_eq!(result.mime_type, "text/html");
     assert_eq!(result.metadata.output_format.as_deref(), Some("plain"));
     assert_eq!(result.uris.as_ref().map(Vec::len), Some(1));
+}
+
+#[cfg(feature = "url-ingestion")]
+#[tokio::test]
+async fn url_page_rejects_untrusted_content_type_as_public_mime() {
+    let result = run_url_page_pipeline(
+        "safe content".to_string(),
+        true,
+        "text/html\r\nx-injected: value",
+        Vec::new(),
+        &ExtractionConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.mime_type, "text/html");
 }
 
 #[cfg(feature = "tree-sitter")]

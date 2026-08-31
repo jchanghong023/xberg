@@ -174,7 +174,6 @@ fn probe_standard_image(
 }
 
 #[cfg(any(
-    test,
     all(feature = "liter-llm", not(target_arch = "wasm32")),
     feature = "candle-trocr",
     feature = "candle-paddleocr-vl",
@@ -192,7 +191,6 @@ pub(crate) fn probe_standard_image_with_security_limits(
 }
 
 #[cfg(any(
-    test,
     all(feature = "liter-llm", not(target_arch = "wasm32")),
     feature = "candle-trocr",
     feature = "candle-paddleocr-vl",
@@ -357,13 +355,12 @@ pub(crate) fn decode_standard_rgb8_with_security_limits(
     decode_standard_rgb8(bytes, limits, 0)
 }
 
-#[cfg(any(test, layout_detection, auto_rotate, sceptre_ocr, feature = "sceptre-wasm"))]
+#[cfg(any(layout_detection, auto_rotate, sceptre_ocr, feature = "sceptre-wasm"))]
 pub(crate) fn decode_standard_rgb8_with_default_security_limits(bytes: &[u8]) -> Result<image::RgbImage> {
     decode_standard_rgb8_with_security_limits(bytes, &SecurityLimits::default())
 }
 
 #[cfg(any(
-    test,
     feature = "ocr",
     feature = "ocr-wasm",
     all(feature = "pdf", any(feature = "ocr-pipeline", feature = "layout-detection"))
@@ -376,7 +373,7 @@ pub(crate) fn decode_standard_rgb8_with_additional_live_bytes_and_security_limit
     decode_standard_rgb8(bytes, limits, additional_live_bytes)
 }
 
-#[cfg(any(test, feature = "ocr", feature = "ocr-wasm"))]
+#[cfg(any(feature = "ocr", feature = "ocr-wasm"))]
 pub(crate) fn decode_standard_rgb8_with_additional_live_bytes_and_default_security_limits(
     bytes: &[u8],
     additional_live_bytes: u64,

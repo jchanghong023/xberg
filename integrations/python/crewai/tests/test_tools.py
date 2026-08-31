@@ -221,7 +221,7 @@ def test_extract_tool_sync_run_bridge() -> None:
 async def test_extract_tool_file_not_found() -> None:
     """A missing file surfaces as a RuntimeError from xberg."""
     tool = XbergExtractTool()
-    with pytest.raises(RuntimeError, match="does not exist"):
+    with pytest.raises(RuntimeError, match=r"^IO error:"):
         await tool.arun(file_path=MISSING_FILE)
 
 
@@ -313,5 +313,5 @@ async def test_metadata_tool_includes_counts() -> None:
 async def test_metadata_tool_file_not_found() -> None:
     """A missing file surfaces as a RuntimeError from xberg."""
     tool = XbergExtractMetadataTool()
-    with pytest.raises(RuntimeError, match="does not exist"):
+    with pytest.raises(RuntimeError, match=r"^IO error:"):
         await tool.arun(file_path=MISSING_FILE)

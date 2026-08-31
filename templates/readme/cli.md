@@ -72,6 +72,13 @@ brew trust xberg-io/tap
 brew install xberg-io/tap/xberg
 ```
 
+### Scoop (Windows)
+
+```powershell
+scoop bucket add xberg https://github.com/xberg-io/scoop-bucket
+scoop install xberg
+```
+
 ### Cargo
 
 ```bash

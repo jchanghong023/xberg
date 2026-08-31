@@ -14,6 +14,8 @@ use crate::Result;
 #[cfg(feature = "notebook")]
 use crate::core::config::{ExtractionConfig, JupyterCellRendering};
 #[cfg(feature = "notebook")]
+use crate::extractors::myst::{TextNotebook, TextNotebookCellType, preprocess_myst};
+#[cfg(feature = "notebook")]
 use crate::extractors::security::SecurityBudget;
 #[cfg(feature = "notebook")]
 use crate::plugins::{InternalDocumentExtractor, Plugin};
@@ -56,6 +58,10 @@ type NotebookContent = (
 /// decode base64 regardless of mimetype.
 #[cfg(feature = "notebook")]
 const SUPPORTED_IMAGE_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml"];
+#[cfg(feature = "notebook")]
+const BASE64_ENCODED_BLOCK_SIZE: usize = 4;
+#[cfg(feature = "notebook")]
+const BASE64_DECODED_BLOCK_SIZE: usize = 3;
 
 /// Jupyter Notebook extractor.
 ///
@@ -85,17 +91,98 @@ enum OutputRepresentation {
 }
 
 #[cfg(feature = "notebook")]
+#[derive(Default)]
+struct CellVisibility {
+    hide_input: bool,
+    hide_output: bool,
+    suppressed: bool,
+}
+
+#[cfg(feature = "notebook")]
 impl JupyterExtractor {
     /// Create a new Jupyter extractor.
     pub(crate) fn new() -> Self {
         Self
     }
 
+    /// Render a MyST/Jupytext text-notebook model through the same path as an
+    /// `.ipynb` document. ~keep
+    pub(crate) fn render_text_notebook(
+        notebook: TextNotebook,
+        mime_type: &str,
+        config: &ExtractionConfig,
+        budget: &mut SecurityBudget,
+    ) -> Result<InternalDocument> {
+        let mut notebook_json = Self::text_notebook_json(notebook);
+        let metadata = Self::take_text_notebook_metadata(&mut notebook_json);
+        let mut document = Self::render_notebook_json(notebook_json, mime_type, config, budget)?;
+        for (key, value) in &metadata {
+            document
+                .metadata
+                .additional
+                .insert(Cow::Owned(key.clone()), value.clone());
+        }
+        document.metadata.title = metadata.get("title").and_then(Value::as_str).map(str::to_owned);
+        Ok(document)
+    }
+
+    fn take_text_notebook_metadata(notebook: &mut Value) -> serde_json::Map<String, Value> {
+        let Some(metadata) = notebook.get_mut("metadata").and_then(Value::as_object_mut) else {
+            return serde_json::Map::new();
+        };
+        let original = std::mem::take(metadata);
+        for key in ["kernelspec", "language_info"] {
+            if let Some(value) = original.get(key) {
+                metadata.insert(key.into(), value.clone());
+            }
+        }
+        original
+    }
+
+    fn text_notebook_json(notebook: TextNotebook) -> Value {
+        let cells = notebook.cells.into_iter().map(|cell| {
+            let mut metadata = serde_json::Map::new();
+            if !cell.tags.is_empty() {
+                metadata.insert("tags".into(), json!(cell.tags));
+            }
+            if let Some(language) = cell.language {
+                metadata.insert("language".into(), json!(language));
+            }
+            let mut value = json!({
+                "cell_type": cell.cell_type.as_str(),
+                "metadata": metadata,
+                "source": cell.source,
+            });
+            if cell.cell_type == TextNotebookCellType::Code {
+                value["execution_count"] = Value::Null;
+                value["outputs"] = Value::Array(Vec::new());
+            }
+            value
+        });
+        json!({
+            "cells": cells.collect::<Vec<_>>(),
+            "metadata": notebook.metadata,
+            "nbformat": 4,
+            "nbformat_minor": 5,
+        })
+    }
+
     /// Extract content from a Jupyter notebook.
+    #[cfg(test)]
     fn extract_notebook(content: &[u8], plain: bool) -> Result<NotebookContent> {
         let notebook: Value = serde_json::from_slice(content)
             .map_err(|e| crate::XbergError::parsing(format!("Failed to parse JSON: {}", e)))?;
+        let mut budget = SecurityBudget::from_limits(&crate::extractors::security::SecurityLimits::default());
+        budget.account_text(content.len())?;
+        Self::extract_notebook_value(notebook, plain, true, &mut budget)
+    }
 
+    fn extract_notebook_value(
+        notebook: Value,
+        plain: bool,
+        include_outputs: bool,
+        budget: &mut SecurityBudget,
+    ) -> Result<NotebookContent> {
         let mut extracted_content = String::new();
         let mut metadata = AHashMap::new();
         let mut images = Vec::new();
@@ -138,10 +225,19 @@ impl JupyterExtractor {
         if let Some(cells) = notebook.get("cells").and_then(|c| c.as_array()) {
             let mut cells_meta: Vec<Value> = Vec::with_capacity(cells.len());
             for (cell_idx, cell) in cells.iter().enumerate() {
+                budget.step()?;
                 cells_meta.push(Self::cell_metadata(cell, cell_idx));
 
-                Self::extract_cell(cell, cell_idx, &mut extracted_content, &mut images, plain)?;
-                Self::extract_cell_attachments(cell, cell_idx, &mut attachment_images, &mut warnings);
+                Self::extract_cell(
+                    cell,
+                    cell_idx,
+                    &mut extracted_content,
+                    &mut images,
+                    plain,
+                    include_outputs,
+                    budget,
+                )?;
+                Self::extract_cell_attachments(cell, cell_idx, &mut attachment_images, &mut warnings, budget)?;
             }
             metadata.insert(Cow::Borrowed("cells"), json!(cells_meta));
         }
@@ -170,12 +266,14 @@ impl JupyterExtractor {
         cell_idx: usize,
         images: &mut Vec<ExtractedImage>,
         warnings: &mut Vec<ProcessingWarning>,
-    ) {
+        budget: &mut SecurityBudget,
+    ) -> Result<()> {
         let Some(attachments) = cell.get("attachments").and_then(|a| a.as_object()) else {
-            return;
+            return Ok(());
         };
 
         for (filename, mime_map) in attachments {
+            budget.step()?;
             let Some(mime_map) = mime_map.as_object() else {
                 continue;
             };
@@ -197,7 +295,7 @@ impl JupyterExtractor {
 
             let base64_str = Self::extract_source(value);
             let cleaned = base64_str.replace(['\n', '\r'], "");
-            let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&cleaned) else {
+            let Some(decoded) = Self::decode_base64_bounded(&cleaned, budget)? else {
                 warnings.push(ProcessingWarning {
                     source: Cow::Borrowed("jupyter"),
                     message: Cow::Owned(format!(
@@ -234,6 +332,7 @@ impl JupyterExtractor {
                 data_base64: None,
             });
         }
+        Ok(())
     }
 
     fn cell_metadata(cell: &Value, cell_idx: usize) -> Value {
@@ -257,6 +356,21 @@ impl JupyterExtractor {
             && !tags.is_empty()
         {
             metadata.insert("tags".into(), Value::Array(tags.clone()));
+        }
+        if let Some(user_expressions) = cell
+            .get("metadata")
+            .and_then(|value| value.get("user_expressions"))
+            .and_then(Value::as_array)
+            && !user_expressions.is_empty()
+        {
+            metadata.insert("user_expressions".into(), Value::Array(user_expressions.clone()));
+        }
+        if let Some(language) = cell
+            .get("metadata")
+            .and_then(|value| value.get("language"))
+            .and_then(Value::as_str)
+        {
+            metadata.insert("language".into(), json!(language));
         }
         if let Some(outputs) = cell.get("outputs").and_then(|value| value.as_array())
             && !outputs.is_empty()
@@ -296,12 +410,14 @@ impl JupyterExtractor {
         content: &mut String,
         images: &mut Vec<ExtractedImage>,
         plain: bool,
+        include_outputs: bool,
+        budget: &mut SecurityBudget,
     ) -> Result<()> {
         let cell_type = cell.get("cell_type").and_then(|t| t.as_str()).unwrap_or("unknown");
 
         match cell_type {
             "markdown" => Self::extract_markdown_cell(cell, content)?,
-            "code" => Self::extract_code_cell(cell, cell_idx, content, images, plain)?,
+            "code" => Self::extract_code_cell(cell, cell_idx, content, images, plain, include_outputs, budget)?,
             "raw" => Self::extract_raw_cell(cell, content)?,
             _ => {}
         }
@@ -329,6 +445,8 @@ impl JupyterExtractor {
         content: &mut String,
         images: &mut Vec<ExtractedImage>,
         plain: bool,
+        include_outputs: bool,
+        budget: &mut SecurityBudget,
     ) -> Result<()> {
         if let Some(source) = cell.get("source") {
             let cell_text = Self::extract_source(source);
@@ -338,9 +456,10 @@ impl JupyterExtractor {
             }
         }
 
-        if let Some(outputs) = cell.get("outputs").and_then(|o| o.as_array()) {
+        if include_outputs && let Some(outputs) = cell.get("outputs").and_then(|o| o.as_array()) {
             for output in outputs {
-                Self::extract_output(output, cell_idx, content, images, plain)?;
+                budget.step()?;
+                Self::extract_output(output, cell_idx, content, images, plain, budget)?;
             }
         }
 
@@ -374,15 +493,16 @@ impl JupyterExtractor {
         content: &mut String,
         images: &mut Vec<ExtractedImage>,
         plain: bool,
+        budget: &mut SecurityBudget,
     ) -> Result<()> {
         let output_type = output.get("output_type").and_then(|t| t.as_str()).unwrap_or("unknown");
 
         match output_type {
             "stream" => Self::extract_stream_output(output, content)?,
             "execute_result" | "display_data" | "update_display_data" => {
-                Self::extract_data_output(output, cell_idx, content, images, plain)?;
+                Self::extract_data_output(output, cell_idx, content, images, plain, budget)?;
             }
-            "error" => Self::extract_error_output(output, content)?,
+            "error" => Self::extract_error_output(output, content, budget)?,
             _ => {}
         }
 
@@ -409,6 +529,7 @@ impl JupyterExtractor {
         content: &mut String,
         images: &mut Vec<ExtractedImage>,
         plain_mode: bool,
+        budget: &mut SecurityBudget,
     ) -> Result<()> {
         if let Some(data) = output.get("data").and_then(|d| d.as_object()) {
             if let Some(plain) = data.get("text/plain") {
@@ -439,7 +560,7 @@ impl JupyterExtractor {
                 if let Some(image_value) = data.get(*mime_type) {
                     let base64_str = Self::extract_source(image_value);
                     let cleaned = base64_str.replace(['\n', '\r'], "");
-                    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&cleaned) {
+                    if let Some(decoded) = Self::decode_base64_bounded(&cleaned, budget)? {
                         let format = match *mime_type {
                             "image/png" => "png",
                             "image/jpeg" => "jpeg",
@@ -480,6 +601,7 @@ impl JupyterExtractor {
             if let Some(svg_value) = data.get("image/svg+xml") {
                 let svg_markup = Self::extract_source(svg_value);
                 if !svg_markup.is_empty() {
+                    budget.account_text(svg_markup.len())?;
                     let svg_bytes = svg_markup.into_bytes();
                     let (image_kind, kind_confidence) =
                         crate::extraction::image_kind::classify(&svg_bytes, "svg", None, None, None, None, false);
@@ -512,12 +634,30 @@ impl JupyterExtractor {
             if let Some(json_content) = data.get("application/json")
                 && let Ok(formatted) = serde_json::to_string_pretty(json_content)
             {
+                budget.account_text(formatted.len())?;
                 content.push_str(&formatted);
                 content.push('\n');
             }
         }
 
         Ok(())
+    }
+
+    fn base64_decoded_upper_bound(encoded_len: usize) -> usize {
+        encoded_len
+            .saturating_add(BASE64_ENCODED_BLOCK_SIZE - 1)
+            .saturating_div(BASE64_ENCODED_BLOCK_SIZE)
+            .saturating_mul(BASE64_DECODED_BLOCK_SIZE)
+    }
+
+    fn decode_base64_bounded(encoded: &str, budget: &mut SecurityBudget) -> Result<Option<Vec<u8>>> {
+        let mut prospective_budget = budget.clone();
+        prospective_budget.account_text(Self::base64_decoded_upper_bound(encoded.len()))?;
+        let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(encoded) else {
+            return Ok(None);
+        };
+        *budget = prospective_budget;
+        Ok(Some(decoded))
     }
 
     /// Push the richest text-bearing representation of a single output onto
@@ -540,56 +680,94 @@ impl JupyterExtractor {
     /// render the exception name/value plus the *full* traceback (not just
     /// the name/value), since the traceback is often the only actionable
     /// diagnostic for a failed cell.
-    fn push_output_element(builder: &mut InternalDocumentBuilder, output: &Value, plain: bool) {
+    fn push_output_element(
+        builder: &mut InternalDocumentBuilder,
+        output: &Value,
+        plain: bool,
+        budget: &mut SecurityBudget,
+    ) -> Result<()> {
         let output_type = output.get("output_type").and_then(|t| t.as_str()).unwrap_or("");
-
         match output_type {
-            "stream" => {
-                if let Some(t) = output.get("text") {
-                    let text = Self::extract_source(t);
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        builder.push_paragraph(trimmed, vec![], None, None);
-                    }
-                }
-            }
+            "stream" => Self::push_stream_element(builder, output, budget)?,
             "execute_result" | "display_data" | "update_display_data" => {
-                let Some(data) = output.get("data").and_then(|d| d.as_object()) else {
-                    return;
-                };
-                match Self::richest_output_representation(data, plain) {
-                    Some(OutputRepresentation::RawHtml(html)) => {
-                        let trimmed = html.trim();
-                        if !trimmed.is_empty() {
-                            builder.push_raw_block("html", trimmed, None);
-                        }
-                    }
-                    Some(OutputRepresentation::Text(text)) => {
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() {
-                            builder.push_paragraph(trimmed, vec![], None, None);
-                        }
-                    }
-                    Some(OutputRepresentation::Latex(latex)) => {
-                        // `text/latex` ships its math delimited. The formula
-                        // element holds bare LaTeX, and the renderers add the
-                        // delimiters back.
-                        let bare = crate::extraction::derive::strip_math_delimiters(&latex);
-                        if !bare.is_empty() {
-                            builder.push_formula(bare, None, None);
-                        }
-                    }
-                    None => {}
-                }
+                Self::push_data_element(builder, output, plain, budget)?;
             }
-            "error" => {
-                let text = Self::collect_error_text(output);
-                if !text.is_empty() {
-                    builder.push_paragraph(&text, vec![], None, None);
-                }
-            }
+            "error" => Self::push_error_element(builder, output, budget)?,
             _ => {}
         }
+        Ok(())
+    }
+
+    fn push_stream_element(
+        builder: &mut InternalDocumentBuilder,
+        output: &Value,
+        budget: &mut SecurityBudget,
+    ) -> Result<()> {
+        let text = Self::extract_source(output.get("text").unwrap_or(&Value::Null));
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            budget.account_text(trimmed.len())?;
+            builder.push_paragraph(trimmed, vec![], None, None);
+        }
+        Ok(())
+    }
+
+    fn push_data_element(
+        builder: &mut InternalDocumentBuilder,
+        output: &Value,
+        plain: bool,
+        budget: &mut SecurityBudget,
+    ) -> Result<()> {
+        let Some(data) = output.get("data").and_then(Value::as_object) else {
+            return Ok(());
+        };
+        match Self::richest_output_representation(data, plain) {
+            Some(OutputRepresentation::RawHtml(value)) => Self::push_raw_html(builder, &value, budget)?,
+            Some(OutputRepresentation::Text(value)) => Self::push_text(builder, &value, budget)?,
+            Some(OutputRepresentation::Latex(value)) => Self::push_latex(builder, &value, budget)?,
+            None => {}
+        }
+        Ok(())
+    }
+
+    fn push_raw_html(builder: &mut InternalDocumentBuilder, value: &str, budget: &mut SecurityBudget) -> Result<()> {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            budget.account_text(trimmed.len())?;
+            builder.push_raw_block("html", trimmed, None);
+        }
+        Ok(())
+    }
+
+    fn push_text(builder: &mut InternalDocumentBuilder, value: &str, budget: &mut SecurityBudget) -> Result<()> {
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            budget.account_text(trimmed.len())?;
+            builder.push_paragraph(trimmed, vec![], None, None);
+        }
+        Ok(())
+    }
+
+    fn push_latex(builder: &mut InternalDocumentBuilder, value: &str, budget: &mut SecurityBudget) -> Result<()> {
+        let bare = crate::extraction::derive::strip_math_delimiters(value);
+        if !bare.is_empty() {
+            budget.account_text(bare.len())?;
+            builder.push_formula(bare, None, None);
+        }
+        Ok(())
+    }
+
+    fn push_error_element(
+        builder: &mut InternalDocumentBuilder,
+        output: &Value,
+        budget: &mut SecurityBudget,
+    ) -> Result<()> {
+        let text = Self::collect_error_text(output, budget)?;
+        if !text.is_empty() {
+            budget.account_text(text.len())?;
+            builder.push_paragraph(&text, vec![], None, None);
+        }
+        Ok(())
     }
 
     /// Select the single richest text-bearing representation from an
@@ -633,7 +811,7 @@ impl JupyterExtractor {
 
     /// Render an `error` output's exception name/value and full traceback as
     /// a single text block.
-    fn collect_error_text(output: &Value) -> String {
+    fn collect_error_text(output: &Value, budget: &mut SecurityBudget) -> Result<String> {
         let ename = output.get("ename").and_then(|e| e.as_str()).unwrap_or("Unknown");
         let evalue = output.get("evalue").and_then(|e| e.as_str()).unwrap_or("");
         let mut text = format!("Error ({}): {}", ename, evalue);
@@ -642,6 +820,7 @@ impl JupyterExtractor {
             text.push('\n');
             text.push_str("Traceback:");
             for line in traceback {
+                budget.step()?;
                 if let Some(line_str) = line.as_str() {
                     text.push('\n');
                     text.push_str(line_str);
@@ -649,7 +828,254 @@ impl JupyterExtractor {
             }
         }
 
-        text
+        Ok(text)
+    }
+
+    fn prepare_notebook(
+        notebook: &mut Value,
+        apply_cell_tags: bool,
+        plain: bool,
+        budget: &mut SecurityBudget,
+    ) -> Result<()> {
+        let Some(cells) = notebook.get_mut("cells").and_then(Value::as_array_mut) else {
+            return Ok(());
+        };
+        for cell in cells {
+            budget.step()?;
+            if apply_cell_tags {
+                Self::apply_cell_visibility_tags(cell, budget)?;
+            }
+            Self::prepare_markdown_cell(cell, plain, budget)?;
+        }
+        Ok(())
+    }
+
+    fn apply_cell_visibility_tags(cell: &mut Value, budget: &mut SecurityBudget) -> Result<()> {
+        let visibility = Self::cell_visibility(cell, budget)?;
+        let Some(object) = cell.as_object_mut() else {
+            return Ok(());
+        };
+        if visibility.hide_input {
+            object.insert("source".into(), Value::Array(Vec::new()));
+            object.remove("attachments");
+        }
+        if visibility.hide_output {
+            object.insert("outputs".into(), Value::Array(Vec::new()));
+        }
+        if visibility.suppressed {
+            Self::redact_saved_expression_payloads(object, !visibility.hide_input, budget)?;
+        }
+        Ok(())
+    }
+
+    fn cell_visibility(cell: &Value, budget: &mut SecurityBudget) -> Result<CellVisibility> {
+        let tags = cell
+            .get("metadata")
+            .and_then(|metadata| metadata.get("tags"))
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut visibility = CellVisibility::default();
+        for tag in tags.iter().filter_map(Value::as_str) {
+            budget.step()?;
+            match tag {
+                "remove-cell" | "remove_cell" | "hide-cell" | "hide_cell" => {
+                    visibility.hide_input = true;
+                    visibility.hide_output = true;
+                }
+                "remove-input" | "remove_input" | "hide-input" | "hide_input" => visibility.hide_input = true,
+                "remove-output" | "remove_output" | "hide-output" | "hide_output" => visibility.hide_output = true,
+                _ => {}
+            }
+        }
+        visibility.suppressed = visibility.hide_input || visibility.hide_output;
+        Ok(visibility)
+    }
+
+    fn redact_saved_expression_payloads(
+        cell: &mut serde_json::Map<String, Value>,
+        retain_identifier: bool,
+        budget: &mut SecurityBudget,
+    ) -> Result<()> {
+        let Some(expressions) = cell
+            .get_mut("metadata")
+            .and_then(Value::as_object_mut)
+            .and_then(|metadata| metadata.get_mut("user_expressions"))
+            .and_then(Value::as_array_mut)
+        else {
+            return Ok(());
+        };
+        for expression in expressions {
+            budget.step()?;
+            let identifier = expression.get("expression").cloned();
+            let status = expression
+                .get("result")
+                .and_then(|result| result.get("status"))
+                .cloned();
+            let mut redacted = serde_json::Map::new();
+            if retain_identifier && let Some(identifier) = identifier {
+                redacted.insert("expression".into(), identifier);
+            }
+            if let Some(status) = status {
+                redacted.insert("result".into(), json!({"status": status}));
+            }
+            *expression = Value::Object(redacted);
+        }
+        Ok(())
+    }
+
+    fn prepare_markdown_cell(cell: &mut Value, plain: bool, budget: &mut SecurityBudget) -> Result<()> {
+        if cell.get("cell_type").and_then(Value::as_str) != Some("markdown") {
+            return Ok(());
+        }
+        let source = Self::extract_source(cell.get("source").unwrap_or(&Value::Null));
+        if source.is_empty() {
+            return Ok(());
+        }
+        let resolved = Self::resolve_saved_expressions(cell, &source, plain, budget)?;
+        cell["source"] = Value::String(preprocess_myst(&resolved, budget)?);
+        Ok(())
+    }
+
+    fn resolve_saved_expressions<'a>(
+        cell: &Value,
+        source: &'a str,
+        plain: bool,
+        budget: &mut SecurityBudget,
+    ) -> Result<Cow<'a, str>> {
+        let Some(expressions) = cell
+            .get("metadata")
+            .and_then(|metadata| metadata.get("user_expressions"))
+            .and_then(Value::as_array)
+        else {
+            return Ok(Cow::Borrowed(source));
+        };
+        let mut saved = AHashMap::new();
+        for expression in expressions {
+            budget.step()?;
+            if let Some((name, value)) = Self::saved_expression(expression, plain) {
+                saved.insert(name, value);
+            }
+        }
+        Self::replace_eval_roles(source, &saved, budget)
+    }
+
+    fn saved_expression(expression: &Value, plain: bool) -> Option<(&str, String)> {
+        let name = expression.get("expression")?.as_str()?;
+        Some((name, Self::saved_expression_text(expression, plain)?))
+    }
+
+    fn replace_eval_roles<'a>(
+        source: &'a str,
+        saved: &AHashMap<&str, String>,
+        budget: &mut SecurityBudget,
+    ) -> Result<Cow<'a, str>> {
+        const PREFIX: &str = "{eval}`";
+        if !source.contains(PREFIX) {
+            return Ok(Cow::Borrowed(source));
+        }
+        let mut output = String::with_capacity(source.len());
+        let mut remaining = source;
+        while let Some(start) = remaining.find(PREFIX) {
+            Self::push_budgeted(&mut output, &remaining[..start], budget)?;
+            let role = &remaining[start + PREFIX.len()..];
+            let Some(end) = role.find('`') else {
+                Self::push_budgeted(&mut output, &remaining[start..], budget)?;
+                return Ok(Cow::Owned(output));
+            };
+            let expression = &role[..end];
+            if let Some(value) = saved.get(expression) {
+                Self::push_budgeted(&mut output, value, budget)?;
+            } else {
+                Self::push_budgeted(&mut output, &remaining[start..start + PREFIX.len() + end + 1], budget)?;
+            }
+            remaining = &role[end + 1..];
+        }
+        Self::push_budgeted(&mut output, remaining, budget)?;
+        Ok(Cow::Owned(output))
+    }
+
+    fn push_budgeted(output: &mut String, value: &str, budget: &mut SecurityBudget) -> Result<()> {
+        budget.account_text(value.len())?;
+        output.push_str(value);
+        Ok(())
+    }
+
+    fn saved_expression_text(expression: &Value, plain: bool) -> Option<String> {
+        let result = expression.get("result")?;
+        if result
+            .get("status")
+            .and_then(Value::as_str)
+            .is_some_and(|status| status != "ok")
+        {
+            return None;
+        }
+        let data = result.get("data")?.as_object()?;
+        if !plain {
+            for mime_type in ["text/markdown", "text/latex"] {
+                if let Some(value) = data.get(mime_type) {
+                    let text = Self::extract_source(value);
+                    if !text.is_empty() {
+                        return Some(text);
+                    }
+                }
+            }
+        }
+        let text = Self::extract_source(data.get("text/plain")?);
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn render_notebook_json(
+        mut notebook: Value,
+        mime_type: &str,
+        config: &ExtractionConfig,
+        budget: &mut SecurityBudget,
+    ) -> Result<InternalDocument> {
+        let plain = matches!(config.output_format, crate::core::config::OutputFormat::Plain);
+        Self::prepare_notebook(&mut notebook, config.apply_notebook_cell_tags, plain, budget)?;
+        let content = Self::extract_notebook_value(
+            notebook,
+            plain,
+            config.jupyter_cell_rendering.includes_outputs(),
+            budget,
+        )?;
+        Self::assemble_document(content, mime_type, config, plain, budget)
+    }
+
+    fn assemble_document(
+        content: NotebookContent,
+        mime_type: &str,
+        config: &ExtractionConfig,
+        plain: bool,
+        budget: &mut SecurityBudget,
+    ) -> Result<InternalDocument> {
+        let (_, metadata, output_images, notebook, warnings, attachment_images) = content;
+        let language = metadata
+            .get(&Cow::Borrowed("language_name"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let additional = metadata.into_iter().collect();
+        let mut images = if config.jupyter_cell_rendering.includes_outputs() {
+            output_images
+        } else {
+            Vec::new()
+        };
+        images.extend(attachment_images);
+        for (index, image) in images.iter_mut().enumerate() {
+            image.image_index = index as u32;
+        }
+        let mut document =
+            Self::build_internal_document_with_budget(&notebook, config.jupyter_cell_rendering, plain, budget)?
+                .unwrap_or_else(|| InternalDocumentBuilder::new("jupyter").build());
+        document.mime_type = mime_type.to_string();
+        document.metadata = Metadata {
+            language,
+            additional,
+            ..Default::default()
+        };
+        document.images = images;
+        document.processing_warnings.extend(warnings);
+        Ok(document)
     }
 
     /// Build an `InternalDocument` from the already-parsed notebook JSON.
@@ -659,12 +1085,27 @@ impl JupyterExtractor {
     /// mirrors `ExtractionConfig::output_format` being `Plain`
     /// and suppresses richer (markdown/html) output representations in
     /// favor of `text/plain` only.
+    #[cfg(test)]
     fn build_internal_document(
         notebook: &Value,
         rendering: JupyterCellRendering,
         plain: bool,
     ) -> Option<InternalDocument> {
-        let cells = notebook.get("cells")?.as_array()?;
+        let mut budget = SecurityBudget::from_limits(&crate::extractors::security::SecurityLimits::default());
+        Self::build_internal_document_with_budget(notebook, rendering, plain, &mut budget)
+            .ok()
+            .flatten()
+    }
+
+    fn build_internal_document_with_budget(
+        notebook: &Value,
+        rendering: JupyterCellRendering,
+        plain: bool,
+        budget: &mut SecurityBudget,
+    ) -> Result<Option<InternalDocument>> {
+        let Some(cells) = notebook.get("cells").and_then(Value::as_array) else {
+            return Ok(None);
+        };
 
         let kernel_lang = notebook
             .get("metadata")
@@ -682,6 +1123,7 @@ impl JupyterExtractor {
         let mut builder = InternalDocumentBuilder::new("jupyter");
 
         for cell in cells {
+            budget.step()?;
             let cell_type = cell.get("cell_type").and_then(|t| t.as_str()).unwrap_or("unknown");
             let source_text = Self::extract_source(cell.get("source").unwrap_or(&Value::Null));
             let trimmed = source_text.trim();
@@ -708,6 +1150,7 @@ impl JupyterExtractor {
 
             match cell_type {
                 "markdown" => {
+                    budget.account_text(trimmed.len())?;
                     let events: Vec<pulldown_cmark::Event> =
                         pulldown_cmark::Parser::new_ext(trimmed, crate::extractors::markdown::markdown_options())
                             .collect();
@@ -717,8 +1160,17 @@ impl JupyterExtractor {
                 }
                 "code" => {
                     if rendering.includes_source() && !trimmed.is_empty() {
-                        let idx = builder.push_code(trimmed, kernel_lang, None, None);
+                        budget.account_text(trimmed.len())?;
+                        let cell_language = cell
+                            .get("metadata")
+                            .and_then(|metadata| metadata.get("language"))
+                            .and_then(Value::as_str)
+                            .or(kernel_lang);
+                        let idx = builder.push_code(trimmed, cell_language, None, None);
                         let mut attrs = AHashMap::new();
+                        if let Some(language) = cell_language {
+                            attrs.insert("language".to_string(), language.to_string());
+                        }
                         if let Some(exec_count) = cell.get("execution_count") {
                             match exec_count {
                                 Value::Number(n) => {
@@ -748,23 +1200,25 @@ impl JupyterExtractor {
                         && let Some(outputs) = cell.get("outputs").and_then(|o| o.as_array())
                     {
                         for output in outputs {
-                            Self::push_output_element(&mut builder, output, plain);
+                            budget.step()?;
+                            Self::push_output_element(&mut builder, output, plain, budget)?;
                         }
                     }
                 }
                 _ => {
                     if !trimmed.is_empty() {
+                        budget.account_text(trimmed.len())?;
                         builder.push_paragraph(trimmed, vec![], None, None);
                     }
                 }
             }
         }
 
-        Some(builder.build())
+        Ok(Some(builder.build()))
     }
 
     /// Extract error output, preserving ename, evalue, and traceback in content.
-    fn extract_error_output(output: &Value, content: &mut String) -> Result<()> {
+    fn extract_error_output(output: &Value, content: &mut String, budget: &mut SecurityBudget) -> Result<()> {
         let ename = output.get("ename").and_then(|e| e.as_str()).unwrap_or("Unknown");
         let evalue = output.get("evalue").and_then(|e| e.as_str()).unwrap_or("");
 
@@ -773,6 +1227,7 @@ impl JupyterExtractor {
         if let Some(traceback) = output.get("traceback").and_then(|t| t.as_array()) {
             content.push_str("Traceback:\n");
             for line in traceback {
+                budget.step()?;
                 if let Some(line_str) = line.as_str() {
                     content.push_str(line_str);
                     content.push('\n');
@@ -840,44 +1295,9 @@ impl InternalDocumentExtractor for JupyterExtractor {
     ) -> Result<InternalDocument> {
         let mut budget = SecurityBudget::from_config(config);
         budget.account_text(content.len())?;
-        let plain = matches!(config.output_format, crate::core::config::OutputFormat::Plain);
-        let (_extracted_content, additional_metadata, extracted_images, notebook_json, warnings, attachment_images) =
-            Self::extract_notebook(content, plain)?;
-
-        let mut metadata_additional = AHashMap::new();
-        let meta_language = additional_metadata
-            .get(&Cow::Borrowed("language_name"))
-            .and_then(|v| v.as_str().map(|s| s.to_string()));
-        for (key, value) in additional_metadata {
-            metadata_additional.insert(key, json!(value));
-        }
-
-        // `JupyterCellRendering` governs a code cell's saved *outputs*; cell
-        // `attachments` are part of markdown/raw cell *source* and are kept
-        // regardless of that setting (see `JupyterCellRendering`'s docs).
-        let mut images = if config.jupyter_cell_rendering.includes_outputs() {
-            extracted_images
-        } else {
-            Vec::new()
-        };
-        images.extend(attachment_images);
-        for (index, image) in images.iter_mut().enumerate() {
-            image.image_index = index as u32;
-        }
-
-        let mut doc = Self::build_internal_document(&notebook_json, config.jupyter_cell_rendering, plain)
-            .unwrap_or_else(|| InternalDocumentBuilder::new("jupyter").build());
-        doc.mime_type = mime_type.to_string();
-
-        doc.metadata = Metadata {
-            language: meta_language,
-            additional: metadata_additional,
-            ..Default::default()
-        };
-        doc.images = images;
-        doc.processing_warnings.extend(warnings);
-
-        Ok(doc)
+        let notebook = serde_json::from_slice(content)
+            .map_err(|error| crate::XbergError::parsing(format!("Failed to parse JSON: {error}")))?;
+        Self::render_notebook_json(notebook, mime_type, config, &mut budget)
     }
 
     fn supported_mime_types(&self) -> &[&str] {
@@ -892,7 +1312,13 @@ impl InternalDocumentExtractor for JupyterExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::extractors::security::SecurityLimits;
+    use crate::plugins::InternalDocumentExtractor;
     use crate::types::internal::ElementKind;
+
+    fn test_budget() -> SecurityBudget {
+        SecurityBudget::from_limits(&SecurityLimits::default())
+    }
 
     #[test]
     fn test_jupyter_extractor_plugin_interface() {
@@ -1171,5 +1597,236 @@ mod tests {
                 .any(|e| matches!(e.kind, ElementKind::Heading { .. }) && e.text.contains("Heading")),
             "markdown cells render through the shared MarkdownExtractor (heading element present)"
         );
+    }
+
+    #[test]
+    fn should_prefer_text_notebook_cell_language_over_kernel_language() {
+        let notebook = TextNotebook {
+            metadata: json!({"kernelspec": {"language": "python"}})
+                .as_object()
+                .expect("notebook metadata is an object")
+                .clone(),
+            cells: vec![crate::extractors::myst::TextNotebookCell {
+                cell_type: TextNotebookCellType::Code,
+                source: "println(42)".to_string(),
+                language: Some("julia".to_string()),
+                tags: Vec::new(),
+            }],
+        };
+        let notebook_json = JupyterExtractor::text_notebook_json(notebook);
+        assert_eq!(notebook_json["cells"][0]["metadata"]["language"], "julia");
+
+        let document = JupyterExtractor::build_internal_document(&notebook_json, JupyterCellRendering::Both, false)
+            .expect("text notebook renders");
+        let code = document
+            .elements
+            .iter()
+            .find(|element| matches!(element.kind, ElementKind::Code))
+            .expect("code cell renders as code");
+        assert_eq!(
+            code.attributes
+                .as_ref()
+                .and_then(|attrs| attrs.get("language"))
+                .map(String::as_str),
+            Some("julia")
+        );
+    }
+
+    #[test]
+    fn should_not_resolve_saved_eval_to_html() {
+        let mut notebook = json!({
+            "cells": [{
+                "cell_type": "markdown",
+                "source": "Value: {eval}`answer`",
+                "metadata": {"user_expressions": [{
+                    "expression": "answer",
+                    "result": {
+                        "status": "ok",
+                        "data": {
+                            "text/html": "<script>alert(1)</script>",
+                            "text/markdown": "**safe**",
+                            "text/plain": "safe"
+                        }
+                    }
+                }]}
+            }]
+        });
+
+        JupyterExtractor::prepare_notebook(&mut notebook, false, false, &mut test_budget())
+            .expect("notebook preparation succeeds");
+
+        assert_eq!(notebook["cells"][0]["source"], "Value: **safe**\n");
+    }
+
+    #[test]
+    fn plain_mode_should_resolve_saved_eval_to_plain_text() {
+        let mut notebook = json!({
+            "cells": [{
+                "cell_type": "markdown",
+                "source": "Value: {eval}`answer`",
+                "metadata": {"user_expressions": [{
+                    "expression": "answer",
+                    "result": {"status": "ok", "data": {
+                        "text/html": "<strong>html</strong>",
+                        "text/markdown": "**markdown**",
+                        "text/latex": "$latex$",
+                        "text/plain": "plain"
+                    }}
+                }]}
+            }]
+        });
+
+        JupyterExtractor::prepare_notebook(&mut notebook, false, true, &mut test_budget())
+            .expect("notebook preparation succeeds");
+
+        assert_eq!(notebook["cells"][0]["source"], "Value: plain\n");
+    }
+
+    #[test]
+    fn should_redact_saved_result_payload_for_hidden_cell() {
+        let mut notebook = json!({
+            "cells": [{
+                "cell_type": "markdown",
+                "source": "secret",
+                "metadata": {
+                    "tags": ["remove-cell"],
+                    "user_expressions": [{
+                        "expression": "secret",
+                        "result": {"status": "ok", "data": {"text/plain": "credential"}}
+                    }]
+                }
+            }]
+        });
+
+        JupyterExtractor::prepare_notebook(&mut notebook, true, false, &mut test_budget())
+            .expect("notebook preparation succeeds");
+        let metadata = JupyterExtractor::cell_metadata(&notebook["cells"][0], 0);
+
+        assert!(metadata["user_expressions"][0].get("expression").is_none());
+        assert_eq!(metadata["user_expressions"][0]["result"]["status"], "ok");
+        assert!(metadata["user_expressions"][0]["result"].get("data").is_none());
+    }
+
+    #[tokio::test]
+    async fn should_reject_saved_eval_expansion_over_content_limit() {
+        let notebook = json!({
+            "cells": [{
+                "cell_type": "markdown",
+                "source": "{eval}`large` {eval}`large` {eval}`large`",
+                "metadata": {"user_expressions": [{
+                    "expression": "large",
+                    "result": {"status": "ok", "data": {"text/plain": "x".repeat(128)}}
+                }]}
+            }],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5
+        });
+        let content = serde_json::to_vec(&notebook).expect("notebook serializes");
+        let config = ExtractionConfig {
+            security_limits: Some(SecurityLimits {
+                max_content_size: content.len() + 64,
+                ..SecurityLimits::default()
+            }),
+            ..ExtractionConfig::default()
+        };
+
+        let error = JupyterExtractor::new()
+            .extract_content(&content, "application/x-ipynb+json", &config)
+            .await
+            .expect_err("expanded eval content must consume the security budget");
+
+        assert!(error.to_string().contains("Content too large"));
+    }
+
+    #[tokio::test]
+    async fn should_reject_notebook_over_iteration_limit() {
+        let notebook = json!({
+            "cells": [
+                {"cell_type": "markdown", "source": "one", "metadata": {}},
+                {"cell_type": "markdown", "source": "two", "metadata": {}}
+            ],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5
+        });
+        let content = serde_json::to_vec(&notebook).expect("notebook serializes");
+        let config = ExtractionConfig {
+            security_limits: Some(SecurityLimits {
+                max_content_size: content.len() * 4,
+                max_iterations: 1,
+                ..SecurityLimits::default()
+            }),
+            ..ExtractionConfig::default()
+        };
+
+        let error = JupyterExtractor::new()
+            .extract_content(&content, "application/x-ipynb+json", &config)
+            .await
+            .expect_err("cell traversal must consume the iteration budget");
+
+        assert!(error.to_string().contains("Too many iterations"));
+    }
+
+    #[test]
+    fn invalid_base64_should_not_consume_content_budget() {
+        let limits = SecurityLimits {
+            max_content_size: 3,
+            ..SecurityLimits::default()
+        };
+        let mut budget = SecurityBudget::from_limits(&limits);
+
+        let decoded = JupyterExtractor::decode_base64_bounded("!!!!", &mut budget)
+            .expect("invalid base64 is skipped without failing extraction");
+
+        assert!(decoded.is_none());
+        budget.account_text(3).expect("invalid base64 must not consume budget");
+    }
+
+    #[tokio::test]
+    async fn source_rendering_should_skip_output_image_payloads() {
+        let image = base64::engine::general_purpose::STANDARD.encode([0_u8; 128]);
+        let notebook = json!({
+            "cells": [{
+                "cell_type": "code",
+                "source": "x = 1",
+                "metadata": {},
+                "outputs": [{"output_type": "display_data", "data": {"image/png": image}}]
+            }],
+            "metadata": {},
+            "nbformat": 4,
+            "nbformat_minor": 5
+        });
+        let content = serde_json::to_vec(&notebook).expect("notebook serializes");
+        let mut config = ExtractionConfig {
+            jupyter_cell_rendering: JupyterCellRendering::Source,
+            ..ExtractionConfig::default()
+        };
+        config.security_limits = Some(SecurityLimits {
+            max_content_size: content.len() + 16,
+            ..SecurityLimits::default()
+        });
+
+        let document = JupyterExtractor::new()
+            .extract_content(&content, "application/x-ipynb+json", &config)
+            .await
+            .expect("omitted output payload must not consume source-only budget");
+
+        assert!(document.images.is_empty());
+    }
+
+    #[test]
+    fn plain_output_should_use_plain_representation_from_mixed_bundle() {
+        let data = json!({
+            "text/html": "<strong>rich</strong>",
+            "text/markdown": "**rich**",
+            "text/latex": "$rich$",
+            "text/plain": "plain"
+        });
+
+        let representation =
+            JupyterExtractor::richest_output_representation(data.as_object().expect("data is an object"), true);
+
+        assert!(matches!(representation, Some(OutputRepresentation::Text(text)) if text == "plain"));
     }
 }

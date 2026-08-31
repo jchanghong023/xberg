@@ -101,6 +101,27 @@ impl PostProcessorRegistry {
         Ok(())
     }
 
+    #[cfg(any(
+        test,
+        feature = "quality",
+        feature = "classification",
+        feature = "summarization",
+        feature = "translation",
+        feature = "captioning",
+        feature = "qr-codes",
+        feature = "ner",
+        feature = "redaction",
+        feature = "keywords-yake",
+        feature = "keywords-rake"
+    ))]
+    pub(crate) fn register_if_absent(&mut self, processor: Arc<dyn PostProcessor>) -> Result<bool> {
+        if self.name_index.contains_key(processor.name()) {
+            return Ok(false);
+        }
+        self.register(processor)?;
+        Ok(true)
+    }
+
     /// Get all processors for a specific stage, in priority order.
     ///
     /// # Arguments
@@ -185,19 +206,38 @@ impl PostProcessorRegistry {
     pub fn shutdown_all(&mut self) -> Result<()> {
         let names = self.list();
         let count = names.len();
+        let mut first_error = None;
 
         if count > 0 {
             tracing::debug!("Shutting down {} post-processors", count);
         }
 
         for name in names {
-            self.remove(&name)?;
+            if let Err(error) = self.remove(&name) {
+                if first_error.is_none() {
+                    first_error = Some(crate::XbergError::Plugin {
+                        plugin_name: name.clone(),
+                        message: format!("shutdown failed: {error}"),
+                    });
+                } else {
+                    tracing::warn!(
+                        processor = %name,
+                        %error,
+                        "Additional post-processor shutdown failure"
+                    );
+                }
+            }
         }
 
-        if count > 0 {
-            tracing::debug!("Successfully shut down all {} post-processors", count);
+        match first_error {
+            Some(error) => Err(error),
+            None => {
+                if count > 0 {
+                    tracing::debug!("Successfully shut down all {} post-processors", count);
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     /// Drain the registry. Alias for `shutdown_all` used by alef trait-bridge codegen.
@@ -299,6 +339,31 @@ mod tests {
     }
 
     #[test]
+    fn register_if_absent_preserves_same_name_processor() {
+        let mut registry = PostProcessorRegistry::new();
+        registry
+            .register(Arc::new(MockPostProcessor::new(
+                "protected-default",
+                ProcessingStage::Middle,
+                70,
+            )))
+            .unwrap();
+
+        let inserted = registry
+            .register_if_absent(Arc::new(MockPostProcessor::new(
+                "protected-default",
+                ProcessingStage::Middle,
+                10,
+            )))
+            .unwrap();
+        let processors = registry.get_for_stage(ProcessingStage::Middle);
+
+        assert!(!inserted);
+        assert_eq!(processors.len(), 1);
+        assert_eq!(processors[0].priority(), 70);
+    }
+
+    #[test]
     fn test_post_processor_registry_remove() {
         let mut registry = PostProcessorRegistry::new();
 
@@ -372,6 +437,54 @@ mod tests {
 
         registry.shutdown_all().unwrap();
         assert_eq!(registry.list().len(), 0);
+    }
+
+    #[test]
+    fn shutdown_all_drains_every_processor_after_failures() {
+        struct FailingShutdown {
+            name: &'static str,
+            attempts: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        impl Plugin for FailingShutdown {
+            fn name(&self) -> &str {
+                self.name
+            }
+            fn version(&self) -> String {
+                "1.0.0".to_string()
+            }
+            fn shutdown(&self) -> Result<()> {
+                self.attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(XbergError::Other(format!("{} failed", self.name)))
+            }
+        }
+
+        #[async_trait]
+        impl PostProcessor for FailingShutdown {
+            async fn process(&self, _result: &mut ExtractedDocument, _: &ExtractionConfig) -> Result<()> {
+                Ok(())
+            }
+            fn processing_stage(&self) -> ProcessingStage {
+                ProcessingStage::Middle
+            }
+        }
+
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut registry = PostProcessorRegistry::new();
+        for name in ["failing-a", "failing-b"] {
+            registry
+                .register(Arc::new(FailingShutdown {
+                    name,
+                    attempts: Arc::clone(&attempts),
+                }))
+                .unwrap();
+        }
+
+        let error = registry.shutdown_all().expect_err("shutdown failures must be returned");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 2);
+        assert!(registry.list().is_empty());
+        assert!(error.to_string().starts_with("Plugin error in 'failing-"));
+        assert!(error.to_string().contains("shutdown failed:"));
     }
 
     #[test]

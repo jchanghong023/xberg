@@ -1222,7 +1222,7 @@ async fn resolve_owned_bytes_mime(
     crate::core::mime::resolve_owned_bytes_mime(bytes, filename, mime_type, config.mime_detection_policy).await
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tokio-runtime"))]
 fn resolve_bytes_mime_type(
     mime_type: Option<&str>,
     filename: Option<&str>,
@@ -1562,12 +1562,14 @@ async fn run_url_page_pipeline(
     uris: Vec<ExtractedUri>,
     config: &ExtractionConfig,
 ) -> Result<ExtractedDocument> {
-    let mime_type = if is_markdown {
+    let source_mime_type = normalized_content_type(content_type);
+    let extraction_mime_type = if is_markdown {
         "text/markdown".to_string()
     } else {
-        normalized_content_type(content_type)
+        source_mime_type.clone()
     };
-    let mut result = extract_bytes(content.as_bytes(), &mime_type, config).await?;
+    let mut result = extract_bytes(content.as_bytes(), &extraction_mime_type, config).await?;
+    result.mime_type = source_mime_type.into();
     match result.uris.as_mut() {
         Some(existing) => existing.extend(uris),
         None if !uris.is_empty() => result.uris = Some(uris),
@@ -1578,12 +1580,7 @@ async fn run_url_page_pipeline(
 
 #[cfg(feature = "url-ingestion")]
 fn normalized_content_type(content_type: &str) -> String {
-    let mime = content_type.split(';').next().unwrap_or(content_type).trim();
-    if mime.is_empty() {
-        "text/html".to_string()
-    } else {
-        mime.to_string()
-    }
+    crate::core::mime::validate_mime_type(content_type).unwrap_or_else(|_| "text/html".to_string())
 }
 
 #[cfg(feature = "url-ingestion")]

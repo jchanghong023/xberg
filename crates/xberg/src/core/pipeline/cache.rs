@@ -11,9 +11,8 @@ use std::sync::LazyLock;
 
 /// Cached post-processors for each stage to reduce lock contention.
 ///
-/// This cache is populated once during the first pipeline run and reused
-/// for all subsequent extractions, eliminating 3 of 4 registry lock acquisitions
-/// per extraction.
+/// This cache is populated on first use and rebuilt whenever the registry generation changes,
+/// eliminating repeated registry lock acquisitions while preserving plugin lifecycle updates.
 pub(super) struct ProcessorCache {
     pub(super) early: Arc<Vec<Arc<dyn PostProcessor>>>,
     pub(super) middle: Arc<Vec<Arc<dyn PostProcessor>>>,
@@ -24,11 +23,12 @@ pub(super) struct ProcessorCache {
     /// rebuilds the snapshot when they diverge, instead of trusting a cache
     /// populated once on the very first extraction forever.
     pub(super) generation: u64,
+    pub(super) registration_epoch: u64,
 }
 
 impl ProcessorCache {
     /// Create a new processor cache by fetching from the registry.
-    pub(super) fn new() -> Result<Self> {
+    pub(super) fn new(registration_epoch: u64) -> Result<Self> {
         let processor_registry = crate::plugins::registry::get_post_processor_registry();
         let registry = processor_registry.read();
 
@@ -37,6 +37,7 @@ impl ProcessorCache {
             middle: Arc::new(registry.get_for_stage(ProcessingStage::Middle)),
             late: Arc::new(registry.get_for_stage(ProcessingStage::Late)),
             generation: registry.generation(),
+            registration_epoch,
         })
     }
 }

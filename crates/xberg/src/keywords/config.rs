@@ -257,6 +257,7 @@ impl KeywordConfig {
     }
 
     /// Set language for stopword filtering.
+    #[cfg(all(test, feature = "keywords-rake"))]
     pub(crate) fn with_language(mut self, lang: impl Into<String>) -> Self {
         self.language = Some(lang.into());
         self

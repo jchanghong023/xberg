@@ -51,7 +51,7 @@
     {
       "type": "min_length",
       "field": "results[0].chunks[0].content",
-      "value": 20
+      "value": 9
     }
   ],
   "config": {

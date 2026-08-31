@@ -21,17 +21,17 @@
   "input": {
     "mock_responses": [
       {
-        "path": "/pdf/fake_memo.pdf",
+        "path": "/pdf/embedded_images_tables.pdf",
         "status_code": 200,
         "headers": {
           "content-type": "application/pdf"
         },
-        "body_file": "../test_documents/pdf/fake_memo.pdf"
+        "body_file": "../test_documents/pdf/embedded_images_tables.pdf"
       }
     ],
     "extract_input": {
       "kind": "uri",
-      "uri": "$mock_url/pdf/fake_memo.pdf",
+      "uri": "$mock_url/pdf/embedded_images_tables.pdf",
       "mime_type": "application/pdf"
     }
   },

@@ -634,6 +634,66 @@ pub fn derive_extraction_result(
     let pages = apply_page_content_format(raw_pages, &doc, &output_format);
     let ocr_elements = doc.prebuilt_ocr_elements.take().or_else(|| build_ocr_elements(&doc));
 
+    // ~keep: The OCR pipeline fills `doc.formulas` directly (with geometry). Markup
+    // extractors emit `ElementKind::Formula` elements instead. Append the
+    // element-derived formulas so every source reaches the public list. This must
+    // run before document-structure derivation moves formula text out of the elements.
+    //
+    // Some OCR paths represent one formula twice: the layout image path pushes
+    // a side-channel `Formula` and a matching geometry-less element for the
+    // same region. A geometry-less element whose normalized LaTeX already
+    // appears in the side channel is a second representation, not a second
+    // formula, so it is skipped. An element that carries its own page or bbox
+    // is always its own formula: a mixed native+scanned document can hold the
+    // same equation on two different pages. Duplicate formulas WITHIN the
+    // element stream are all kept. The FFI round-trip
+    // (`InternalDocument::from(ExtractedDocument)`) restores `doc.formulas`
+    // with an empty element list, so re-derivation cannot duplicate either.
+    let mut formulas = std::mem::take(&mut doc.formulas);
+    let side_channel_latex: std::collections::HashSet<String> = formulas
+        .iter()
+        .map(|f| normalized_latex(strip_math_delimiters(&f.latex)))
+        .collect();
+    let side_channel_paged: std::collections::HashSet<(String, u32)> = formulas
+        .iter()
+        .filter_map(|f| Some((normalized_latex(strip_math_delimiters(&f.latex)), f.page?)))
+        .collect();
+    formulas.extend(
+        doc.elements
+            .iter()
+            .filter(|e| matches!(e.kind, crate::types::internal::ElementKind::Formula))
+            .filter_map(|e| {
+                let latex = strip_math_delimiters(&e.text);
+                if latex.is_empty() {
+                    return None;
+                }
+                // ~keep: A geometry-less element that repeats a side-channel formula is
+                // the same formula's second representation. A paged element is
+                // one only when the side channel holds the same latex on the
+                // SAME page: the OCR pipeline emits both an element and a
+                // side-channel entry per detected region.
+                let norm = normalized_latex(latex);
+                let duplicate = match e.page {
+                    None if e.bbox.is_none() => side_channel_latex.contains(&norm),
+                    Some(page) => side_channel_paged.contains(&(norm, page)),
+                    _ => false,
+                };
+                if duplicate {
+                    return None;
+                }
+                Some(crate::types::Formula {
+                    latex: latex.to_string(),
+                    bbox: e.bbox,
+                    page: e.page,
+                })
+            }),
+    );
+
+    // ~keep: A formula that stays inside its text is its own formula, never a second
+    // representation of an element, so it joins the list without the dedup
+    // above.
+    formulas.extend(std::mem::take(&mut doc.recorded_formulas));
+
     let document = if include_document_structure {
         Some(derive_document_structure_inner(&mut doc))
     } else {
@@ -712,65 +772,6 @@ pub fn derive_extraction_result(
         .get("extraction_method")
         .and_then(serde_json::Value::as_str)
         .and_then(ExtractionMethod::from_metadata_value);
-
-    // The OCR pipeline fills `doc.formulas` directly (with geometry). Markup
-    // extractors emit `ElementKind::Formula` elements instead. Append the
-    // element-derived formulas so every source reaches the public list.
-    //
-    // Some OCR paths represent one formula twice: the layout image path pushes
-    // a side-channel `Formula` and a matching geometry-less element for the
-    // same region. A geometry-less element whose normalized LaTeX already
-    // appears in the side channel is a second representation, not a second
-    // formula, so it is skipped. An element that carries its own page or bbox
-    // is always its own formula: a mixed native+scanned document can hold the
-    // same equation on two different pages. Duplicate formulas WITHIN the
-    // element stream are all kept. The FFI round-trip
-    // (`InternalDocument::from(ExtractedDocument)`) restores `doc.formulas`
-    // with an empty element list, so re-derivation cannot duplicate either.
-    let mut formulas = std::mem::take(&mut doc.formulas);
-    let side_channel_latex: std::collections::HashSet<String> = formulas
-        .iter()
-        .map(|f| normalized_latex(strip_math_delimiters(&f.latex)))
-        .collect();
-    let side_channel_paged: std::collections::HashSet<(String, u32)> = formulas
-        .iter()
-        .filter_map(|f| Some((normalized_latex(strip_math_delimiters(&f.latex)), f.page?)))
-        .collect();
-    formulas.extend(
-        doc.elements
-            .iter()
-            .filter(|e| matches!(e.kind, crate::types::internal::ElementKind::Formula))
-            .filter_map(|e| {
-                let latex = strip_math_delimiters(&e.text);
-                if latex.is_empty() {
-                    return None;
-                }
-                // A geometry-less element that repeats a side-channel formula is
-                // the same formula's second representation. A paged element is
-                // one only when the side channel holds the same latex on the
-                // SAME page: the OCR pipeline emits both an element and a
-                // side-channel entry per detected region.
-                let norm = normalized_latex(latex);
-                let duplicate = match e.page {
-                    None if e.bbox.is_none() => side_channel_latex.contains(&norm),
-                    Some(page) => side_channel_paged.contains(&(norm, page)),
-                    _ => false,
-                };
-                if duplicate {
-                    return None;
-                }
-                Some(crate::types::Formula {
-                    latex: latex.to_string(),
-                    bbox: e.bbox,
-                    page: e.page,
-                })
-            }),
-    );
-
-    // A formula that stays inside its text is its own formula, never a second
-    // representation of an element, so it joins the list without the dedup
-    // above.
-    formulas.extend(std::mem::take(&mut doc.recorded_formulas));
 
     tracing::debug!(
         content_length = content.len(),
@@ -1127,6 +1128,24 @@ mod tests {
         assert_eq!(result.formulas[0].latex, "E = mc^2");
         assert_eq!(result.formulas[0].page, None);
         assert_eq!(result.formulas[0].bbox, None);
+    }
+
+    #[test]
+    fn should_project_formulas_when_document_structure_is_included() {
+        let mut doc = make_doc("markdown");
+        doc.push_element(InternalElement::text(ElementKind::Formula, "E = mc^2", 0));
+
+        let result = derive_extraction_result(doc, true, crate::core::config::OutputFormat::Markdown);
+
+        assert_eq!(result.formulas.len(), 1);
+        assert_eq!(result.formulas[0].latex, "E = mc^2");
+        let structure = result.document.expect("document structure requested");
+        assert!(
+            structure
+                .nodes
+                .iter()
+                .any(|node| matches!(&node.content, NodeContent::Formula { text } if text == "E = mc^2"))
+        );
     }
 
     #[test]

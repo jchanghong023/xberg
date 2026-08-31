@@ -2543,6 +2543,9 @@ vendor_mode = "registry"
 pkg_config = true
 cmake_config = true
 
+[crates.verify]
+ignore_ephemeral = ["test_apps/**", ".codex/skills/**", ".agents/skills/**", ".github/skills/**", ".claude/skills/**"]
+
 [crates.e2e]
 fixtures = "fixtures"
 output = "e2e"
@@ -2563,6 +2566,7 @@ languages = [
   "zig",
   "homebrew",
 ]
+fields_method_calls = ["results[0].metadata.format.excel", "metadata.format.excel"]
 fields_optional = [
   "results[0].metadata.format",
   "results[0].metadata.format.excel.sheet_count",
@@ -2760,6 +2764,8 @@ options_via = "from_json"
 
 [crates.e2e.calls.extract.overrides.python]
 options_type = "ExtractionConfig"
+options_via = "from_json"
+from_json_module = "xberg._xberg"
 
 [crates.e2e.calls.extract.overrides.node]
 options_type = "ExtractionConfig"
@@ -2797,6 +2803,8 @@ enum_fields = { outputFormat = "OutputFormat" }
 
 [crates.e2e.calls.extract_batch.overrides.python]
 options_type = "ExtractionConfig"
+options_via = "from_json"
+from_json_module = "xberg._xberg"
 
 [crates.e2e.calls.extract_batch.overrides.php]
 function = "extractBatch"
