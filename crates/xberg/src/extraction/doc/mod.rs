@@ -126,13 +126,22 @@ fn read_lw_field(word_doc: &[u8], rg_lw_offset: usize, index: usize) -> usize {
 /// `FibBase.lid` describes the application language rather than being an
 /// authoritative encoding declaration. It is still useful for compressed
 /// pieces: it distinguishes the common East-Asian and non-Western ANSI
-/// families from the Western default, while unknown or normalized LIDs retain
-/// the historical Windows-1252 fallback.
+/// families from the Western default. Chinese is special because its
+/// sublanguage is part of the code-page choice: Traditional Chinese uses
+/// Big5/CP950 while Simplified Chinese uses CP936. Check those full LANGIDs
+/// before reducing other languages to their primary-language IDs.
 fn doc_codepage_from_lid(lid: u16) -> u32 {
-    match lid & 0x03FF {
+    let primary = lid & 0x03FF;
+    if primary == 0x04 {
+        return match lid {
+            0x0404 | 0x0C04 | 0x1404 => 950, // Traditional Chinese: Taiwan/Hong Kong/Macao
+            _ => 936,                        // Simplified, neutral, and unknown Chinese
+        };
+    }
+
+    match primary {
         0x01 | 0x20 | 0x29 => 1256,                             // Arabic, Urdu, Persian
         0x02 | 0x19 | 0x22 | 0x28 | 0x3C..=0x41 => 1251,        // Cyrillic
-        0x04 => 936,                                            // Simplified Chinese
         0x05 | 0x0E | 0x15 | 0x18 | 0x1A | 0x1B | 0x24 => 1250, // Central European
         0x08 => 1253,                                           // Greek
         0x0D => 1255,                                           // Hebrew
@@ -668,17 +677,23 @@ fn extract_text_contiguous(word_doc: &[u8], ccp_text: usize, codepage: u32) -> R
     let ansi_len = ccp_text.min(data_len);
     let ansi_chars = decode_doc_ansi(&text_data[..ansi_len], codepage);
     let unicode_len = ccp_text.saturating_mul(2).min(data_len);
-    let unicode_chars: Vec<char> = text_data[..unicode_len]
+    let unicode_units: Vec<u16> = text_data[..unicode_len]
         .chunks_exact(2)
         .take(ccp_text)
-        .filter_map(|chunk| char::from_u32(u16::from_le_bytes([chunk[0], chunk[1]]) as u32))
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
         .collect();
+    // Decode the complete UTF-16 sequence so surrogate pairs (emoji, CJK
+    // extension characters, and historic scripts) remain a single scalar.
+    // `from_utf16_lossy` also gives malformed pairs the same replacement
+    // character behavior as the previous contiguous-text implementation.
+    let unicode_text = String::from_utf16_lossy(&unicode_units);
+    let unicode_chars: Vec<char> = unicode_text.chars().collect();
     let expected_unicode_len = ccp_text.saturating_mul(2);
     let is_unicode = unicode_len == expected_unicode_len
         && !should_recover_ansi_from_unicode(&text_data[..ansi_len], &unicode_chars, codepage);
 
     let text: String = if is_unicode {
-        unicode_chars.into_iter().collect()
+        unicode_text
     } else {
         ansi_chars.into_iter().collect()
     };

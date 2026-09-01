@@ -457,11 +457,12 @@ fn decode_visio_lzw(data: &[u8], max_size: usize) -> Result<Vec<u8>> {
                 } else {
                     first as usize + ((second as usize & 0xf0) << 4) + 18
                 };
-                let mut copied = [0u8; 18];
-                for (index, byte) in copied.iter_mut().take(length).enumerate() {
-                    *byte = dictionary[(pointer + index) & (LZW_DICTIONARY_SIZE - 1)];
-                }
-                for &byte in copied.iter().take(length) {
+                // Back-references may overlap bytes written during this same match.
+                // Read and write one byte at a time so a newly emitted byte is
+                // available to the next source position, as required by the
+                // LZW sliding-window semantics.
+                for index in 0..length {
+                    let byte = dictionary[(pointer + index) & (LZW_DICTIONARY_SIZE - 1)];
                     dictionary[output_position & (LZW_DICTIONARY_SIZE - 1)] = byte;
                     output.push(byte);
                     output_position += 1;

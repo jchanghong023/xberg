@@ -5566,14 +5566,13 @@ impl PdfDocument {
         spans
     }
     /// Return whether the trustworthy structure tree covers enough of this page's
-    /// marked-content spans to be used for reading order.
+    /// visible text to be used for reading order.
     ///
-    /// A structurally valid tree may still be incomplete: common producers tag
-    /// only a heading or a small subset of page content. Using that sparse
-    /// traversal as if it were authoritative drops the remaining content into
-    /// numeric-MCID fallback order, which is worse than the geometric order
-    /// already available for the page. Count distinct `(scope, MCID)` keys so
-    /// split glyph spans do not distort the coverage decision.
+    /// The denominator is the non-whitespace character mass of every visible span,
+    /// not only spans carrying an MCID. A tagged page may contain a valid heading
+    /// in the structure tree and an otherwise untagged body; counting only MCID
+    /// keys would falsely report 100% coverage and append that body at the end.
+    /// Require at least 80% covered text and no more than 20% unmarked text.
     fn structure_tree_covers_page(&self, page_index: usize, spans: &[TextSpan]) -> bool {
         let ordered_content = self
             .structure_content_cache
@@ -5595,24 +5594,38 @@ impl PdfDocument {
             })
             .collect();
         let page_scope = crate::structure::McidScope::Page(page_index as u32);
-        let span_keys: HashSet<McidKey> = spans
-            .iter()
-            .filter_map(|span| {
-                span.mcid
-                    .map(|mcid| (span.mcid_scope.clone().unwrap_or(page_scope.clone()), mcid))
-            })
-            .collect();
+        let mut total_chars = 0usize;
+        let mut covered_chars = 0usize;
+        let mut unmarked_chars = 0usize;
 
-        if span_keys.is_empty() {
+        for span in spans {
+            let visible_chars = span.text.chars().filter(|character| !character.is_whitespace()).count();
+            if visible_chars == 0 {
+                continue;
+            }
+            total_chars = total_chars.saturating_add(visible_chars);
+
+            let Some(mcid) = span.mcid else {
+                unmarked_chars = unmarked_chars.saturating_add(visible_chars);
+                continue;
+            };
+            let scope = span.mcid_scope.clone().unwrap_or(page_scope.clone());
+            if ordered_keys.contains(&(scope, mcid)) {
+                covered_chars = covered_chars.saturating_add(visible_chars);
+            }
+        }
+
+        if total_chars == 0 {
             return true;
         }
-        let covered = span_keys.intersection(&ordered_keys).count();
-        let sufficient = (covered as u128) * 100 >= (span_keys.len() as u128) * 80;
+        let sufficient = (covered_chars as u128) * 100 >= (total_chars as u128) * 80
+            && (unmarked_chars as u128) * 100 <= (total_chars as u128) * 20;
         if !sufficient {
             tracing::debug!(
                 page = page_index,
-                covered,
-                total = span_keys.len(),
+                covered_chars,
+                total_chars,
+                unmarked_chars,
                 "structure tree coverage is insufficient; using geometric reading order"
             );
         }
