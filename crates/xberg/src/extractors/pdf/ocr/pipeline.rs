@@ -1115,10 +1115,16 @@ pub(super) async fn extract_with_ocr_for_page(
     let base_ocr_config = config.ocr.as_ref().unwrap_or(&default_ocr_config);
 
     let accel_ocr_config;
-    let base_ocr_config = if base_ocr_config.acceleration.is_none() && config.acceleration.is_some() {
+    let base_ocr_config = if (base_ocr_config.acceleration.is_none() && config.acceleration.is_some())
+        || base_ocr_config.security_limits.is_some()
+        || config.security_limits.is_some()
+    {
         accel_ocr_config = {
             let mut c = base_ocr_config.clone();
-            c.acceleration = config.acceleration.clone();
+            if c.acceleration.is_none() {
+                c.acceleration = config.acceleration.clone();
+            }
+            c.security_limits = config.security_limits.clone();
             c
         };
         &accel_ocr_config
