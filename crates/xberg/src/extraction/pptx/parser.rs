@@ -38,14 +38,18 @@ const CHART_NAMESPACE: &str = "http://schemas.openxmlformats.org/drawingml/2006/
 /// DrawingML diagram (SmartArt) namespace for `p:graphicFrame` diagram payloads.
 const DIAGRAM_NAMESPACE: &str = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
 
-/// A `p:graphicFrame`'s parsed payload: a table, a chart reference, or a
-/// SmartArt/diagram reference. Chart and diagram text lives in a separate ZIP
-/// part resolved later against the slide's relationships (see
-/// `container::resolve_graphic_frame_text`).
+/// DrawingML OLE namespace used by embedded Visio and other OLE objects.
+const OLE_NAMESPACE: &str = "http://schemas.openxmlformats.org/drawingml/2006/ole";
+
+/// A `p:graphicFrame`'s parsed payload: a table, a chart reference, a
+/// SmartArt/diagram reference, or an image fallback from an OLE object.
+/// Chart and diagram text lives in a separate ZIP part resolved later against
+/// the slide's relationships (see `container::resolve_graphic_frame_text`).
 enum GraphicFrameContent {
     Table(TableElement),
     Chart(ChartReference),
     SmartArt(DiagramReference),
+    Image(ImageReference),
 }
 
 pub(super) fn parse_slide_xml(xml_data: &[u8]) -> Result<Vec<SlideElement>> {
@@ -114,6 +118,7 @@ fn parse_group(node: &Node, xml_str: &str) -> Result<Vec<SlideElement>> {
                     GraphicFrameContent::Table(table) => elements.push(SlideElement::Table(table, position)),
                     GraphicFrameContent::Chart(chart) => elements.push(SlideElement::Chart(chart, position)),
                     GraphicFrameContent::SmartArt(diagram) => elements.push(SlideElement::SmartArt(diagram, position)),
+                    GraphicFrameContent::Image(image) => elements.push(SlideElement::Image(image, position)),
                 }
             }
         }
@@ -294,6 +299,40 @@ fn parse_graphic_frame(node: &Node) -> Result<Option<GraphicFrameContent>> {
                 resolved_text: None,
             })
         }));
+    }
+
+    if uri == OLE_NAMESPACE {
+        let Some(alternate_content) = graphic_data.descendants().find(|n| {
+            n.is_element()
+                && n.tag_name().namespace() == Some(MARKUP_COMPATIBILITY_NAMESPACE)
+                && n.tag_name().name() == "AlternateContent"
+        }) else {
+            return Ok(None);
+        };
+
+        let Some(fallback_node) = alternate_content.children().find(|n| {
+            n.is_element()
+                && n.tag_name().namespace() == Some(MARKUP_COMPATIBILITY_NAMESPACE)
+                && n.tag_name().name() == "Fallback"
+        }) else {
+            return Ok(None);
+        };
+
+        let Some(pic_node) = fallback_node.descendants().find(|n| {
+            n.is_element()
+                && n.tag_name().namespace() == Some(PRESENTATIONML_NAMESPACE)
+                && n.tag_name().name() == "pic"
+        }) else {
+            return Ok(None);
+        };
+
+        return match parse_pic(&pic_node) {
+            Ok(image) => Ok(Some(GraphicFrameContent::Image(image))),
+            Err(e) => {
+                tracing::warn!("Skipping broken OLE fallback image in slide: {}", e);
+                Ok(None)
+            }
+        };
     }
 
     Ok(None)
