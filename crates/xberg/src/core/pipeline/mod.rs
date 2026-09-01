@@ -953,119 +953,229 @@ fn apply_element_transform(result: &mut ExtractedDocument, config: &ExtractionCo
     }
 }
 
-/// Replace inline markdown image references with OCR text for formats (e.g. PPTX)
-/// that bake placeholders into paragraph text rather than using `ElementKind::Image`.
-fn replace_embedded_image_markdown_with_ocr(doc: &mut InternalDocument) {
-    if !doc.ocr_text_only || doc.images.is_empty() {
+/// Parse a complete, standalone markdown image reference and return its target.
+///
+/// Inline image syntax embedded in ordinary text is deliberately ignored.
+fn markdown_image_target(text: &str) -> Option<&str> {
+    let text = text.trim();
+    if !text.starts_with("![") || !text.ends_with(')') || text.contains('\n') {
+        return None;
+    }
+    let separator = text.find("](")?;
+    (separator >= 2).then_some(&text[separator + 2..text.len() - 1])
+}
+
+fn take_image_placement(
+    images: &[crate::types::ExtractedImage],
+    used: &mut [bool],
+    page_number: Option<u32>,
+    target: &str,
+    allow_legacy_fallback: bool,
+) -> Option<usize> {
+    if !target.is_empty() {
+        let exact = images.iter().enumerate().position(|(index, image)| {
+            !used[index] && image.page_number == page_number && image.source_path.as_deref() == Some(target)
+        });
+        if exact.is_some() || !allow_legacy_fallback {
+            return exact;
+        }
+    } else if !allow_legacy_fallback {
+        return None;
+    }
+
+    images
+        .iter()
+        .enumerate()
+        .position(|(index, image)| !used[index] && image.page_number == page_number)
+}
+
+fn image_ocr_content(image: &crate::types::ExtractedImage) -> Option<&str> {
+    image
+        .ocr_result
+        .as_ref()
+        .map(|result| result.content.as_str())
+        .filter(|content| !content.trim().is_empty())
+}
+
+fn mark_as_image_ocr_code(element: &mut crate::types::internal::InternalElement, content: &str) {
+    element.kind = crate::types::internal::ElementKind::Code;
+    element.text.clear();
+    element.text.push_str(content);
+    element.annotations.clear();
+    let attributes = element.attributes.get_or_insert_with(ahash::AHashMap::new);
+    attributes.insert("language".to_string(), "text".to_string());
+}
+
+fn rewrite_page_image_placeholders(
+    pages: &mut Option<Vec<crate::types::PageContent>>,
+    images: &[crate::types::ExtractedImage],
+    append: bool,
+    allow_legacy_fallback: bool,
+) {
+    let Some(pages) = pages else {
         return;
-    }
-
-    let mut image_idx = 0usize;
-
-    for elem in &mut doc.elements {
-        if !matches!(elem.kind, crate::types::internal::ElementKind::Paragraph) {
-            continue;
-        }
-        if !is_markdown_image_reference(&elem.text) {
-            continue;
-        }
-        if let Some(img) = doc.images.get(image_idx)
-            && let Some(ocr) = &img.ocr_result
-            && !ocr.content.is_empty()
-        {
-            elem.text = ocr.content.clone();
-            image_idx += 1;
-            continue;
-        }
-        image_idx += 1;
-    }
-
-    for table in &mut doc.tables {
-        for row in &mut table.cells {
-            for cell in row {
-                if !is_markdown_image_reference(cell) {
-                    continue;
+    };
+    let mut used = vec![false; images.len()];
+    for page in pages {
+        let mut output = String::with_capacity(page.content.len());
+        for segment in page.content.split_inclusive('\n') {
+            let line = segment.strip_suffix('\n').unwrap_or(segment);
+            let Some(target) = markdown_image_target(line) else {
+                output.push_str(segment);
+                continue;
+            };
+            let placement =
+                take_image_placement(images, &mut used, Some(page.page_number), target, allow_legacy_fallback);
+            if let Some(index) = placement {
+                used[index] = true;
+                if append {
+                    output.push_str(line);
+                    output.push('\n');
                 }
-                if let Some(img) = doc.images.get(image_idx)
-                    && let Some(ocr) = &img.ocr_result
-                    && !ocr.content.is_empty()
-                {
-                    *cell = ocr.content.clone();
-                    image_idx += 1;
-                    continue;
+                if let Some(content) = image_ocr_content(&images[index]) {
+                    output.push_str(&crate::rendering::literal_fenced_block(content, "text"));
+                    output.push('\n');
                 }
-                image_idx += 1;
+            } else if append {
+                output.push_str(segment);
             }
         }
+        page.content = output;
     }
 }
 
-/// Append OCR text after inline markdown image references for formats (e.g. PPTX)
-/// that bake placeholders into paragraph text. Only runs when `append_ocr_text` is
-/// `true` and `ocr_text_only` is `false`.
+/// Replace standalone image placeholders with inert OCR text blocks. Missing,
+/// failed, empty, and unassociated placements are removed independently.
+fn replace_embedded_image_markdown_with_ocr(doc: &mut InternalDocument) {
+    if !doc.ocr_text_only {
+        return;
+    }
+
+    let allow_legacy_fallback = doc.source_format != "pptx";
+    let mut used = vec![false; doc.images.len()];
+    for element in &mut doc.elements {
+        if !matches!(element.kind, crate::types::internal::ElementKind::Paragraph) {
+            continue;
+        }
+        let Some(target) = markdown_image_target(&element.text) else {
+            continue;
+        };
+        let placement = take_image_placement(&doc.images, &mut used, element.page, target, allow_legacy_fallback);
+        if let Some(index) = placement {
+            used[index] = true;
+            if let Some(content) = image_ocr_content(&doc.images[index]) {
+                mark_as_image_ocr_code(element, content);
+            } else {
+                element.text.clear();
+            }
+        } else {
+            element.text.clear();
+            doc.processing_warnings.push(crate::types::ProcessingWarning {
+                source: std::borrow::Cow::Borrowed("image_ocr"),
+                message: std::borrow::Cow::Owned(format!(
+                    "image_index=unmatched page={} format=unknown stage=placement_association reason=no unused placement matched placeholder",
+                    element.page.map_or_else(|| "unknown".to_string(), |page| page.to_string())
+                )),
+            });
+        }
+    }
+
+    let mut unmatched_table_pages = Vec::new();
+    for table in &mut doc.tables {
+        let page_number = table.page_number;
+        for row in &mut table.cells {
+            for cell in row {
+                let Some(target) = markdown_image_target(cell) else {
+                    continue;
+                };
+                if let Some(index) =
+                    take_image_placement(&doc.images, &mut used, Some(page_number), target, allow_legacy_fallback)
+                {
+                    used[index] = true;
+                    *cell = image_ocr_content(&doc.images[index])
+                        .map(str::to_string)
+                        .unwrap_or_default();
+                } else {
+                    cell.clear();
+                    unmatched_table_pages.push(page_number);
+                }
+            }
+        }
+    }
+    for page_number in unmatched_table_pages {
+        doc.processing_warnings.push(crate::types::ProcessingWarning {
+            source: std::borrow::Cow::Borrowed("image_ocr"),
+            message: std::borrow::Cow::Owned(format!(
+                "image_index=unmatched page={page_number} format=unknown stage=placement_association reason=no unused placement matched table placeholder"
+            )),
+        });
+    }
+
+    rewrite_page_image_placeholders(&mut doc.prebuilt_pages, &doc.images, false, allow_legacy_fallback);
+}
+
+/// Append OCR text as literal text blocks after standalone image placeholders.
 fn append_embedded_image_ocr_text(doc: &mut InternalDocument) {
     if doc.ocr_text_only || !doc.append_ocr_text || doc.images.is_empty() {
         return;
     }
 
-    let mut image_idx = 0usize;
-    let mut new_elements = Vec::with_capacity(doc.elements.len() * 2);
-
-    for elem in &doc.elements {
-        new_elements.push(elem.clone());
-
-        if matches!(elem.kind, crate::types::internal::ElementKind::Paragraph)
-            && is_markdown_image_reference(&elem.text)
-        {
-            if let Some(img) = doc.images.get(image_idx)
-                && let Some(ocr) = &img.ocr_result
-                && !ocr.content.is_empty()
-            {
-                let ocr_elem = crate::types::internal::InternalElement::text(
-                    crate::types::internal::ElementKind::Paragraph,
-                    ocr.content.clone(),
-                    0,
-                );
-                new_elements.push(ocr_elem);
-            }
-            image_idx += 1;
+    let allow_legacy_fallback = doc.source_format != "pptx";
+    let mut used = vec![false; doc.images.len()];
+    let mut new_elements = Vec::with_capacity(doc.elements.len().saturating_mul(2));
+    for element in &doc.elements {
+        new_elements.push(element.clone());
+        let Some(target) = (matches!(element.kind, crate::types::internal::ElementKind::Paragraph))
+            .then(|| markdown_image_target(&element.text))
+            .flatten()
+        else {
+            continue;
+        };
+        let Some(index) = take_image_placement(&doc.images, &mut used, element.page, target, allow_legacy_fallback)
+        else {
+            continue;
+        };
+        used[index] = true;
+        if let Some(content) = image_ocr_content(&doc.images[index]) {
+            let mut ocr_element = crate::types::internal::InternalElement::text(
+                crate::types::internal::ElementKind::Code,
+                content,
+                element.depth,
+            );
+            ocr_element.page = element.page;
+            let mut attributes = ahash::AHashMap::new();
+            attributes.insert("language".to_string(), "text".to_string());
+            ocr_element.attributes = Some(attributes);
+            new_elements.push(ocr_element);
         }
     }
-
     doc.elements = new_elements;
 
     for table in &mut doc.tables {
+        let page_number = table.page_number;
         for row in &mut table.cells {
             for cell in row {
-                if !is_markdown_image_reference(cell) {
+                let Some(target) = markdown_image_target(cell) else {
                     continue;
+                };
+                let Some(index) =
+                    take_image_placement(&doc.images, &mut used, Some(page_number), target, allow_legacy_fallback)
+                else {
+                    continue;
+                };
+                used[index] = true;
+                if let Some(content) = image_ocr_content(&doc.images[index]) {
+                    *cell = format!(
+                        "{}\n\n{}",
+                        cell.trim(),
+                        crate::rendering::literal_fenced_block(content, "text")
+                    );
                 }
-                if let Some(img) = doc.images.get(image_idx)
-                    && let Some(ocr) = &img.ocr_result
-                    && !ocr.content.is_empty()
-                {
-                    *cell = format!("{}\n\n{}", cell.trim(), ocr.content);
-                }
-                image_idx += 1;
             }
         }
     }
-}
 
-/// Returns `true` if `text` is exactly a markdown image reference (`![alt](url)`).
-fn is_markdown_image_reference(text: &str) -> bool {
-    let t = text.trim();
-    if !t.starts_with("![") {
-        return false;
-    }
-    let Some(bracket_end) = t.find("](") else {
-        return false;
-    };
-    if bracket_end < 2 {
-        return false;
-    }
-    let after = &t[bracket_end + 2..];
-    after.ends_with(')')
+    rewrite_page_image_placeholders(&mut doc.prebuilt_pages, &doc.images, true, allow_legacy_fallback);
 }
 
 /// Apply NFC unicode normalization to all text content.

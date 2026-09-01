@@ -804,6 +804,7 @@ impl PaddleOcrBackend {
         effective_config: Arc<PaddleOcrConfig>,
         accel: Option<&crate::core::config::acceleration::AccelerationConfig>,
         page_rotation_degrees: u32,
+        security_limits: crate::extractors::security::SecurityLimits,
     ) -> Result<PaddlePageOcr> {
         let family = language_to_script_family(language);
         let engine = self
@@ -815,7 +816,7 @@ impl PaddleOcrBackend {
 
         let (mut text_blocks, processed_width, processed_height) = tokio::task::spawn_blocking(move || {
             catch_unwind(std::panic::AssertUnwindSafe(|| {
-                Self::perform_ocr(&image_bytes_owned, &engine, &config)
+                Self::perform_ocr(&image_bytes_owned, &engine, &config, &security_limits)
             }))
             .map_err(|_| crate::XbergError::Plugin {
                 message: "PaddleOCR inference panicked (ONNX Runtime error)".to_string(),
@@ -1075,13 +1076,13 @@ impl PaddleOcrBackend {
     /// (`crates/xberg-paddle-ocr/src/inference/ort_backend.rs`) because `ort::Session::run`
     /// requires `&mut self`. Concurrent calls into this function serialize on that mutex —
     /// see `paddle_inference_thread_count` above for why that is handled by widening the
-    /// session's own intra-op thread budget instead.
     fn perform_ocr(
         image_bytes: &[u8],
         ocr_engine: &Arc<PaddleOcrEngine>,
         config: &PaddleOcrConfig,
+        security_limits: &crate::extractors::security::SecurityLimits,
     ) -> Result<(Vec<xberg_paddle_ocr::DetailedTextBlock>, u32, u32)> {
-        let img = crate::extraction::image::load_image_for_ocr(image_bytes)
+        let img = crate::extraction::image::load_image_for_ocr_with_security_limits(image_bytes, security_limits)
             .map_err(|e| crate::XbergError::Ocr {
                 message: e.to_string(),
                 source: None,
@@ -1320,18 +1321,20 @@ impl OcrBackend for PaddleOcrBackend {
         } else {
             Arc::clone(&self.config)
         };
+        let security_limits = config.security_limits.clone().unwrap_or_default();
 
         let languages = config.effective_languages();
         let (paddle_lang, language_warnings) = super::select_paddle_language(&languages);
 
         let mut rotation_outcome = None;
         let ocr_image_bytes: Cow<'_, [u8]> = if config.auto_rotate {
-            let decoded_image = crate::extraction::image::load_image_for_ocr(image_bytes)
-                .map_err(|error| crate::XbergError::Ocr {
-                    message: format!("Failed to decode PaddleOCR image for orientation detection: {error}"),
-                    source: None,
-                })?
-                .to_rgb8();
+            let decoded_image =
+                crate::extraction::image::load_image_for_ocr_with_security_limits(image_bytes, &security_limits)
+                    .map_err(|error| crate::XbergError::Ocr {
+                        message: format!("Failed to decode PaddleOCR image for orientation detection: {error}"),
+                        source: None,
+                    })?
+                    .to_rgb8();
             match self.detect_and_rotate(&decoded_image) {
                 Ok(outcome) => {
                     rotation_outcome = Some(outcome);
@@ -1381,6 +1384,7 @@ impl OcrBackend for PaddleOcrBackend {
                 Arc::clone(&effective_config),
                 effective_accel.as_ref(),
                 residual_page_rotation_degrees,
+                security_limits,
             )
             .await?;
         let rotation_outcome =

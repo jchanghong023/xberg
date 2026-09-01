@@ -2171,7 +2171,7 @@ pub struct TextExtractor<'doc> {
     /// `/ActualText` must NOT override an MCID whose in-stream
     /// /ActualText has already been applied at extraction time
     /// (ISO 32000-1:2008 §14.6, §14.9.4).
-    mc_actualtext_mcids: HashSet<u32>,
+    mc_actualtext_mcids: HashSet<(crate::structure::McidScope, u32)>,
     /// Stack of marked content contexts (per PDF Spec Section 14.6)
     ///
     /// Tracks nested marked content tags to enable artifact filtering.
@@ -2477,7 +2477,7 @@ impl<'doc> TextExtractor<'doc> {
     /// The set is observed by the BDC handler; this method drains it
     /// out so the document layer can stash it on a per-page side
     /// channel for the struct-tree-scope ActualText applier.
-    pub fn take_mc_actualtext_mcids(&mut self) -> HashSet<u32> {
+    pub fn take_mc_actualtext_mcids(&mut self) -> HashSet<(crate::structure::McidScope, u32)> {
         std::mem::take(&mut self.mc_actualtext_mcids)
     }
 
@@ -5802,7 +5802,8 @@ impl<'doc> TextExtractor<'doc> {
                         // ancestor's struct-tree-scope
                         // /ActualText). ~keep
                         if let Some(mcid) = self.current_mcid {
-                            self.mc_actualtext_mcids.insert(mcid);
+                            let scope = self.current_mcid_scope();
+                            self.mc_actualtext_mcids.insert((scope, mcid));
                         }
                     }
 

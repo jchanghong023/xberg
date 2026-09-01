@@ -19,6 +19,7 @@ mod json;
 mod markdown;
 mod plain;
 
+pub(crate) use comrak_bridge::literal_fenced_block;
 pub(crate) use djot::render_djot;
 pub(crate) use doctags::render_doctags;
 pub(crate) use dot::render_dot;

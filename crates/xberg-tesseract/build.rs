@@ -1082,10 +1082,6 @@ mod build_tesseract {
     }
 
     /// Render a path for a CMake `-D<variable>=<value>` argument.
-    ///
-    /// On Windows the build root is canonicalized, which yields an extended-length `\\?\` path.
-    /// CMake cannot consume that form, so the verbatim prefix is stripped before the separators
-    /// are converted. See `source_cache::windows_cmake_argument_path`.
     #[cfg(windows)]
     fn normalize_cmake_path(path: &Path) -> String {
         crate::source_cache::windows_cmake_argument_path(&path.to_string_lossy())

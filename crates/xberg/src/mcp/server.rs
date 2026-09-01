@@ -152,6 +152,8 @@ impl XbergMcp {
     ///
     /// * `config` - Default extraction configuration for all tool calls
     pub(crate) fn with_config(config: ExtractionConfig) -> Self {
+        let thread_budget = crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref());
+        crate::core::config::concurrency::init_thread_pools(thread_budget);
         let extraction_service_builder = ExtractionServiceBuilder::new().with_tracing();
         #[cfg(feature = "otel")]
         let extraction_service_builder = extraction_service_builder.with_metrics();
@@ -1249,6 +1251,9 @@ pub async fn start_mcp_server_http_with_config(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use axum::Router;
     use std::net::SocketAddr;
+
+    let thread_budget = crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref());
+    crate::core::config::concurrency::init_thread_pools(thread_budget);
 
     let http_service = StreamableHttpService::new(
         move || Ok(XbergMcp::with_config(config.clone())),

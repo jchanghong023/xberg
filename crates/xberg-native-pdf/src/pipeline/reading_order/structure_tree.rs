@@ -140,7 +140,7 @@ impl ReadingOrderStrategy for StructureTreeStrategy {
         // authoring tool assigned MCIDs in content-stream order without
         // respecting column visual order). Fall back to geometric. ~keep
         if mcid_order_zigzags_columns(&spans, mcid_order) {
-            tracing::warn!("MCID order zigzags across columns, falling back to geometric ordering");
+            tracing::debug!("MCID order zigzags across columns, using geometric ordering");
             return self.fallback_order(spans, context);
         }
 

@@ -873,6 +873,13 @@ pub struct OcrConfig {
     /// `ExtractionConfig::acceleration` before each `process_image` call.
     #[serde(skip)]
     pub acceleration: Option<super::acceleration::AccelerationConfig>,
+    /// Security limits inherited from the surrounding extraction request.
+    ///
+    /// This is injected at runtime and skipped by serde. Backends that decode
+    /// image bytes internally, such as PaddleOCR, use it to apply the same
+    /// `ExtractionConfig::security_limits` as the outer extraction pipeline.
+    #[serde(skip)]
+    pub security_limits: Option<crate::extractors::security::SecurityLimits>,
 
     /// Caller-supplied Tesseract `traineddata` bytes per language code.
     ///
@@ -915,6 +922,7 @@ impl Default for OcrConfig {
             vlm_config: None,
             vlm_prompt: None,
             acceleration: None,
+            security_limits: None,
             tessdata_bytes: None,
             tessdata_path: None,
         }

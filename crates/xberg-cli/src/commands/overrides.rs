@@ -825,6 +825,7 @@ impl ExtractionOverrides {
                 vlm_fallback: Default::default(),
                 vlm_prompt: None,
                 acceleration: None,
+                security_limits: None,
                 tessdata_bytes: None,
                 tessdata_path: None,
                 backend_options,

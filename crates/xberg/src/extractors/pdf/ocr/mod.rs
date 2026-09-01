@@ -37,7 +37,7 @@ pub(crate) use rendering::render_selected_pages_for_ocr;
 
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 pub(crate) use document::{
-    boundaries_after_replacements, merge_ocr_pages_into_internal_document,
+    boundaries_after_replacements, destructive_ocr_information_loss, merge_ocr_pages_into_internal_document,
     merge_structured_ocr_pages_into_internal_document,
 };
 

@@ -1541,6 +1541,7 @@ xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.1.0", optional =
 # PaddleOCR via ONNX Runtime or tract (vendored from paddle-ocr-rs). The backend is selected
 # by the enabling feature (`paddle-ocr-ort` / `paddle-ocr-tract`), never by a default.
 xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.1.0", optional = true, default-features = false }
+xberg-windows-metafile = { path = "../xberg-windows-metafile", version = "1.1.0" }
 
 # tokio OS features (every native target, including Android and Windows): `process`, `fs`, and
 # `rt-multi-thread` all fail to compile on wasm32 — tokio's own wasm32 gate only allows

@@ -440,8 +440,16 @@ fn decode_jbig2_to_gray_with_security_limits(bytes: &[u8], limits: &SecurityLimi
 /// for all other formats.
 #[cfg(feature = "ocr")]
 pub(crate) fn load_image_for_ocr(image_bytes: &[u8]) -> Result<image::DynamicImage> {
-    let limits = SecurityLimits::default();
-    decode_image_to_rgb8_with_security_limits(image_bytes, &limits).map(image::DynamicImage::ImageRgb8)
+    load_image_for_ocr_with_security_limits(image_bytes, &SecurityLimits::default())
+}
+
+/// Load image bytes for OCR using caller-provided security limits.
+#[cfg(feature = "ocr")]
+pub(crate) fn load_image_for_ocr_with_security_limits(
+    image_bytes: &[u8],
+    limits: &SecurityLimits,
+) -> Result<image::DynamicImage> {
+    decode_image_to_rgb8_with_security_limits(image_bytes, limits).map(image::DynamicImage::ImageRgb8)
 }
 
 pub(crate) fn decode_image_to_rgb8_with_security_limits(

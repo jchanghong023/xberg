@@ -1,0 +1,144 @@
+name: Build Windows CLI
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-windows-cli-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows-cli:
+    name: Build CLI binary (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Setup Rust
+        uses: xberg-io/actions/setup-rust@v1
+        with:
+          target: x86_64-pc-windows-msvc
+          cache-key-prefix: cli-native-v1
+
+      - name: Install system dependencies
+        uses: ./.github/actions/install-system-deps
+
+      - name: Setup ONNX Runtime
+        uses: ./.github/actions/setup-onnx-runtime
+        with:
+          ort-version: "1.24.2"
+
+      - name: Build release CLI
+        id: build
+        uses: xberg-io/actions/build-rust-cli@v1
+        with:
+          package-name: xberg-cli
+          binary-name: xberg
+          target: x86_64-pc-windows-msvc
+          extra-cargo-args: --features mcp,mcp-http,api,heic
+
+      - name: Package release-compatible Windows CLI
+        shell: bash
+        env:
+          BINARY_PATH: ${{ steps.build.outputs.binary-path }}
+        run: |
+          set -euo pipefail
+          STAGE="xberg-cli-${TARGET}"
+          mkdir -p "$STAGE"
+          cp LICENSE THIRD_PARTY_LICENSES.md "$STAGE/"
+          cp "$BINARY_PATH" "$STAGE/xberg.exe"
+
+          # The official Windows CLI release dynamically links ONNX Runtime,
+          # so ship the same DLL closure beside xberg.exe.
+          cp "${ORT_LIB_LOCATION:?}"/*.dll "$STAGE/"
+          test -f "$STAGE/onnxruntime.dll" || {
+            echo "::error::onnxruntime.dll not staged"
+            exit 1
+          }
+
+          # Do not let the workspace's ORT staging directory on PATH mask a
+          # missing DLL in the packaged tree. This mirrors upstream publish.yaml.
+          WORKSPACE_POSIX="$(pwd)"
+          CLEAN_PATH=""
+          while IFS= read -r path_entry; do
+            test -n "$path_entry" || continue
+            case "$path_entry" in
+              "$WORKSPACE_POSIX" | "$WORKSPACE_POSIX"/*)
+                continue
+                ;;
+            esac
+            if test -e "$path_entry/onnxruntime.dll"; then
+              echo "Dropping PATH entry providing onnxruntime.dll: $path_entry"
+              continue
+            fi
+            CLEAN_PATH="${CLEAN_PATH:+$CLEAN_PATH:}$path_entry"
+          done <<<"${PATH//:/$'\n'}"
+
+          PATH="$CLEAN_PATH" "$STAGE/xberg.exe" --version
+          echo "Windows CLI smoke test passed: $STAGE/xberg.exe --version"
+
+          pwsh -NoProfile -File "$GITHUB_WORKSPACE/scripts/ci/verify-windows-dll-closure.ps1" \
+            -Artifact "$STAGE" \
+            -NativeGlob "xberg.exe"
+
+          7z a "${STAGE}.zip" "$STAGE" >/dev/null
+
+
+      - name: Upload Windows CLI artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xberg-cli-x86_64-pc-windows-msvc
+          path: xberg-cli-x86_64-pc-windows-msvc.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Generate timestamped release version
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $chinaTimeZone = [TimeZoneInfo]::FindSystemTimeZoneById("China Standard Time")
+          $releaseTime = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $chinaTimeZone)
+          # The run number plus attempt makes the tag collision-free without an
+          # API probe whose expected 404 aborts PowerShell before it can branch.
+          $version = $releaseTime.ToString("yyyy.M.d-HHmm", [Globalization.CultureInfo]::InvariantCulture)
+          $version = "$version-run$env:GITHUB_RUN_NUMBER.$env:GITHUB_RUN_ATTEMPT"
+          $tag = "v$version"
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "release_time=$($releaseTime.ToString("yyyy-MM-dd HH:mm zzz"))" >> $env:GITHUB_OUTPUT
+
+      - name: Create timestamped GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_TIME: ${{ steps.release.outputs.release_time }}
+        run: |
+          set -euo pipefail
+          ASSET="xberg-cli-${TARGET}.zip"
+          gh release create "$RELEASE_TAG" \
+            "$ASSET#Xberg Windows CLI (${TARGET})" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_TAG" \
+            --latest \
+            --notes "Automated Windows CLI release.
+
+          **Version:** ${RELEASE_VERSION}
+          **Commit:** ${GITHUB_SHA}
+          **Release time:** ${RELEASE_TIME}
+          **Workflow run:** https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"

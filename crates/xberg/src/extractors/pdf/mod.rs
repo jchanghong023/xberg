@@ -1718,6 +1718,7 @@ impl PdfExtractor {
             };
             let mut ocr_config_with_format = ocr_config.clone();
             ocr_config_with_format.output_format = Some(config.output_format.clone());
+            ocr_config_with_format.security_limits = config.security_limits.clone();
             for img in imgs.iter_mut() {
                 if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
                     break;
@@ -2019,22 +2020,47 @@ impl PdfExtractor {
                                 layout_warning,
                                 layout_glyph_drop_warnings,
                             )) => {
-                                if let Some(warning) = layout_warning {
-                                    crate::core::diagnostics::push_warning_deduped(&mut ocr_fallback_warnings, warning);
+                                let information_loss =
+                                    ocr::destructive_ocr_information_loss(&native_text, &ocr_text, &thresholds);
+                                if native_text.trim().is_empty() || information_loss.is_none() {
+                                    if let Some(warning) = layout_warning {
+                                        crate::core::diagnostics::push_warning_deduped(
+                                            &mut ocr_fallback_warnings,
+                                            warning,
+                                        );
+                                    }
+                                    for warning in layout_glyph_drop_warnings {
+                                        crate::core::diagnostics::push_warning_deduped(
+                                            &mut ocr_fallback_warnings,
+                                            warning,
+                                        );
+                                    }
+                                    ocr_layout_gate_audit = gate_audit;
+                                    ocr_tables = ocr_tbls;
+                                    ocr_elements = ocr_elems;
+                                    ocr_internal_doc = ocr_doc;
+                                    ocr_llm_usage = llm_usage;
+                                    ocr_page_texts = Some(ocr_pts);
+                                    ocr_page_rasters = ocr_rstrs;
+                                    ocr_formulas = formulas;
+                                    ocr_preprocessing_by_page = preprocessing;
+                                    (ocr_text, ExtractionMethod::Ocr)
+                                } else {
+                                    let (native_alnum, ocr_alnum) = information_loss.expect("checked as present");
+                                    tracing::warn!(
+                                        native_alnum,
+                                        ocr_alnum,
+                                        "automatic full-document OCR would discard most native text; using native text"
+                                    );
+                                    ocr_fallback_warnings.push(crate::types::ProcessingWarning {
+                                        source: std::borrow::Cow::Borrowed("ocr"),
+                                        message: std::borrow::Cow::Owned(format!(
+                                            "Automatic OCR retained only {ocr_alnum} of {native_alnum} native \
+                                             alphanumeric characters; returning native PDF text."
+                                        )),
+                                    });
+                                    (native_text, ExtractionMethod::Native)
                                 }
-                                for warning in layout_glyph_drop_warnings {
-                                    crate::core::diagnostics::push_warning_deduped(&mut ocr_fallback_warnings, warning);
-                                }
-                                ocr_layout_gate_audit = gate_audit;
-                                ocr_tables = ocr_tbls;
-                                ocr_elements = ocr_elems;
-                                ocr_internal_doc = ocr_doc;
-                                ocr_llm_usage = llm_usage;
-                                ocr_page_texts = Some(ocr_pts);
-                                ocr_page_rasters = ocr_rstrs;
-                                ocr_formulas = formulas;
-                                ocr_preprocessing_by_page = preprocessing;
-                                (ocr_text, ExtractionMethod::Ocr)
                             }
                             Err(e) => {
                                 tracing::warn!(

@@ -1008,7 +1008,9 @@ pub(crate) fn evaluate_per_page_ocr(
         !can_defer_absolute_garbage_threshold,
     );
 
-    if document_decision.whole_doc_failure {
+    // When every page has a valid boundary, page-level decisions are more precise
+    // than an aggregate failure diluted or amplified by a large page count.
+    if document_decision.whole_doc_failure && !can_defer_absolute_garbage_threshold {
         return document_decision;
     }
 
@@ -1034,7 +1036,10 @@ pub(crate) fn evaluate_per_page_ocr(
         }
     }
 
-    if !failing_pages.is_empty() {
+    if can_defer_absolute_garbage_threshold {
+        document_decision.fallback = !failing_pages.is_empty();
+        document_decision.whole_doc_failure = valid_boundary_count > 0 && failing_pages.len() == valid_boundary_count;
+    } else if !failing_pages.is_empty() {
         document_decision.fallback = true;
         if failing_pages.len() == valid_boundary_count {
             document_decision.whole_doc_failure = true;

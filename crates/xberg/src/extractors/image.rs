@@ -1198,6 +1198,7 @@ fn configured_region_ocr(
     if region_config.acceleration.is_none() {
         region_config.acceleration = config.acceleration.clone();
     }
+    region_config.security_limits = config.security_limits.clone();
     Ok((backend, region_config))
 }
 
@@ -1610,6 +1611,7 @@ impl ImageExtractor {
         apply_default_whole_image_tesseract_psm(&mut ocr_config_with_format);
         ocr_config_with_format.output_format = Some(config.output_format.clone());
         ocr_config_with_format.acceleration = config.acceleration.clone();
+        ocr_config_with_format.security_limits = config.security_limits.clone();
         #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
         let include_words = should_use_layout_ocr(config);
         #[cfg(not(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm"))))]

@@ -60,6 +60,8 @@ pub(crate) fn extract_doc_text(content: &[u8]) -> Result<DocExtractionResult> {
     }
 
     let n_fib = u16::from_le_bytes([word_doc[2], word_doc[3]]);
+    let lid = u16::from_le_bytes([word_doc[0x06], word_doc[0x07]]);
+    let codepage = doc_codepage_from_lid(lid);
 
     let flags_a = u16::from_le_bytes([word_doc[0x0A], word_doc[0x0B]]);
     let use_1table = (flags_a & 0x0200) != 0;
@@ -71,13 +73,15 @@ pub(crate) fn extract_doc_text(content: &[u8]) -> Result<DocExtractionResult> {
     let mut processing_warnings = Vec::new();
 
     if n_fib >= 101 {
-        extract_text_word97(&word_doc, &table_stream, &mut processing_warnings).map(|text| DocExtractionResult {
-            content: text,
-            metadata,
-            processing_warnings,
+        extract_text_word97(&word_doc, &table_stream, codepage, &mut processing_warnings).map(|text| {
+            DocExtractionResult {
+                content: text,
+                metadata,
+                processing_warnings,
+            }
         })
     } else {
-        extract_text_word6(&word_doc).map(|text| DocExtractionResult {
+        extract_text_word6(&word_doc, codepage).map(|text| DocExtractionResult {
             content: text,
             metadata,
             processing_warnings,
@@ -115,6 +119,93 @@ fn read_lw_field(word_doc: &[u8], rg_lw_offset: usize, index: usize) -> usize {
         return 0;
     }
     u32::from_le_bytes([word_doc[off], word_doc[off + 1], word_doc[off + 2], word_doc[off + 3]]) as usize
+}
+
+/// Return the Windows code page most commonly associated with a Word LID.
+///
+/// `FibBase.lid` describes the application language rather than being an
+/// authoritative encoding declaration. It is still useful for compressed
+/// pieces: it distinguishes the common East-Asian and non-Western ANSI
+/// families from the Western default. Chinese is special because its
+/// sublanguage is part of the code-page choice: Traditional Chinese uses
+/// Big5/CP950 while Simplified Chinese uses CP936. Check those full LANGIDs
+/// before reducing other languages to their primary-language IDs.
+fn doc_codepage_from_lid(lid: u16) -> u32 {
+    let primary = lid & 0x03FF;
+    if primary == 0x04 {
+        return match lid {
+            0x0404 | 0x0C04 | 0x1404 => 950, // Traditional Chinese: Taiwan/Hong Kong/Macao
+            _ => 936,                        // Simplified, neutral, and unknown Chinese
+        };
+    }
+
+    match primary {
+        0x01 | 0x20 | 0x29 => 1256,                             // Arabic, Urdu, Persian
+        0x02 | 0x19 | 0x22 | 0x28 | 0x3C..=0x41 => 1251,        // Cyrillic
+        0x05 | 0x0E | 0x15 | 0x18 | 0x1A | 0x1B | 0x24 => 1250, // Central European
+        0x08 => 1253,                                           // Greek
+        0x0D => 1255,                                           // Hebrew
+        0x11 => 932,                                            // Japanese
+        0x12 => 949,                                            // Korean
+        0x1E => 874,                                            // Thai
+        0x1F | 0x2C => 1254,                                    // Turkish/Azeri
+        0x25..=0x27 => 1257,                                    // Baltic
+        0x2A => 1258,                                           // Vietnamese
+        _ => 1252,
+    }
+}
+
+/// Decode one-byte text from a DOC compressed piece using its best code-page
+/// hint. Windows-1252 keeps the legacy special-byte mapping used by this
+/// extractor; other code pages use the shared `encoding_rs` mapping.
+fn decode_doc_ansi(bytes: &[u8], codepage: u32) -> Vec<char> {
+    if codepage == 1252 {
+        return bytes.iter().map(|&byte| cp1252_to_char(byte)).collect();
+    }
+
+    let (decoded, _, _) = crate::text::windows_codepage::encoding_for_windows_codepage(codepage).decode(bytes);
+    decoded.chars().collect()
+}
+
+/// Score text candidates for the compressed-vs-Unicode recovery path.
+///
+/// A malformed or producer-specific piece can carry one-byte text while its
+/// compression flag says UTF-16. Comparing candidates is safer than looking
+/// only for CJK code points: English byte pairs often decode to a mixture of
+/// CJK, symbols, and controls rather than an all-CJK run.
+fn doc_text_quality(chars: &[char]) -> i32 {
+    chars
+        .iter()
+        .map(|character| match *character {
+            '\r' | '\n' | '\t' => 3,
+            '\u{FFFD}' => -8,
+            character if character.is_ascii_alphanumeric() => 4,
+            character if character.is_ascii_punctuation() || character.is_whitespace() => 2,
+            character if character.is_control() => -5,
+            character if character.is_alphanumeric() => 3,
+            _ => 1,
+        })
+        .sum()
+}
+
+/// Whether raw bytes are more plausibly a one-byte text run than the supplied
+/// UTF-16 candidate.
+fn should_recover_ansi_from_unicode(bytes: &[u8], unicode_chars: &[char], codepage: u32) -> bool {
+    if bytes.len() < 8 || unicode_chars.len() < 4 {
+        return false;
+    }
+
+    // A substantial NUL-byte population is the normal signature of UTF-16
+    // Western text. Do not reinterpret such a run as ANSI.
+    let null_count = bytes.iter().filter(|&&byte| byte == 0).count();
+    if null_count * 4 >= bytes.len() {
+        return false;
+    }
+
+    let ansi_chars = decode_doc_ansi(bytes, codepage);
+    let ansi_score = doc_text_quality(&ansi_chars);
+    let unicode_score = doc_text_quality(unicode_chars);
+    ansi_score > unicode_score + (unicode_chars.len() as i32 / 8).max(1)
 }
 
 /// A named half-open range in the piece table's CP (character position) space.
@@ -238,7 +329,12 @@ struct SubdocumentText {
 }
 
 /// Extract text from Word 97/2000/XP/2003 files using the piece table.
-fn extract_text_word97(word_doc: &[u8], table_stream: &[u8], warnings: &mut Vec<ProcessingWarning>) -> Result<String> {
+fn extract_text_word97(
+    word_doc: &[u8],
+    table_stream: &[u8],
+    codepage: u32,
+    warnings: &mut Vec<ProcessingWarning>,
+) -> Result<String> {
     let fib_base_size = 32;
     let csw_offset = fib_base_size;
 
@@ -304,7 +400,7 @@ fn extract_text_word97(word_doc: &[u8], table_stream: &[u8], warnings: &mut Vec<
     ]) as usize;
 
     if fc_clx == 0 || lcb_clx == 0 {
-        return extract_text_contiguous(word_doc, ccp_text);
+        return extract_text_contiguous(word_doc, ccp_text, codepage);
     }
 
     if table_stream.len() < fc_clx + lcb_clx {
@@ -325,7 +421,7 @@ fn extract_text_word97(word_doc: &[u8], table_stream: &[u8], warnings: &mut Vec<
             pos += 4;
 
             let plc_pcd = &clx[pos..];
-            return extract_text_from_piece_table(word_doc, plc_pcd, &subdoc_ranges, total_cp, warnings);
+            return extract_text_from_piece_table(word_doc, plc_pcd, &subdoc_ranges, total_cp, codepage, warnings);
         } else if clxt == 0x01 {
             pos += 1;
             if pos + 2 > clx.len() {
@@ -338,7 +434,7 @@ fn extract_text_word97(word_doc: &[u8], table_stream: &[u8], warnings: &mut Vec<
         }
     }
 
-    extract_text_fallback(word_doc, ccp_text)
+    extract_text_fallback(word_doc, ccp_text, codepage)
 }
 
 /// Record that a piece's declared byte range runs past the end of the
@@ -362,10 +458,13 @@ fn push_piece_overrun_warning(
 }
 
 /// Decode up to `char_count` characters for one piece-table piece, mirroring
-/// the compressed (CP1252, 1 byte/char) vs. uncompressed (UTF-16LE, 2
-/// bytes/char) layouts used by the legacy `.doc` piece table, plus the
-/// CJK-heuristic fallback for uncompressed pieces that decode as mostly CJK
-/// ideographs (a strong signal the piece is actually CP1252, not UTF-16).
+/// the compressed (one byte per character) vs. uncompressed (UTF-16LE, two
+/// bytes per character) layouts used by the legacy `.doc` piece table.
+///
+/// The compressed representation uses the code page hinted by `FibBase.lid`.
+/// For malformed producer output that marks a one-byte run as UTF-16, the
+/// decoder compares both candidates and recovers the more plausible text
+/// rather than emitting accidental CJK code points.
 ///
 /// Returns fewer than `char_count` characters -- and records a warning via
 /// [`push_piece_overrun_warning`] -- when the piece's declared FC/length
@@ -375,6 +474,7 @@ fn decode_piece_chars(
     fc_raw: u32,
     char_count: usize,
     piece_index: usize,
+    codepage: u32,
     warnings: &mut Vec<ProcessingWarning>,
 ) -> Vec<char> {
     let is_compressed = (fc_raw & 0x4000_0000) != 0;
@@ -394,10 +494,7 @@ fn decode_piece_chars(
         if byte_offset >= available_end {
             return Vec::new();
         }
-        word_doc[byte_offset..available_end]
-            .iter()
-            .map(|&b| cp1252_to_char(b))
-            .collect()
+        decode_doc_ansi(&word_doc[byte_offset..available_end], codepage)
     } else {
         let end = byte_offset + char_count * 2;
         let available_end = if end > word_doc.len() {
@@ -415,19 +512,12 @@ fn decode_piece_chars(
                 .collect()
         };
 
-        let suspicious = chars
-            .iter()
-            .filter(|c| (0x4E00..=0x9FFF).contains(&(**c as u32)))
-            .count();
-        if chars.len() > 4 && suspicious > chars.len() / 4 {
-            let cp1252_end = (byte_offset + char_count).min(word_doc.len());
-            if byte_offset >= cp1252_end {
-                return Vec::new();
-            }
-            return word_doc[byte_offset..cp1252_end]
-                .iter()
-                .map(|&b| cp1252_to_char(b))
-                .collect();
+        if byte_offset >= word_doc.len() {
+            return chars;
+        }
+        let ansi_end = (byte_offset + char_count).min(word_doc.len());
+        if should_recover_ansi_from_unicode(&word_doc[byte_offset..ansi_end], &chars, codepage) {
+            return decode_doc_ansi(&word_doc[byte_offset..ansi_end], codepage);
         }
         chars
     }
@@ -457,6 +547,7 @@ fn extract_text_from_piece_table(
     plc_pcd: &[u8],
     ranges: &SubdocRanges,
     total_cp: usize,
+    codepage: u32,
     warnings: &mut Vec<ProcessingWarning>,
 ) -> Result<String> {
     let plc_size = plc_pcd.len();
@@ -520,7 +611,7 @@ fn extract_text_from_piece_table(
             continue;
         }
 
-        let chars = decode_piece_chars(word_doc, fc_raw, char_count, i, warnings);
+        let chars = decode_piece_chars(word_doc, fc_raw, char_count, i, codepage, warnings);
         if chars.is_empty() {
             continue;
         }
@@ -564,43 +655,52 @@ fn extract_text_from_piece_table(
 /// Extract text from a "simple" DOC file where text is stored contiguously.
 ///
 /// When fcClx=0, the text is stored at offset `fcMin` in the WordDocument stream
-/// as either CP1252 (compressed) or UTF-16LE (uncompressed).
-fn extract_text_contiguous(word_doc: &[u8], ccp_text: usize) -> Result<String> {
+/// as either legacy one-byte text or UTF-16LE.
+fn extract_text_contiguous(word_doc: &[u8], ccp_text: usize, codepage: u32) -> Result<String> {
     if word_doc.len() < 0x20 {
-        return extract_text_fallback(word_doc, ccp_text);
+        return extract_text_fallback(word_doc, ccp_text, codepage);
     }
 
     let fc_min = u32::from_le_bytes([word_doc[0x18], word_doc[0x19], word_doc[0x1A], word_doc[0x1B]]) as usize;
     let fc_mac = u32::from_le_bytes([word_doc[0x1C], word_doc[0x1D], word_doc[0x1E], word_doc[0x1F]]) as usize;
 
     if fc_min == 0 || fc_min >= word_doc.len() {
-        return extract_text_fallback(word_doc, ccp_text);
+        return extract_text_fallback(word_doc, ccp_text, codepage);
     }
 
     let data_len = fc_mac.saturating_sub(fc_min).min(word_doc.len() - fc_min);
     if data_len == 0 {
-        return extract_text_fallback(word_doc, ccp_text);
+        return extract_text_fallback(word_doc, ccp_text, codepage);
     }
 
     let text_data = &word_doc[fc_min..fc_min + data_len];
+    let ansi_len = ccp_text.min(data_len);
+    let ansi_chars = decode_doc_ansi(&text_data[..ansi_len], codepage);
+    let unicode_len = ccp_text.saturating_mul(2).min(data_len);
+    let unicode_units: Vec<u16> = text_data[..unicode_len]
+        .chunks_exact(2)
+        .take(ccp_text)
+        .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+        .collect();
+    // Decode the complete UTF-16 sequence so surrogate pairs (emoji, CJK
+    // extension characters, and historic scripts) remain a single scalar.
+    // `from_utf16_lossy` also gives malformed pairs the same replacement
+    // character behavior as the previous contiguous-text implementation.
+    let unicode_text = String::from_utf16_lossy(&unicode_units);
+    let unicode_chars: Vec<char> = unicode_text.chars().collect();
+    let expected_unicode_len = ccp_text.saturating_mul(2);
+    let is_unicode = unicode_len == expected_unicode_len
+        && !should_recover_ansi_from_unicode(&text_data[..ansi_len], &unicode_chars, codepage);
 
-    let null_count = text_data.iter().filter(|&&b| b == 0).count();
-    let is_unicode = data_len >= ccp_text * 2 || null_count > data_len / 4;
-
-    let text = if is_unicode {
-        let chars: Vec<u16> = text_data
-            .chunks_exact(2)
-            .take(ccp_text)
-            .map(|c| u16::from_le_bytes([c[0], c[1]]))
-            .collect();
-        String::from_utf16_lossy(&chars)
+    let text: String = if is_unicode {
+        unicode_text
     } else {
-        text_data.iter().take(ccp_text).map(|&b| cp1252_to_char(b)).collect()
+        ansi_chars.into_iter().collect()
     };
 
     let normalized = normalize_doc_text(&text);
     if normalized.is_empty() {
-        return extract_text_fallback(word_doc, ccp_text);
+        return extract_text_fallback(word_doc, ccp_text, codepage);
     }
 
     Ok(normalized)
@@ -609,30 +709,33 @@ fn extract_text_contiguous(word_doc: &[u8], ccp_text: usize) -> Result<String> {
 /// Fallback text extraction for when the piece table is unavailable.
 ///
 /// Attempts to extract readable text from the WordDocument stream directly.
-fn extract_text_fallback(word_doc: &[u8], _ccp_text: usize) -> Result<String> {
+fn extract_text_fallback(word_doc: &[u8], _ccp_text: usize, codepage: u32) -> Result<String> {
     let mut result = String::new();
-    let mut text_run = String::new();
+    let mut text_run = Vec::new();
+    let append_run = |result: &mut String, bytes: &[u8]| {
+        if bytes.len() < 3 {
+            return;
+        }
+        let decoded: String = decode_doc_ansi(bytes, codepage).into_iter().collect();
+        if decoded.is_empty() {
+            return;
+        }
+        if !result.is_empty() {
+            result.push(' ');
+        }
+        result.push_str(&decoded);
+    };
 
-    for &b in word_doc.iter().skip(256) {
-        if b == 0x0D || b == 0x0A || b == 0x09 || (0x20..=0xFE).contains(&b) {
-            text_run.push(cp1252_to_char(b));
+    for &byte in word_doc.iter().skip(256) {
+        if byte == 0x0D || byte == 0x0A || byte == 0x09 || (0x20..=0xFE).contains(&byte) {
+            text_run.push(byte);
         } else if !text_run.is_empty() {
-            if text_run.len() >= 3 {
-                if !result.is_empty() {
-                    result.push(' ');
-                }
-                result.push_str(&text_run);
-            }
+            append_run(&mut result, &text_run);
             text_run.clear();
         }
     }
 
-    if text_run.len() >= 3 {
-        if !result.is_empty() {
-            result.push(' ');
-        }
-        result.push_str(&text_run);
-    }
+    append_run(&mut result, &text_run);
 
     if result.is_empty() {
         return Err(XbergError::parsing("No text content found in DOC file"));
@@ -644,27 +747,21 @@ fn extract_text_fallback(word_doc: &[u8], _ccp_text: usize) -> Result<String> {
 /// Extract text from Word 6/95 files.
 ///
 /// Word 6/95 has a simpler format where text starts at a known offset.
-fn extract_text_word6(word_doc: &[u8]) -> Result<String> {
+fn extract_text_word6(word_doc: &[u8], codepage: u32) -> Result<String> {
     if word_doc.len() < 0x50 {
         return Err(XbergError::parsing("Word 6/95 file too short"));
     }
 
     let ccp_text = u32::from_le_bytes([word_doc[0x4C], word_doc[0x4D], word_doc[0x4E], word_doc[0x4F]]) as usize;
-
     let fc_min = u32::from_le_bytes([word_doc[0x18], word_doc[0x19], word_doc[0x1A], word_doc[0x1B]]) as usize;
 
     if fc_min + ccp_text > word_doc.len() {
-        return extract_text_fallback(word_doc, ccp_text);
+        return extract_text_fallback(word_doc, ccp_text, codepage);
     }
 
     let text_bytes = &word_doc[fc_min..fc_min + ccp_text];
-    let mut result = String::with_capacity(ccp_text);
-
-    for &b in text_bytes {
-        result.push(cp1252_to_char(b));
-    }
-
-    Ok(normalize_doc_text(&result))
+    let text: String = decode_doc_ansi(text_bytes, codepage).into_iter().collect();
+    Ok(normalize_doc_text(&text))
 }
 
 /// Word field BEGIN marker. Text from here to [`FIELD_SEPARATOR`] is the field
