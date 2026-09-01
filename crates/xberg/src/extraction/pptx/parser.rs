@@ -38,8 +38,8 @@ const CHART_NAMESPACE: &str = "http://schemas.openxmlformats.org/drawingml/2006/
 /// DrawingML diagram (SmartArt) namespace for `p:graphicFrame` diagram payloads.
 const DIAGRAM_NAMESPACE: &str = "http://schemas.openxmlformats.org/drawingml/2006/diagram";
 
-/// DrawingML OLE namespace used by embedded Visio and other OLE objects.
-const OLE_NAMESPACE: &str = "http://schemas.openxmlformats.org/drawingml/2006/ole";
+/// PresentationML OLE namespace used by embedded Visio and other OLE objects.
+const OLE_NAMESPACE: &str = "http://schemas.openxmlformats.org/presentationml/2006/ole";
 
 /// A `p:graphicFrame`'s parsed payload: a table, a chart reference, a
 /// SmartArt/diagram reference, or an image fallback from an OLE object.
