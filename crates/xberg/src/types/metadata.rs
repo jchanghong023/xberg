@@ -251,6 +251,11 @@ impl FormatMetadata {
     pub fn excel(&self) -> Option<&ExcelMetadata> {
         if let Self::Excel(e) = self { Some(e) } else { None }
     }
+
+    /// Returns the HTML metadata if this is an HTML format, or `None` otherwise.
+    pub fn html(&self) -> Option<&HtmlMetadata> {
+        if let Self::Html(h) = self { Some(h) } else { None }
+    }
 }
 
 impl std::fmt::Display for FormatMetadata {

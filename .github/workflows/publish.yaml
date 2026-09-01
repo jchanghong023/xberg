@@ -1009,7 +1009,24 @@ jobs:
           # crates/xberg-wasm/package.json scripts and drops any hand-added
           # suffix, so we invoke the patch here (publish.yaml is not generated)
           # rather than relying on a package.json script surviving regen. ~keep
-          build-command: "pnpm run build:all && node scripts/fix-wasi-imports.mjs"
+          # CARGO_PROFILE_RELEASE_OPT_LEVEL=z: the workspace `[profile.release]` is
+          # tuned for native throughput (`opt-level = 3`), and only the thin
+          # `xberg-wasm` glue crate carries a per-package `opt-level = "z"` — every
+          # dependency that actually fills the blob (xberg, crawlberg, candle,
+          # tract, tokenizers, the WASI Tesseract) was still generated at 3. On
+          # wasm32 that inflates the `code` section by ~48%: measured on this
+          # revision, code 37,885,900 -> 25,543,030 bytes and the shipped
+          # `pkg/web/xberg_wasm_bg.wasm` 52,208,780 -> 40,020,247 (-23.3%), with
+          # `data` unchanged (14.07 MB, mostly bundled eng.traineddata) and the
+          # Node load smoke test still reporting the same 364 exports. That is what
+          # brings the artifact back under WASM_MAX_FILE_BYTES without dropping a
+          # feature. It is set here rather than in `.cargo/config.toml`, because a
+          # `[target.wasm32-unknown-unknown] rustflags` entry is silently discarded
+          # whenever RUSTFLAGS is set (CI sets `-D warnings`) — see
+          # crates/xberg-wasm/build.rs — and rather than in package.json, which alef
+          # regenerates. Keep it in step with .task/languages/rust.yml's
+          # `wasm:build:all` so a local build measures what publish ships. ~keep
+          build-command: "CARGO_PROFILE_RELEASE_OPT_LEVEL=z pnpm run build:all && node scripts/fix-wasi-imports.mjs"
 
       - name: Enforce WASM CDN size budget (jsDelivr limits)
         working-directory: crates/xberg-wasm
@@ -1708,7 +1725,15 @@ jobs:
             \( -name 'libxberg_ffi.*' -o -name 'xberg_ffi.dll' \) \
             -exec cp {} "$STAGE/lib/" \;
           cp crates/xberg-ffi/include/xberg.h "$STAGE/include/"
-          cp LICENSE "$STAGE/" 2>/dev/null || true
+          # This step's contract (see the comment above) is "library + header +
+          # LICENSE", and the sibling CLI staging steps copy LICENSE unsuppressed.
+          # A published C FFI tarball missing its LICENSE is a distribution defect,
+          # so name what is missing rather than discarding the error.
+          [ -f LICENSE ] || {
+            echo "::error::LICENSE is missing from the checkout — refusing to stage a C FFI tarball without it"
+            exit 1
+          }
+          cp LICENSE "$STAGE/"
           # Windows links ONNX Runtime dynamically (`Setup ONNX Runtime` above
           # runs with its default `system` strategy); this leg had no
           # equivalent of the glibc-Linux step below and shipped no ONNX
@@ -2356,7 +2381,14 @@ jobs:
               cp "$src" "$STAGE/$base"
               chmod u+w "$STAGE/$base"
               install_name_tool -id "@loader_path/$base" "$STAGE/$base"
-              codesign --force -s - "$STAGE/$base" || true
+              # This leg builds aarch64-apple-darwin, where signature state is
+              # fatal, not cosmetic: dyld refuses an unsigned library outright
+              # and AMFI SIGKILLs the process for an invalid one. `codesign` was
+              # suppressed here and nothing ever verified the result, so a bad
+              # signature would have reached Dart pub users as a hard crash.
+              codesign --force -s - "$STAGE/$base"
+              codesign --verify --strict "$STAGE/$base" \
+                || { echo "::error::$base has no valid code signature; it would be killed at dlopen on arm64"; exit 1; }
               # The native and the ORT dylib must not resolve non-system libs.
               bad="$(otool -L "$STAGE/${LIB}" "$STAGE/$base" | tail -n +2 \
                 | awk '{print $1}' | grep -E '^(/opt/homebrew|/usr/local)/' || true)"
@@ -3574,7 +3606,7 @@ jobs:
             linux-musl-x86_64 linux-musl-aarch64
           lib-name: xberg_ffi
 
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"
@@ -3919,9 +3951,31 @@ jobs:
             if [ "$copied" -eq 0 ]; then
               echo "::warning::no shared library found for $rid under $stage_root/lib — skipping"
             fi
-            cp "$stage_root"/include/*.h "$out/include/" 2>/dev/null || true
+            # nullglob is unset again just above, so an include/ with no .h would
+            # leave the pattern literal and `cp` would fail -- an error previously
+            # discarded, publishing a Zig bundle with no C headers to compile
+            # against. Collect under nullglob and assert on the count instead of
+            # trusting cp's exit status.
+            shopt -s nullglob
+            headers=("$stage_root"/include/*.h)
+            shopt -u nullglob
+            if [ "${#headers[@]}" -eq 0 ]; then
+              echo "::error::no C headers found under $stage_root/include for $rid (from $art) — refusing to ship a headerless Zig bundle"
+              exit 1
+            fi
+            cp "${headers[@]}" "$out/include/"
             rm -rf "$tmp"
           done
+          # include/ is also left empty when the loop body never ran at all -- no
+          # artifacts downloaded, or every platform label unknown -- which the
+          # per-artifact check above cannot observe.
+          shopt -s nullglob
+          staged_headers=("$out"/include/*.h)
+          shopt -u nullglob
+          if [ "${#staged_headers[@]}" -eq 0 ]; then
+            echo "::error::$out/include contains no headers — refusing to publish a Zig bundle consumers cannot compile against"
+            exit 1
+          fi
           ls -la "$out"
           for d in "$out"/*/; do echo "--- $d ---"; ls -la "$d"; done
 
@@ -4062,7 +4116,7 @@ jobs:
     if: ${{ needs.prepare.outputs.release_scoop == 'true' && needs.upload-cli-release.result == 'success' && (needs.prepare.outputs.is_tag == 'true' || needs.prepare.outputs.dry_run == 'true') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         id: bucket-token
         with:
           app-id: ${{ secrets.BOT_APP_ID }}
@@ -4070,18 +4124,18 @@ jobs:
           owner: xberg-io
           repositories: scoop-bucket
 
-      - uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
         id: source-token
         with:
           app-id: ${{ secrets.BOT_APP_ID }}
           private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
           owner: xberg-io
 
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: ${{ needs.prepare.outputs.checkout_ref }}
 
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           repository: xberg-io/scoop-bucket
           token: ${{ steps.bucket-token.outputs.token }}
@@ -4516,7 +4570,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ needs.prepare.outputs.ref }}
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "21"

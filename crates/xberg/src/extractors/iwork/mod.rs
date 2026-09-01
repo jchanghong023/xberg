@@ -29,6 +29,12 @@ use std::io::Read;
 
 /// Maximum size for an individual IWA file to guard against decompression bombs.
 const MAX_IWA_DECOMPRESSED_SIZE: usize = 64 * 1024 * 1024;
+/// Absolute read bound for the `Metadata/` members. These are read for every iWork document
+/// regardless of configuration and hold at most a few kilobytes in any real document, so the
+/// per-member bound is the smaller of the declared size and this ceiling -- the declared size
+/// alone is an archive-controlled claim, and this ceiling alone would let an honestly-declared
+/// member allocate far more than a plist ever needs. GHSA-85w9-wqcq-x48r. ~keep
+const MAX_METADATA_MEMBER_SIZE: u64 = 16 * 1024 * 1024;
 
 /// `ProcessingWarning::source` used for every degradation reported by the iWork extractors.
 pub(crate) const IWORK_WARNING_SOURCE: &str = "iwork";
@@ -132,14 +138,28 @@ pub(crate) fn read_iwa_file(content: &[u8], path: &str, expansion: &mut IwaExpan
         .by_name(path)
         .map_err(|_| XbergError::parsing(format!("IWA file not found in archive: {path}")))?;
 
-    expansion.validate_member_size(file.size())?;
-    let compressed_size = usize::try_from(file.size()).map_err(|_| SecurityError::ContentTooLarge {
+    let declared_size = file.size();
+    expansion.validate_member_size(declared_size)?;
+    let declared_usize = usize::try_from(declared_size).map_err(|_| SecurityError::ContentTooLarge {
         size: usize::MAX,
         max: expansion.max_size.min(MAX_IWA_DECOMPRESSED_SIZE),
     })?;
-    let mut raw = Vec::with_capacity(compressed_size.min(MAX_IWA_DECOMPRESSED_SIZE));
-    file.read_to_end(&mut raw)
+    let mut raw = Vec::with_capacity(declared_usize.min(MAX_IWA_DECOMPRESSED_SIZE));
+    // `file.size()` is only the archive's *declared* uncompressed size, and the `zip` crate
+    // does not bound the decompressed side, so `validate_member_size` above constrains a claim
+    // rather than the read. Bound the read by that claim and reject a member that exceeds it.
+    // GHSA-85w9-wqcq-x48r. ~keep
+    let mut bounded = (&mut file).take(declared_size.saturating_add(1));
+    bounded
+        .read_to_end(&mut raw)
         .map_err(|e| XbergError::parsing(format!("Failed to read IWA file {path}: {e}")))?;
+    if u64::try_from(raw.len()).unwrap_or(u64::MAX) > declared_size {
+        return Err(SecurityError::ContentTooLarge {
+            size: raw.len(),
+            max: declared_usize,
+        }
+        .into());
+    }
 
     decode_iwa_stream(&raw, expansion)
 }
@@ -378,18 +398,20 @@ pub(crate) fn extract_metadata_from_zip(content: &[u8]) -> crate::types::metadat
 
     let mut metadata = crate::types::metadata::Metadata::default();
 
-    if let Ok(mut file) = archive.by_name("Metadata/Properties.plist") {
+    if let Ok(file) = archive.by_name("Metadata/Properties.plist") {
+        let bound = file.size().saturating_add(1).min(MAX_METADATA_MEMBER_SIZE);
         let mut buf = Vec::new();
-        if file.read_to_end(&mut buf).is_ok()
+        if file.take(bound).read_to_end(&mut buf).is_ok()
             && let Ok(text) = std::str::from_utf8(&buf)
         {
             parse_plist_metadata(text, &mut metadata);
         }
     }
 
-    if let Ok(mut file) = archive.by_name("Metadata/DocumentIdentifier") {
+    if let Ok(file) = archive.by_name("Metadata/DocumentIdentifier") {
+        let bound = file.size().saturating_add(1).min(MAX_METADATA_MEMBER_SIZE);
         let mut buf = Vec::new();
-        if file.read_to_end(&mut buf).is_ok()
+        if file.take(bound).read_to_end(&mut buf).is_ok()
             && let Ok(text) = std::str::from_utf8(&buf)
         {
             let trimmed = text.trim();

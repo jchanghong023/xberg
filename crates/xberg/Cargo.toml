@@ -1426,7 +1426,15 @@ uuid = { version = "1", features = ["v4"], optional = true }
 v_htmlescape = { version = "0.17", optional = true }
 whatlang = { version = "0.18.0", optional = true }
 xberg-gliner = { workspace = true, optional = true }
-xberg-libheif = { path = "../xberg-libheif", version = "1.1.0", optional = true }
+# `default-features = false` + `v1_19`, pinned explicitly rather than inherited: the
+# prebuilt artifacts link libheif dynamically, so every symbol they reference must exist in the
+# oldest libheif a supported distro ships. Debian 13 (trixie, current stable) has 1.19.8 and
+# bookworm-backports only 1.19.7, so a `v1_20`+ floor makes the PHP/PIE extension unloadable
+# there -- `undefined symbol: heif_image_get_plane_readonly2`, which libheif added in 1.20
+# (xberg-io/xberg#1541). `xberg-libheif` gates every version-dependent call, including a
+# `#[cfg(not(feature = "v1_20"))]` fallback to `heif_image_get_plane_readonly`, so this only
+# gives up newer libheif APIs, not functionality. ~keep
+xberg-libheif = { path = "../xberg-libheif", version = "1.1.0", optional = true, default-features = false, features = ["v1_19"] }
 xberg-libwpd = { path = "../xberg-libwpd", version = "1.1.0", optional = true }
 xberg-native-pdf = { workspace = true, optional = true }
 # No `version` on this path-dep: xberg-tesseract carries `links =

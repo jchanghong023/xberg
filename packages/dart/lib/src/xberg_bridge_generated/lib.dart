@@ -7786,6 +7786,17 @@ class ExtractionConfig {
   /// stored in the notebook.
   final JupyterCellRendering jupyterCellRendering;
 
+  /// Apply Jupyter Book/MyST cell visibility tags while rendering notebooks.
+  ///
+  /// When enabled, `remove-cell`/`hide-cell`, `remove-input`/`hide-input`,
+  /// and `remove-output`/`hide-output` suppress the corresponding saved
+  /// source or output. Cells are never executed, and their metadata remains
+  /// available even when their rendered content is suppressed.
+  ///
+  /// Defaults to `true`. Set this to `false` to preserve all saved notebook
+  /// content regardless of cell tags.
+  final bool applyNotebookCellTags;
+
   /// Layout detection configuration (None = layout detection disabled).
   ///
   /// When set, PDF pages and images are analyzed for document structure
@@ -7962,6 +7973,7 @@ class ExtractionConfig {
     required this.escapeMarkdown,
     required this.tableAnchors,
     required this.jupyterCellRendering,
+    required this.applyNotebookCellTags,
     this.layout,
     this.transcription,
     required this.useLayoutForMarkdown,
@@ -8017,6 +8029,7 @@ class ExtractionConfig {
       escapeMarkdown.hashCode ^
       tableAnchors.hashCode ^
       jupyterCellRendering.hashCode ^
+      applyNotebookCellTags.hashCode ^
       layout.hashCode ^
       transcription.hashCode ^
       useLayoutForMarkdown.hashCode ^
@@ -8074,6 +8087,7 @@ class ExtractionConfig {
           escapeMarkdown == other.escapeMarkdown &&
           tableAnchors == other.tableAnchors &&
           jupyterCellRendering == other.jupyterCellRendering &&
+          applyNotebookCellTags == other.applyNotebookCellTags &&
           layout == other.layout &&
           transcription == other.transcription &&
           useLayoutForMarkdown == other.useLayoutForMarkdown &&

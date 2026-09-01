@@ -65,7 +65,8 @@ dirs)
         ! -path "*/.venv/*" \
         ! -path "*/dist/*" \
         ! -path "*/build/*" \
-        -exec "$HASH_CMD" {} \; >>"$TEMP_HASHES" 2>/dev/null || true
+        -exec "$HASH_CMD" {} \; >>"$TEMP_HASHES" 2>/dev/null ||
+        warn "Failed to hash one or more files under: $dir (cache key may be stale)"
     else
       warn "Directory not found: $dir"
     fi
@@ -93,7 +94,8 @@ glob)
           ! -path "*/node_modules/*" \
           ! -path "*/.venv/*" \
           -name "$name_pattern" \
-          -exec "$HASH_CMD" {} \; 2>/dev/null >>"$TEMP_HASHES" || true
+          -exec "$HASH_CMD" {} \; 2>/dev/null >>"$TEMP_HASHES" ||
+          warn "Failed to hash one or more files under: $base_dir (cache key may be stale)"
       else
         warn "Directory not found: $base_dir"
       fi

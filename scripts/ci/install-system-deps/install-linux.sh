@@ -92,9 +92,14 @@ fi
 
 echo "::endgroup::"
 
-echo "::group::Building libheif from source (Noble ships 1.17.6, libheif-sys needs >=1.21)"
+echo "::group::Building libheif from source (Noble ships 1.17.6, xberg needs >=1.19)"
 
-LIBHEIF_VERSION="${LIBHEIF_VERSION:-1.23.0}"
+# Pinned to the oldest libheif a supported distro ships (Debian 13 trixie: 1.19.8), not the
+# newest release: binaries built here link libheif dynamically and must load against the
+# host's copy. Building against newer headers would emit references to symbols and struct
+# layouts (heif_security_limits grew in 1.20) that a 1.19 runtime does not provide.
+# Must stay in step with the `v1_*` feature on `xberg-libheif` in crates/xberg/Cargo.toml.
+LIBHEIF_VERSION="${LIBHEIF_VERSION:-1.19.8}"
 LIBHEIF_PREFIX="${LIBHEIF_PREFIX:-/usr/local}"
 
 echo "Removing apt's libheif to prevent shadowing..."
@@ -140,15 +145,32 @@ fi
 
 sudo ldconfig
 
+# Fail loudly: what this seeds is exactly what the next run's cache-restore step copies back,
+# so a silently dropped file here poisons every later job with a half-populated cache. The
+# copies below were `2>/dev/null || true` and could not be distinguished from success. ~keep
 if [ -n "${GITHUB_ACTION:-}" ]; then
   mkdir -p /tmp/libheif-cache/usr/local/lib/pkgconfig
   mkdir -p /tmp/libheif-cache/usr/local/include
   mkdir -p /tmp/libheif-cache/usr/local/share
-  cp -a /usr/local/lib/libheif* /tmp/libheif-cache/usr/local/lib/ 2>/dev/null || true
-  cp -a /usr/local/lib/pkgconfig/libheif.pc /tmp/libheif-cache/usr/local/lib/pkgconfig/ 2>/dev/null || true
+  cp -a /usr/local/lib/libheif* /tmp/libheif-cache/usr/local/lib/
+  cp -a /usr/local/lib/pkgconfig/libheif.pc /tmp/libheif-cache/usr/local/lib/pkgconfig/
   [ -d /usr/local/include/libheif ] && cp -a /usr/local/include/libheif /tmp/libheif-cache/usr/local/include/
+  # libheif 1.19.x installs no share/libheif; newer releases do. Genuinely optional. ~keep
   [ -d /usr/local/share/libheif ] && cp -a /usr/local/share/libheif /tmp/libheif-cache/usr/local/share/
 fi
+
+# Assert what pkg-config will actually report to libheif-sys's build script. Without this the
+# only symptom of a version/ordering mistake is `Package 'libheif' has version 'x', required
+# version is '>= y'` thrown from a cargo build script hundreds of lines later. ~keep
+resolved_libheif_version="$(PKG_CONFIG_PATH="$LIBHEIF_PREFIX/lib/pkgconfig:${PKG_CONFIG_PATH:-}" \
+  pkg-config --modversion libheif 2>/dev/null || true)"
+if [ "$resolved_libheif_version" != "$LIBHEIF_VERSION" ]; then
+  echo "::error::pkg-config resolves libheif ${resolved_libheif_version:-<not found>}, expected ${LIBHEIF_VERSION}."
+  echo "::error::The highest v1_* feature on xberg-libheif sets libheif-sys's pkg-config floor;"
+  echo "::error::keep LIBHEIF_VERSION here in step with crates/xberg-libheif/Cargo.toml."
+  exit 1
+fi
+echo "✓ pkg-config resolves libheif ${resolved_libheif_version}"
 
 echo ""
 echo "libheif symbol verification:"

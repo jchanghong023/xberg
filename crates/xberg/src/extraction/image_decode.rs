@@ -214,6 +214,19 @@ pub(crate) fn decode_standard_image_with_format_and_security_limits(
     decode_standard_image(bytes, limits, Some(format))
 }
 
+// Callers live behind their own feature gates -- `core::image_encode` (`image-encode`),
+// `extractors::pdf::ocr::rendering` and `engine::structured::rasterize` (`pdf`), and
+// `extraction::image` (`ocr`/`ocr-wasm`/`ocr-pipeline`) -- so an ungated definition is dead code
+// in any combination that selects none of them (e.g. CI's `--no-default-features --features
+// layout-tract`, which denies warnings). `test` keeps `decode_for_encode_under_test` compiling. ~keep
+#[cfg(any(
+    test,
+    feature = "image-encode",
+    feature = "pdf",
+    feature = "ocr",
+    feature = "ocr-wasm",
+    feature = "ocr-pipeline"
+))]
 pub(crate) fn decode_standard_image_with_security_limits(
     bytes: &[u8],
     limits: &SecurityLimits,
@@ -221,6 +234,17 @@ pub(crate) fn decode_standard_image_with_security_limits(
     decode_standard_image(bytes, limits, None)
 }
 
+// Same reasoning as `decode_standard_image_with_security_limits` above; this one is additionally
+// reached from `clone_dynamic_image_to_rgb8_with_security_limits`, whose own gate
+// (`layout-detection` + `ocr`/`ocr-wasm`) is already covered by the `ocr` arms here. ~keep
+#[cfg(any(
+    test,
+    feature = "image-encode",
+    feature = "pdf",
+    feature = "ocr",
+    feature = "ocr-wasm",
+    feature = "ocr-pipeline"
+))]
 pub(crate) fn validate_dynamic_image_additional_live_bytes(
     image: &image::DynamicImage,
     limits: &SecurityLimits,
@@ -259,6 +283,15 @@ pub(crate) fn clone_dynamic_image_to_rgb8_with_security_limits(
     Ok(image.to_rgb8())
 }
 
+// Private helper behind both public decode wrappers, so it is live exactly when either is. ~keep
+#[cfg(any(
+    test,
+    feature = "image-encode",
+    feature = "pdf",
+    feature = "ocr",
+    feature = "ocr-wasm",
+    feature = "ocr-pipeline"
+))]
 fn decode_standard_image(
     bytes: &[u8],
     limits: &SecurityLimits,

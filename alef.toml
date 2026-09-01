@@ -1,5 +1,5 @@
 [workspace]
-alef_version = "0.79.2"
+alef_version = "0.79.5"
 languages = [
   "python",
   "node",
@@ -2566,9 +2566,20 @@ languages = [
   "zig",
   "homebrew",
 ]
-fields_method_calls = ["results[0].metadata.format.excel", "metadata.format.excel"]
+fields_method_calls = [
+  "results[0].metadata.format.excel",
+  "metadata.format.excel",
+  "results[0].metadata.format.html",
+  "metadata.format.html",
+]
 fields_optional = [
   "results[0].metadata.format",
+  "results[0].metadata.format.excel",
+  "metadata.format.excel",
+  "results[0].metadata.format.html",
+  "metadata.format.html",
+  "results[0].metadata.format.html.title",
+  "metadata.format.html.title",
   "results[0].metadata.format.excel.sheet_count",
   "results[0].metadata.format.excel.sheet_names",
   "results[0].metadata.output_format",

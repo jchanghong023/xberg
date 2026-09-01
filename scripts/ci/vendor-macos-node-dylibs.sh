@@ -38,7 +38,16 @@ deps_of() {
 }
 
 resolve() { readlink -f "$1" 2>/dev/null || python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1"; }
-resign()  { codesign --remove-signature "$1" 2>/dev/null || true; codesign -f -s - "$1"; }
+# `--remove-signature` legitimately fails on an already-unsigned binary, so only
+# that call is suppressed. The re-sign itself must not be, and its exit status is
+# not enough: an unsigned or invalid signature is fatal at dlopen on arm64, so
+# assert the resulting signature actually verifies. ~keep
+resign()  {
+  codesign --remove-signature "$1" 2>/dev/null || true
+  codesign -f -s - "$1"
+  codesign --verify --strict "$1" ||
+    { echo "::error::no valid code signature on $(basename "$1") after ad-hoc re-signing"; exit 1; }
+}
 
 declare -A seen
 queue=()
@@ -74,7 +83,7 @@ while [ $i -lt ${#queue[@]} ]; do
     if [ -z "${seen[$b]:-}" ]; then seen["$b"]=1; queue+=("$b"); fi
   done < <(deps_of "$target")
   case "$bin" in
-    *.dylib) install_name_tool -id "@loader_path/$bin" "$target" 2>/dev/null || true; changed=1 ;;
+    *.dylib) install_name_tool -id "@loader_path/$bin" "$target"; changed=1 ;;
   esac
   [ $changed -eq 1 ] && resign "$target"
 done

@@ -472,7 +472,10 @@ pub(crate) fn decode_image_to_rgb8_with_security_limits(
     decode_standard_rgb8_with_security_limits(image_bytes, limits)
 }
 
-#[cfg(test)]
+// Both callers are `#[cfg(feature = "ocr")]` tests in this file's `tests` module, so a
+// bare `cfg(test)` leaves it dead in any test build without `ocr` (the
+// `formula-recognition,pdf` CI leg). ~keep
+#[cfg(all(test, feature = "ocr"))]
 pub(crate) fn decode_image_with_security_limits(
     image_bytes: &[u8],
     limits: &SecurityLimits,

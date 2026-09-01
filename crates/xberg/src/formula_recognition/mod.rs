@@ -306,6 +306,13 @@ pub(crate) fn recognize_crop(crop: &RgbImage, accel: Option<&AccelerationConfig>
 /// runtime worker. The inline arm is unreachable today (the feature implies
 /// `tokio-runtime` and cannot be enabled on wasm32); it exists so the
 /// function stays total if either implication ever changes.
+///
+/// Both callers are themselves feature-gated entry points -- the PDF layout route
+/// (`extractors::pdf`, so `pdf`) and the image route (`any(ocr, ocr-wasm)`). With
+/// `formula-recognition` alone the recognizer has no entry point at all, so without this
+/// gate the wrapper is dead code. `recognize_crop` stays live either way via
+/// `recognize_for_test`. ~keep
+#[cfg(any(feature = "pdf", feature = "ocr", feature = "ocr-wasm"))]
 pub(crate) async fn recognize_crop_blocking(
     crop: RgbImage,
     accel: Option<AccelerationConfig>,

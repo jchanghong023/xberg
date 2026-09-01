@@ -47,7 +47,15 @@ deps_of() {
   done
 }
 
-resign() { codesign --force --sign - "$1" 2>/dev/null || log "warning: could not ad-hoc re-sign $1"; }
+# A failed re-sign is not a warning-level event: dyld refuses an unsigned library
+# and AMFI SIGKILLs the loading process for an invalid signature, so a bad result
+# here ships a CLI that dies on launch. Verify rather than trusting the exit code,
+# since the signature is what has to be good -- not merely codesign returning 0.
+resign() {
+  codesign --force --sign - "$1" || die "ad-hoc re-sign failed for $(basename "$1")"
+  codesign --verify --strict "$1" ||
+    die "no valid code signature on $(basename "$1") after ad-hoc re-signing"
+}
 
 main() {
   local binary="${1:?usage: $(basename "$0") <macho-binary>}"

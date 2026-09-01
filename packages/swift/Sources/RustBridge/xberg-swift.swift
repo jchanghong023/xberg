@@ -11034,6 +11034,10 @@ extension ExtractionConfigRef {
         RustString(ptr: __swift_bridge__$ExtractionConfig$jupyter_cell_rendering(ptr))
     }
 
+    public func applyNotebookCellTags() -> Bool {
+        __swift_bridge__$ExtractionConfig$apply_notebook_cell_tags(ptr)
+    }
+
     public func layout() -> Optional<LayoutDetectionConfig> {
         { let val = __swift_bridge__$ExtractionConfig$layout(ptr); if val != nil { return LayoutDetectionConfig(ptr: val!) } else { return nil } }()
     }

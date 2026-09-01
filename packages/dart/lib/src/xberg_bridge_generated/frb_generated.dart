@@ -19169,8 +19169,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ExtractionConfig dco_decode_extraction_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 51)
-      throw Exception('unexpected arr length: expect 51 but see ${arr.length}');
+    if (arr.length != 52)
+      throw Exception('unexpected arr length: expect 52 but see ${arr.length}');
     return ExtractionConfig(
       mimeDetectionPolicy: dco_decode_mime_detection_policy(arr[0]),
       useCache: dco_decode_bool(arr[1]),
@@ -19204,33 +19204,34 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       escapeMarkdown: dco_decode_bool(arr[25]),
       tableAnchors: dco_decode_bool(arr[26]),
       jupyterCellRendering: dco_decode_jupyter_cell_rendering(arr[27]),
-      layout: dco_decode_opt_box_autoadd_layout_detection_config(arr[28]),
-      transcription: dco_decode_opt_box_autoadd_transcription_config(arr[29]),
-      useLayoutForMarkdown: dco_decode_bool(arr[30]),
-      includeDocumentStructure: dco_decode_bool(arr[31]),
-      acceleration: dco_decode_opt_box_autoadd_acceleration_config(arr[32]),
-      cacheNamespace: dco_decode_opt_String(arr[33]),
-      cacheTtlSecs: dco_decode_opt_box_autoadd_i_64(arr[34]),
-      email: dco_decode_opt_box_autoadd_email_config(arr[35]),
-      csv: dco_decode_opt_box_autoadd_csv_config(arr[36]),
-      geojson: dco_decode_opt_box_autoadd_geo_json_extraction_config(arr[37]),
-      concurrency: dco_decode_opt_box_autoadd_concurrency_config(arr[38]),
-      url: dco_decode_url_extraction_config(arr[39]),
-      maxArchiveDepth: dco_decode_i_64(arr[40]),
-      treeSitter: dco_decode_opt_box_autoadd_tree_sitter_config(arr[41]),
+      applyNotebookCellTags: dco_decode_bool(arr[28]),
+      layout: dco_decode_opt_box_autoadd_layout_detection_config(arr[29]),
+      transcription: dco_decode_opt_box_autoadd_transcription_config(arr[30]),
+      useLayoutForMarkdown: dco_decode_bool(arr[31]),
+      includeDocumentStructure: dco_decode_bool(arr[32]),
+      acceleration: dco_decode_opt_box_autoadd_acceleration_config(arr[33]),
+      cacheNamespace: dco_decode_opt_String(arr[34]),
+      cacheTtlSecs: dco_decode_opt_box_autoadd_i_64(arr[35]),
+      email: dco_decode_opt_box_autoadd_email_config(arr[36]),
+      csv: dco_decode_opt_box_autoadd_csv_config(arr[37]),
+      geojson: dco_decode_opt_box_autoadd_geo_json_extraction_config(arr[38]),
+      concurrency: dco_decode_opt_box_autoadd_concurrency_config(arr[39]),
+      url: dco_decode_url_extraction_config(arr[40]),
+      maxArchiveDepth: dco_decode_i_64(arr[41]),
+      treeSitter: dco_decode_opt_box_autoadd_tree_sitter_config(arr[42]),
       structuredExtraction:
-          dco_decode_opt_box_autoadd_structured_extraction_config(arr[42]),
-      ner: dco_decode_opt_box_autoadd_ner_config(arr[43]),
-      redaction: dco_decode_opt_box_autoadd_redaction_config(arr[44]),
-      summarization: dco_decode_opt_box_autoadd_summarization_config(arr[45]),
-      translation: dco_decode_opt_box_autoadd_translation_config(arr[46]),
+          dco_decode_opt_box_autoadd_structured_extraction_config(arr[43]),
+      ner: dco_decode_opt_box_autoadd_ner_config(arr[44]),
+      redaction: dco_decode_opt_box_autoadd_redaction_config(arr[45]),
+      summarization: dco_decode_opt_box_autoadd_summarization_config(arr[46]),
+      translation: dco_decode_opt_box_autoadd_translation_config(arr[47]),
       pageClassification: dco_decode_opt_box_autoadd_page_classification_config(
-        arr[47],
+        arr[48],
       ),
       chunkClassification:
-          dco_decode_opt_box_autoadd_chunk_classification_config(arr[48]),
-      captioning: dco_decode_opt_box_autoadd_captioning_config(arr[49]),
-      qrCodes: dco_decode_opt_box_autoadd_bool(arr[50]),
+          dco_decode_opt_box_autoadd_chunk_classification_config(arr[49]),
+      captioning: dco_decode_opt_box_autoadd_captioning_config(arr[50]),
+      qrCodes: dco_decode_opt_box_autoadd_bool(arr[51]),
     );
   }
 
@@ -28070,6 +28071,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_jupyterCellRendering = sse_decode_jupyter_cell_rendering(
       deserializer,
     );
+    var var_applyNotebookCellTags = sse_decode_bool(deserializer);
     var var_layout = sse_decode_opt_box_autoadd_layout_detection_config(
       deserializer,
     );
@@ -28145,6 +28147,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       escapeMarkdown: var_escapeMarkdown,
       tableAnchors: var_tableAnchors,
       jupyterCellRendering: var_jupyterCellRendering,
+      applyNotebookCellTags: var_applyNotebookCellTags,
       layout: var_layout,
       transcription: var_transcription,
       useLayoutForMarkdown: var_useLayoutForMarkdown,
@@ -39015,6 +39018,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.escapeMarkdown, serializer);
     sse_encode_bool(self.tableAnchors, serializer);
     sse_encode_jupyter_cell_rendering(self.jupyterCellRendering, serializer);
+    sse_encode_bool(self.applyNotebookCellTags, serializer);
     sse_encode_opt_box_autoadd_layout_detection_config(self.layout, serializer);
     sse_encode_opt_box_autoadd_transcription_config(
       self.transcription,

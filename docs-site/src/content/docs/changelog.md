@@ -159,6 +159,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed structured extraction forcing every caller schema to JSON Schema Draft 2020-12; validation
   now honors the schema's declared draft while keeping external reference resolution offline
   ([#1539](https://github.com/xberg-io/xberg/issues/1539)).
+- Fixed hybrid PDF OCR dropping surrounding prose when a table-bearing bare-text page was
+  restructured alongside geometry-backed pages.
+- Fixed automatic PDF OCR fallback reporting an empty success when OCR failed and no native text
+  remained; recoverable failures still return available native text with a warning.
+- Fixed degraded VLM fallback output replacing denser OCR text, while abstaining from the density
+  comparison for short text and non-space-delimited CJK or kana content.
 - Fixed Windows source and Ruby package builds failing on stable Rust while validating the
   identity of staged Tesseract source directories.
 - Fixed GCC 12+ WordPerfect builds by adding the standard header that declares `size_t` before
@@ -189,12 +195,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with a processing warning by default instead of silently emptying pages. Set
   `ocr.quality_thresholds.discard_suspected_ocr_noise = true` (or the equivalent pipeline quality
   threshold) to opt into the previous destructive filtering behavior.
-- Fixed hybrid PDF OCR dropping surrounding prose when a table-bearing bare-text page was
-  restructured alongside geometry-backed pages.
-- Fixed automatic PDF OCR fallback reporting an empty success when OCR failed and no native text
-  remained; recoverable failures still return available native text with a warning.
-- Fixed degraded VLM fallback output replacing denser OCR text, while abstaining from the density
-  comparison for short text and non-space-delimited CJK or kana content.
 - Fixed runtime crashes in system-linked Tesseract OCR builds by linking the required native exception-safety
   shim.
 - Fixed `xberg batch` so mixed-success runs emit every successful document and every attributed
@@ -318,6 +318,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- Bounded DOCX image and iWork archive member reads by the member's declared uncompressed size
+  instead of trusting that declaration. A crafted document could forge a small declared size in the
+  ZIP central directory while carrying a deflate stream that inflated to multiple gigabytes,
+  exhausting memory during DOCX image extraction (`images.extract_images`) or `.pages`/`.numbers`/
+  `.key` extraction. Reported by Syed Anas Mohiuddin
+  ([GHSA-85w9-wqcq-x48r](https://github.com/xberg-io/xberg/security/advisories/GHSA-85w9-wqcq-x48r)).
 - Pinned downloaded Tesseract, Leptonica, and English tessdata inputs to immutable revisions with
   verified sizes and SHA-256 digests, race-safe content-addressed caches, private build directories,
   and bounded fail-closed archive extraction.

@@ -154,7 +154,8 @@ typedef struct XBERGBBox XBERGBBox;
  * cross_region_prefix = "eu"
  *
  * `Debug` is implemented by hand so the three credential fields are never
- * printed. \endcode
+ * printed.
+ * \endcode
  */
 typedef struct XBERGBedrockConfig XBERGBedrockConfig;
 /**
@@ -485,7 +486,9 @@ typedef struct XBERGContributorRole XBERGContributorRole;
  * Main conversion options for HTML to Markdown conversion.
  *
  * Use `ConversionOptions.builder()` to construct, or `Default.default()` for
- * defaults. \code use html_to_markdown_rs::{ConversionOptions, HeadingStyle};
+ * defaults.
+ * \code
+ * use html_to_markdown_rs::{ConversionOptions, HeadingStyle};
  *
  * let options = ConversionOptions::builder()
  *     .heading_style(HeadingStyle::Atx)
@@ -670,9 +673,11 @@ typedef struct XBERGDocumentCounts XBERGDocumentCounts;
  * # Thread Safety
  *
  * Extractors must be thread-safe (`Send + Sync`) to support concurrent
- * extraction. \code use xberg::plugins::{Plugin, DocumentExtractor}; use
- * xberg::{ExtractInput, ExtractionConfig, ExtractedDocument, Result}; use
- * async_trait::async_trait;
+ * extraction.
+ * \code
+ * use xberg::plugins::{Plugin, DocumentExtractor};
+ * use xberg::{ExtractInput, ExtractionConfig, ExtractedDocument, Result};
+ * use async_trait::async_trait;
  *
  * struct CustomTextExtractor;
  *
@@ -1578,7 +1583,9 @@ typedef struct XBERGNodeContent XBERGNodeContent;
  * # Thread Safety
  *
  * OCR backends must be thread-safe (`Send + Sync`) to support concurrent
- * processing. \code use xberg::plugins::{Plugin, OcrBackend, OcrBackendType};
+ * processing.
+ * \code
+ * use xberg::plugins::{Plugin, OcrBackend, OcrBackendType};
  * use xberg::{Result, OcrConfig};
  * use async_trait::async_trait;
  * use std::borrow::Cow;
@@ -1711,7 +1718,9 @@ typedef struct XBERGOcrQualityThresholds XBERGOcrQualityThresholds;
 typedef struct XBERGOcrRotation XBERGOcrRotation;
 /**
  * Which pages of a PDF get OCR'd when neither `force_ocr` nor `force_ocr_pages`
- * applies. \code use xberg::{ExtractionConfig, OcrStrategy};
+ * applies.
+ * \code
+ * use xberg::{ExtractionConfig, OcrStrategy};
  *
  * // OCR pages that look like scans; keep native text everywhere else.
  * let config = ExtractionConfig {
@@ -1767,8 +1776,9 @@ typedef struct XBERGPaddleLanguage XBERGPaddleLanguage;
  * Configuration for PaddleOCR backend.
  *
  * Configures PaddleOCR text detection and recognition with multi-language
- * support. Uses a builder pattern for convenient configuration. \code use
- * xberg::PaddleOcrConfig;
+ * support. Uses a builder pattern for convenient configuration.
+ * \code
+ * use xberg::PaddleOcrConfig;
  *
  * // Create with default English configuration
  * let config = PaddleOcrConfig::new("en");
@@ -2866,12 +2876,13 @@ typedef uint64_t XBERGValidator;
  * every page to the VLM.
  *
  * When `OcrConfig.pipeline` is explicitly set, `vlm_fallback` is ignored â
- * the explicit pipeline takes precedence. \note Both `OnLowQuality` and
- * `Always` require `OcrConfig.vlm_config` to be `Some`. Constructing an
- * `OcrConfig` with one of these policies but no `vlm_config` is detected by
- * `OcrConfig::validate` and will surface as a `Validation` error at extraction
- * time, not a panic. \code use xberg::{OcrConfig, VlmFallbackPolicy,
- * LlmConfig};
+ * the explicit pipeline takes precedence.
+ * \note Both `OnLowQuality` and `Always` require `OcrConfig.vlm_config` to be
+ * `Some`. Constructing an `OcrConfig` with one of these policies but no
+ * `vlm_config` is detected by `OcrConfig::validate` and will surface as a
+ * `Validation` error at extraction time, not a panic.
+ * \code
+ * use xberg::{OcrConfig, VlmFallbackPolicy, LlmConfig};
  *
  * let config = OcrConfig {
  *     vlm_fallback: VlmFallbackPolicy::OnLowQuality { quality_threshold: 0.6 },
@@ -2884,7 +2895,8 @@ typedef uint64_t XBERGValidator;
  *
  * // Threshold calibration is deferred to the Stage 0 benchmark harness.
  * assert!(matches!(config.vlm_fallback, VlmFallbackPolicy::OnLowQuality { ..
- * })); \endcode
+ * }));
+ * \endcode
  */
 typedef struct XBERGVlmFallbackPolicy XBERGVlmFallbackPolicy;
 /**
@@ -4789,9 +4801,9 @@ uint32_t xberg_captioning_config_min_image_area(XBERGAlefHandle handle);
  *
  * Public and on the type rather than a free private `fn` because generated
  * bindings have to call it to reproduce the default, and a private one is out
- * of their reach. \note SAFETY: Caller must ensure all pointer arguments are
- * valid or null. Returned pointers must be freed with the appropriate free
- * function.
+ * of their reach.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 uint32_t xberg_captioning_config_default_min_image_area(void);
 
@@ -4995,9 +5007,9 @@ xberg_chunk_classification_config_max_concurrency(XBERGAlefHandle handle);
  *
  * Public and on the type rather than a free private `fn` because generated
  * bindings have to call it to reproduce the default, and a private one is out
- * of their reach. \note SAFETY: Caller must ensure all pointer arguments are
- * valid or null. Returned pointers must be freed with the appropriate free
- * function.
+ * of their reach.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 uintptr_t xberg_chunk_classification_config_default_batch_size(void);
 
@@ -5006,9 +5018,9 @@ uintptr_t xberg_chunk_classification_config_default_batch_size(void);
  *
  * Public and on the type rather than a free private `fn` because generated
  * bindings have to call it to reproduce the default, and a private one is out
- * of their reach. \note SAFETY: Caller must ensure all pointer arguments are
- * valid or null. Returned pointers must be freed with the appropriate free
- * function.
+ * of their reach.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 uintptr_t xberg_chunk_classification_config_default_max_concurrency(void);
 
@@ -8798,8 +8810,9 @@ char *xberg_document_structure_node_types(XBERGAlefHandle handle);
  * Call this after all nodes have been added to the structure. Internal
  * construction paths (builder, derivation) call this automatically.
  * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
- * Returned pointers must be freed with the appropriate free function. \code use
- * xberg::types::document_structure::{DocumentStructure, DocumentNode,
+ * Returned pointers must be freed with the appropriate free function.
+ * \code
+ * use xberg::types::document_structure::{DocumentStructure, DocumentNode,
  * NodeContent};
  *
  * let mut structure = DocumentStructure {
@@ -10437,15 +10450,6 @@ uintptr_t xberg_excel_sheet_col_count(XBERGAlefHandle handle);
 uintptr_t xberg_excel_sheet_cell_count(XBERGAlefHandle handle);
 
 /**
- * Get the `table_cells` field from a `ExcelSheet`.
- * A non-null returned pointer is owned by the caller.
- * It must be freed with `xberg_free_string`.
- * # Safety
- * Pointer must be a valid handle returned by this library.
- */
-char *xberg_excel_sheet_table_cells(XBERGAlefHandle handle);
-
-/**
  * Create a `ExcelWorkbook` from a JSON string. Returns null on failure.
  * # Safety
  * JSON string must be valid UTF-8 and null-terminated.
@@ -11652,6 +11656,14 @@ XBERGAlefHandle
 xberg_extraction_config_jupyter_cell_rendering(XBERGAlefHandle handle);
 
 /**
+ * Get the `apply_notebook_cell_tags` field from a `ExtractionConfig`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+int32_t
+xberg_extraction_config_apply_notebook_cell_tags(XBERGAlefHandle handle);
+
+/**
  * Get the `layout` field from a `ExtractionConfig`.
  * A non-null returned handle is owned by the caller.
  * It must be freed with `xberg_layout_detection_config_free`.
@@ -11883,9 +11895,9 @@ int32_t xberg_extraction_config_has_qr_codes(XBERGAlefHandle handle);
  *
  * Public and on the type rather than a free private `fn` because generated
  * bindings have to call it to reproduce the default, and a private one is out
- * of their reach. \note SAFETY: Caller must ensure all pointer arguments are
- * valid or null. Returned pointers must be freed with the appropriate free
- * function.
+ * of their reach.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 uintptr_t xberg_extraction_config_default_archive_depth(void);
 
@@ -11898,9 +11910,9 @@ uintptr_t xberg_extraction_config_default_archive_depth(void);
  *
  * Public and on the type rather than a free private `fn` because generated
  * bindings have to call it to reproduce the default, and a private one is out
- * of their reach. \note SAFETY: Caller must ensure all pointer arguments are
- * valid or null. Returned pointers must be freed with the appropriate free
- * function.
+ * of their reach.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 uint64_t xberg_extraction_config_default_max_embedded_file_bytes(void);
 
@@ -11913,9 +11925,9 @@ uint64_t xberg_extraction_config_default_max_embedded_file_bytes(void);
  * Call this function first: `1` means the sibling getter's return value is
  * meaningful, `0` means the result was absent and the getter's sentinel must be
  * ignored, `-1` reports an invalid handle or a call error (see
- * `xberg_last_error_code`). \note SAFETY: Caller must ensure all pointer
- * arguments are valid or null. Returned pointers must be freed with the
- * appropriate free function.
+ * `xberg_last_error_code`).
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 int32_t
 xberg_extraction_config_default_max_embedded_file_bytes_has_result(void);
@@ -11932,9 +11944,9 @@ xberg_extraction_config_default_max_embedded_file_bytes_has_result(void);
  *
  * Public and on the type rather than a free private `fn` because generated
  * bindings have to call it to reproduce the default, and a private one is out
- * of their reach. \note SAFETY: Caller must ensure all pointer arguments are
- * valid or null. Returned pointers must be freed with the appropriate free
- * function.
+ * of their reach.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 uint64_t xberg_extraction_config_default_extraction_timeout(void);
 
@@ -11947,9 +11959,9 @@ uint64_t xberg_extraction_config_default_extraction_timeout(void);
  * Call this function first: `1` means the sibling getter's return value is
  * meaningful, `0` means the result was absent and the getter's sentinel must be
  * ignored, `-1` reports an invalid handle or a call error (see
- * `xberg_last_error_code`). \note SAFETY: Caller must ensure all pointer
- * arguments are valid or null. Returned pointers must be freed with the
- * appropriate free function.
+ * `xberg_last_error_code`).
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 int32_t xberg_extraction_config_default_extraction_timeout_has_result(void);
 
@@ -11984,10 +11996,11 @@ XBERGAlefHandle xberg_extraction_config_default(void);
  * Called automatically when a config is loaded from a file, built from a JSON
  * override, or passed to the public `extract` and `extract_batch` entry points.
  * Call this method explicitly before passing a typed config to lower-level
- * processing APIs. \note Returns `XbergError::Validation` describing the first
- * invalid setting found. \note SAFETY: Caller must ensure all pointer arguments
- * are valid or null. Returned pointers must be freed with the appropriate free
- * function.
+ * processing APIs.
+ * \note Returns `XbergError::Validation` describing the first invalid setting
+ * found.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 int32_t xberg_extraction_config_validate(XBERGAlefHandle this_);
 
@@ -12021,9 +12034,9 @@ int32_t xberg_extraction_config_needs_image_data(XBERGAlefHandle this_);
  *
  * For text-only extractions (no OCR, no image extraction, no captioning),
  * skipping image decompression can improve CPU utilization by 5-10% by avoiding
- * wasteful image I/O and processing when results won't be used. \note SAFETY:
- * Caller must ensure all pointer arguments are valid or null. Returned pointers
- * must be freed with the appropriate free function.
+ * wasteful image I/O and processing when results won't be used.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 int32_t xberg_extraction_config_needs_image_processing(XBERGAlefHandle this_);
 
@@ -17558,24 +17571,6 @@ XBERGAlefHandle xberg_ocr_config_vlm_config(XBERGAlefHandle handle);
 char *xberg_ocr_config_vlm_prompt(XBERGAlefHandle handle);
 
 /**
- * Get the `acceleration` field from a `OcrConfig`.
- * A non-null returned handle is owned by the caller.
- * It must be freed with `xberg_acceleration_config_free`.
- * # Safety
- * Pointer must be a valid handle returned by this library.
- */
-XBERGAlefHandle xberg_ocr_config_acceleration(XBERGAlefHandle handle);
-
-/**
- * Get the `tessdata_bytes` field from a `OcrConfig`.
- * A non-null returned pointer is owned by the caller.
- * It must be freed with `xberg_free_string`.
- * # Safety
- * Pointer must be a valid handle returned by this library.
- */
-char *xberg_ocr_config_tessdata_bytes(XBERGAlefHandle handle);
-
-/**
  * Get the `tessdata_path` field from a `OcrConfig`.
  * A non-null returned pointer is owned by the caller.
  * It must be freed with `xberg_free_string`.
@@ -18658,8 +18653,10 @@ xberg_paddle_ocr_config_inference_backend(XBERGAlefHandle handle);
  * Sets a custom Hugging Face Hub cache root for model files.
  * \param path Path to cache directory
  * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
- * Returned pointers must be freed with the appropriate free function. \code use
- * xberg::PaddleOcrConfig; use std::path::PathBuf;
+ * Returned pointers must be freed with the appropriate free function.
+ * \code
+ * use xberg::PaddleOcrConfig;
+ * use std::path::PathBuf;
  *
  * let config = PaddleOcrConfig::new("en")
  *     .with_cache_dir(PathBuf::from("/tmp/paddle-cache"));
@@ -18674,8 +18671,9 @@ XBERGAlefHandle xberg_paddle_ocr_config_with_cache_dir(XBERGAlefHandle this_,
  * Enables or disables table structure detection.
  * \param enable Whether to enable table detection
  * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
- * Returned pointers must be freed with the appropriate free function. \code use
- * xberg::PaddleOcrConfig;
+ * Returned pointers must be freed with the appropriate free function.
+ * \code
+ * use xberg::PaddleOcrConfig;
  *
  * let config = PaddleOcrConfig::new("en")
  *     .with_table_detection(true);
@@ -18783,9 +18781,9 @@ XBERGAlefHandle xberg_paddle_ocr_config_with_padding(XBERGAlefHandle this_,
 /**
  * Sets the model tier controlling detection/recognition model size.
  * \param tier `"mobile"` (default, lightweight, faster) or `"server"` (high
- * accuracy, GPU/complex documents) \note SAFETY: Caller must ensure all pointer
- * arguments are valid or null. Returned pointers must be freed with the
- * appropriate free function.
+ * accuracy, GPU/complex documents)
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 XBERGAlefHandle xberg_paddle_ocr_config_with_model_tier(XBERGAlefHandle this_,
                                                         const char *tier);
@@ -18795,9 +18793,9 @@ XBERGAlefHandle xberg_paddle_ocr_config_with_model_tier(XBERGAlefHandle this_,
 /**
  * Sets the model generation.
  * \param version `"pp-ocrv6"` (default) or `"pp-ocrv5"`. Under `"pp-ocrv6"`,
- * `model_tier` selects among `"medium"`/`"small"`/`"tiny"`. \note SAFETY:
- * Caller must ensure all pointer arguments are valid or null. Returned pointers
- * must be freed with the appropriate free function.
+ * `model_tier` selects among `"medium"`/`"small"`/`"tiny"`.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 XBERGAlefHandle
 xberg_paddle_ocr_config_with_model_version(XBERGAlefHandle this_,
@@ -19589,15 +19587,16 @@ float xberg_page_signals_layout_text_density(XBERGAlefHandle handle);
  * Callers that already have structured per-page data (e.g. from a PDF
  * extractor) can set individual fields directly.  This constructor is for
  * callers that only have the plain-text content of a page (e.g. from
- * `PageContent`). \param page_number â 1-indexed page number. \param text
- * â Full extracted text for the page. \param layout_text_density â
- * Pre-computed text density in `[0.0, 1.0]`. Pass `0.0` when unknown (disables
- * density-shift detection for this page). # Heuristics All signal derivations
- * are *conservative starting points*. Each is documented inline. They err on
- * the side of fewer false positives; tune thresholds via `MultidocThresholds`
- * rather than by changing these heuristics. \note SAFETY: Caller must ensure
- * all pointer arguments are valid or null. Returned pointers must be freed with
- * the appropriate free function.
+ * `PageContent`).
+ * \param page_number â 1-indexed page number.
+ * \param text â Full extracted text for the page.
+ * \param layout_text_density â Pre-computed text density in `[0.0, 1.0]`.
+ * Pass `0.0` when unknown (disables density-shift detection for this page). #
+ * Heuristics All signal derivations are *conservative starting points*. Each is
+ * documented inline. They err on the side of fewer false positives; tune
+ * thresholds via `MultidocThresholds` rather than by changing these heuristics.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 XBERGAlefHandle xberg_page_signals_from_page_text(uint32_t page_number,
                                                   const char *text,
@@ -20490,24 +20489,6 @@ char *xberg_post_processor_config_enabled_processors(XBERGAlefHandle handle);
  * Pointer must be a valid handle returned by this library.
  */
 char *xberg_post_processor_config_disabled_processors(XBERGAlefHandle handle);
-
-/**
- * Get the `enabled_set` field from a `PostProcessorConfig`.
- * A non-null returned pointer is owned by the caller.
- * It must be freed with `xberg_free_string`.
- * # Safety
- * Pointer must be a valid handle returned by this library.
- */
-char *xberg_post_processor_config_enabled_set(XBERGAlefHandle handle);
-
-/**
- * Get the `disabled_set` field from a `PostProcessorConfig`.
- * A non-null returned pointer is owned by the caller.
- * It must be freed with `xberg_free_string`.
- * # Safety
- * Pointer must be a valid handle returned by this library.
- */
-char *xberg_post_processor_config_disabled_set(XBERGAlefHandle handle);
 
 /**
  * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
@@ -22795,8 +22776,9 @@ XBERGAlefHandle xberg_server_config_default(void);
 /**
  * Get the server listen address (host:port).
  * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
- * Returned pointers must be freed with the appropriate free function. \code use
- * xberg::core::ServerConfig;
+ * Returned pointers must be freed with the appropriate free function.
+ * \code
+ * use xberg::core::ServerConfig;
  *
  * let config = ServerConfig::default();
  * assert_eq!(config.listen_addr(), "127.0.0.1:8000");
@@ -22812,8 +22794,9 @@ char *xberg_server_config_listen_addr(XBERGAlefHandle this_);
  * Returns `true` if the `cors_origins` vector is empty, meaning all origins
  * are allowed. Returns `false` if specific origins are configured.
  * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
- * Returned pointers must be freed with the appropriate free function. \code use
- * xberg::core::ServerConfig;
+ * Returned pointers must be freed with the appropriate free function.
+ * \code
+ * use xberg::core::ServerConfig;
  *
  * let mut config = ServerConfig::default();
  * assert!(config.cors_allows_all());
@@ -22834,8 +22817,9 @@ int32_t xberg_server_config_cors_allows_all(XBERGAlefHandle this_);
  * - The given origin is in the allowed origins list
  * \param origin The origin to check (e.g., "<https://example.com>")
  * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
- * Returned pointers must be freed with the appropriate free function. \code use
- * xberg::core::ServerConfig;
+ * Returned pointers must be freed with the appropriate free function.
+ * \code
+ * use xberg::core::ServerConfig;
  *
  * let mut config = ServerConfig::default();
  * assert!(config.is_origin_allowed("https://example.com"));
@@ -22853,8 +22837,9 @@ int32_t xberg_server_config_is_origin_allowed(XBERGAlefHandle this_,
 /**
  * Get maximum request body size in megabytes (rounded up).
  * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
- * Returned pointers must be freed with the appropriate free function. \code use
- * xberg::core::ServerConfig;
+ * Returned pointers must be freed with the appropriate free function.
+ * \code
+ * use xberg::core::ServerConfig;
  *
  * let mut config = ServerConfig::default();
  * assert_eq!(config.max_request_body_mb(), 100);
@@ -22867,8 +22852,9 @@ uintptr_t xberg_server_config_max_request_body_mb(XBERGAlefHandle this_);
 /**
  * Get maximum multipart field size in megabytes (rounded up).
  * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
- * Returned pointers must be freed with the appropriate free function. \code use
- * xberg::core::ServerConfig;
+ * Returned pointers must be freed with the appropriate free function.
+ * \code
+ * use xberg::core::ServerConfig;
  *
  * let mut config = ServerConfig::default();
  * assert_eq!(config.max_multipart_field_mb(), 100);
@@ -23442,9 +23428,9 @@ XBERGAlefHandle xberg_structured_extraction_config_llm(XBERGAlefHandle handle);
  *
  * Public and on the type rather than a free private `fn` because generated
  * bindings have to call it to reproduce the default, and a private one is out
- * of their reach. \note SAFETY: Caller must ensure all pointer arguments are
- * valid or null. Returned pointers must be freed with the appropriate free
- * function.
+ * of their reach.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 char *xberg_structured_extraction_config_default_schema_name(void);
 
@@ -25184,9 +25170,9 @@ XBERGAlefHandle xberg_url_extraction_config_default(void);
  *
  * Public and on the type rather than a free private `fn` because generated
  * bindings have to call it to reproduce the default, and a private one is out
- * of their reach. \note SAFETY: Caller must ensure all pointer arguments are
- * valid or null. Returned pointers must be freed with the appropriate free
- * function.
+ * of their reach.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 XBERGAlefHandle xberg_url_extraction_config_default_xberg_crawl_config(void);
 #endif
@@ -29271,10 +29257,10 @@ void xberg_whitespace_mode_free(XBERGAlefHandle handle);
  *
  * This owned form preserves the mutations when the document crosses a
  * language-binding boundary. Rust callers that already own a mutable document
- * can use `classify_chunks` to avoid moving it. \note Returns the same
- * validation and LLM errors as `classify_chunks`. \note SAFETY: Caller must
- * ensure all pointer arguments are valid or null. Returned pointers must be
- * freed with the appropriate free function.
+ * can use `classify_chunks` to avoid moving it.
+ * \note Returns the same validation and LLM errors as `classify_chunks`.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 XBERGAlefHandle xberg_classify_chunks_owned(XBERGAlefHandle result,
                                             XBERGAlefHandle config);
@@ -29314,11 +29300,14 @@ XBERGAlefHandle xberg_extract_batch(const char *inputs, XBERGAlefHandle config);
  * The heuristic is simple: a line that contains alphabetic words, ends with
  * sentence punctuation, and is not a heading, blank line, or markup-only line
  * is considered a claim. Exclude lines that appear in the citation block (after
- * `---` + `<!-- citations ... -->`). \param markdown The markdown text to
- * search \return A vector of trimmed line text strings for unmarked claims.
+ * `---` + `<!-- citations ... -->`).
+ * \param markdown The markdown text to search
+ * \return A vector of trimmed line text strings for unmarked claims.
  * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
- * Returned pointers must be freed with the appropriate free function. \code let
- * text = r#"This is a claim without citation. Another claim with citation.[^1]
+ * Returned pointers must be freed with the appropriate free function.
+ * \code
+ * let text = r#"This is a claim without citation.
+ * Another claim with citation.[^1]
  * This is a claim with inference.[*inference*]
  *
  * [^1]: Citation"#;
@@ -29335,9 +29324,9 @@ char *xberg_find_unmarked_claims(const char *markdown);
  * Return the byte length of the C string most recently returned by
  * `xberg_find_unmarked_claims` on this thread. Returns 0 when the primary call
  * returned null or failed before producing a string. Enables safe slice
- * construction in Zig and Java FFM Panama without a NUL-scan. \note SAFETY:
- * Pointer arguments are ignored and are present only to keep the companion ABI
- * aligned with `xberg_find_unmarked_claims`.
+ * construction in Zig and Java FFM Panama without a NUL-scan.
+ * \note SAFETY: Pointer arguments are ignored and are present only to keep the
+ * companion ABI aligned with `xberg_find_unmarked_claims`.
  */
 uintptr_t xberg_find_unmarked_claims_len(const char *_markdown);
 #endif
@@ -29353,9 +29342,9 @@ char *xberg_list_document_extractors(void);
  * Return the byte length of the C string most recently returned by
  * `xberg_list_document_extractors` on this thread. Returns 0 when the primary
  * call returned null or failed before producing a string. Enables safe slice
- * construction in Zig and Java FFM Panama without a NUL-scan. \note SAFETY:
- * Pointer arguments are ignored and are present only to keep the companion ABI
- * aligned with `xberg_list_document_extractors`.
+ * construction in Zig and Java FFM Panama without a NUL-scan.
+ * \note SAFETY: Pointer arguments are ignored and are present only to keep the
+ * companion ABI aligned with `xberg_list_document_extractors`.
  */
 uintptr_t xberg_list_document_extractors_len(void);
 
@@ -29373,9 +29362,9 @@ char *xberg_list_embedding_backends(void);
  * Return the byte length of the C string most recently returned by
  * `xberg_list_embedding_backends` on this thread. Returns 0 when the primary
  * call returned null or failed before producing a string. Enables safe slice
- * construction in Zig and Java FFM Panama without a NUL-scan. \note SAFETY:
- * Pointer arguments are ignored and are present only to keep the companion ABI
- * aligned with `xberg_list_embedding_backends`.
+ * construction in Zig and Java FFM Panama without a NUL-scan.
+ * \note SAFETY: Pointer arguments are ignored and are present only to keep the
+ * companion ABI aligned with `xberg_list_embedding_backends`.
  */
 uintptr_t xberg_list_embedding_backends_len(void);
 
@@ -29383,9 +29372,10 @@ uintptr_t xberg_list_embedding_backends_len(void);
  * List all registered OCR backends.
  *
  * Returns the names of all OCR backends currently registered in the global
- * registry. \return A vector of OCR backend names. \note SAFETY: Caller must
- * ensure all pointer arguments are valid or null. Returned pointers must be
- * freed with the appropriate free function.
+ * registry.
+ * \return A vector of OCR backend names.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  * \code
  * use xberg::plugins::list_ocr_backends;
  *
@@ -29401,9 +29391,9 @@ char *xberg_list_ocr_backends(void);
  * Return the byte length of the C string most recently returned by
  * `xberg_list_ocr_backends` on this thread. Returns 0 when the primary call
  * returned null or failed before producing a string. Enables safe slice
- * construction in Zig and Java FFM Panama without a NUL-scan. \note SAFETY:
- * Pointer arguments are ignored and are present only to keep the companion ABI
- * aligned with `xberg_list_ocr_backends`.
+ * construction in Zig and Java FFM Panama without a NUL-scan.
+ * \note SAFETY: Pointer arguments are ignored and are present only to keep the
+ * companion ABI aligned with `xberg_list_ocr_backends`.
  */
 uintptr_t xberg_list_ocr_backends_len(void);
 
@@ -29415,8 +29405,9 @@ uintptr_t xberg_list_ocr_backends_len(void);
  * \return - `Ok(Vec<String>)` - Vector of post-processor names
  * - `Err(...)` if the registry lock is poisoned
  * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
- * Returned pointers must be freed with the appropriate free function. \code use
- * xberg::plugins::list_post_processors;
+ * Returned pointers must be freed with the appropriate free function.
+ * \code
+ * use xberg::plugins::list_post_processors;
  *
  * let processors = list_post_processors()?;
  * for name in processors {
@@ -29430,9 +29421,9 @@ char *xberg_list_post_processors(void);
  * Return the byte length of the C string most recently returned by
  * `xberg_list_post_processors` on this thread. Returns 0 when the primary call
  * returned null or failed before producing a string. Enables safe slice
- * construction in Zig and Java FFM Panama without a NUL-scan. \note SAFETY:
- * Pointer arguments are ignored and are present only to keep the companion ABI
- * aligned with `xberg_list_post_processors`.
+ * construction in Zig and Java FFM Panama without a NUL-scan.
+ * \note SAFETY: Pointer arguments are ignored and are present only to keep the
+ * companion ABI aligned with `xberg_list_post_processors`.
  */
 uintptr_t xberg_list_post_processors_len(void);
 
@@ -29448,9 +29439,9 @@ char *xberg_list_renderers(void);
  * Return the byte length of the C string most recently returned by
  * `xberg_list_renderers` on this thread. Returns 0 when the primary call
  * returned null or failed before producing a string. Enables safe slice
- * construction in Zig and Java FFM Panama without a NUL-scan. \note SAFETY:
- * Pointer arguments are ignored and are present only to keep the companion ABI
- * aligned with `xberg_list_renderers`.
+ * construction in Zig and Java FFM Panama without a NUL-scan.
+ * \note SAFETY: Pointer arguments are ignored and are present only to keep the
+ * companion ABI aligned with `xberg_list_renderers`.
  */
 uintptr_t xberg_list_renderers_len(void);
 
@@ -29468,9 +29459,9 @@ char *xberg_list_reranker_backends(void);
  * Return the byte length of the C string most recently returned by
  * `xberg_list_reranker_backends` on this thread. Returns 0 when the primary
  * call returned null or failed before producing a string. Enables safe slice
- * construction in Zig and Java FFM Panama without a NUL-scan. \note SAFETY:
- * Pointer arguments are ignored and are present only to keep the companion ABI
- * aligned with `xberg_list_reranker_backends`.
+ * construction in Zig and Java FFM Panama without a NUL-scan.
+ * \note SAFETY: Pointer arguments are ignored and are present only to keep the
+ * companion ABI aligned with `xberg_list_reranker_backends`.
  */
 uintptr_t xberg_list_reranker_backends_len(void);
 
@@ -29495,8 +29486,9 @@ uintptr_t xberg_list_reranker_backends_len(void);
  * \return A vector of `SupportedFormat` entries sorted by extension, limited to
  * formats with a registered extractor in this build.
  * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
- * Returned pointers must be freed with the appropriate free function. \code use
- * xberg::core::mime::list_supported_formats;
+ * Returned pointers must be freed with the appropriate free function.
+ * \code
+ * use xberg::core::mime::list_supported_formats;
  *
  * let formats = list_supported_formats();
  * assert!(!formats.is_empty());
@@ -29508,9 +29500,9 @@ char *xberg_list_supported_formats(void);
  * Return the byte length of the C string most recently returned by
  * `xberg_list_supported_formats` on this thread. Returns 0 when the primary
  * call returned null or failed before producing a string. Enables safe slice
- * construction in Zig and Java FFM Panama without a NUL-scan. \note SAFETY:
- * Pointer arguments are ignored and are present only to keep the companion ABI
- * aligned with `xberg_list_supported_formats`.
+ * construction in Zig and Java FFM Panama without a NUL-scan.
+ * \note SAFETY: Pointer arguments are ignored and are present only to keep the
+ * companion ABI aligned with `xberg_list_supported_formats`.
  */
 uintptr_t xberg_list_supported_formats_len(void);
 
@@ -29528,9 +29520,9 @@ char *xberg_list_tokenizer_backends(void);
  * Return the byte length of the C string most recently returned by
  * `xberg_list_tokenizer_backends` on this thread. Returns 0 when the primary
  * call returned null or failed before producing a string. Enables safe slice
- * construction in Zig and Java FFM Panama without a NUL-scan. \note SAFETY:
- * Pointer arguments are ignored and are present only to keep the companion ABI
- * aligned with `xberg_list_tokenizer_backends`.
+ * construction in Zig and Java FFM Panama without a NUL-scan.
+ * \note SAFETY: Pointer arguments are ignored and are present only to keep the
+ * companion ABI aligned with `xberg_list_tokenizer_backends`.
  */
 uintptr_t xberg_list_tokenizer_backends_len(void);
 
@@ -29545,9 +29537,9 @@ char *xberg_list_validators(void);
  * Return the byte length of the C string most recently returned by
  * `xberg_list_validators` on this thread. Returns 0 when the primary call
  * returned null or failed before producing a string. Enables safe slice
- * construction in Zig and Java FFM Panama without a NUL-scan. \note SAFETY:
- * Pointer arguments are ignored and are present only to keep the companion ABI
- * aligned with `xberg_list_validators`.
+ * construction in Zig and Java FFM Panama without a NUL-scan.
+ * \note SAFETY: Pointer arguments are ignored and are present only to keep the
+ * companion ABI aligned with `xberg_list_validators`.
  */
 uintptr_t xberg_list_validators_len(void);
 
@@ -29562,10 +29554,11 @@ uintptr_t xberg_list_validators_len(void);
  *
  * Use this when you need the URL inventory of a site before committing to
  * full document extraction â e.g. to build a crawl queue or validate
- * scope. \note Returns `Validation` if the crawl configuration fails validation
- * or if the map operation itself fails. \note SAFETY: Caller must ensure all
- * pointer arguments are valid or null. Returned pointers must be freed with the
- * appropriate free function.
+ * scope.
+ * \note Returns `Validation` if the crawl configuration fails
+ * validation or if the map operation itself fails.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
  */
 XBERGAlefHandle xberg_map_url(const char *uri, XBERGAlefHandle config);
 #endif
@@ -29593,9 +29586,9 @@ char *xberg_max_sim_rank(XBERGAlefHandle query, const char *docs);
  * Return the byte length of the C string most recently returned by
  * `xberg_max_sim_rank` on this thread. Returns 0 when the primary call returned
  * null or failed before producing a string. Enables safe slice construction in
- * Zig and Java FFM Panama without a NUL-scan. \note SAFETY: Pointer arguments
- * are ignored and are present only to keep the companion ABI aligned with
- * `xberg_max_sim_rank`.
+ * Zig and Java FFM Panama without a NUL-scan.
+ * \note SAFETY: Pointer arguments are ignored and are present only to keep the
+ * companion ABI aligned with `xberg_max_sim_rank`.
  */
 uintptr_t xberg_max_sim_rank_len(XBERGAlefHandle _query, const char *_docs);
 #endif
@@ -29630,10 +29623,12 @@ double xberg_max_sim_score(XBERGAlefHandle query, XBERGAlefHandle doc);
  * \param excerpt The text snippet to find
  * \param source_text The full source text to search
  * \return `true` if the excerpt appears (exactly or with normalized
- * whitespace), `false` otherwise. \note SAFETY: Caller must ensure all pointer
- * arguments are valid or null. Returned pointers must be freed with the
- * appropriate free function. \code let source = "The document states: Exact
- * quoted text."; let excerpt = "Exact quoted text";
+ * whitespace), `false` otherwise.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
+ * \code
+ * let source = "The document states: Exact quoted text.";
+ * let excerpt = "Exact quoted text";
  * assert!(verify_excerpt(excerpt, source));
  *
  * // Whitespace normalization

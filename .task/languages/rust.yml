@@ -126,6 +126,13 @@ tasks:
   wasm:build:all:
     desc: "Build all WASM targets (web/bundler/nodejs/deno) plus the TypeScript wrapper"
     dir: crates/xberg-wasm
+    # The workspace `[profile.release]` targets native throughput (`opt-level = 3`);
+    # on wasm32 that costs ~12 MB of `code` section and pushes the bundle over
+    # jsDelivr's 50 MiB per-file cap. Mirrors the same override in
+    # .github/workflows/publish.yaml's build-wasm-package step so a local build
+    # measures the artifact publish actually ships. ~keep
+    env:
+      CARGO_PROFILE_RELEASE_OPT_LEVEL: z
     cmds:
       - pnpm run build:all
 

@@ -94,8 +94,31 @@ pub(crate) fn windows_cmake_source_units(path: &[u16]) -> Vec<u16> {
     path.strip_prefix(&WINDOWS_VERBATIM_PREFIX).unwrap_or(path).to_vec()
 }
 
+/// Render a filesystem path for use as the value of a CMake `-D<variable>=<value>` argument.
+///
+/// `fs::canonicalize` returns extended-length ("verbatim") paths on Windows, such as
+/// `\\?\D:\a\b`. Converting only the separators leaves `//?/D:/a/b`, which CMake reads as a
+/// UNC root instead of a drive path. Package files produced by `install(EXPORT ...)` recover
+/// their own install prefix from the directory they were loaded from, so a verbatim prefix
+/// reaching `CMAKE_INSTALL_PREFIX` or `<Package>_DIR` propagates into the generated
+/// `<Package>Targets.cmake`, whose `file(GLOB ...)` for the per-configuration file then matches
+/// nothing. The imported target is still created, but without an `IMPORTED_LOCATION` for any
+/// configuration. Strip the verbatim prefix first, then use the forward separators CMake accepts
+/// on every platform.
+#[cfg(any(test, windows))]
+pub(crate) fn windows_cmake_argument_path(path: &str) -> String {
+    let units = path.encode_utf16().collect::<Vec<_>>();
+    String::from_utf16_lossy(&windows_cmake_source_units(&units)).replace('\\', "/")
+}
+
+/// Drop the extended-length prefix from a canonicalized Windows path, keeping native separators.
+///
+/// The verbatim prefix exists to defeat `MAX_PATH`, so it is only removed once `same_file`
+/// confirms the shortened form still opens the very same directory. A path that is long enough
+/// to need the prefix cannot be opened without it, so the check fails and the caller keeps the
+/// verbatim form rather than trading a tool-compatibility problem for a path-length one.
 #[cfg(windows)]
-pub(crate) fn cmake_source_path(path: &Path) -> io::Result<PathBuf> {
+fn windows_path_without_verbatim_prefix(path: &Path) -> io::Result<PathBuf> {
     let units = path.as_os_str().encode_wide().collect::<Vec<_>>();
     let normalized = PathBuf::from(OsString::from_wide(&windows_cmake_source_units(&units)));
     if same_file::is_same_file(path, &normalized)? {
@@ -104,15 +127,42 @@ pub(crate) fn cmake_source_path(path: &Path) -> io::Result<PathBuf> {
     Err(io::Error::new(
         io::ErrorKind::InvalidData,
         format!(
-            "CMake source alias does not identify the canonical source: {}",
+            "path without the Windows verbatim prefix does not identify the same directory: {}",
             path.display()
         ),
     ))
 }
 
+#[cfg(windows)]
+pub(crate) fn cmake_source_path(path: &Path) -> io::Result<PathBuf> {
+    windows_path_without_verbatim_prefix(path)
+}
+
 #[cfg(all(not(windows), not(test)))]
 pub(crate) fn cmake_source_path(path: &Path) -> io::Result<PathBuf> {
     Ok(path.to_path_buf())
+}
+
+/// Render a directory for a path argument handed to Cargo or to an external build tool:
+/// `cargo:rustc-link-search=native=`, the MSVC linker's `/LIBPATH:`, and the C compiler's `/I`.
+///
+/// Every such directory here descends from `fs::canonicalize(OUT_DIR)`, so on Windows it arrives
+/// with the `\\?\` verbatim prefix. Verbatim paths bypass Win32 path normalization outright: the
+/// forward slash is an ordinary filename character inside one, so an `#include <tesseract/capi.h>`
+/// resolved against a verbatim `/I` directory never opens, and `link.exe` has no documented
+/// contract for accepting `/LIBPATH:\\?\...` either. The prefix buys nothing at these lengths --
+/// the deepest path this build hands over on CI measures 132 characters against a 260-character
+/// `MAX_PATH` -- so it is dropped whenever the shorter form still names the same directory, and
+/// kept when it does not.
+pub(crate) fn tool_argument_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        windows_path_without_verbatim_prefix(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+    #[cfg(not(windows))]
+    {
+        path.to_path_buf()
+    }
 }
 
 pub(crate) fn prepare_verified_artifact(

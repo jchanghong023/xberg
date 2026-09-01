@@ -209,6 +209,63 @@
       ],
       "type": "object"
     },
+    "ArgvRunConfig": {
+      "additionalProperties": false,
+      "description": "A sequence of argv-only steps sharing one working directory and one set of environment\nvariables -- the typed alternative to `StringOrVec` for run commands alef *generates*\nitself and that must embed a config-supplied value (e.g. a Go module path) as a literal\nargument. Never populated by hand-writing shell syntax: there is nothing to quote or\nescape here, because no step is ever handed to a shell in the first place.",
+      "properties": {
+        "env": {
+          "default": [],
+          "items": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "string"
+              }
+            ],
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "steps": {
+          "items": {
+            "$ref": "#/$defs/ArgvStep"
+          },
+          "type": "array"
+        },
+        "work_dir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "work_dir",
+        "steps"
+      ],
+      "type": "object"
+    },
+    "ArgvStep": {
+      "additionalProperties": false,
+      "description": "One argv-only step of an [`ArgvRunConfig`]: a program and its literal arguments, invoked\ndirectly via `Command::new(command).args(args)` -- never through a shell. Each argument is\npassed to the child process as a single opaque element, so shell metacharacters inside an\nargument (`;`, backticks, `$(...)`, quotes) are inert: there is no shell parsing them.",
+      "properties": {
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command",
+        "args"
+      ],
+      "type": "object"
+    },
     "BridgeBinding": {
       "description": "How a trait bridge attaches to the public API.\n\nSee [`TraitBridgeConfig::bind_via`] for the user-facing description.",
       "oneOf": [
@@ -1211,6 +1268,18 @@
     "CleanConfig": {
       "additionalProperties": false,
       "properties": {
+        "argv_clean": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArgvRunConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Argv-only alternative to `clean`. See [`ArgvRunConfig`]. When both `clean` and\n`argv_clean` are set, the caller runs `argv_clean` and ignores `clean`."
+        },
         "before": {
           "anyOf": [
             {
@@ -1231,7 +1300,7 @@
               "type": "null"
             }
           ],
-          "description": "Command(s) to clean build artifacts for this language."
+          "description": "Command(s) to clean build artifacts for this language.\n\nMutually exclusive with `argv_clean` in practice, for the same reason as\n`TestAppRunConfig::run`/`argv_run`: `alef.toml` overrides always set this field, and a\ndefault that must embed a config-supplied path (a custom package output directory) as a\nliteral argument sets `argv_clean` instead."
         },
         "precondition": {
           "description": "Shell command that must exit 0 for clean to run; skip with warning on failure.",
@@ -3494,7 +3563,7 @@
     },
     "HomebrewCliTest": {
       "additionalProperties": false,
-      "description": "A single CLI test entry for the Homebrew test_app generator.\n\nEach entry describes one test step in `run_tests.sh`.  The `command`\nfield is a verbatim shell fragment; the following variables are already\nexported by `run_tests.sh` when the fragment is evaluated:\n\n- `$CLI_FORMULA` — the CLI binary name (from `cli_formula`)\n- `$VERSION` — the package version\n- `$TAP` — the Homebrew tap (e.g. `\"myorg/tap\"`)\n- `$SCRIPT_DIR` — absolute directory of `run_tests.sh`\n\nIf `expect_contains` is set the test passes only when the command's\ncombined stdout+stderr contains the given substring; otherwise a zero\nexit code is sufficient.\n\nExample `alef.toml`:\n\n```toml\n[[crates.e2e.registry.packages.homebrew.cli_tests]]\nname = \"version\"\ncommand = \"$CLI_FORMULA --version\"\nexpect_contains = \"$VERSION\"\n\n[[crates.e2e.registry.packages.homebrew.cli_tests]]\nname = \"convert-h1\"\ncommand = \"echo '<h1>Hi</h1>' | $CLI_FORMULA\"\nexpect_contains = \"# Hi\"\n```",
+      "description": "A single CLI test entry for the Homebrew test_app generator.\n\nEach entry describes one test step in `run_tests.sh`.  The `command`\nfield is a verbatim shell fragment; the following variables are already\nexported by `run_tests.sh` when the fragment is evaluated:\n\n- `$CLI_FORMULA` — the CLI binary name (from `cli_formula`)\n- `$VERSION` — the package version\n- `$TAP` — the Homebrew tap (e.g. `\"myorg/tap\"`)\n- `$SCRIPT_DIR` — absolute directory of `run_tests.sh`\n\nIf `expect_contains` is set the test passes only when the command's\ncombined stdout+stderr contains the given substring; otherwise a zero\nexit code is sufficient.\n\nExample `alef.toml`:\n\n```toml\n[[crates.e2e.registry.packages.homebrew.cli_tests]]\nname = \"version\"\ncommand = \"$CLI_FORMULA --version\"\nexpect_contains = \"1.2.3\"\n\n[[crates.e2e.registry.packages.homebrew.cli_tests]]\nname = \"convert-h1\"\ncommand = \"echo '<h1>Hi</h1>' | $CLI_FORMULA\"\nexpect_contains = \"# Hi\"\n```",
       "properties": {
         "command": {
           "description": "Shell fragment executed verbatim; variables `$CLI_FORMULA`, `$VERSION`,\n`$TAP`, and `$SCRIPT_DIR` are in scope.",
@@ -3502,7 +3571,7 @@
         },
         "expect_contains": {
           "default": null,
-          "description": "Substring that must appear in the combined stdout+stderr output.\nWhen `None` a zero exit code is sufficient.",
+          "description": "Substring that must appear in the combined stdout+stderr output.\nTreated as literal data; shell variables and substitutions are not expanded.\nWhen `None` a zero exit code is sufficient.",
           "type": [
             "string",
             "null"
@@ -4729,7 +4798,7 @@
         },
         "cli_tests": {
           "default": [],
-          "description": "CLI test steps for the Homebrew test_app generator.\n\nWhen empty (the default) a single default `--version` check is emitted\nthat asserts `$VERSION` appears in the output.  Provide explicit entries\nto replace the default entirely.\n\nUsed by the `homebrew` test_app generator.",
+          "description": "CLI test steps for the Homebrew test_app generator.\n\nWhen empty (the default) a single default `--version` check is emitted\nthat asserts the resolved package version appears in the output. Provide explicit entries\nto replace the default entirely.\n\nUsed by the `homebrew` test_app generator.",
           "items": {
             "$ref": "#/$defs/HomebrewCliTest"
           },
@@ -7235,6 +7304,18 @@
     "TestAppRunConfig": {
       "additionalProperties": false,
       "properties": {
+        "argv_run": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArgvRunConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Argv-only alternative to `run`, for generated defaults that must not risk a shell\nre-interpreting a config-supplied value. See [`ArgvRunConfig`]. When both `run` and\n`argv_run` are set, the caller runs `argv_run` and ignores `run`."
+        },
         "before": {
           "anyOf": [
             {
@@ -7262,7 +7343,7 @@
               "type": "null"
             }
           ],
-          "description": "Command(s) that install the published package into the registry-mode test\napp and exercise it (e.g. `cd test_apps/ruby && BUNDLE_PATH=vendor/bundle ruby -S bundle install &&\nBUNDLE_PATH=vendor/bundle ruby -S bundle exec ruby -S rspec`)."
+          "description": "Command(s) that install the published package into the registry-mode test\napp and exercise it (e.g. `cd test_apps/ruby && BUNDLE_PATH=vendor/bundle ruby -S bundle install &&\nBUNDLE_PATH=vendor/bundle ruby -S bundle exec ruby -S rspec`).\n\nMutually exclusive with `argv_run` in practice: a default that needs to embed a\nconfig-supplied value as a literal argument sets `argv_run` and leaves this `None`.\n`alef.toml` overrides (`[crates.e2e.registry.run.<lang>]`) always set this field --\nhand-written shell syntax is exactly what a user authoring an override means to run."
         }
       },
       "type": "object"
@@ -8475,7 +8556,7 @@
       "type": "object"
     }
   },
-  "$id": "https://github.com/xberg-io/alef/releases/download/v0.79.2/alef.schema.json",
+  "$id": "https://github.com/xberg-io/alef/releases/download/v0.79.4/alef.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "JSON Schema for the JSON representation of alef.toml.",
@@ -8599,6 +8680,6 @@
   ],
   "title": "Alef configuration",
   "type": "object",
-  "version": "0.79.2",
-  "x-alef-version": "0.79.2"
+  "version": "0.79.4",
+  "x-alef-version": "0.79.4"
 }

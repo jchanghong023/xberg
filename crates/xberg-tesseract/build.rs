@@ -26,6 +26,7 @@ mod build_tesseract {
     use crate::source_cache::{
         PreparedSourceTree, SourceArtifact, canonicalize_trusted_build_root, cmake_source_path, copy_verified_artifact,
         ensure_directory, ensure_private_cache_root, prepare_source_tree, prepare_verified_artifact, read_exact_size,
+        tool_argument_path,
     };
     use cmake::Config;
     use std::env;
@@ -808,16 +809,16 @@ mod build_tesseract {
             .file("src/shim.cpp")
             .cpp(true)
             .std("c++17")
-            .include(tool_compatible_path(&tesseract_install_dir.join("include")))
+            .include(tool_argument_path(&tesseract_install_dir.join("include")))
             .compile("xberg_shim");
 
         println!(
             "cargo:rustc-link-search=native={}",
-            tool_compatible_path(&leptonica_lib_dir).display()
+            tool_argument_path(&leptonica_lib_dir).display()
         );
         println!(
             "cargo:rustc-link-search=native={}",
-            tool_compatible_path(&tesseract_install_dir.join("lib")).display()
+            tool_argument_path(&tesseract_install_dir.join("lib")).display()
         );
 
         #[cfg(feature = "dynamic-linking")]
@@ -1080,36 +1081,15 @@ mod build_tesseract {
         )))
     }
 
-    /// Native Windows tools cannot reliably consume verbatim paths
-    /// (`\\?\C:\...`). `std::fs::canonicalize` returns that form on Windows,
-    /// so remove only the verbatim prefix at external tool boundaries.
+    /// Render a path for a CMake `-D<variable>=<value>` argument.
     #[cfg(windows)]
-    fn tool_compatible_path(path: &Path) -> PathBuf {
-        use std::ffi::OsString;
-        use std::os::windows::ffi::{OsStrExt, OsStringExt};
-
-        let wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
-        const VERBATIM_PREFIX: &[u16] = &[b'\\' as u16, b'\\' as u16, b'?' as u16, b'\\' as u16];
-        const UNC_PREFIX: &[u16] = &[b'U' as u16, b'N' as u16, b'C' as u16, b'\\' as u16];
-
-        let Some(remainder) = wide.strip_prefix(VERBATIM_PREFIX) else {
-            return path.to_path_buf();
-        };
-        if let Some(unc_path) = remainder.strip_prefix(UNC_PREFIX) {
-            let mut normalized = vec![b'\\' as u16, b'\\' as u16];
-            normalized.extend_from_slice(unc_path);
-            return PathBuf::from(OsString::from_wide(&normalized));
-        }
-        PathBuf::from(OsString::from_wide(remainder))
+    fn normalize_cmake_path(path: &Path) -> String {
+        crate::source_cache::windows_cmake_argument_path(&path.to_string_lossy())
     }
 
     #[cfg(not(windows))]
-    fn tool_compatible_path(path: &Path) -> PathBuf {
-        path.to_path_buf()
-    }
-
     fn normalize_cmake_path(path: &Path) -> String {
-        tool_compatible_path(path).to_string_lossy().replace('\\', "/")
+        path.to_string_lossy().replace('\\', "/")
     }
 
     /// Apply the WASM patch to Tesseract source. Uses `git apply` if available, falls back to manual application.
@@ -1567,8 +1547,14 @@ Installation instructions:
         let leptonica_lib_dir = leptonica_install_dir.join("lib");
         let tesseract_lib_dir = tesseract_install_dir.join("lib");
 
-        println!("cargo:rustc-link-search=native={}", leptonica_lib_dir.display());
-        println!("cargo:rustc-link-search=native={}", tesseract_lib_dir.display());
+        println!(
+            "cargo:rustc-link-search=native={}",
+            tool_argument_path(&leptonica_lib_dir).display()
+        );
+        println!(
+            "cargo:rustc-link-search=native={}",
+            tool_argument_path(&tesseract_lib_dir).display()
+        );
 
         println!("cargo:rustc-link-lib=static=tesseract");
         println!("cargo:rustc-link-lib=static=leptonica");
@@ -1842,7 +1828,7 @@ Installation instructions:
         };
 
         for dir in candidate_lib_dirs.iter().filter(|d| d.exists()) {
-            println!("cargo:rustc-link-search=native={}", dir.display());
+            println!("cargo:rustc-link-search=native={}", tool_argument_path(dir).display());
         }
 
         link_name_to_use

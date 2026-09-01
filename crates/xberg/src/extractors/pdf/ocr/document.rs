@@ -1229,16 +1229,29 @@ pub(super) fn processed_ocr_layout_dimensions(metadata: &crate::types::Metadata)
     }
 }
 
-// Defined exactly where it is called, which is not a single feature set: the
-// `layout-detection` call site (in `extract_with_ocr_for_page`) also requires
-// `any(ocr, ocr-wasm)`, while the `not(layout-detection)` one rides only on that
-// function's own `any(ocr, ocr-pipeline)` gate. A plain `any(ocr, ocr-wasm)` left the
-// `liter-llm` build (ocr-pipeline, no ocr, no layout-detection) calling a function that
-// did not exist -- undetected since 2026-07-29 because no CI leg built that combination
-// until the xberg-cli feature legs began executing. ~keep
+// Defined exactly where it is called, which is not a single feature set. Three
+// call sites, none of which subsumes the others:
+//   * `extract_with_ocr_for_page`'s `layout-detection` branch, which additionally
+//     requires `any(ocr, ocr-wasm)`;
+//   * that same function's `not(layout-detection)` branch, which rides only on its own
+//     `any(ocr, ocr-pipeline)` gate;
+//   * the element-geometry call sites -- `build_mixed_ocr_page_document` here and the
+//     `#[cfg(feature = "pdf")]` public-element block in `extract_with_ocr_for_page` --
+//     which need `pdf` and no OCR frontend at all.
+// A plain `any(ocr, ocr-wasm)` left the `liter-llm` build (ocr-pipeline, no ocr, no
+// layout-detection) calling a function that did not exist -- undetected since 2026-07-29
+// because no CI leg built that combination until the xberg-cli feature legs began
+// executing. Omitting the `pdf` arm broke `formula-recognition,pdf` (layout-detection +
+// ocr-pipeline, no OCR backend) exactly the same way: the two element-geometry call sites
+// stayed in while the definition compiled out. ~keep
 #[cfg(all(
     any(feature = "ocr", feature = "ocr-pipeline"),
-    any(feature = "ocr", feature = "ocr-wasm", not(feature = "layout-detection"))
+    any(
+        feature = "ocr",
+        feature = "ocr-wasm",
+        feature = "pdf",
+        not(feature = "layout-detection")
+    )
 ))]
 pub(super) fn resolved_ocr_layout_dimensions(
     metadata: &crate::types::Metadata,
@@ -1564,8 +1577,11 @@ pub(super) fn assemble_ocr_page_paragraphs(
         crate::pdf::structure::adapters::reattach_ocr_layout_list_markers(&mut paragraphs, page_rotation_degrees);
         return paragraphs;
     }
+    // Both parameters are read only by the `#[cfg(feature = "ocr")]` block above, but this
+    // function is gated on `any(ocr, ocr-wasm)`, so `ocr-wasm` + `layout-detection` leaves
+    // them unread. No CI leg builds that pair, so nothing catches it. ~keep
     #[cfg(not(feature = "ocr"))]
-    let _ = detection;
+    let _ = (detection, page_rotation_degrees);
 
     crate::pdf::structure::adapters::ocr_doc_to_paragraphs(doc, page_height, font_size_scale)
 }
@@ -1709,7 +1725,16 @@ pub(super) fn ocr_margin_filter_capability_warning() -> crate::types::Processing
         ),
     }
 }
-#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+// Both call sites are the OCR-paragraph assembly blocks in `extract_with_ocr_for_page`:
+// one gated on `layout-detection` *with* `ocr`/`ocr-wasm`, the other on
+// `not(layout-detection)`. `layout-detection` without either OCR frontend (the
+// `formula-recognition,pdf` CI leg) compiles both out, so a bare
+// `any(ocr, ocr-pipeline)` gate here left the function -- and pipeline.rs's import of
+// it -- with no caller. ~keep
+#[cfg(all(
+    any(feature = "ocr", feature = "ocr-pipeline"),
+    any(feature = "ocr", feature = "ocr-wasm", not(feature = "layout-detection"))
+))]
 pub(super) fn apply_ocr_layout_content_filter(
     paragraphs: &mut [crate::pdf::structure::types::PdfParagraph],
     config: &ExtractionConfig,

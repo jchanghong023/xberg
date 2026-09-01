@@ -332,7 +332,7 @@ jobs:
       # packages/java/pom.xml `<maven.compiler.release>` and the `validate` job below,
       # which already sets the same version for the same reason. ~keep
       - name: Setup Java
-        uses: actions/setup-java@v5
+        uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "25"

@@ -12867,6 +12867,7 @@ const _: fn() = || {
         let _: bool = ExtractionConfig.escape_markdown;
         let _: bool = ExtractionConfig.table_anchors;
         let _: crate::JupyterCellRendering = ExtractionConfig.jupyter_cell_rendering;
+        let _: bool = ExtractionConfig.apply_notebook_cell_tags;
         let _: Option<crate::LayoutDetectionConfig> = ExtractionConfig.layout;
         let _: Option<crate::TranscriptionConfig> = ExtractionConfig.transcription;
         let _: bool = ExtractionConfig.use_layout_for_markdown;
@@ -18018,6 +18019,7 @@ impl SseDecode for crate::ExtractionConfig {
         let mut var_escapeMarkdown = <bool>::sse_decode(deserializer);
         let mut var_tableAnchors = <bool>::sse_decode(deserializer);
         let mut var_jupyterCellRendering = <crate::JupyterCellRendering>::sse_decode(deserializer);
+        let mut var_applyNotebookCellTags = <bool>::sse_decode(deserializer);
         let mut var_layout = <Option<crate::LayoutDetectionConfig>>::sse_decode(deserializer);
         let mut var_transcription = <Option<crate::TranscriptionConfig>>::sse_decode(deserializer);
         let mut var_useLayoutForMarkdown = <bool>::sse_decode(deserializer);
@@ -18070,6 +18072,7 @@ impl SseDecode for crate::ExtractionConfig {
             escape_markdown: var_escapeMarkdown,
             table_anchors: var_tableAnchors,
             jupyter_cell_rendering: var_jupyterCellRendering,
+            apply_notebook_cell_tags: var_applyNotebookCellTags,
             layout: var_layout,
             transcription: var_transcription,
             use_layout_for_markdown: var_useLayoutForMarkdown,
@@ -28640,6 +28643,7 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::ExtractionConfig> {
             self.0.escape_markdown.into_into_dart().into_dart(),
             self.0.table_anchors.into_into_dart().into_dart(),
             self.0.jupyter_cell_rendering.into_into_dart().into_dart(),
+            self.0.apply_notebook_cell_tags.into_into_dart().into_dart(),
             self.0.layout.into_into_dart().into_dart(),
             self.0.transcription.into_into_dart().into_dart(),
             self.0.use_layout_for_markdown.into_into_dart().into_dart(),
@@ -35617,6 +35621,7 @@ impl SseEncode for crate::ExtractionConfig {
         <bool>::sse_encode(self.escape_markdown, serializer);
         <bool>::sse_encode(self.table_anchors, serializer);
         <crate::JupyterCellRendering>::sse_encode(self.jupyter_cell_rendering, serializer);
+        <bool>::sse_encode(self.apply_notebook_cell_tags, serializer);
         <Option<crate::LayoutDetectionConfig>>::sse_encode(self.layout, serializer);
         <Option<crate::TranscriptionConfig>>::sse_encode(self.transcription, serializer);
         <bool>::sse_encode(self.use_layout_for_markdown, serializer);

@@ -1141,8 +1141,19 @@ impl InternalDocumentExtractor for DocxExtractor {
                 && let Ok(mut file) = archive.by_name(&zip_path)
                 && file.size() <= crate::extraction::docx::MAX_IMAGE_FILE_SIZE
             {
-                let mut data = Vec::with_capacity(file.size() as usize);
-                if std::io::Read::read_to_end(&mut file, &mut data).is_ok() {
+                // `file.size()` is the ZIP central directory's *declared* uncompressed size,
+                // which the archive's author chooses freely; the `zip` crate puts no `Take` on
+                // the decompressed side, so a member forging a small declared size while
+                // carrying a large deflate stream inflates without bound here. Bound the read
+                // by the declared size (already checked against `MAX_IMAGE_FILE_SIZE` above)
+                // and drop any member that yields more bytes than it declared.
+                // GHSA-85w9-wqcq-x48r. ~keep
+                let declared_size = file.size();
+                let mut data = Vec::with_capacity(usize::try_from(declared_size).unwrap_or(0));
+                let mut bounded = std::io::Read::take(&mut file, declared_size.saturating_add(1));
+                if std::io::Read::read_to_end(&mut bounded, &mut data).is_ok()
+                    && u64::try_from(data.len()).unwrap_or(u64::MAX) <= declared_size
+                {
                     image_data = Some(data);
                 }
             }

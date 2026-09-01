@@ -10,6 +10,14 @@ pub(super) fn probe_layout(config: &ExtractionConfig) -> Vec<DoctorCheck> {
     probe_layout_with_manager(config, &manager)
 }
 
+// Every push below is individually `#[cfg]`-gated, so which checks exist -- and in what
+// order -- depends on the feature set; a `vec![]` literal cannot express that. The lint
+// only trips once four or more of the pushes survive cfg-stripping, which is why it fires
+// on `formula-recognition,pdf` (four consecutive pushes) but not on `full` (two). ~keep
+#[allow(
+    clippy::vec_init_then_push,
+    reason = "the pushes are cfg-gated; a vec![] literal cannot express them"
+)]
 fn probe_layout_with_manager(config: &ExtractionConfig, manager: &LayoutModelManager) -> Vec<DoctorCheck> {
     let mut checks = Vec::new();
     #[cfg(feature = "layout-detection")]

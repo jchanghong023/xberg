@@ -2,21 +2,34 @@
 use super::document::assemble_ocr_page_paragraphs;
 #[cfg(all(
     any(feature = "ocr", feature = "ocr-pipeline"),
-    any(feature = "ocr", feature = "ocr-wasm", not(feature = "layout-detection"))
+    any(
+        feature = "ocr",
+        feature = "ocr-wasm",
+        feature = "pdf",
+        not(feature = "layout-detection")
+    )
 ))]
 use super::document::resolved_ocr_layout_dimensions;
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 use super::document::{
-    accepted_ocr_page_replacements, apply_ocr_layout_content_filter, apply_ocr_page_replacements,
-    apply_ocr_text_list_fallback, fill_unstructured_ocr_pages, heuristically_restructured_ocr_pages,
-    ocr_points_per_pixel,
+    accepted_ocr_page_replacements, apply_ocr_page_replacements, apply_ocr_text_list_fallback,
+    fill_unstructured_ocr_pages, heuristically_restructured_ocr_pages,
 };
+// Read only by the two OCR-paragraph assembly blocks below -- one gated on
+// `layout-detection` *with* `ocr`/`ocr-wasm`, the other on `not(layout-detection)`. With
+// `layout-detection` and neither OCR frontend (the `formula-recognition,pdf` CI leg) both
+// blocks compile out, so importing these under the enclosing function's plain
+// `any(ocr, ocr-pipeline)` gate is an unused import. ~keep
+#[cfg(all(
+    any(feature = "ocr", feature = "ocr-pipeline"),
+    any(feature = "ocr", feature = "ocr-wasm", not(feature = "layout-detection"))
+))]
+use super::document::{apply_ocr_layout_content_filter, ocr_points_per_pixel};
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
 use super::document::{
-    build_mixed_ocr_page_document, build_pipeline_ocr_page_document, filter_ocr_paragraphs_by_page_margins,
-    formula_bbox_to_page_points, ocr_margin_filter_capability_warning, ocr_paragraphs_plain_text,
-    public_ocr_elements_for_pdf_page, rescale_ocr_bboxes_to_page_points, should_use_document_processing,
-    split_document_global_ocr_structure_by_page, undo_auto_rotate_point,
+    build_mixed_ocr_page_document, build_pipeline_ocr_page_document, formula_bbox_to_page_points,
+    ocr_margin_filter_capability_warning, public_ocr_elements_for_pdf_page, rescale_ocr_bboxes_to_page_points,
+    should_use_document_processing, split_document_global_ocr_structure_by_page, undo_auto_rotate_point,
 };
 #[cfg(all(
     any(feature = "ocr", feature = "ocr-pipeline"),
@@ -24,6 +37,14 @@ use super::document::{
     feature = "layout-detection"
 ))]
 use super::document::{detection_for_mixed_route_page, single_stage_pipeline_for_layout};
+// Same two blocks as `apply_ocr_layout_content_filter` above, but their uses sit inside
+// the blocks' nested `#[cfg(feature = "pdf")]` margin-filter scopes. ~keep
+#[cfg(all(
+    any(feature = "ocr", feature = "ocr-pipeline"),
+    feature = "pdf",
+    any(feature = "ocr", feature = "ocr-wasm", not(feature = "layout-detection"))
+))]
+use super::document::{filter_ocr_paragraphs_by_page_margins, ocr_paragraphs_plain_text};
 #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
 use super::document::{
     recognized_table_to_public_table, scale_detection_to_dimensions, scale_detection_to_ocr_coordinates,
@@ -1294,6 +1315,14 @@ pub(super) async fn extract_with_ocr_for_page(
     // paragraphs of a rejected page must be dropped along with its text.
     let mut rejected_pages = vec![false; total_pages];
     let mut all_page_paragraphs: Vec<Option<Vec<crate::pdf::structure::types::PdfParagraph>>> = vec![None; total_pages];
+    // Written only by the two OCR-paragraph assembly blocks below (`layout-detection`
+    // *with* `ocr`/`ocr-wasm`, or `not(layout-detection)`); still read unconditionally by
+    // the document-global heuristic. `layout-detection` without either OCR frontend (the
+    // `formula-recognition,pdf` CI leg) leaves it write-free. ~keep
+    #[cfg_attr(
+        all(feature = "layout-detection", not(feature = "ocr"), not(feature = "ocr-wasm")),
+        allow(unused_mut)
+    )]
     let mut ocr_page_heights = vec![0.0_f32; total_pages];
     #[allow(unused_mut)]
     let mut collected_tables: Vec<crate::types::Table> = Vec::new();
@@ -1737,9 +1766,21 @@ pub(super) async fn extract_with_ocr_for_page(
                 page_backend_errors.push((page_idx, error));
             }
 
+            // Both are read by the `pdf` margin-warning/page-content code below in every
+            // feature set, but only written inside the two assembly blocks -- so with
+            // `layout-detection` and neither OCR frontend they stay at their initializers.
+            // ~keep
             #[cfg(feature = "pdf")]
+            #[cfg_attr(
+                all(feature = "layout-detection", not(feature = "ocr"), not(feature = "ocr-wasm")),
+                allow(unused_mut)
+            )]
             let mut margin_filtered_content: Option<String> = None;
             #[cfg(feature = "pdf")]
+            #[cfg_attr(
+                all(feature = "layout-detection", not(feature = "ocr"), not(feature = "ocr-wasm")),
+                allow(unused_mut)
+            )]
             let mut margin_filter_complete = false;
 
             #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
