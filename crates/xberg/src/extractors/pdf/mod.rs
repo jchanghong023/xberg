@@ -1718,6 +1718,7 @@ impl PdfExtractor {
             };
             let mut ocr_config_with_format = ocr_config.clone();
             ocr_config_with_format.output_format = Some(config.output_format.clone());
+            ocr_config_with_format.security_limits = config.security_limits.clone();
             for img in imgs.iter_mut() {
                 if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
                     break;

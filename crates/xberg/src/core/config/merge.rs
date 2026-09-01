@@ -68,7 +68,8 @@ pub fn merge_config_json(base: &ExtractionConfig, override_json: &str) -> Result
 /// runtime-injected values from `base` always survive the merge unchanged:
 ///
 /// - [`ExtractionConfig::cancel_token`] and [`ExtractionConfig::source_name`]
-/// - [`crate::core::config::OcrConfig::acceleration`] and
+/// - [`crate::core::config::OcrConfig::acceleration`],
+///   [`crate::core::config::OcrConfig::security_limits`], and
 ///   [`crate::core::config::OcrConfig::tessdata_bytes`] (only when the merged
 ///   config still has an `ocr` section — an override that removes it entirely
 ///   has nothing to restore onto)
@@ -81,6 +82,7 @@ fn restore_skipped_fields(base: &ExtractionConfig, merged: &mut ExtractionConfig
     if let (Some(base_ocr), Some(merged_ocr)) = (base.ocr.as_ref(), merged.ocr.as_mut()) {
         merged_ocr.acceleration = base_ocr.acceleration.clone();
         merged_ocr.tessdata_bytes = base_ocr.tessdata_bytes.clone();
+        merged_ocr.security_limits = base_ocr.security_limits.clone();
     }
 
     if let (Some(base_pp), Some(merged_pp)) = (base.postprocessor.as_ref(), merged.postprocessor.as_mut()) {

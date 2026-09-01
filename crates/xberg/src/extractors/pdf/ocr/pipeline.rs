@@ -212,6 +212,7 @@ pub(crate) async fn extract_mixed_ocr_native(
     if ocr_config_resolved.acceleration.is_none() {
         ocr_config_resolved.acceleration = config.acceleration.clone();
     }
+    ocr_config_resolved.security_limits = config.security_limits.clone();
 
     let batch_size = crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref());
 

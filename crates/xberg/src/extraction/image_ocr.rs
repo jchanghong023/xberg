@@ -291,6 +291,7 @@ pub(crate) async fn process_images_with_ocr(
         let mut task_ocr_config = ocr_config.clone();
         task_ocr_config.output_format = Some(output_format.clone());
         task_ocr_config.acceleration = acceleration.clone();
+        task_ocr_config.security_limits = Some(security_limits.clone());
         pending.push_back((
             index,
             image,
