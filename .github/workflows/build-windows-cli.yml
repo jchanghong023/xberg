@@ -91,7 +91,77 @@ jobs:
             -Artifact "$STAGE" \
             -NativeGlob "xberg.exe"
 
+      - name: Sign Windows CLI files
+        shell: pwsh
+        env:
+          SIGNING_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+          SIGNING_PFX_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PFX_PASSWORD }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_BASE64)) {
+            throw "WINDOWS_CODESIGN_PFX_BASE64 GitHub secret is not configured"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:SIGNING_PFX_PASSWORD)) {
+            throw "WINDOWS_CODESIGN_PFX_PASSWORD GitHub secret is not configured"
+          }
+
+          $pfxPath = Join-Path $env:RUNNER_TEMP "xberg-signing.pfx"
+          $pfxBytes = [Convert]::FromBase64String(($env:SIGNING_PFX_BASE64 -replace "\s", ""))
+          [IO.File]::WriteAllBytes($pfxPath, $pfxBytes)
+
+          try {
+            $signtool = Get-ChildItem `
+              -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin" `
+              -Filter signtool.exe `
+              -Recurse `
+              -ErrorAction SilentlyContinue |
+              Where-Object { $_.DirectoryName -like "*\x64" } |
+              Sort-Object FullName -Descending |
+              Select-Object -First 1 -ExpandProperty FullName
+
+            if ([string]::IsNullOrWhiteSpace($signtool)) {
+              throw "signtool.exe was not found on the GitHub runner"
+            }
+
+            $stage = Join-Path $env:GITHUB_WORKSPACE "xberg-cli-$env:TARGET"
+            $files = @(
+              (Join-Path $stage "xberg.exe"),
+              (Join-Path $stage "onnxruntime.dll")
+            )
+
+            foreach ($file in $files) {
+              if (-not (Test-Path -LiteralPath $file -PathType Leaf)) {
+                throw "Signing input does not exist: $file"
+              }
+
+              & $signtool sign `
+                /fd SHA256 `
+                /f $pfxPath `
+                /p $env:SIGNING_PFX_PASSWORD `
+                /tr http://timestamp.digicert.com `
+                /td SHA256 `
+                /d "Xberg Windows CLI" `
+                $file
+
+              & $signtool verify /pa /all $file
+              if ($LASTEXITCODE -ne 0) {
+                throw "Authenticode verification failed: $file"
+              }
+            }
+          }
+          finally {
+            Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Package signed Windows CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          STAGE="xberg-cli-${TARGET}"
           7z a "${STAGE}.zip" "$STAGE" >/dev/null
+
+
 
       - name: Upload Windows CLI artifact
         uses: actions/upload-artifact@v7
