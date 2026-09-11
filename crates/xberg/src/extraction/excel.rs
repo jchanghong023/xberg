@@ -42,6 +42,8 @@ use crate::extractors::security::SecurityLimits;
 use crate::types::revisions::{DocumentRevision, RevisionDelta, RevisionKind};
 use crate::types::{ExcelSheet, ExcelWorkbook, ProcessingWarning};
 
+pub(crate) mod images;
+
 /// Maximum number of cells in a Range's bounding box before we consider it pathological.
 /// This threshold is set to prevent OOM when processing files with sparse data at extreme
 /// positions (e.g., Excel Solver files that have cells at A1 and XFD1048575).
