@@ -859,19 +859,24 @@ pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Ar
                     .then_some(image)
                     .flatten()
                     .and_then(|img| img.ocr_result.as_ref());
-                let body = ocr_result
-                    .and_then(|result| {
-                        result
-                            .ocr_internal_document
-                            .as_ref()
-                            .and_then(crate::rendering::ocr_layout::layout_ocr_text)
-                            .or_else(|| {
-                                let text = result.content.trim();
-                                (!text.is_empty()).then(|| text.to_string())
-                            })
-                    })
-                    .filter(|_| doc.append_ocr_text);
-                let marker = (!doc.ocr_text_only).then(|| {
+                let ocr_text = ocr_result.and_then(|result| {
+                    result
+                        .ocr_internal_document
+                        .as_ref()
+                        .and_then(crate::rendering::ocr_layout::layout_ocr_text)
+                        .or_else(|| {
+                            let text = result.content.trim();
+                            (!text.is_empty()).then(|| text.to_string())
+                        })
+                });
+                // `ocr_text_only` prints the recognized text in place of the image, so the path
+                // is dropped and `append_ocr_text` does not apply; otherwise the marker carries
+                // the path and `append_ocr_text` decides whether the text follows it. Same
+                // split the placeholder rendering used before the fence existed, so a
+                // text-only caller keeps its text instead of an empty block. ~keep
+                let text_only = doc.ocr_text_only && ocr_text.is_some();
+                let body = ocr_text.filter(|_| text_only || doc.append_ocr_text);
+                let marker = (!text_only).then(|| {
                     if desc.is_empty() {
                         format!("![]({url})")
                     } else {
@@ -1488,6 +1493,91 @@ mod tests {
             out
         );
         assert!(out.contains("Only text."), "paragraph must still render; got: {}", out);
+    }
+
+    /// An image element plus the `ExtractedImage` it resolves to, carrying `ocr_text` as its
+    /// recognized text.
+    fn doc_with_ocr_image(ocr_text: Option<&str>) -> InternalDocument {
+        use crate::types::internal::ElementKind;
+        use crate::types::{ExtractedDocument, ExtractedImage};
+
+        let mut b = InternalDocumentBuilder::new("test");
+        b.push_element(crate::types::internal::InternalElement::text(
+            ElementKind::Image { image_index: 0 },
+            "",
+            0,
+        ));
+        let mut doc = b.build();
+        doc.images.push(ExtractedImage {
+            data: bytes::Bytes::from_static(b"\x89PNG"),
+            format: std::borrow::Cow::Borrowed("png"),
+            image_index: 0,
+            page_number: Some(1),
+            width: Some(100),
+            height: Some(100),
+            ocr_result: ocr_text.map(|text| {
+                Box::new(ExtractedDocument {
+                    content: text.to_string(),
+                    ..Default::default()
+                })
+            }),
+            ..Default::default()
+        });
+        doc
+    }
+
+    /// `images.ocr_text_only` prints the recognized text in place of the image. The image
+    /// branch used to gate that text on `append_ocr_text` as well — a flag that only governs
+    /// the *other* branch — so a text-only caller got an empty fenced block and lost the text
+    /// the OCR pass had just produced. ~keep
+    #[test]
+    fn test_image_ocr_text_only_keeps_text_without_path() {
+        let mut doc = doc_with_ocr_image(Some("Recognized text"));
+        doc.ocr_text_only = true;
+        doc.append_ocr_text = false;
+        let out = render(&doc);
+        assert!(
+            out.contains("Recognized text"),
+            "text-only image must keep its recognized text; got: {out:?}"
+        );
+        assert!(
+            !out.contains("!["),
+            "text-only image must not emit an image marker; got: {out:?}"
+        );
+    }
+
+    /// The other half of that split: without `append_ocr_text` the marker keeps the path and
+    /// the recognized text stays out of the output.
+    #[test]
+    fn test_image_without_append_ocr_text_keeps_path_only() {
+        let mut doc = doc_with_ocr_image(Some("Recognized text"));
+        doc.ocr_text_only = false;
+        doc.append_ocr_text = false;
+        let out = render(&doc);
+        assert!(out.contains("image_0.png"), "path must stay; got: {out:?}");
+        assert!(
+            !out.contains("Recognized text"),
+            "recognized text must be dropped when append_ocr_text is off; got: {out:?}"
+        );
+    }
+
+    /// Default settings put the marker and the recognized text in one fenced block, so a
+    /// renderer shows the alignment the OCR pass reconstructed.
+    #[test]
+    fn test_image_fence_carries_path_and_text_by_default() {
+        let mut doc = doc_with_ocr_image(Some("Recognized text"));
+        doc.ocr_text_only = false;
+        doc.append_ocr_text = true;
+        let out = render(&doc);
+        assert!(out.contains("```text"), "image must render in a fenced block; got: {out:?}");
+        assert!(
+            out.contains("![](image_0.png)"),
+            "marker must carry the image path; got: {out:?}"
+        );
+        assert!(
+            out.contains("Recognized text"),
+            "recognized text must follow the marker; got: {out:?}"
+        );
     }
 
     #[test]

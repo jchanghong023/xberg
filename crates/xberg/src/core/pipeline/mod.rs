@@ -1056,6 +1056,7 @@ fn append_embedded_image_ocr_text(doc: &mut InternalDocument) {
 ///
 /// Extractors that bake references into their text (PPTX) use this to recover the alt text
 /// before turning the reference into a real image element. ~keep
+#[cfg(feature = "office")]
 pub(crate) fn markdown_image_reference_alt(text: &str) -> Option<&str> {
     let t = text.trim();
     let rest = t.strip_prefix("![")?;
