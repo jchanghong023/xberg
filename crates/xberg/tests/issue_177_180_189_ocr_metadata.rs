@@ -208,8 +208,23 @@ fn word_language_is_forwarded_per_ocr_element() {
 
     let capture = install_paragraph_skip_capture();
     capture.events.lock().unwrap().clear();
-    let result = extract_uri_document_blocking(&file_path, None, &tesseract_eng_config(OutputFormat::Plain))
-        .expect("should extract test_hello_world.png with OCR");
+    // `OcrConfig::select_public_elements` short-circuits to `None` unless `element_config` opts
+    // in, and `apply_public_element_policy` always runs -- so with the shared helper's
+    // `element_config: None` this test's `ocr_elements` was unconditionally `None` and it
+    // panicked here before reaching any `word_language` assertion. Opt in locally rather than in
+    // `tesseract_eng_config`, whose other caller asserts only on `metadata.additional`. ~keep
+    let mut config = tesseract_eng_config(OutputFormat::Plain);
+    config
+        .ocr
+        .as_mut()
+        .expect("tesseract_eng_config always sets an ocr section")
+        .element_config = Some(xberg::OcrElementConfig {
+        include_elements: true,
+        min_level: xberg::OcrElementLevel::Word,
+        ..Default::default()
+    });
+    let result =
+        extract_uri_document_blocking(&file_path, None, &config).expect("should extract test_hello_world.png with OCR");
     let captured_paragraph_skip_events = capture.events.lock().unwrap().clone();
 
     let elements = result.ocr_elements.expect("OCR should produce word-level elements");
@@ -379,7 +394,7 @@ fn tesseract_full_page_config(output_format: OutputFormat) -> ExtractionConfig {
             language: vec!["eng".to_string()],
             tesseract_config: Some(xberg::TesseractConfig {
                 language: vec!["eng".to_string()],
-                psm: FULL_PAGE_SEGMENTATION_PSM,
+                psm: Some(FULL_PAGE_SEGMENTATION_PSM),
                 ..Default::default()
             }),
             element_config: Some(xberg::OcrElementConfig {

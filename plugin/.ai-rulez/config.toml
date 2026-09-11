@@ -1,12 +1,12 @@
 version = "4.0"
 name = "xberg"
-description = "Local document extraction: text, tables, metadata, images from 106 formats with optional OCR."
+description = "Local document extraction: text, tables, metadata, images from 107 formats with optional OCR."
 
 [plugin]
 name = "xberg"
-version = "1.1.0"
+version = "1.1.6"
 display_name = "Xberg"
-description = "Local document extraction: text, tables, metadata, images from 106 formats with optional OCR."
+description = "Local document extraction: text, tables, metadata, images from 107 formats with optional OCR."
 homepage = "https://xberg.io"
 repository = "https://github.com/xberg-io/xberg"
 license = "MIT"
@@ -28,7 +28,7 @@ args = ["mcp", "--transport", "stdio"]
 
 [plugin.interface]
 display_name = "Xberg"
-short_description = "Local document extraction for 106 formats"
+short_description = "Local document extraction for 107 formats"
 long_description = "Extract text, tables, metadata, and images from PDFs, Office files, images, HTML, email, archives, and academic formats. Runs locally via the xberg CLI and an auto-registered MCP server. Plugin ships skills covering the CLI surface, OCR backends, table extraction, and output-format selection."
 developer_name = "Kreuzberg, Inc."
 category = "document-intelligence"

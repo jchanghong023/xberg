@@ -70,13 +70,13 @@ function requireNative() {
   } else if (process.platform === "android") {
     if (process.arch === "arm64") {
       try {
-        return require("./index.android-arm64.node");
+        return require("./xberg-node.android-arm64.node");
       } catch (e) {
         loadErrors.push(e);
       }
       try {
-        const binding = require("xberg-root-android-arm64");
-        const bindingPackageVersion = require("xberg-root-android-arm64/package.json").version;
+        const binding = require("@xberg-io/xberg-android-arm64");
+        const bindingPackageVersion = require("@xberg-io/xberg-android-arm64/package.json").version;
         if (
           bindingPackageVersion !== "1.1.0" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -92,13 +92,13 @@ function requireNative() {
       }
     } else if (process.arch === "arm") {
       try {
-        return require("./index.android-arm-eabi.node");
+        return require("./xberg-node.android-arm-eabi.node");
       } catch (e) {
         loadErrors.push(e);
       }
       try {
-        const binding = require("xberg-root-android-arm-eabi");
-        const bindingPackageVersion = require("xberg-root-android-arm-eabi/package.json").version;
+        const binding = require("@xberg-io/xberg-android-arm-eabi");
+        const bindingPackageVersion = require("@xberg-io/xberg-android-arm-eabi/package.json").version;
         if (
           bindingPackageVersion !== "1.1.0" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -122,13 +122,13 @@ function requireNative() {
         (process.config && process.config.variables && process.config.variables.node_target_type === "shared_library")
       ) {
         try {
-          return require("./index.win32-x64-gnu.node");
+          return require("./xberg-node.win32-x64-gnu.node");
         } catch (e) {
           loadErrors.push(e);
         }
         try {
-          const binding = require("xberg-root-win32-x64-gnu");
-          const bindingPackageVersion = require("xberg-root-win32-x64-gnu/package.json").version;
+          const binding = require("@xberg-io/xberg-win32-x64-gnu");
+          const bindingPackageVersion = require("@xberg-io/xberg-win32-x64-gnu/package.json").version;
           if (
             bindingPackageVersion !== "1.1.0" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -144,13 +144,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require("./index.win32-x64-msvc.node");
+          return require("./xberg-node.win32-x64-msvc.node");
         } catch (e) {
           loadErrors.push(e);
         }
         try {
-          const binding = require("xberg-root-win32-x64-msvc");
-          const bindingPackageVersion = require("xberg-root-win32-x64-msvc/package.json").version;
+          const binding = require("@xberg-io/xberg-win32-x64-msvc");
+          const bindingPackageVersion = require("@xberg-io/xberg-win32-x64-msvc/package.json").version;
           if (
             bindingPackageVersion !== "1.1.0" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -167,13 +167,13 @@ function requireNative() {
       }
     } else if (process.arch === "ia32") {
       try {
-        return require("./index.win32-ia32-msvc.node");
+        return require("./xberg-node.win32-ia32-msvc.node");
       } catch (e) {
         loadErrors.push(e);
       }
       try {
-        const binding = require("xberg-root-win32-ia32-msvc");
-        const bindingPackageVersion = require("xberg-root-win32-ia32-msvc/package.json").version;
+        const binding = require("@xberg-io/xberg-win32-ia32-msvc");
+        const bindingPackageVersion = require("@xberg-io/xberg-win32-ia32-msvc/package.json").version;
         if (
           bindingPackageVersion !== "1.1.0" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -189,13 +189,13 @@ function requireNative() {
       }
     } else if (process.arch === "arm64") {
       try {
-        return require("./index.win32-arm64-msvc.node");
+        return require("./xberg-node.win32-arm64-msvc.node");
       } catch (e) {
         loadErrors.push(e);
       }
       try {
-        const binding = require("xberg-root-win32-arm64-msvc");
-        const bindingPackageVersion = require("xberg-root-win32-arm64-msvc/package.json").version;
+        const binding = require("@xberg-io/xberg-win32-arm64-msvc");
+        const bindingPackageVersion = require("@xberg-io/xberg-win32-arm64-msvc/package.json").version;
         if (
           bindingPackageVersion !== "1.1.0" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -214,13 +214,13 @@ function requireNative() {
     }
   } else if (process.platform === "darwin") {
     try {
-      return require("./index.darwin-universal.node");
+      return require("./xberg-node.darwin-universal.node");
     } catch (e) {
       loadErrors.push(e);
     }
     try {
-      const binding = require("xberg-root-darwin-universal");
-      const bindingPackageVersion = require("xberg-root-darwin-universal/package.json").version;
+      const binding = require("@xberg-io/xberg-darwin-universal");
+      const bindingPackageVersion = require("@xberg-io/xberg-darwin-universal/package.json").version;
       if (
         bindingPackageVersion !== "1.1.0" &&
         process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -236,13 +236,13 @@ function requireNative() {
     }
     if (process.arch === "x64") {
       try {
-        return require("./index.darwin-x64.node");
+        return require("./xberg-node.darwin-x64.node");
       } catch (e) {
         loadErrors.push(e);
       }
       try {
-        const binding = require("xberg-root-darwin-x64");
-        const bindingPackageVersion = require("xberg-root-darwin-x64/package.json").version;
+        const binding = require("@xberg-io/xberg-darwin-x64");
+        const bindingPackageVersion = require("@xberg-io/xberg-darwin-x64/package.json").version;
         if (
           bindingPackageVersion !== "1.1.0" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -258,13 +258,13 @@ function requireNative() {
       }
     } else if (process.arch === "arm64") {
       try {
-        return require("./index.darwin-arm64.node");
+        return require("./xberg-node.darwin-arm64.node");
       } catch (e) {
         loadErrors.push(e);
       }
       try {
-        const binding = require("xberg-root-darwin-arm64");
-        const bindingPackageVersion = require("xberg-root-darwin-arm64/package.json").version;
+        const binding = require("@xberg-io/xberg-darwin-arm64");
+        const bindingPackageVersion = require("@xberg-io/xberg-darwin-arm64/package.json").version;
         if (
           bindingPackageVersion !== "1.1.0" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -284,13 +284,13 @@ function requireNative() {
   } else if (process.platform === "freebsd") {
     if (process.arch === "x64") {
       try {
-        return require("./index.freebsd-x64.node");
+        return require("./xberg-node.freebsd-x64.node");
       } catch (e) {
         loadErrors.push(e);
       }
       try {
-        const binding = require("xberg-root-freebsd-x64");
-        const bindingPackageVersion = require("xberg-root-freebsd-x64/package.json").version;
+        const binding = require("@xberg-io/xberg-freebsd-x64");
+        const bindingPackageVersion = require("@xberg-io/xberg-freebsd-x64/package.json").version;
         if (
           bindingPackageVersion !== "1.1.0" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -306,13 +306,13 @@ function requireNative() {
       }
     } else if (process.arch === "arm64") {
       try {
-        return require("./index.freebsd-arm64.node");
+        return require("./xberg-node.freebsd-arm64.node");
       } catch (e) {
         loadErrors.push(e);
       }
       try {
-        const binding = require("xberg-root-freebsd-arm64");
-        const bindingPackageVersion = require("xberg-root-freebsd-arm64/package.json").version;
+        const binding = require("@xberg-io/xberg-freebsd-arm64");
+        const bindingPackageVersion = require("@xberg-io/xberg-freebsd-arm64/package.json").version;
         if (
           bindingPackageVersion !== "1.1.0" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -333,13 +333,13 @@ function requireNative() {
     if (process.arch === "x64") {
       if (isMusl()) {
         try {
-          return require("./index.linux-x64-musl.node");
+          return require("./xberg-node.linux-x64-musl.node");
         } catch (e) {
           loadErrors.push(e);
         }
         try {
-          const binding = require("xberg-root-linux-x64-musl");
-          const bindingPackageVersion = require("xberg-root-linux-x64-musl/package.json").version;
+          const binding = require("@xberg-io/xberg-linux-x64-musl");
+          const bindingPackageVersion = require("@xberg-io/xberg-linux-x64-musl/package.json").version;
           if (
             bindingPackageVersion !== "1.1.0" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -355,13 +355,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require("./index.linux-x64-gnu.node");
+          return require("./xberg-node.linux-x64-gnu.node");
         } catch (e) {
           loadErrors.push(e);
         }
         try {
-          const binding = require("xberg-root-linux-x64-gnu");
-          const bindingPackageVersion = require("xberg-root-linux-x64-gnu/package.json").version;
+          const binding = require("@xberg-io/xberg-linux-x64-gnu");
+          const bindingPackageVersion = require("@xberg-io/xberg-linux-x64-gnu/package.json").version;
           if (
             bindingPackageVersion !== "1.1.0" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -379,13 +379,13 @@ function requireNative() {
     } else if (process.arch === "arm64") {
       if (isMusl()) {
         try {
-          return require("./index.linux-arm64-musl.node");
+          return require("./xberg-node.linux-arm64-musl.node");
         } catch (e) {
           loadErrors.push(e);
         }
         try {
-          const binding = require("xberg-root-linux-arm64-musl");
-          const bindingPackageVersion = require("xberg-root-linux-arm64-musl/package.json").version;
+          const binding = require("@xberg-io/xberg-linux-arm64-musl");
+          const bindingPackageVersion = require("@xberg-io/xberg-linux-arm64-musl/package.json").version;
           if (
             bindingPackageVersion !== "1.1.0" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -401,13 +401,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require("./index.linux-arm64-gnu.node");
+          return require("./xberg-node.linux-arm64-gnu.node");
         } catch (e) {
           loadErrors.push(e);
         }
         try {
-          const binding = require("xberg-root-linux-arm64-gnu");
-          const bindingPackageVersion = require("xberg-root-linux-arm64-gnu/package.json").version;
+          const binding = require("@xberg-io/xberg-linux-arm64-gnu");
+          const bindingPackageVersion = require("@xberg-io/xberg-linux-arm64-gnu/package.json").version;
           if (
             bindingPackageVersion !== "1.1.0" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -425,13 +425,13 @@ function requireNative() {
     } else if (process.arch === "arm") {
       if (isMusl()) {
         try {
-          return require("./index.linux-arm-musleabihf.node");
+          return require("./xberg-node.linux-arm-musleabihf.node");
         } catch (e) {
           loadErrors.push(e);
         }
         try {
-          const binding = require("xberg-root-linux-arm-musleabihf");
-          const bindingPackageVersion = require("xberg-root-linux-arm-musleabihf/package.json").version;
+          const binding = require("@xberg-io/xberg-linux-arm-musleabihf");
+          const bindingPackageVersion = require("@xberg-io/xberg-linux-arm-musleabihf/package.json").version;
           if (
             bindingPackageVersion !== "1.1.0" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -447,13 +447,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require("./index.linux-arm-gnueabihf.node");
+          return require("./xberg-node.linux-arm-gnueabihf.node");
         } catch (e) {
           loadErrors.push(e);
         }
         try {
-          const binding = require("xberg-root-linux-arm-gnueabihf");
-          const bindingPackageVersion = require("xberg-root-linux-arm-gnueabihf/package.json").version;
+          const binding = require("@xberg-io/xberg-linux-arm-gnueabihf");
+          const bindingPackageVersion = require("@xberg-io/xberg-linux-arm-gnueabihf/package.json").version;
           if (
             bindingPackageVersion !== "1.1.0" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -471,13 +471,13 @@ function requireNative() {
     } else if (process.arch === "loong64") {
       if (isMusl()) {
         try {
-          return require("./index.linux-loong64-musl.node");
+          return require("./xberg-node.linux-loong64-musl.node");
         } catch (e) {
           loadErrors.push(e);
         }
         try {
-          const binding = require("xberg-root-linux-loong64-musl");
-          const bindingPackageVersion = require("xberg-root-linux-loong64-musl/package.json").version;
+          const binding = require("@xberg-io/xberg-linux-loong64-musl");
+          const bindingPackageVersion = require("@xberg-io/xberg-linux-loong64-musl/package.json").version;
           if (
             bindingPackageVersion !== "1.1.0" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -493,13 +493,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require("./index.linux-loong64-gnu.node");
+          return require("./xberg-node.linux-loong64-gnu.node");
         } catch (e) {
           loadErrors.push(e);
         }
         try {
-          const binding = require("xberg-root-linux-loong64-gnu");
-          const bindingPackageVersion = require("xberg-root-linux-loong64-gnu/package.json").version;
+          const binding = require("@xberg-io/xberg-linux-loong64-gnu");
+          const bindingPackageVersion = require("@xberg-io/xberg-linux-loong64-gnu/package.json").version;
           if (
             bindingPackageVersion !== "1.1.0" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -517,13 +517,13 @@ function requireNative() {
     } else if (process.arch === "riscv64") {
       if (isMusl()) {
         try {
-          return require("./index.linux-riscv64-musl.node");
+          return require("./xberg-node.linux-riscv64-musl.node");
         } catch (e) {
           loadErrors.push(e);
         }
         try {
-          const binding = require("xberg-root-linux-riscv64-musl");
-          const bindingPackageVersion = require("xberg-root-linux-riscv64-musl/package.json").version;
+          const binding = require("@xberg-io/xberg-linux-riscv64-musl");
+          const bindingPackageVersion = require("@xberg-io/xberg-linux-riscv64-musl/package.json").version;
           if (
             bindingPackageVersion !== "1.1.0" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -539,13 +539,13 @@ function requireNative() {
         }
       } else {
         try {
-          return require("./index.linux-riscv64-gnu.node");
+          return require("./xberg-node.linux-riscv64-gnu.node");
         } catch (e) {
           loadErrors.push(e);
         }
         try {
-          const binding = require("xberg-root-linux-riscv64-gnu");
-          const bindingPackageVersion = require("xberg-root-linux-riscv64-gnu/package.json").version;
+          const binding = require("@xberg-io/xberg-linux-riscv64-gnu");
+          const bindingPackageVersion = require("@xberg-io/xberg-linux-riscv64-gnu/package.json").version;
           if (
             bindingPackageVersion !== "1.1.0" &&
             process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -562,13 +562,13 @@ function requireNative() {
       }
     } else if (process.arch === "ppc64") {
       try {
-        return require("./index.linux-ppc64-gnu.node");
+        return require("./xberg-node.linux-ppc64-gnu.node");
       } catch (e) {
         loadErrors.push(e);
       }
       try {
-        const binding = require("xberg-root-linux-ppc64-gnu");
-        const bindingPackageVersion = require("xberg-root-linux-ppc64-gnu/package.json").version;
+        const binding = require("@xberg-io/xberg-linux-ppc64-gnu");
+        const bindingPackageVersion = require("@xberg-io/xberg-linux-ppc64-gnu/package.json").version;
         if (
           bindingPackageVersion !== "1.1.0" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -584,13 +584,13 @@ function requireNative() {
       }
     } else if (process.arch === "s390x") {
       try {
-        return require("./index.linux-s390x-gnu.node");
+        return require("./xberg-node.linux-s390x-gnu.node");
       } catch (e) {
         loadErrors.push(e);
       }
       try {
-        const binding = require("xberg-root-linux-s390x-gnu");
-        const bindingPackageVersion = require("xberg-root-linux-s390x-gnu/package.json").version;
+        const binding = require("@xberg-io/xberg-linux-s390x-gnu");
+        const bindingPackageVersion = require("@xberg-io/xberg-linux-s390x-gnu/package.json").version;
         if (
           bindingPackageVersion !== "1.1.0" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -610,13 +610,13 @@ function requireNative() {
   } else if (process.platform === "openharmony") {
     if (process.arch === "arm64") {
       try {
-        return require("./index.openharmony-arm64.node");
+        return require("./xberg-node.openharmony-arm64.node");
       } catch (e) {
         loadErrors.push(e);
       }
       try {
-        const binding = require("xberg-root-openharmony-arm64");
-        const bindingPackageVersion = require("xberg-root-openharmony-arm64/package.json").version;
+        const binding = require("@xberg-io/xberg-openharmony-arm64");
+        const bindingPackageVersion = require("@xberg-io/xberg-openharmony-arm64/package.json").version;
         if (
           bindingPackageVersion !== "1.1.0" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -632,13 +632,13 @@ function requireNative() {
       }
     } else if (process.arch === "x64") {
       try {
-        return require("./index.openharmony-x64.node");
+        return require("./xberg-node.openharmony-x64.node");
       } catch (e) {
         loadErrors.push(e);
       }
       try {
-        const binding = require("xberg-root-openharmony-x64");
-        const bindingPackageVersion = require("xberg-root-openharmony-x64/package.json").version;
+        const binding = require("@xberg-io/xberg-openharmony-x64");
+        const bindingPackageVersion = require("@xberg-io/xberg-openharmony-x64/package.json").version;
         if (
           bindingPackageVersion !== "1.1.0" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -654,13 +654,13 @@ function requireNative() {
       }
     } else if (process.arch === "arm") {
       try {
-        return require("./index.openharmony-arm.node");
+        return require("./xberg-node.openharmony-arm.node");
       } catch (e) {
         loadErrors.push(e);
       }
       try {
-        const binding = require("xberg-root-openharmony-arm");
-        const bindingPackageVersion = require("xberg-root-openharmony-arm/package.json").version;
+        const binding = require("@xberg-io/xberg-openharmony-arm");
+        const bindingPackageVersion = require("@xberg-io/xberg-openharmony-arm/package.json").version;
         if (
           bindingPackageVersion !== "1.1.0" &&
           process.env.NAPI_RS_ENFORCE_VERSION_CHECK &&
@@ -682,150 +682,46 @@ function requireNative() {
   }
 }
 
-function createLoadErrorChain(errors) {
-  return errors.reduce((previous, current) => {
-    let message;
-    try {
-      message = current && typeof current.message === "string" ? current.message : String(current);
-    } catch {
-      message = "Unknown error";
-    }
-    const error = new Error(message);
-    error.cause = previous;
-    return error;
-  }, null);
-}
+nativeBinding = requireNative();
 
 // NAPI_RS_FORCE_WASI is a tri-state flag:
 //   unset / any other value → native binding preferred, WASI is only a fallback
-//   'true'                   → prefer WASI, but retain native as a lazy fallback
-//   'error'                  → require WASI without initializing a native fallback
+//   'true'                   → force WASI fallback even if native loaded
+//   'error'                  → force WASI and throw if no WASI binding is found
 // Treating any non-empty string as truthy (the historical behavior) meant
 // NAPI_RS_FORCE_WASI=false, NAPI_RS_FORCE_WASI=0, etc. inadvertently triggered
 // the WASI path, causing ENOENT for packages shipped without a .wasi.cjs file.
-//
-// NAPI_RS_WASI_FLAVOR selects one exact generated flavor and implies strict
-// WASI loading. It never crosses into another flavor or falls back to native.
-const __napiWasiFlavors = ["wasm32-wasi"];
-const __napiWasiFlavor = process.env.NAPI_RS_WASI_FLAVOR;
-const __napiWasiFlavorRequested = typeof __napiWasiFlavor === "string" && __napiWasiFlavor.length > 0;
-if (__napiWasiFlavorRequested && __napiWasiFlavors.indexOf(__napiWasiFlavor) === -1) {
-  throw new Error(
-    'Unsupported WASI flavor "' + __napiWasiFlavor + '". Available flavors: ' + __napiWasiFlavors.join(", "),
-  );
-}
-const forceWasiError = process.env.NAPI_RS_FORCE_WASI === "error";
-const forceWasi = process.env.NAPI_RS_FORCE_WASI === "true" || forceWasiError || __napiWasiFlavorRequested;
-
-if (!forceWasi) {
-  nativeBinding = requireNative();
-}
+const forceWasi = process.env.NAPI_RS_FORCE_WASI === "true" || process.env.NAPI_RS_FORCE_WASI === "error";
 
 if (!nativeBinding || forceWasi) {
   let wasiBinding = null;
-  let wasiBindingLoaded = false;
-  const wasiBindingErrors = [];
-  const __napiWasiResolveCandidate = (specifier, isPackage, localArtifacts) => {
-    try {
-      require.resolve(specifier);
-    } catch (resolveError) {
-      if (!resolveError || resolveError.code !== "MODULE_NOT_FOUND") {
-        throw resolveError;
-      }
-      if (isPackage) {
-        try {
-          require.resolve(specifier + "/package.json");
-        } catch (packageError) {
-          if (packageError && packageError.code === "MODULE_NOT_FOUND") {
-            return resolveError;
-          }
-          // An exports restriction proves the package exists even when its
-          // package.json is not public. Preserve the root resolution failure.
-          throw resolveError;
-        }
-        // The package exists but its main/export target is broken.
-        throw resolveError;
-      }
-      return resolveError;
+  let wasiBindingError = null;
+  try {
+    wasiBinding = require("./xberg-node.wasi.cjs");
+    nativeBinding = wasiBinding;
+  } catch (err) {
+    if (forceWasi) {
+      wasiBindingError = err;
     }
-    if (localArtifacts) {
-      let artifactError = null;
-      for (let i = 0; i < localArtifacts.length; i++) {
-        try {
-          require.resolve(localArtifacts[i]);
-          return null;
-        } catch (resolveError) {
-          if (!resolveError || resolveError.code !== "MODULE_NOT_FOUND") {
-            throw resolveError;
-          }
-          artifactError = resolveError;
-        }
-      }
-      return artifactError;
-    }
-    return null;
-  };
-  if (!wasiBindingLoaded && (!__napiWasiFlavorRequested || __napiWasiFlavor === "wasm32-wasi")) {
-    let candidateError = null;
-    let candidateFailed = false;
+  }
+  if (!nativeBinding || forceWasi) {
     try {
-      candidateError = __napiWasiResolveCandidate("./index.wasi.cjs", false, [
-        "./index.wasm32-wasi.debug.wasm",
-        "./index.wasm32-wasi.wasm",
-      ]);
-      candidateFailed = candidateError !== null;
-      if (!candidateFailed) {
-        wasiBinding = require("./index.wasi.cjs");
-        nativeBinding = wasiBinding;
-        wasiBindingLoaded = true;
-      }
+      wasiBinding = require("@xberg-io/xberg-wasm32-wasi");
+      nativeBinding = wasiBinding;
     } catch (err) {
-      candidateError = err;
-      candidateFailed = true;
-    }
-    if (candidateFailed) {
-      wasiBindingErrors.push(candidateError);
-      loadErrors.push(candidateError);
-    }
-  }
-  if (!wasiBindingLoaded && (!__napiWasiFlavorRequested || __napiWasiFlavor === "wasm32-wasi")) {
-    let candidateError = null;
-    let candidateFailed = false;
-    try {
-      candidateError = __napiWasiResolveCandidate("xberg-root-wasm32-wasi", true, undefined);
-      candidateFailed = candidateError !== null;
-      if (!candidateFailed) {
-        if (process.env.NAPI_RS_ENFORCE_VERSION_CHECK && process.env.NAPI_RS_ENFORCE_VERSION_CHECK !== "0") {
-          const bindingPackageVersion = require("xberg-root-wasm32-wasi/package.json").version;
-          if (bindingPackageVersion !== "1.1.0") {
-            throw new Error(
-              `WASI binding package version mismatch, expected 1.1.0 but got ${bindingPackageVersion}. You can reinstall dependencies to fix this issue.`,
-            );
-          }
+      if (forceWasi) {
+        if (!wasiBindingError) {
+          wasiBindingError = err;
+        } else {
+          wasiBindingError.cause = err;
         }
-        wasiBinding = require("xberg-root-wasm32-wasi");
-        nativeBinding = wasiBinding;
-        wasiBindingLoaded = true;
+        loadErrors.push(err);
       }
-    } catch (err) {
-      candidateError = err;
-      candidateFailed = true;
-    }
-    if (candidateFailed) {
-      wasiBindingErrors.push(candidateError);
-      loadErrors.push(candidateError);
     }
   }
-  if (!wasiBindingLoaded && forceWasi && !forceWasiError && !__napiWasiFlavorRequested) {
-    nativeBinding = requireNative();
-  }
-  if ((forceWasiError || __napiWasiFlavorRequested) && !wasiBindingLoaded) {
-    const error = new Error(
-      __napiWasiFlavorRequested
-        ? 'WASI binding for flavor "' + __napiWasiFlavor + '" not found'
-        : "WASI binding not found and NAPI_RS_FORCE_WASI is set to error",
-    );
-    error.cause = createLoadErrorChain(wasiBindingErrors);
+  if (process.env.NAPI_RS_FORCE_WASI === "error" && !wasiBinding) {
+    const error = new Error("WASI binding not found and NAPI_RS_FORCE_WASI is set to error");
+    error.cause = wasiBindingError;
     throw error;
   }
 }
@@ -839,7 +735,10 @@ if (!nativeBinding) {
     );
     // assign instead of the `new Error(message, { cause })` options form,
     // which Node < 16.9 silently ignores
-    error.cause = createLoadErrorChain(loadErrors);
+    error.cause = loadErrors.reduce((err, cur) => {
+      cur.cause = err;
+      return cur;
+    });
     throw error;
   }
   throw new Error(`Failed to load native binding`);
@@ -859,23 +758,24 @@ module.exports.BlockType = nativeBinding.BlockType;
 module.exports.JsBlockType = nativeBinding.JsBlockType;
 module.exports.BoundaryReason = nativeBinding.BoundaryReason;
 module.exports.JsBoundaryReason = nativeBinding.JsBoundaryReason;
-module.exports.BreadcrumbTarget = nativeBinding.BreadcrumbTarget;
-module.exports.JsBreadcrumbTarget = nativeBinding.JsBreadcrumbTarget;
 module.exports.BrowserBackend = nativeBinding.BrowserBackend;
 module.exports.JsBrowserBackend = nativeBinding.JsBrowserBackend;
 module.exports.BrowserMode = nativeBinding.BrowserMode;
 module.exports.JsBrowserMode = nativeBinding.JsBrowserMode;
 module.exports.BrowserWait = nativeBinding.BrowserWait;
 module.exports.JsBrowserWait = nativeBinding.JsBrowserWait;
-module.exports.buildDecoderPromptTokens = nativeBinding.buildDecoderPromptTokens;
 module.exports.CallMode = nativeBinding.CallMode;
 module.exports.JsCallMode = nativeBinding.JsCallMode;
+module.exports.CandleDevicePreference = nativeBinding.CandleDevicePreference;
+module.exports.JsCandleDevicePreference = nativeBinding.JsCandleDevicePreference;
+module.exports.CandleTrocrVariant = nativeBinding.CandleTrocrVariant;
+module.exports.JsCandleTrocrVariant = nativeBinding.JsCandleTrocrVariant;
 module.exports.ChunkerType = nativeBinding.ChunkerType;
 module.exports.JsChunkerType = nativeBinding.JsChunkerType;
 module.exports.chunkingConfigDefault = nativeBinding.chunkingConfigDefault;
 module.exports.ChunkType = nativeBinding.ChunkType;
 module.exports.JsChunkType = nativeBinding.JsChunkType;
-module.exports.classifyChunks = nativeBinding.classifyChunks;
+module.exports.classifyChunksOwned = nativeBinding.classifyChunksOwned;
 module.exports.clearDocumentExtractors = nativeBinding.clearDocumentExtractors;
 module.exports.clearEmbeddingBackends = nativeBinding.clearEmbeddingBackends;
 module.exports.clearOcrBackends = nativeBinding.clearOcrBackends;
@@ -890,8 +790,6 @@ module.exports.CodeContentMode = nativeBinding.CodeContentMode;
 module.exports.JsCodeContentMode = nativeBinding.JsCodeContentMode;
 module.exports.CodeDataNodeKind = nativeBinding.CodeDataNodeKind;
 module.exports.JsCodeDataNodeKind = nativeBinding.JsCodeDataNodeKind;
-module.exports.ConfidenceSemantics = nativeBinding.ConfidenceSemantics;
-module.exports.JsConfidenceSemantics = nativeBinding.JsConfidenceSemantics;
 module.exports.contentFilterConfigDefault = nativeBinding.contentFilterConfigDefault;
 module.exports.ContentFilterKind = nativeBinding.ContentFilterKind;
 module.exports.JsContentFilterKind = nativeBinding.JsContentFilterKind;
@@ -913,9 +811,6 @@ module.exports.JsElementType = nativeBinding.JsElementType;
 module.exports.embeddingConfigDefault = nativeBinding.embeddingConfigDefault;
 module.exports.EmbeddingsEmbeddingBackend = nativeBinding.EmbeddingsEmbeddingBackend;
 module.exports.JsEmbeddingsEmbeddingBackend = nativeBinding.JsEmbeddingsEmbeddingBackend;
-module.exports.ensureInitialized = nativeBinding.ensureInitialized;
-module.exports.EntityCategory = nativeBinding.EntityCategory;
-module.exports.JsEntityCategory = nativeBinding.JsEntityCategory;
 module.exports.ExecutionProviderType = nativeBinding.ExecutionProviderType;
 module.exports.JsExecutionProviderType = nativeBinding.JsExecutionProviderType;
 module.exports.extract = nativeBinding.extract;
@@ -936,6 +831,10 @@ module.exports.FormFieldType = nativeBinding.FormFieldType;
 module.exports.JsFormFieldType = nativeBinding.JsFormFieldType;
 module.exports.FormulaModel = nativeBinding.FormulaModel;
 module.exports.JsFormulaModel = nativeBinding.JsFormulaModel;
+module.exports.GlmOcrLayoutMode = nativeBinding.GlmOcrLayoutMode;
+module.exports.JsGlmOcrLayoutMode = nativeBinding.JsGlmOcrLayoutMode;
+module.exports.GlmOcrTaskKind = nativeBinding.GlmOcrTaskKind;
+module.exports.JsGlmOcrTaskKind = nativeBinding.JsGlmOcrTaskKind;
 module.exports.HeadingStyle = nativeBinding.HeadingStyle;
 module.exports.JsHeadingStyle = nativeBinding.JsHeadingStyle;
 module.exports.heuristicsConfigDefault = nativeBinding.heuristicsConfigDefault;
@@ -945,6 +844,8 @@ module.exports.JsHighlightStyle = nativeBinding.JsHighlightStyle;
 module.exports.htmlOutputConfigDefault = nativeBinding.htmlOutputConfigDefault;
 module.exports.HtmlTheme = nativeBinding.HtmlTheme;
 module.exports.JsHtmlTheme = nativeBinding.JsHtmlTheme;
+module.exports.HtmlToMarkdownRsOutputFormat = nativeBinding.HtmlToMarkdownRsOutputFormat;
+module.exports.JsHtmlToMarkdownRsOutputFormat = nativeBinding.JsHtmlToMarkdownRsOutputFormat;
 module.exports.imageExtractionConfigDefault = nativeBinding.imageExtractionConfigDefault;
 module.exports.ImageKind = nativeBinding.ImageKind;
 module.exports.JsImageKind = nativeBinding.JsImageKind;
@@ -953,7 +854,6 @@ module.exports.ImageType = nativeBinding.ImageType;
 module.exports.JsImageType = nativeBinding.JsImageType;
 module.exports.InlineType = nativeBinding.InlineType;
 module.exports.JsInlineType = nativeBinding.JsInlineType;
-module.exports.installPdfRenderDiagnostics = nativeBinding.installPdfRenderDiagnostics;
 module.exports.JupyterCellRendering = nativeBinding.JupyterCellRendering;
 module.exports.JsJupyterCellRendering = nativeBinding.JsJupyterCellRendering;
 module.exports.KeywordAlgorithm = nativeBinding.KeywordAlgorithm;
@@ -988,19 +888,20 @@ module.exports.maxSimRank = nativeBinding.maxSimRank;
 module.exports.maxSimScore = nativeBinding.maxSimScore;
 module.exports.MergeMode = nativeBinding.MergeMode;
 module.exports.JsMergeMode = nativeBinding.JsMergeMode;
+module.exports.MimeDetectionPolicy = nativeBinding.MimeDetectionPolicy;
+module.exports.JsMimeDetectionPolicy = nativeBinding.JsMimeDetectionPolicy;
 module.exports.multidocThresholdsDefault = nativeBinding.multidocThresholdsDefault;
 module.exports.NerBackendKind = nativeBinding.NerBackendKind;
 module.exports.JsNerBackendKind = nativeBinding.JsNerBackendKind;
 module.exports.NewlineStyle = nativeBinding.NewlineStyle;
 module.exports.JsNewlineStyle = nativeBinding.JsNewlineStyle;
+module.exports.ngramRangeDefault = nativeBinding.ngramRangeDefault;
 module.exports.OcrBackendType = nativeBinding.OcrBackendType;
 module.exports.JsOcrBackendType = nativeBinding.JsOcrBackendType;
 module.exports.ocrConfigDefault = nativeBinding.ocrConfigDefault;
 module.exports.OcrElementLevel = nativeBinding.OcrElementLevel;
 module.exports.JsOcrElementLevel = nativeBinding.JsOcrElementLevel;
 module.exports.ocrQualityThresholdsDefault = nativeBinding.ocrQualityThresholdsDefault;
-module.exports.OutputFormat = nativeBinding.OutputFormat;
-module.exports.JsOutputFormat = nativeBinding.JsOutputFormat;
 module.exports.PaddleInferenceBackend = nativeBinding.PaddleInferenceBackend;
 module.exports.JsPaddleInferenceBackend = nativeBinding.JsPaddleInferenceBackend;
 module.exports.PaddleLanguage = nativeBinding.PaddleLanguage;
@@ -1018,6 +919,8 @@ module.exports.paddleOcrConfigWithModelVersion = nativeBinding.paddleOcrConfigWi
 module.exports.paddleOcrConfigWithPadding = nativeBinding.paddleOcrConfigWithPadding;
 module.exports.paddleOcrConfigWithRecBatchNum = nativeBinding.paddleOcrConfigWithRecBatchNum;
 module.exports.paddleOcrConfigWithTableDetection = nativeBinding.paddleOcrConfigWithTableDetection;
+module.exports.PaddleOcrVlTaskKind = nativeBinding.PaddleOcrVlTaskKind;
+module.exports.JsPaddleOcrVlTaskKind = nativeBinding.JsPaddleOcrVlTaskKind;
 module.exports.pageConfigDefault = nativeBinding.pageConfigDefault;
 module.exports.PageOrientationHandling = nativeBinding.PageOrientationHandling;
 module.exports.JsPageOrientationHandling = nativeBinding.JsPageOrientationHandling;
@@ -1029,8 +932,6 @@ module.exports.JsPdfAnnotationType = nativeBinding.JsPdfAnnotationType;
 module.exports.PdfBackend = nativeBinding.PdfBackend;
 module.exports.JsPdfBackend = nativeBinding.JsPdfBackend;
 module.exports.pdfConfigDefault = nativeBinding.pdfConfigDefault;
-module.exports.PiiCategory = nativeBinding.PiiCategory;
-module.exports.JsPiiCategory = nativeBinding.JsPiiCategory;
 module.exports.postProcessorConfigDefault = nativeBinding.postProcessorConfigDefault;
 module.exports.PreprocessingPreset = nativeBinding.PreprocessingPreset;
 module.exports.JsPreprocessingPreset = nativeBinding.JsPreprocessingPreset;
@@ -1086,11 +987,11 @@ module.exports.TableModel = nativeBinding.TableModel;
 module.exports.JsTableModel = nativeBinding.JsTableModel;
 module.exports.TableOverlapPreference = nativeBinding.TableOverlapPreference;
 module.exports.JsTableOverlapPreference = nativeBinding.JsTableOverlapPreference;
-module.exports.takeXbergNativePdfRenderWarnings = nativeBinding.takeXbergNativePdfRenderWarnings;
 module.exports.tesseractConfigDefault = nativeBinding.tesseractConfigDefault;
 module.exports.TextDirection = nativeBinding.TextDirection;
 module.exports.JsTextDirection = nativeBinding.JsTextDirection;
-module.exports.timestampTokenToMs = nativeBinding.timestampTokenToMs;
+module.exports.TierStrategy = nativeBinding.TierStrategy;
+module.exports.JsTierStrategy = nativeBinding.JsTierStrategy;
 module.exports.tokenReductionConfigDefault = nativeBinding.tokenReductionConfigDefault;
 module.exports.tokenReductionOptionsDefault = nativeBinding.tokenReductionOptionsDefault;
 module.exports.transcriptionConfigDefault = nativeBinding.transcriptionConfigDefault;

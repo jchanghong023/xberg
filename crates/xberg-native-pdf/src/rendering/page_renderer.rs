@@ -13,6 +13,11 @@
     clippy::ptr_arg
 )]
 
+// TODO(xberg-io/xberg#1567): 4 cyclomatic-complexity and 108 size/complexity findings
+// in this file, currently excluded via the quality-debt baseline in alef.toml. Splitting
+// these needs compiler-in-the-loop verification, not a mechanical pass. Delete this
+// note and the file's baseline entry together once it goes green. Help wanted.
+
 use crate::content::graphics_state::{GraphicsState, GraphicsStateStack, Matrix};
 use crate::content::operators::Operator;
 use crate::content::parser::parse_content_stream;
@@ -299,6 +304,143 @@ pub(crate) const MAX_SMASK_DEPTH: u32 = 32;
 /// without bound. The cap sits well above any realistic nesting; glyphs at
 /// or beyond it are skipped while their advance width is still applied.
 pub(crate) const MAX_TYPE3_DEPTH: u32 = 8;
+
+/// Outcome of resolving a generic (non-device-family) colour space for the
+/// plain fill-colour operator (`Operator::SetFillColor`, i.e. `sc`).
+/// `HandledNoChange` distinguishes "the space was recognised but leaves
+/// `fill_color_rgb` untouched" (`/Separation` / `/DeviceN`, whose colour the
+/// paint-time pipeline resolves) from `Unhandled`, for which the caller
+/// still applies the `components[0]`-as-gray fallback. ~keep
+enum FillColorSpaceResolution {
+    Rgb(f32, f32, f32),
+    HandledNoChange,
+    Unhandled,
+}
+
+/// Outcome of resolving a generic (non-device-family) colour space for the
+/// pattern-capable `scn`/`SCN` operators (`SetFillColorN` / `SetStrokeColorN`).
+/// `RgbCmyk` additionally carries the CMYK quadruple that
+/// `/DeviceN /Process`-attributed paints must populate on the graphics state
+/// for the §11.7.4.3 overprint blend (see the call sites). ~keep
+enum ScnColorSpaceResolution {
+    Rgb(f32, f32, f32),
+    RgbCmyk((f32, f32, f32), (f32, f32, f32, f32)),
+    HandledNoChange,
+    Unhandled,
+}
+
+/// Read-only paint context threaded through the post-paint colour-lane
+/// modulator helpers (`PageRenderer::apply_paint_modulators` /
+/// `apply_sidecar_paint_modulators`). Bundles the parameters shared by every
+/// modulator call site into one struct instead of passing them positionally
+/// at each of the ten call sites. ~keep
+struct PaintModulatorContext<'a> {
+    gs: &'a GraphicsState,
+    doc: &'a PdfDocument,
+    page_num: usize,
+    resources: &'a Object,
+    base_transform: Transform,
+    fill_side: bool,
+}
+
+/// Pre-paint snapshots consumed by `PageRenderer::apply_paint_modulators`.
+/// This is the cadence shared by the combo path ops (`B`/`b`/`B*`/`b*`),
+/// text-showing (`Tj`/`'`/`"`/`TJ`), `Do`, and `sh`. ~keep
+struct PaintModulatorSnapshots {
+    cmyk_compose: Option<Vec<u8>>,
+    overprint: Option<Vec<u8>>,
+    spot: Option<Vec<u8>>,
+    smask: Option<Vec<u8>>,
+    smask_spot: Option<Vec<u8>>,
+}
+
+/// Pre-paint snapshots consumed by
+/// `PageRenderer::apply_sidecar_paint_modulators`. This is the cadence
+/// shared by the plain stroke (`S`) and fill (`f`/`F`) path ops. Unlike
+/// `PaintModulatorSnapshots`, it additionally mirrors the CMYK and RGB
+/// sidecar planes and always runs the (possibly-empty-snapshot) spot
+/// mirror. ~keep
+struct SidecarPaintModulatorSnapshots {
+    cmyk_compose: Option<Vec<u8>>,
+    overprint: Option<Vec<u8>>,
+    cmyk_sidecar: Option<Vec<u8>>,
+    rgb_sidecar: Option<Vec<u8>>,
+    smask: Option<Vec<u8>>,
+    smask_spot: Option<Vec<u8>>,
+}
+
+/// Colour resolved from an `/ICCBased` colour-space array's stream `/N`
+/// component count (ISO 32000-1 §8.6.5.5: N=1 DeviceGray-like, N=3
+/// DeviceRGB-like, N=4 DeviceCMYK-like). Returns `None` when the stream
+/// can't be resolved, isn't a dictionary, `/N` doesn't match one of the
+/// three cases, or `components` is too short for that case — matching the
+/// original inline `match n { .. _ => {} }` no-op. Shared by all four
+/// `sc`/`SC`/`scn`/`SCN` colour-space resolvers below. ~keep
+fn resolve_iccbased_stream_color(
+    doc: &PdfDocument,
+    iccbased_stream_ref: &Object,
+    components: &[f32],
+) -> Option<(f32, f32, f32)> {
+    let dict_obj = doc.resolve_object(iccbased_stream_ref).ok()?;
+    let dict = dict_obj.as_dict()?;
+    let n = dict.get("N").and_then(|o| o.as_integer()).unwrap_or(3);
+    match n {
+        1 if !components.is_empty() => Some((components[0], components[0], components[0])),
+        3 if components.len() >= 3 => Some((components[0], components[1], components[2])),
+        4 if components.len() >= 4 => Some(cmyk_to_rgb(components[0], components[1], components[2], components[3])),
+        _ => None,
+    }
+}
+
+/// Generic (non-device-family) colour-space resolution for the plain `sc`
+/// fill-colour operator (`Operator::SetFillColor`). ~keep
+fn resolve_generic_fill_color(
+    resolved_space: Option<&Object>,
+    doc: &PdfDocument,
+    components: &[f32],
+) -> FillColorSpaceResolution {
+    let Some(rs) = resolved_space else {
+        return FillColorSpaceResolution::Unhandled;
+    };
+    let Some(arr) = rs.as_array() else {
+        return FillColorSpaceResolution::Unhandled;
+    };
+    let Some(type_name) = arr.first().and_then(|o| o.as_name()) else {
+        return FillColorSpaceResolution::Unhandled;
+    };
+    match type_name {
+        "ICCBased" if arr.len() > 1 => match resolve_iccbased_stream_color(doc, &arr[1], components) {
+            Some((r, g, b)) => FillColorSpaceResolution::Rgb(r, g, b),
+            None => FillColorSpaceResolution::Unhandled,
+        },
+        "Separation" | "DeviceN" => FillColorSpaceResolution::HandledNoChange,
+        "Indexed" if !components.is_empty() => {
+            let g = components[0] / 255.0;
+            FillColorSpaceResolution::Rgb(g, g, g)
+        }
+        _ => FillColorSpaceResolution::Unhandled,
+    }
+}
+
+/// Generic (non-device-family) colour-space resolution for the plain `SC`
+/// stroke-colour operator (`Operator::SetStrokeColor`). Unlike the fill-side
+/// resolver above, the original inline match here only ever recognised
+/// `/ICCBased` — `/Separation`, `/DeviceN` and `/Indexed` fall through to
+/// the caller's gray fallback, matching the asymmetry already present in
+/// the pre-extraction code. ~keep
+fn resolve_generic_stroke_color(
+    resolved_space: Option<&Object>,
+    doc: &PdfDocument,
+    components: &[f32],
+) -> Option<(f32, f32, f32)> {
+    let rs = resolved_space?;
+    let arr = rs.as_array()?;
+    let type_name = arr.first().and_then(|o| o.as_name())?;
+    if type_name != "ICCBased" || arr.len() <= 1 {
+        return None;
+    }
+    resolve_iccbased_stream_color(doc, &arr[1], components)
+}
 
 impl PageRenderer {
     /// Create a new page renderer with the specified options.
@@ -687,6 +829,135 @@ impl PageRenderer {
         }
     }
 
+    /// Generic (non-device-family) colour-space resolution shared by the
+    /// pattern-capable `scn`/`SCN` operators (`SetFillColorN` /
+    /// `SetStrokeColorN`). The two call sites are identical apart from which
+    /// `GraphicsState` fields they write, so the resolution logic lives here
+    /// once. ~keep
+    fn resolve_scn_color(
+        &self,
+        resolved_space: Option<&Object>,
+        doc: &PdfDocument,
+        components: &[f32],
+        rendering_intent: &str,
+    ) -> ScnColorSpaceResolution {
+        let Some(rs) = resolved_space else {
+            return ScnColorSpaceResolution::Unhandled;
+        };
+        let Some(arr) = rs.as_array() else {
+            return ScnColorSpaceResolution::Unhandled;
+        };
+        let Some(type_name) = arr.first().and_then(|o| o.as_name()) else {
+            return ScnColorSpaceResolution::Unhandled;
+        };
+        match type_name {
+            "ICCBased" if arr.len() > 1 => match resolve_iccbased_stream_color(doc, &arr[1], components) {
+                Some((r, g, b)) => ScnColorSpaceResolution::Rgb(r, g, b),
+                None => ScnColorSpaceResolution::Unhandled,
+            },
+            "Separation" | "DeviceN" => {
+                // §11.7.4.3 CompatibleOverprint reads `gs.fill_color_cmyk` /
+                // `gs.stroke_color_cmyk` (when populated) to recover the
+                // source CMYK for the `B(c_b, c_s)` blend function. A
+                // `/DeviceN` paint that declares `/Process` attribution
+                // (§8.6.6.5) carries process colorants directly in its
+                // source tints, so that identity must be recovered here. ~keep
+                if type_name == "DeviceN" {
+                    let intent = crate::color::RenderingIntent::from_pdf_name(rendering_intent);
+                    if let Some(cmyk) = crate::rendering::sidecar::extract_process_paint_cmyk(
+                        rs,
+                        components,
+                        doc,
+                        intent,
+                        Some(&self.icc_transform_cache),
+                    ) {
+                        let rgb = cmyk_to_rgb(cmyk.0, cmyk.1, cmyk.2, cmyk.3);
+                        return ScnColorSpaceResolution::RgbCmyk(rgb, cmyk);
+                    }
+                }
+                ScnColorSpaceResolution::HandledNoChange
+            }
+            "Indexed" => ScnColorSpaceResolution::HandledNoChange,
+            _ => ScnColorSpaceResolution::Unhandled,
+        }
+    }
+
+    /// Applies the `cmyk_compose → overprint → spot-mirror → SMask`
+    /// post-paint modulator cadence shared by the combo path ops, text
+    /// showing, `Do`, and `sh`. Extracted verbatim from the identical
+    /// four-`if let` sequence that was duplicated at every one of those call
+    /// sites — each modulator still only runs when its snapshot is `Some`,
+    /// in the same order as before. ~keep
+    fn apply_paint_modulators(
+        &mut self,
+        pixmap: &mut Pixmap,
+        snapshots: PaintModulatorSnapshots,
+        coverage: Option<&[u8]>,
+        ctx: PaintModulatorContext<'_>,
+    ) -> Result<()> {
+        if let Some(snap) = snapshots.cmyk_compose {
+            self.apply_cmyk_compose_after_paint(pixmap, &snap, ctx.gs, ctx.doc, ctx.fill_side);
+        }
+        if let Some(snap) = snapshots.overprint {
+            self.apply_overprint_after_paint(pixmap, &snap, ctx.gs, ctx.doc, ctx.fill_side);
+        }
+        if let Some(snap) = snapshots.spot {
+            self.mirror_spot_paint_into_sidecar_with_coverage(pixmap, &snap, coverage, ctx.gs, ctx.fill_side);
+        }
+        if let Some(snap) = snapshots.smask {
+            self.apply_smask_after_paint(
+                pixmap,
+                &snap,
+                snapshots.smask_spot.as_deref(),
+                ctx.gs,
+                ctx.doc,
+                ctx.page_num,
+                ctx.resources,
+                ctx.base_transform,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Applies the sidecar-mirroring post-paint modulator cadence shared by
+    /// the plain stroke (`S`) and fill (`f`/`F`) path ops. Extracted
+    /// verbatim from the identical five-block sequence that was duplicated
+    /// at both call sites. ~keep
+    fn apply_sidecar_paint_modulators(
+        &mut self,
+        pixmap: &mut Pixmap,
+        snapshots: SidecarPaintModulatorSnapshots,
+        coverage: Option<&[u8]>,
+        ctx: PaintModulatorContext<'_>,
+    ) -> Result<()> {
+        if let Some(snap) = snapshots.cmyk_compose {
+            self.apply_cmyk_compose_after_paint_with_coverage(pixmap, &snap, coverage, ctx.gs, ctx.doc, ctx.fill_side);
+        }
+        if let Some(snap) = snapshots.overprint {
+            self.apply_overprint_after_paint_with_coverage(pixmap, &snap, coverage, ctx.gs, ctx.doc, ctx.fill_side);
+        }
+        if let Some(snap) = snapshots.cmyk_sidecar {
+            self.mirror_cmyk_paint_into_sidecar_with_coverage(pixmap, &snap, coverage, ctx.gs, ctx.doc, ctx.fill_side);
+        }
+        if let Some(snap) = snapshots.rgb_sidecar {
+            self.mirror_rgb_paint_into_sidecar_with_coverage(pixmap, &snap, coverage, ctx.gs, ctx.doc, ctx.fill_side);
+        }
+        self.mirror_spot_paint_into_sidecar_with_coverage(pixmap, &[], coverage, ctx.gs, ctx.fill_side);
+        if let Some(snap) = snapshots.smask {
+            self.apply_smask_after_paint(
+                pixmap,
+                &snap,
+                snapshots.smask_spot.as_deref(),
+                ctx.gs,
+                ctx.doc,
+                ctx.page_num,
+                ctx.resources,
+                ctx.base_transform,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Execute PDF operators to render content.
     ///
     /// OCG layer exclusion is sourced from `self.options.excluded_layers`;
@@ -1002,78 +1273,26 @@ impl PageRenderer {
                             gs.fill_color_rgb = cmyk_to_rgb(components[0], components[1], components[2], components[3]);
                             gs.fill_color_cmyk = Some((components[0], components[1], components[2], components[3]));
                         }
-                        _ => {
-                            let mut handled = false;
-                            if let Some(rs) = resolved_space {
-                                if let Some(arr) = rs.as_array() {
-                                    if let Some(type_name) = arr.first().and_then(|o| o.as_name()) {
-                                        match type_name {
-                                            "ICCBased" if arr.len() > 1 => {
-                                                if let Ok(dict_obj) = doc.resolve_object(&arr[1]) {
-                                                    if let Some(dict) = dict_obj.as_dict() {
-                                                        let n = dict.get("N").and_then(|o| o.as_integer()).unwrap_or(3);
-                                                        match n {
-                                                            1 if !components.is_empty() => {
-                                                                let g = components[0];
-                                                                gs.fill_color_rgb = (g, g, g);
-                                                                handled = true;
-                                                            }
-                                                            3 if components.len() >= 3 => {
-                                                                gs.fill_color_rgb =
-                                                                    (components[0], components[1], components[2]);
-                                                                handled = true;
-                                                            }
-                                                            4 if components.len() >= 4 => {
-                                                                gs.fill_color_rgb = cmyk_to_rgb(
-                                                                    components[0],
-                                                                    components[1],
-                                                                    components[2],
-                                                                    components[3],
-                                                                );
-                                                                handled = true;
-                                                            }
-                                                            _ => {}
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            "Separation" | "DeviceN" => {
-                                                // Inline Separation/DeviceN evaluation used to
-                                                // live here as a partial reimplementation of the
-                                                // colour-resolver's tint-transform path. Wave 5
-                                                // promoted the pipeline to the single source of
-                                                // truth — the pipeline runs the full Type 2 / 3 /
-                                                // 4 evaluator at paint time and splices the
-                                                // resulting RGBA via pipeline_resolve_paint_gs.
-                                                // The dispatcher just records the components on
-                                                // gs.fill_color_components above; the pipeline
-                                                // reads those when the paint op fires. Setting
-                                                // gs.fill_color_rgb here would only seed the
-                                                // rgba_matches short-circuit, and an inline
-                                                // approximation would be wrong for any Type 4 or
-                                                // Type 3 tint transform — pin it as "handled"
-                                                // (no fallback gray write) and let the pipeline
-                                                // own the colour. ~keep
-                                                handled = true;
-                                            }
-                                            "Indexed" => {
-                                                if !components.is_empty() {
-                                                    let g = components[0] / 255.0;
-                                                    gs.fill_color_rgb = (g, g, g);
-                                                    handled = true;
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
+                        // Inline Separation/DeviceN evaluation used to live
+                        // here as a partial reimplementation of the colour-
+                        // resolver's tint-transform path. Wave 5 promoted
+                        // the pipeline to the single source of truth — the
+                        // pipeline runs the full Type 2 / 3 / 4 evaluator at
+                        // paint time and splices the resulting RGBA via
+                        // pipeline_resolve_paint_gs. The dispatcher just
+                        // records the components on gs.fill_color_components
+                        // above; the pipeline reads those when the paint op
+                        // fires. See `resolve_generic_fill_color`. ~keep
+                        _ => match resolve_generic_fill_color(resolved_space, doc, components) {
+                            FillColorSpaceResolution::Rgb(r, g, b) => gs.fill_color_rgb = (r, g, b),
+                            FillColorSpaceResolution::HandledNoChange => {}
+                            FillColorSpaceResolution::Unhandled => {
+                                if !components.is_empty() {
+                                    let g = components[0];
+                                    gs.fill_color_rgb = (g, g, g);
                                 }
                             }
-
-                            if !handled && !components.is_empty() {
-                                let g = components[0];
-                                gs.fill_color_rgb = (g, g, g);
-                            }
-                        }
+                        },
                     }
                     // Per ISO 32000-1 §8.6.6.4 / §8.6.6.5: when the fill
                     // colour space is /Separation or /DeviceN, record the
@@ -1112,51 +1331,15 @@ impl PageRenderer {
                                 cmyk_to_rgb(components[0], components[1], components[2], components[3]);
                             gs.stroke_color_cmyk = Some((components[0], components[1], components[2], components[3]));
                         }
-                        _ => {
-                            let mut handled = false;
-                            if let Some(rs) = resolved_space {
-                                if let Some(arr) = rs.as_array() {
-                                    if let Some(type_name) = arr.first().and_then(|o| o.as_name()) {
-                                        match type_name {
-                                            "ICCBased" if arr.len() > 1 => {
-                                                if let Ok(dict_obj) = doc.resolve_object(&arr[1]) {
-                                                    if let Some(dict) = dict_obj.as_dict() {
-                                                        let n = dict.get("N").and_then(|o| o.as_integer()).unwrap_or(3);
-                                                        match n {
-                                                            1 if !components.is_empty() => {
-                                                                let g = components[0];
-                                                                gs.stroke_color_rgb = (g, g, g);
-                                                                handled = true;
-                                                            }
-                                                            3 if components.len() >= 3 => {
-                                                                gs.stroke_color_rgb =
-                                                                    (components[0], components[1], components[2]);
-                                                                handled = true;
-                                                            }
-                                                            4 if components.len() >= 4 => {
-                                                                gs.stroke_color_rgb = cmyk_to_rgb(
-                                                                    components[0],
-                                                                    components[1],
-                                                                    components[2],
-                                                                    components[3],
-                                                                );
-                                                                handled = true;
-                                                            }
-                                                            _ => {}
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
+                        _ => match resolve_generic_stroke_color(resolved_space, doc, components) {
+                            Some((r, g, b)) => gs.stroke_color_rgb = (r, g, b),
+                            None => {
+                                if !components.is_empty() {
+                                    let g = components[0];
+                                    gs.stroke_color_rgb = (g, g, g);
                                 }
                             }
-                            if !handled && !components.is_empty() {
-                                let g = components[0];
-                                gs.stroke_color_rgb = (g, g, g);
-                            }
-                        }
+                        },
                     }
                     gs.stroke_spot_inks = resolved_space
                         .map(|rs| crate::rendering::sidecar::extract_paint_spot_inks(rs, components, doc))
@@ -1196,101 +1379,26 @@ impl PageRenderer {
                             gs.fill_color_rgb = cmyk_to_rgb(components[0], components[1], components[2], components[3]);
                             gs.fill_color_cmyk = Some((components[0], components[1], components[2], components[3]));
                         }
-                        _ => {
-                            let mut handled = false;
-                            if let Some(rs) = resolved_space {
-                                if let Some(arr) = rs.as_array() {
-                                    if let Some(type_name) = arr.first().and_then(|o| o.as_name()) {
-                                        match type_name {
-                                            "ICCBased" if arr.len() > 1 => {
-                                                if let Ok(dict_obj) = doc.resolve_object(&arr[1]) {
-                                                    if let Some(dict) = dict_obj.as_dict() {
-                                                        let n = dict.get("N").and_then(|o| o.as_integer()).unwrap_or(3);
-                                                        match n {
-                                                            1 if !components.is_empty() => {
-                                                                let g = components[0];
-                                                                gs.fill_color_rgb = (g, g, g);
-                                                                handled = true;
-                                                            }
-                                                            3 if components.len() >= 3 => {
-                                                                gs.fill_color_rgb =
-                                                                    (components[0], components[1], components[2]);
-                                                                handled = true;
-                                                            }
-                                                            4 if components.len() >= 4 => {
-                                                                gs.fill_color_rgb = cmyk_to_rgb(
-                                                                    components[0],
-                                                                    components[1],
-                                                                    components[2],
-                                                                    components[3],
-                                                                );
-                                                                handled = true;
-                                                            }
-                                                            _ => {}
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            "Separation" | "DeviceN" => {
-                                                // Pipeline owns the colour at paint time —
-                                                // see the matching comment in the SetFillColor
-                                                // arm above. The dispatcher just records the
-                                                // components for the pipeline to read.
-                                                //
-                                                // BUT: §11.7.4.3 CompatibleOverprint reads
-                                                // `gs.fill_color_cmyk` (when populated) /
-                                                // `gs.fill_color_rgb` to recover the source
-                                                // CMYK for the `B(c_b, c_s)` blend function.
-                                                // A DeviceN paint that declares /Process
-                                                // attribution (§8.6.6.5) carries process
-                                                // colorants directly in its source tints; we
-                                                // must populate the graphics-state CMYK
-                                                // identity here, otherwise the overprint
-                                                // dispatcher reads the stale post-`cs`
-                                                // initial `(0,0,0)` RGB and produces a
-                                                // constant `(1,1,1,0)` source CMYK
-                                                // regardless of actual scn tints. ~keep
-                                                if type_name == "DeviceN" {
-                                                    let intent_for_extract =
-                                                        crate::color::RenderingIntent::from_pdf_name(
-                                                            &gs.rendering_intent,
-                                                        );
-                                                    if let Some(cmyk) =
-                                                        crate::rendering::sidecar::extract_process_paint_cmyk(
-                                                            rs,
-                                                            components,
-                                                            doc,
-                                                            intent_for_extract,
-                                                            Some(&self.icc_transform_cache),
-                                                        )
-                                                    {
-                                                        gs.fill_color_cmyk = Some(cmyk);
-                                                        gs.fill_color_rgb = cmyk_to_rgb(cmyk.0, cmyk.1, cmyk.2, cmyk.3);
-                                                    }
-                                                }
-                                                handled = true;
-                                            }
-                                            "Indexed" => {
-                                                // Pipeline's resolve_indexed handles index/255
-                                                // gray fallback at paint time. The inline path
-                                                // used to set gs.fill_color_rgb here to seed
-                                                // the rgba_matches short-circuit; the pipeline
-                                                // now produces the same value unconditionally,
-                                                // so the short-circuit either fires or the
-                                                // splice clone runs — either way the colour is
-                                                // correct. ~keep
-                                                handled = true;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
+                        // Pipeline owns the colour for /Separation /
+                        // /DeviceN and /Indexed at paint time — the
+                        // dispatcher just records the components above. The
+                        // §11.7.4.3 CompatibleOverprint CMYK-identity
+                        // recovery for /Process-attributed /DeviceN is
+                        // handled inside `resolve_scn_color`. ~keep
+                        _ => match self.resolve_scn_color(resolved_space, doc, components, &gs.rendering_intent) {
+                            ScnColorSpaceResolution::Rgb(r, g, b) => gs.fill_color_rgb = (r, g, b),
+                            ScnColorSpaceResolution::RgbCmyk(rgb, cmyk) => {
+                                gs.fill_color_cmyk = Some(cmyk);
+                                gs.fill_color_rgb = rgb;
+                            }
+                            ScnColorSpaceResolution::HandledNoChange => {}
+                            ScnColorSpaceResolution::Unhandled => {
+                                if !components.is_empty() {
+                                    let g = components[0];
+                                    gs.fill_color_rgb = (g, g, g);
                                 }
                             }
-                            if !handled && !components.is_empty() {
-                                let g = components[0];
-                                gs.fill_color_rgb = (g, g, g);
-                            }
-                        }
+                        },
                     }
                     gs.fill_spot_inks = resolved_space
                         .map(|rs| crate::rendering::sidecar::extract_paint_spot_inks(rs, components, doc))
@@ -1322,85 +1430,26 @@ impl PageRenderer {
                                 cmyk_to_rgb(components[0], components[1], components[2], components[3]);
                             gs.stroke_color_cmyk = Some((components[0], components[1], components[2], components[3]));
                         }
-                        _ => {
-                            let mut handled = false;
-                            if let Some(rs) = resolved_space {
-                                if let Some(arr) = rs.as_array() {
-                                    if let Some(type_name) = arr.first().and_then(|o| o.as_name()) {
-                                        match type_name {
-                                            "ICCBased" if arr.len() > 1 => {
-                                                if let Ok(dict_obj) = doc.resolve_object(&arr[1]) {
-                                                    if let Some(dict) = dict_obj.as_dict() {
-                                                        let n = dict.get("N").and_then(|o| o.as_integer()).unwrap_or(3);
-                                                        match n {
-                                                            1 if !components.is_empty() => {
-                                                                let g = components[0];
-                                                                gs.stroke_color_rgb = (g, g, g);
-                                                                handled = true;
-                                                            }
-                                                            3 if components.len() >= 3 => {
-                                                                gs.stroke_color_rgb =
-                                                                    (components[0], components[1], components[2]);
-                                                                handled = true;
-                                                            }
-                                                            4 if components.len() >= 4 => {
-                                                                gs.stroke_color_rgb = cmyk_to_rgb(
-                                                                    components[0],
-                                                                    components[1],
-                                                                    components[2],
-                                                                    components[3],
-                                                                );
-                                                                handled = true;
-                                                            }
-                                                            _ => {}
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                            "Separation" | "DeviceN" => {
-                                                // Pipeline owns the colour at paint time —
-                                                // see the matching comment in the SetFillColor
-                                                // arm. The §11.7.4.3 CompatibleOverprint
-                                                // source-CMYK reconstruction for /Process-
-                                                // attributed DeviceN runs the same way as the
-                                                // fill side; see the comment in
-                                                // `SetFillColorN` above. ~keep
-                                                if type_name == "DeviceN" {
-                                                    let intent_for_extract =
-                                                        crate::color::RenderingIntent::from_pdf_name(
-                                                            &gs.rendering_intent,
-                                                        );
-                                                    if let Some(cmyk) =
-                                                        crate::rendering::sidecar::extract_process_paint_cmyk(
-                                                            rs,
-                                                            components,
-                                                            doc,
-                                                            intent_for_extract,
-                                                            Some(&self.icc_transform_cache),
-                                                        )
-                                                    {
-                                                        gs.stroke_color_cmyk = Some(cmyk);
-                                                        gs.stroke_color_rgb =
-                                                            cmyk_to_rgb(cmyk.0, cmyk.1, cmyk.2, cmyk.3);
-                                                    }
-                                                }
-                                                handled = true;
-                                            }
-                                            "Indexed" => {
-                                                // Pipeline's resolve_indexed handles
-                                                // index/255 gray fallback at paint time. ~keep
-                                                handled = true;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
+                        // Pipeline owns the colour at paint time — see the
+                        // matching comment in the SetFillColorN arm above.
+                        // The §11.7.4.3 CompatibleOverprint source-CMYK
+                        // reconstruction for /Process-attributed /DeviceN
+                        // runs the same way as the fill side via
+                        // `resolve_scn_color`. ~keep
+                        _ => match self.resolve_scn_color(resolved_space, doc, components, &gs.rendering_intent) {
+                            ScnColorSpaceResolution::Rgb(r, g, b) => gs.stroke_color_rgb = (r, g, b),
+                            ScnColorSpaceResolution::RgbCmyk(rgb, cmyk) => {
+                                gs.stroke_color_cmyk = Some(cmyk);
+                                gs.stroke_color_rgb = rgb;
+                            }
+                            ScnColorSpaceResolution::HandledNoChange => {}
+                            ScnColorSpaceResolution::Unhandled => {
+                                if !components.is_empty() {
+                                    let g = components[0];
+                                    gs.stroke_color_rgb = (g, g, g);
                                 }
                             }
-                            if !handled && !components.is_empty() {
-                                let g = components[0];
-                                gs.stroke_color_rgb = (g, g, g);
-                            }
-                        }
+                        },
                     }
                     gs.stroke_spot_inks = resolved_space
                         .map(|rs| crate::rendering::sidecar::extract_paint_spot_inks(rs, components, doc))
@@ -1507,65 +1556,26 @@ impl PageRenderer {
                             let cmyk_coverage = self.rasterise_stroke_coverage(&path, transform, &gs_clone, clip);
                             self.path_rasterizer
                                 .stroke_path_clipped(pixmap, &path, transform, render_gs, clip);
-                            if let Some(snap) = cmyk_compose_snap {
-                                self.apply_cmyk_compose_after_paint_with_coverage(
-                                    pixmap,
-                                    &snap,
-                                    cmyk_coverage.as_deref(),
-                                    &gs_clone,
-                                    doc,
-                                    false,
-                                );
-                            }
-                            if let Some(snap) = overprint_snap {
-                                self.apply_overprint_after_paint_with_coverage(
-                                    pixmap,
-                                    &snap,
-                                    cmyk_coverage.as_deref(),
-                                    &gs_clone,
-                                    doc,
-                                    false,
-                                );
-                            }
-                            if let Some(snap) = cmyk_sidecar_snap {
-                                self.mirror_cmyk_paint_into_sidecar_with_coverage(
-                                    pixmap,
-                                    &snap,
-                                    cmyk_coverage.as_deref(),
-                                    &gs_clone,
-                                    doc,
-                                    false,
-                                );
-                            }
-                            if let Some(snap) = rgb_sidecar_snap {
-                                self.mirror_rgb_paint_into_sidecar_with_coverage(
-                                    pixmap,
-                                    &snap,
-                                    cmyk_coverage.as_deref(),
-                                    &gs_clone,
-                                    doc,
-                                    false,
-                                );
-                            }
-                            self.mirror_spot_paint_into_sidecar_with_coverage(
+                            self.apply_sidecar_paint_modulators(
                                 pixmap,
-                                &[],
+                                SidecarPaintModulatorSnapshots {
+                                    cmyk_compose: cmyk_compose_snap,
+                                    overprint: overprint_snap,
+                                    cmyk_sidecar: cmyk_sidecar_snap,
+                                    rgb_sidecar: rgb_sidecar_snap,
+                                    smask: smask_snap,
+                                    smask_spot: smask_spot_snap,
+                                },
                                 cmyk_coverage.as_deref(),
-                                &gs_clone,
-                                false,
-                            );
-                            if let Some(snap) = smask_snap {
-                                self.apply_smask_after_paint(
-                                    pixmap,
-                                    &snap,
-                                    smask_spot_snap.as_deref(),
-                                    &gs_clone,
+                                PaintModulatorContext {
+                                    gs: &gs_clone,
                                     doc,
                                     page_num,
                                     resources,
                                     base_transform,
-                                )?;
-                            }
+                                    fill_side: false,
+                                },
+                            )?;
                         }
                     } else {
                         let _ = current_path.finish();
@@ -1629,65 +1639,26 @@ impl PageRenderer {
                                     tiny_skia::FillRule::Winding,
                                     clip,
                                 );
-                                if let Some(snap) = cmyk_compose_snap {
-                                    self.apply_cmyk_compose_after_paint_with_coverage(
-                                        pixmap,
-                                        &snap,
-                                        cmyk_coverage.as_deref(),
-                                        &gs_clone,
-                                        doc,
-                                        true,
-                                    );
-                                }
-                                if let Some(snap) = overprint_snap {
-                                    self.apply_overprint_after_paint_with_coverage(
-                                        pixmap,
-                                        &snap,
-                                        cmyk_coverage.as_deref(),
-                                        &gs_clone,
-                                        doc,
-                                        true,
-                                    );
-                                }
-                                if let Some(snap) = cmyk_sidecar_snap {
-                                    self.mirror_cmyk_paint_into_sidecar_with_coverage(
-                                        pixmap,
-                                        &snap,
-                                        cmyk_coverage.as_deref(),
-                                        &gs_clone,
-                                        doc,
-                                        true,
-                                    );
-                                }
-                                if let Some(snap) = rgb_sidecar_snap {
-                                    self.mirror_rgb_paint_into_sidecar_with_coverage(
-                                        pixmap,
-                                        &snap,
-                                        cmyk_coverage.as_deref(),
-                                        &gs_clone,
-                                        doc,
-                                        true,
-                                    );
-                                }
-                                self.mirror_spot_paint_into_sidecar_with_coverage(
+                                self.apply_sidecar_paint_modulators(
                                     pixmap,
-                                    &[],
+                                    SidecarPaintModulatorSnapshots {
+                                        cmyk_compose: cmyk_compose_snap,
+                                        overprint: overprint_snap,
+                                        cmyk_sidecar: cmyk_sidecar_snap,
+                                        rgb_sidecar: rgb_sidecar_snap,
+                                        smask: smask_snap,
+                                        smask_spot: smask_spot_snap,
+                                    },
                                     cmyk_coverage.as_deref(),
-                                    &gs_clone,
-                                    true,
-                                );
-                                if let Some(snap) = smask_snap {
-                                    self.apply_smask_after_paint(
-                                        pixmap,
-                                        &snap,
-                                        smask_spot_snap.as_deref(),
-                                        &gs_clone,
+                                    PaintModulatorContext {
+                                        gs: &gs_clone,
                                         doc,
                                         page_num,
                                         resources,
                                         base_transform,
-                                    )?;
-                                }
+                                        fill_side: true,
+                                    },
+                                )?;
                             }
                         }
                     } else {
@@ -1778,33 +1749,25 @@ impl PageRenderer {
                                     self.rasterise_fill_coverage(&path, transform, fill_rule, clip);
                                 self.path_rasterizer
                                     .fill_path_clipped(pixmap, &path, transform, render_gs, fill_rule, clip);
-                                if let Some(snap) = fill_cmyk_compose_snap {
-                                    self.apply_cmyk_compose_after_paint(pixmap, &snap, &gs_clone, doc, true);
-                                }
-                                if let Some(snap) = fill_overprint_snap {
-                                    self.apply_overprint_after_paint(pixmap, &snap, &gs_clone, doc, true);
-                                }
-                                if let Some(snap) = fill_spot_snap {
-                                    self.mirror_spot_paint_into_sidecar_with_coverage(
-                                        pixmap,
-                                        &snap,
-                                        fill_cmyk_coverage.as_deref(),
-                                        &gs_clone,
-                                        true,
-                                    );
-                                }
-                                if let Some(snap) = fill_smask_snap {
-                                    self.apply_smask_after_paint(
-                                        pixmap,
-                                        &snap,
-                                        fill_smask_spot_snap.as_deref(),
-                                        &gs_clone,
+                                self.apply_paint_modulators(
+                                    pixmap,
+                                    PaintModulatorSnapshots {
+                                        cmyk_compose: fill_cmyk_compose_snap,
+                                        overprint: fill_overprint_snap,
+                                        spot: fill_spot_snap,
+                                        smask: fill_smask_snap,
+                                        smask_spot: fill_smask_spot_snap,
+                                    },
+                                    fill_cmyk_coverage.as_deref(),
+                                    PaintModulatorContext {
+                                        gs: &gs_clone,
                                         doc,
                                         page_num,
                                         resources,
                                         base_transform,
-                                    )?;
-                                }
+                                        fill_side: true,
+                                    },
+                                )?;
                             }
 
                             let stroke_smask_snap = self.smask_snapshot(pixmap, &gs_clone);
@@ -1816,33 +1779,25 @@ impl PageRenderer {
                                 self.rasterise_stroke_coverage(&path, transform, &gs_clone, clip);
                             self.path_rasterizer
                                 .stroke_path_clipped(pixmap, &path, transform, render_gs, clip);
-                            if let Some(snap) = stroke_cmyk_compose_snap {
-                                self.apply_cmyk_compose_after_paint(pixmap, &snap, &gs_clone, doc, false);
-                            }
-                            if let Some(snap) = stroke_overprint_snap {
-                                self.apply_overprint_after_paint(pixmap, &snap, &gs_clone, doc, false);
-                            }
-                            if let Some(snap) = stroke_spot_snap {
-                                self.mirror_spot_paint_into_sidecar_with_coverage(
-                                    pixmap,
-                                    &snap,
-                                    stroke_cmyk_coverage.as_deref(),
-                                    &gs_clone,
-                                    false,
-                                );
-                            }
-                            if let Some(snap) = stroke_smask_snap {
-                                self.apply_smask_after_paint(
-                                    pixmap,
-                                    &snap,
-                                    stroke_smask_spot_snap.as_deref(),
-                                    &gs_clone,
+                            self.apply_paint_modulators(
+                                pixmap,
+                                PaintModulatorSnapshots {
+                                    cmyk_compose: stroke_cmyk_compose_snap,
+                                    overprint: stroke_overprint_snap,
+                                    spot: stroke_spot_snap,
+                                    smask: stroke_smask_snap,
+                                    smask_spot: stroke_smask_spot_snap,
+                                },
+                                stroke_cmyk_coverage.as_deref(),
+                                PaintModulatorContext {
+                                    gs: &gs_clone,
                                     doc,
                                     page_num,
                                     resources,
                                     base_transform,
-                                )?;
-                            }
+                                    fill_side: false,
+                                },
+                            )?;
                         }
                     } else {
                         let _ = current_path.finish();
@@ -1901,33 +1856,25 @@ impl PageRenderer {
                                     tiny_skia::FillRule::EvenOdd,
                                     clip,
                                 );
-                                if let Some(snap) = fill_cmyk_compose_snap {
-                                    self.apply_cmyk_compose_after_paint(pixmap, &snap, &gs_clone, doc, true);
-                                }
-                                if let Some(snap) = fill_overprint_snap {
-                                    self.apply_overprint_after_paint(pixmap, &snap, &gs_clone, doc, true);
-                                }
-                                if let Some(snap) = fill_spot_snap {
-                                    self.mirror_spot_paint_into_sidecar_with_coverage(
-                                        pixmap,
-                                        &snap,
-                                        fill_cmyk_coverage.as_deref(),
-                                        &gs_clone,
-                                        true,
-                                    );
-                                }
-                                if let Some(snap) = fill_smask_snap {
-                                    self.apply_smask_after_paint(
-                                        pixmap,
-                                        &snap,
-                                        fill_smask_spot_snap.as_deref(),
-                                        &gs_clone,
+                                self.apply_paint_modulators(
+                                    pixmap,
+                                    PaintModulatorSnapshots {
+                                        cmyk_compose: fill_cmyk_compose_snap,
+                                        overprint: fill_overprint_snap,
+                                        spot: fill_spot_snap,
+                                        smask: fill_smask_snap,
+                                        smask_spot: fill_smask_spot_snap,
+                                    },
+                                    fill_cmyk_coverage.as_deref(),
+                                    PaintModulatorContext {
+                                        gs: &gs_clone,
                                         doc,
                                         page_num,
                                         resources,
                                         base_transform,
-                                    )?;
-                                }
+                                        fill_side: true,
+                                    },
+                                )?;
                             }
 
                             if matches!(op, Operator::FillStrokeEvenOdd) {
@@ -1941,33 +1888,25 @@ impl PageRenderer {
                                     self.rasterise_stroke_coverage(&path, transform, &gs_clone, clip);
                                 self.path_rasterizer
                                     .stroke_path_clipped(pixmap, &path, transform, render_gs, clip);
-                                if let Some(snap) = stroke_cmyk_compose_snap {
-                                    self.apply_cmyk_compose_after_paint(pixmap, &snap, &gs_clone, doc, false);
-                                }
-                                if let Some(snap) = stroke_overprint_snap {
-                                    self.apply_overprint_after_paint(pixmap, &snap, &gs_clone, doc, false);
-                                }
-                                if let Some(snap) = stroke_spot_snap {
-                                    self.mirror_spot_paint_into_sidecar_with_coverage(
-                                        pixmap,
-                                        &snap,
-                                        stroke_cmyk_coverage.as_deref(),
-                                        &gs_clone,
-                                        false,
-                                    );
-                                }
-                                if let Some(snap) = stroke_smask_snap {
-                                    self.apply_smask_after_paint(
-                                        pixmap,
-                                        &snap,
-                                        stroke_smask_spot_snap.as_deref(),
-                                        &gs_clone,
+                                self.apply_paint_modulators(
+                                    pixmap,
+                                    PaintModulatorSnapshots {
+                                        cmyk_compose: stroke_cmyk_compose_snap,
+                                        overprint: stroke_overprint_snap,
+                                        spot: stroke_spot_snap,
+                                        smask: stroke_smask_snap,
+                                        smask_spot: stroke_smask_spot_snap,
+                                    },
+                                    stroke_cmyk_coverage.as_deref(),
+                                    PaintModulatorContext {
+                                        gs: &gs_clone,
                                         doc,
                                         page_num,
                                         resources,
                                         base_transform,
-                                    )?;
-                                }
+                                        fill_side: false,
+                                    },
+                                )?;
                             }
                         }
                     } else {
@@ -2136,33 +2075,25 @@ impl PageRenderer {
                                 &self.fonts,
                             )?;
                             let gs_for_apply = gs_stack.current().clone();
-                            if let Some(snap) = cmyk_compose_snap {
-                                self.apply_cmyk_compose_after_paint(pixmap, &snap, &gs_for_apply, doc, true);
-                            }
-                            if let Some(snap) = overprint_snap {
-                                self.apply_overprint_after_paint(pixmap, &snap, &gs_for_apply, doc, true);
-                            }
-                            if let Some(snap) = spot_snap {
-                                self.mirror_spot_paint_into_sidecar_with_coverage(
-                                    pixmap,
-                                    &snap,
-                                    text_coverage.as_deref(),
-                                    &gs_for_apply,
-                                    true,
-                                );
-                            }
-                            if let Some(snap) = smask_snap {
-                                self.apply_smask_after_paint(
-                                    pixmap,
-                                    &snap,
-                                    smask_spot_snap.as_deref(),
-                                    &gs_for_apply,
+                            self.apply_paint_modulators(
+                                pixmap,
+                                PaintModulatorSnapshots {
+                                    cmyk_compose: cmyk_compose_snap,
+                                    overprint: overprint_snap,
+                                    spot: spot_snap,
+                                    smask: smask_snap,
+                                    smask_spot: smask_spot_snap,
+                                },
+                                text_coverage.as_deref(),
+                                PaintModulatorContext {
+                                    gs: &gs_for_apply,
                                     doc,
                                     page_num,
                                     resources,
                                     base_transform,
-                                )?;
-                            }
+                                    fill_side: true,
+                                },
+                            )?;
                             adv
                         } else {
                             self.text_rasterizer.measure_text(text, gs, &self.fonts)
@@ -2253,33 +2184,25 @@ impl PageRenderer {
                                 &self.fonts,
                             )?;
                             let gs_for_apply = gs_stack.current().clone();
-                            if let Some(snap) = cmyk_compose_snap {
-                                self.apply_cmyk_compose_after_paint(pixmap, &snap, &gs_for_apply, doc, true);
-                            }
-                            if let Some(snap) = overprint_snap {
-                                self.apply_overprint_after_paint(pixmap, &snap, &gs_for_apply, doc, true);
-                            }
-                            if let Some(snap) = spot_snap {
-                                self.mirror_spot_paint_into_sidecar_with_coverage(
-                                    pixmap,
-                                    &snap,
-                                    text_coverage.as_deref(),
-                                    &gs_for_apply,
-                                    true,
-                                );
-                            }
-                            if let Some(snap) = smask_snap {
-                                self.apply_smask_after_paint(
-                                    pixmap,
-                                    &snap,
-                                    smask_spot_snap.as_deref(),
-                                    &gs_for_apply,
+                            self.apply_paint_modulators(
+                                pixmap,
+                                PaintModulatorSnapshots {
+                                    cmyk_compose: cmyk_compose_snap,
+                                    overprint: overprint_snap,
+                                    spot: spot_snap,
+                                    smask: smask_snap,
+                                    smask_spot: smask_spot_snap,
+                                },
+                                text_coverage.as_deref(),
+                                PaintModulatorContext {
+                                    gs: &gs_for_apply,
                                     doc,
                                     page_num,
                                     resources,
                                     base_transform,
-                                )?;
-                            }
+                                    fill_side: true,
+                                },
+                            )?;
                             adv
                         } else {
                             self.text_rasterizer.measure_text(text, gs, &self.fonts)
@@ -2362,33 +2285,25 @@ impl PageRenderer {
                                 &self.fonts,
                             )?;
                             let gs_for_apply = gs_stack.current().clone();
-                            if let Some(snap) = cmyk_compose_snap {
-                                self.apply_cmyk_compose_after_paint(pixmap, &snap, &gs_for_apply, doc, true);
-                            }
-                            if let Some(snap) = overprint_snap {
-                                self.apply_overprint_after_paint(pixmap, &snap, &gs_for_apply, doc, true);
-                            }
-                            if let Some(snap) = spot_snap {
-                                self.mirror_spot_paint_into_sidecar_with_coverage(
-                                    pixmap,
-                                    &snap,
-                                    text_coverage.as_deref(),
-                                    &gs_for_apply,
-                                    true,
-                                );
-                            }
-                            if let Some(snap) = smask_snap {
-                                self.apply_smask_after_paint(
-                                    pixmap,
-                                    &snap,
-                                    smask_spot_snap.as_deref(),
-                                    &gs_for_apply,
+                            self.apply_paint_modulators(
+                                pixmap,
+                                PaintModulatorSnapshots {
+                                    cmyk_compose: cmyk_compose_snap,
+                                    overprint: overprint_snap,
+                                    spot: spot_snap,
+                                    smask: smask_snap,
+                                    smask_spot: smask_spot_snap,
+                                },
+                                text_coverage.as_deref(),
+                                PaintModulatorContext {
+                                    gs: &gs_for_apply,
                                     doc,
                                     page_num,
                                     resources,
                                     base_transform,
-                                )?;
-                            }
+                                    fill_side: true,
+                                },
+                            )?;
                             adv
                         } else {
                             self.text_rasterizer.measure_tj_array(array, gs, &self.fonts)
@@ -2483,33 +2398,25 @@ impl PageRenderer {
                                 &self.fonts,
                             )?;
                             let gs_for_apply = gs_stack.current().clone();
-                            if let Some(snap) = cmyk_compose_snap {
-                                self.apply_cmyk_compose_after_paint(pixmap, &snap, &gs_for_apply, doc, true);
-                            }
-                            if let Some(snap) = overprint_snap {
-                                self.apply_overprint_after_paint(pixmap, &snap, &gs_for_apply, doc, true);
-                            }
-                            if let Some(snap) = spot_snap {
-                                self.mirror_spot_paint_into_sidecar_with_coverage(
-                                    pixmap,
-                                    &snap,
-                                    text_coverage.as_deref(),
-                                    &gs_for_apply,
-                                    true,
-                                );
-                            }
-                            if let Some(snap) = smask_snap {
-                                self.apply_smask_after_paint(
-                                    pixmap,
-                                    &snap,
-                                    smask_spot_snap.as_deref(),
-                                    &gs_for_apply,
+                            self.apply_paint_modulators(
+                                pixmap,
+                                PaintModulatorSnapshots {
+                                    cmyk_compose: cmyk_compose_snap,
+                                    overprint: overprint_snap,
+                                    spot: spot_snap,
+                                    smask: smask_snap,
+                                    smask_spot: smask_spot_snap,
+                                },
+                                text_coverage.as_deref(),
+                                PaintModulatorContext {
+                                    gs: &gs_for_apply,
                                     doc,
                                     page_num,
                                     resources,
                                     base_transform,
-                                )?;
-                            }
+                                    fill_side: true,
+                                },
+                            )?;
                             adv
                         } else {
                             self.text_rasterizer.measure_text(text, gs, &self.fonts)
@@ -2592,33 +2499,25 @@ impl PageRenderer {
                             self.rasterise_image_xobject_coverage(name, transform, &gs_clone, resources, doc, clip)
                         });
                         self.render_xobject(pixmap, name, transform, &gs_clone, resources, doc, page_num, clip)?;
-                        if let Some(snap) = cmyk_compose_snap {
-                            self.apply_cmyk_compose_after_paint(pixmap, &snap, &gs_clone, doc, true);
-                        }
-                        if let Some(snap) = overprint_snap {
-                            self.apply_overprint_after_paint(pixmap, &snap, &gs_clone, doc, true);
-                        }
-                        if let Some(snap) = spot_snap {
-                            self.mirror_spot_paint_into_sidecar_with_coverage(
-                                pixmap,
-                                &snap,
-                                image_coverage.as_deref(),
-                                &gs_clone,
-                                true,
-                            );
-                        }
-                        if let Some(snap) = smask_snap {
-                            self.apply_smask_after_paint(
-                                pixmap,
-                                &snap,
-                                smask_spot_snap.as_deref(),
-                                &gs_clone,
+                        self.apply_paint_modulators(
+                            pixmap,
+                            PaintModulatorSnapshots {
+                                cmyk_compose: cmyk_compose_snap,
+                                overprint: overprint_snap,
+                                spot: spot_snap,
+                                smask: smask_snap,
+                                smask_spot: smask_spot_snap,
+                            },
+                            image_coverage.as_deref(),
+                            PaintModulatorContext {
+                                gs: &gs_clone,
                                 doc,
                                 page_num,
                                 resources,
                                 base_transform,
-                            )?;
-                        }
+                                fill_side: true,
+                            },
+                        )?;
                     }
                 }
 
@@ -2808,33 +2707,25 @@ impl PageRenderer {
                             self.rasterise_shading_coverage(name, transform, &gs_clone, resources, doc, clip)
                         });
                         self.render_shading(pixmap, name, transform, &gs_clone, resources, doc, clip)?;
-                        if let Some(snap) = cmyk_compose_snap {
-                            self.apply_cmyk_compose_after_paint(pixmap, &snap, &gs_clone, doc, true);
-                        }
-                        if let Some(snap) = overprint_snap {
-                            self.apply_overprint_after_paint(pixmap, &snap, &gs_clone, doc, true);
-                        }
-                        if let Some(snap) = spot_snap {
-                            self.mirror_spot_paint_into_sidecar_with_coverage(
-                                pixmap,
-                                &snap,
-                                shading_coverage.as_deref(),
-                                &gs_clone,
-                                true,
-                            );
-                        }
-                        if let Some(snap) = smask_snap {
-                            self.apply_smask_after_paint(
-                                pixmap,
-                                &snap,
-                                smask_spot_snap.as_deref(),
-                                &gs_clone,
+                        self.apply_paint_modulators(
+                            pixmap,
+                            PaintModulatorSnapshots {
+                                cmyk_compose: cmyk_compose_snap,
+                                overprint: overprint_snap,
+                                spot: spot_snap,
+                                smask: smask_snap,
+                                smask_spot: smask_spot_snap,
+                            },
+                            shading_coverage.as_deref(),
+                            PaintModulatorContext {
+                                gs: &gs_clone,
                                 doc,
                                 page_num,
                                 resources,
                                 base_transform,
-                            )?;
-                        }
+                                fill_side: true,
+                            },
+                        )?;
                     }
                 }
 

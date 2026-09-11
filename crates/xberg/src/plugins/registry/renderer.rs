@@ -143,6 +143,15 @@ impl InternalRenderer for PlainRenderer {
     }
 }
 
+/// Built-in renderer names registered by [`RendererRegistry::register_builtins`].
+///
+/// Used by [`RendererRegistry::is_missing_builtin_renderer`] to detect when
+/// [`clear`](RendererRegistry::clear) has stripped a built-in that the `Custom`
+/// output-format dispatch path (`extraction::derive::derive_extraction_result`) looks up
+/// by name — including `"dot"`, which is reachable only through `Custom` since
+/// `OutputFormat::from_str` never maps a string directly to a dedicated variant for it. ~keep
+const BUILTIN_RENDERER_NAMES: [&str; 6] = ["markdown", "html", "djot", "doctags", "dot", "plain"];
+
 /// Registry for document renderer plugins.
 ///
 /// Manages renderers that convert internal pipeline documents to output format strings.
@@ -305,6 +314,30 @@ impl RendererRegistry {
         self.register_builtins();
         Ok(())
     }
+
+    /// True when the registry is missing one or more built-in renderers and should be
+    /// re-seeded.
+    ///
+    /// [`clear`](Self::clear) empties the registry, including the built-ins, leaving the
+    /// `Custom` output-format dispatch path with no renderer to look up by name.
+    pub(crate) fn is_missing_builtin_renderer(&self) -> bool {
+        BUILTIN_RENDERER_NAMES
+            .iter()
+            .any(|name| !self.renderers.contains_key(*name))
+    }
+
+    /// Non-destructively re-seed the built-in renderers when any are missing.
+    ///
+    /// Keeps any user-registered renderers; a no-op when every built-in is already
+    /// present. Mirrors `OcrBackendRegistry::ensure_defaults` for the OCR backend
+    /// registry: used by the self-healing dispatch path so a registry emptied via
+    /// [`clear`](Self::clear) (e.g. by a sibling test or a plugin lifecycle reset) heals
+    /// itself before the next `Custom`-format render.
+    pub(crate) fn ensure_defaults(&mut self) {
+        if self.is_missing_builtin_renderer() {
+            self.register_builtins();
+        }
+    }
 }
 
 impl Default for RendererRegistry {
@@ -426,6 +459,40 @@ mod tests {
 
         registry.clear().unwrap();
         assert!(registry.list().is_empty());
+    }
+
+    #[test]
+    fn test_renderer_registry_is_missing_builtin_renderer_after_clear() {
+        let mut registry = RendererRegistry::new();
+        assert!(!registry.is_missing_builtin_renderer());
+
+        registry.clear().unwrap();
+        assert!(registry.is_missing_builtin_renderer());
+    }
+
+    #[test]
+    fn ensure_defaults_reseeds_builtins_after_clear_and_keeps_user_renderer() {
+        let mut registry = RendererRegistry::new();
+        registry.clear().unwrap();
+        let custom = Arc::new(MockRenderer {
+            format_name: "custom-after-clear".to_string(),
+        });
+        registry.register(custom).unwrap();
+        assert!(
+            registry.is_missing_builtin_renderer(),
+            "precondition: built-ins absent after clear"
+        );
+
+        registry.ensure_defaults();
+
+        assert!(
+            !registry.is_missing_builtin_renderer(),
+            "ensure_defaults should re-seed every built-in renderer"
+        );
+        assert!(
+            registry.list().contains(&"custom-after-clear".to_string()),
+            "ensure_defaults must be non-destructive: the user renderer is kept"
+        );
     }
 
     #[test]

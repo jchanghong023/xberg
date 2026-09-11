@@ -194,14 +194,14 @@ def _metadata_to_lines(metadata: object) -> list[str]:
 class XbergExtractTool(BaseTool):
     """Extract text content from a single document file or URL.
 
-    Supports 106 file formats including PDF, DOCX, XLSX, HTML, and images with
+    Supports 107 file formats including PDF, DOCX, XLSX, HTML, and images with
     OCR. The agent picks the output format and can enable OCR, chunking, keyword
     extraction, named-entity recognition, and summarization per call.
     """
 
     name: str = "Extract Document"
     description: str = (
-        "Extract text content from a document file or URL. Supports 106 file formats "
+        "Extract text content from a document file or URL. Supports 107 file formats "
         "including PDF, DOCX, XLSX, HTML, and images with OCR. Optionally force OCR, "
         "chunk the document, or extract keywords, entities, and a summary."
     )
@@ -231,7 +231,7 @@ class XbergExtractBatchTool(BaseTool):
     name: str = "Extract Documents (Batch)"
     description: str = (
         "Extract text from multiple document files or URLs in a single batched call — "
-        "faster than extracting them one at a time. Supports 106 file formats and the "
+        "faster than extracting them one at a time. Supports 107 file formats and the "
         "same OCR, chunking, keyword, entity, and summary options as single extraction."
     )
     args_schema: type[BaseModel] = ExtractBatchInput
@@ -273,13 +273,13 @@ class XbergExtractMetadataTool(BaseTool):
     """Extract metadata from a document file.
 
     Returns metadata such as title, authors, dates, page count, and format-specific
-    details as a formatted string. Supports 106 file formats.
+    details as a formatted string. Supports 107 file formats.
     """
 
     name: str = "Extract Document Metadata"
     description: str = (
         "Extract metadata from a document file such as title, authors, dates, "
-        "page count, and format-specific details. Supports 106 file formats "
+        "page count, and format-specific details. Supports 107 file formats "
         "including PDF, DOCX, XLSX, HTML, images, and more."
     )
     args_schema: type[BaseModel] = ExtractMetadataInput

@@ -11,7 +11,7 @@ func main() {
 	preserveImportant := true
 	config := xberg.ExtractionConfig{
 		TokenReduction: &xberg.TokenReductionOptions{
-			Mode:                   "moderate",
+			Mode:                   xberg.Ptr("moderate"),
 			PreserveImportantWords: &preserveImportant,
 		},
 	}

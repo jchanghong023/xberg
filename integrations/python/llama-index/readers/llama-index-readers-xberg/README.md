@@ -23,7 +23,7 @@
   </a>
 </div>
 
-LlamaIndex reader for 106 file formats powered by [xberg](https://github.com/xberg-io/xberg)'s Rust extraction engine.
+LlamaIndex reader for 107 file formats powered by [xberg](https://github.com/xberg-io/xberg)'s Rust extraction engine.
 
 ## Installation
 
@@ -35,7 +35,7 @@ Requires Python ≥3.10, `xberg>=1.0.0`, and `llama-index-core>=0.14.23,<0.15`.
 
 ## Features
 
-- **106 file formats** -- PDF, DOCX, PPTX, XLSX, HTML, images, emails, archives, and more ([full list](https://docs.xberg.io/reference/formats/))
+- **107 file formats** -- PDF, DOCX, PPTX, XLSX, HTML, images, emails, archives, and more ([full list](https://docs.xberg.io/reference/formats/))
 - **Rich metadata** -- quality scores, language detection, keywords, annotations
 - **Native chunking** -- xberg semantic chunks with heading path and page span, forwarded to `XbergNodeParser`
 - **Element extraction** -- structural elements for structure-aware RAG pipelines

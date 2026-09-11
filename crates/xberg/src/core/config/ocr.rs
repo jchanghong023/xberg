@@ -145,8 +145,10 @@ pub struct OcrQualityThresholds {
     /// recorded municipal ordinance (10 prose pages, 6 scanned survey/architectural drawings)
     /// with Tesseract 5.5.3:
     ///
-    ///     prose      86.3 - 95.3
-    ///     drawings   18.5 - 64.3
+    /// ```text
+    /// prose      86.3 - 95.3
+    /// drawings   18.5 - 64.3
+    /// ```
     ///
     /// The default sits in that gap with ~11 points of margin on each side. Compare the
     /// short-word ratio, which separated the same two groups by 0.09 on a 0-1 scale.
@@ -604,12 +606,20 @@ pub enum VlmFallbackPolicy {
     /// Try the classical OCR backend first. If the quality score is below
     /// `quality_threshold`, send the page to the VLM.
     ///
-    /// `quality_threshold` is in the `[0.0, 1.0]` range produced by
-    /// `text::quality::calculate_quality_score`. A value of `0.5` is a
-    /// reasonable starting point; calibrate with the Stage 0 benchmark harness.
+    /// `quality_threshold` is in the `[0.0, 1.0]` range, but it is **not** the same
+    /// quantity reported on [`crate::types::page::PageOcrConfidence::score`] (GH#1584).
+    /// The accept decision blends text-shape quality with confidence, weighted 0.7/0.3
+    /// (`extractors::pdf::ocr::pipeline_stage_score`) -- when the backend's confidence is on
+    /// a known scale it contributes only 30% of the compared score, so a page can clear this
+    /// threshold on clean-looking text even while its own `PageOcrConfidence.score` reads
+    /// below it. Do not calibrate this value by reading `PageOcrConfidence.score` off a
+    /// sample page and expecting an equal `quality_threshold` to reproduce the same
+    /// accept/reject outcome. A value of `0.5` is a reasonable starting point; calibrate with
+    /// the Stage 0 benchmark harness.
     OnLowQuality {
-        /// Minimum acceptable quality score from the classical backend.
-        /// Pages scoring below this are retried with VLM.
+        /// Minimum acceptable quality score from the classical backend. Pages scoring below
+        /// this are retried with VLM -- see this variant's doc comment for what "scoring"
+        /// means here.
         quality_threshold: f64,
     },
 
@@ -873,11 +883,18 @@ pub struct OcrConfig {
     /// `ExtractionConfig::acceleration` before each `process_image` call.
     #[serde(skip)]
     pub acceleration: Option<super::acceleration::AccelerationConfig>,
-    /// Security limits inherited from the surrounding extraction request.
+
+    /// Security limits applied when decoding raw image bytes for OCR (GH#1554).
     ///
-    /// This is injected at runtime and skipped by serde. Backends that decode
-    /// image bytes internally, such as PaddleOCR, use it to apply the same
-    /// `ExtractionConfig::security_limits` as the outer extraction pipeline.
+    /// Not user-configurable via config files — injected at runtime from
+    /// `ExtractionConfig::security_limits` before each `process_image` call, the same
+    /// pattern [`Self::acceleration`] uses. `ExtractionConfig::security_limits` is the
+    /// single source of truth: this field only ever holds a copy the caller placed here
+    /// immediately before dispatch, so the two cannot drift. A backend consulting a
+    /// `backend_options` override for this call may still let that override win, but in
+    /// the absence of one this field is what backends should fall back to instead of
+    /// `SecurityLimits::default()`. `None` means "use `SecurityLimits::default()`", never
+    /// "disable the check". ~keep
     #[serde(skip)]
     pub security_limits: Option<crate::extractors::security::SecurityLimits>,
 
@@ -1026,6 +1043,7 @@ impl OcrConfig {
     #[cfg(any(
         feature = "ocr",
         feature = "ocr-wasm",
+        feature = "ocr-pipeline",
         paddle_ocr,
         all(feature = "liter-llm", not(target_arch = "wasm32")),
     ))]
@@ -1041,6 +1059,33 @@ impl OcrConfig {
             vec![DEFAULT_OCR_LANGUAGE.to_string()]
         } else {
             langs
+        }
+    }
+
+    /// Resolve the language Tesseract should use, reconciling [`Self::language`] with
+    /// `tesseract_config.language` (#1572).
+    ///
+    /// Both fields default to `["eng"]`, so neither can represent "unset" on its own. An
+    /// explicit (non-default) [`Self::language`] always wins, matching the convention already
+    /// used to decide whether to propagate a language into a synthesised pipeline stage (see
+    /// [`Self::effective_pipeline`]). Otherwise a non-empty `tesseract_config.language` wins,
+    /// so a caller who only configures `TesseractConfig` still gets their language. Both
+    /// native (`ocr::tesseract_backend`) and WASM (`ocr::tesseract_wasm_backend`) Tesseract
+    /// backends call this so they agree on which field wins.
+    #[cfg(any(
+        feature = "ocr",
+        feature = "ocr-wasm",
+        feature = "ocr-pipeline",
+        paddle_ocr,
+        all(feature = "liter-llm", not(target_arch = "wasm32")),
+    ))]
+    pub(crate) fn effective_tesseract_language(&self) -> Vec<String> {
+        if self.language != [DEFAULT_OCR_LANGUAGE.to_string()] {
+            return self.effective_languages();
+        }
+        match &self.tesseract_config {
+            Some(tess) if !tess.language.is_empty() => tess.language.clone(),
+            _ => self.effective_languages(),
         }
     }
 
@@ -1238,7 +1283,9 @@ fn validate_tesseract_tuning(tesseract_config: Option<&crate::types::TesseractCo
     let Some(tesseract_config) = tesseract_config else {
         return Ok(());
     };
-    crate::core::config_validation::validate_tesseract_psm(tesseract_config.psm)?;
+    if let Some(psm) = tesseract_config.psm {
+        crate::core::config_validation::validate_tesseract_psm(psm)?;
+    }
     crate::core::config_validation::validate_tesseract_oem(tesseract_config.oem)?;
     if let Some(ref preprocessing) = tesseract_config.preprocessing {
         crate::core::config_validation::validate_image_preprocessing_config(preprocessing)?;
@@ -1271,7 +1318,7 @@ mod tests {
 
     fn tesseract_config_with(psm: i32, oem: i32) -> crate::types::TesseractConfig {
         crate::types::TesseractConfig {
-            psm,
+            psm: Some(psm),
             oem,
             ..Default::default()
         }
@@ -1288,6 +1335,20 @@ mod tests {
     }
 
     #[test]
+    fn should_accept_ocr_config_when_tesseract_psm_is_unset() {
+        let config = OcrConfig {
+            tesseract_config: Some(crate::types::TesseractConfig {
+                psm: None,
+                oem: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
     fn should_reject_ocr_config_when_tesseract_psm_is_above_range() {
         let config = OcrConfig {
             tesseract_config: Some(tesseract_config_with(14, 1)),
@@ -1296,11 +1357,35 @@ mod tests {
 
         let message = config
             .validate()
-            .expect_err("psm 14 is out of the 0-13 range")
+            .expect_err("psm 14 is out of the 1-13 range")
             .to_string();
         assert!(
             message.contains("PSM"),
             "error should name the PSM field; got: {message}"
+        );
+    }
+
+    /// GH#1586: PSM 0 is `PSM_OSD_ONLY`, so Tesseract recognises no characters and the
+    /// extraction completed successfully with an empty document. Rejecting it here is the
+    /// only place a caller finds out before losing the content. ~keep
+    #[test]
+    fn should_reject_ocr_config_when_tesseract_psm_is_osd_only() {
+        let config = OcrConfig {
+            tesseract_config: Some(tesseract_config_with(0, 1)),
+            ..Default::default()
+        };
+
+        let message = config
+            .validate()
+            .expect_err("psm 0 recognises no text and must not be accepted")
+            .to_string();
+        assert!(
+            message.contains("PSM 0") || message.contains("PSM value '0'"),
+            "error should name PSM 0 specifically; got: {message}"
+        );
+        assert!(
+            message.contains("orientation"),
+            "error should explain that PSM 0 is orientation detection only; got: {message}"
         );
     }
 

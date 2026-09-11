@@ -116,8 +116,41 @@ fn summarization_test_config() -> ExtractionConfig {
 
 #[cfg(feature = "summarization")]
 fn restore_builtin_summarization() {
-    crate::plugins::unregister_post_processor("summarization").unwrap();
-    crate::plugins::processor::builtin::summarization::register().unwrap();
+    retry_while_registry_in_use(|| crate::plugins::unregister_post_processor("summarization"));
+    retry_while_registry_in_use(crate::plugins::processor::builtin::summarization::register);
+}
+
+/// Maximum attempts before a lifecycle mutation is treated as genuinely stuck.
+///
+/// Carries `retry_while_registry_in_use`'s own cfg: without it the constants outlive the only
+/// function that reads them on any feature set that compiles it out, and `-D warnings` turns
+/// that into a hard error on the narrow no-ORT legs while every wide-feature leg stays green. ~keep
+#[cfg(any(feature = "summarization", feature = "tokio-runtime"))]
+const REGISTRY_MUTATION_ATTEMPTS: usize = 100;
+
+/// Delay between attempts, long enough for a concurrent extraction to drop its snapshot lease.
+#[cfg(any(feature = "summarization", feature = "tokio-runtime"))]
+const REGISTRY_MUTATION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Retry a post-processor lifecycle mutation while the registry reports it is in use.
+///
+/// `with_registration_update` refuses a mutation whenever a snapshot lease is live, and the
+/// documented contract (`initialization.rs`) is that this failure is *retryable* -- so
+/// `.unwrap()`ing it asserts an exclusivity this binary cannot provide. `#[serial]` only orders a
+/// test against the crate's other `#[serial]` tests, while dozens of non-serial tests here run
+/// real extractions and hold that lease. Honour the contract instead of racing it. ~keep
+#[cfg(any(feature = "summarization", feature = "tokio-runtime"))]
+fn retry_while_registry_in_use<T>(mut mutation: impl FnMut() -> crate::Result<T>) -> T {
+    for _ in 0..REGISTRY_MUTATION_ATTEMPTS {
+        match mutation() {
+            Ok(value) => return value,
+            Err(crate::XbergError::Other(message)) if message.contains("retry the lifecycle mutation") => {
+                std::thread::sleep(REGISTRY_MUTATION_RETRY_DELAY);
+            }
+            Err(error) => panic!("post-processor lifecycle mutation failed: {error}"),
+        }
+    }
+    panic!("post-processor registry still in use by a concurrent extraction after retrying");
 }
 
 /// Build an `InternalDocument` with a single paragraph element for pipeline tests.
@@ -226,8 +259,8 @@ async fn builtin_processors_recover_after_public_registry_clear() {
 #[serial]
 #[cfg(all(feature = "quality", feature = "summarization"))]
 async fn unregister_remains_effective_during_pending_builtin_recovery() {
-    crate::plugins::clear_post_processors().unwrap();
-    crate::plugins::unregister_post_processor("summarization").unwrap();
+    retry_while_registry_in_use(crate::plugins::clear_post_processors);
+    retry_while_registry_in_use(|| crate::plugins::unregister_post_processor("summarization"));
 
     let config = ExtractionConfig {
         enable_quality_processing: true,
@@ -298,12 +331,16 @@ fn processor_handoff_rejects_a_snapshot_after_concurrent_shutdown() {
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let executed_after_shutdown = Arc::new(AtomicBool::new(false));
-    crate::plugins::register_post_processor(Arc::new(HandoffRaceProcessor {
-        shutdown: Arc::clone(&shutdown),
-        executed_after_shutdown: Arc::clone(&executed_after_shutdown),
-        mutation_error: None,
-    }))
-    .unwrap();
+    // Setup, before this test holds any lease of its own, so retrying is safe here — unlike the
+    // later `unregister`, which runs while this test's pipeline is deliberately parked and must
+    // NOT be retried. ~keep
+    retry_while_registry_in_use(|| {
+        crate::plugins::register_post_processor(Arc::new(HandoffRaceProcessor {
+            shutdown: Arc::clone(&shutdown),
+            executed_after_shutdown: Arc::clone(&executed_after_shutdown),
+            mutation_error: None,
+        }))
+    });
     initialization::initialize_processor_cache().unwrap();
 
     let (snapshot_sender, snapshot_receiver) = mpsc::channel();
@@ -340,12 +377,16 @@ fn processor_handoff_lease_rejects_shutdown_until_pipeline_finishes() {
 
     let shutdown = Arc::new(AtomicBool::new(false));
     let executed_after_shutdown = Arc::new(AtomicBool::new(false));
-    crate::plugins::register_post_processor(Arc::new(HandoffRaceProcessor {
-        shutdown: Arc::clone(&shutdown),
-        executed_after_shutdown: Arc::clone(&executed_after_shutdown),
-        mutation_error: None,
-    }))
-    .unwrap();
+    // Setup, before this test holds any lease of its own, so retrying is safe here — unlike the
+    // later `unregister`, which runs while this test's pipeline is deliberately parked and must
+    // NOT be retried. ~keep
+    retry_while_registry_in_use(|| {
+        crate::plugins::register_post_processor(Arc::new(HandoffRaceProcessor {
+            shutdown: Arc::clone(&shutdown),
+            executed_after_shutdown: Arc::clone(&executed_after_shutdown),
+            mutation_error: None,
+        }))
+    });
     initialization::initialize_processor_cache().unwrap();
 
     let (handoff_sender, handoff_receiver) = mpsc::channel();
@@ -395,14 +436,23 @@ fn reentrant_lifecycle_mutation_returns_in_use_error_without_deadlock() {
 
     let mutation_error = Arc::new(Mutex::new(None));
     let thread_error = Arc::clone(&mutation_error);
-    let (result_sender, result_receiver) = mpsc::channel();
-    let pipeline_thread = std::thread::spawn(move || {
+    // Registered BEFORE the thread is spawned, and so before `recv_timeout` starts counting.
+    // This is setup, not the behaviour under test: it races the lease held by every non-serial
+    // extraction test and the contract for that failure is to retry. Doing it inside the thread
+    // charges the retry against the 250ms deadlock window, which turns a slow-but-correct retry
+    // on a loaded runner into a spurious "must not deadlock: Timeout"; unwrapping it instead
+    // panics the thread, drops the sender, and reports the same assertion as "Disconnected".
+    // Both disguise a retryable setup error as a deadlock. The assertion that matters is on
+    // `mutation_error`, captured mid-pipeline and untouched by this. ~keep
+    retry_while_registry_in_use(|| {
         crate::plugins::register_post_processor(Arc::new(HandoffRaceProcessor {
             shutdown: Arc::new(AtomicBool::new(false)),
             executed_after_shutdown: Arc::new(AtomicBool::new(false)),
-            mutation_error: Some(thread_error),
+            mutation_error: Some(Arc::clone(&thread_error)),
         }))
-        .unwrap();
+    });
+    let (result_sender, result_receiver) = mpsc::channel();
+    let pipeline_thread = std::thread::spawn(move || {
         let pipeline_result = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -418,7 +468,7 @@ fn reentrant_lifecycle_mutation_returns_in_use_error_without_deadlock() {
         .recv_timeout(Duration::from_millis(250))
         .expect("reentrant lifecycle mutation must not deadlock the pipeline");
     pipeline_thread.join().unwrap();
-    crate::plugins::unregister_post_processor("handoff-race").unwrap();
+    retry_while_registry_in_use(|| crate::plugins::unregister_post_processor("handoff-race"));
 
     pipeline_result.unwrap();
     let error = mutation_error.lock().unwrap().clone().unwrap();
@@ -1328,7 +1378,7 @@ async fn captioning_prepass_keeps_redaction_and_chunks_consistent() {
     }
 
     initialization::initialize_features();
-    crate::plugins::processor::builtin::redaction::register().unwrap();
+    retry_while_registry_in_use(crate::plugins::processor::builtin::redaction::register);
     let registry = crate::plugins::registry::get_post_processor_registry();
     registry.write().register(Arc::new(StubCaptioningProcessor)).unwrap();
     clear_processor_cache().unwrap();
@@ -1371,7 +1421,7 @@ async fn captioning_prepass_keeps_redaction_and_chunks_consistent() {
 
     let processed = run_pipeline(doc, &config).await;
 
-    crate::plugins::processor::builtin::captioning::register().unwrap();
+    retry_while_registry_in_use(crate::plugins::processor::builtin::captioning::register);
     clear_processor_cache().unwrap();
 
     let processed = processed.unwrap();
@@ -1529,7 +1579,7 @@ async fn captioning_prepass_preserves_full_code_intelligence_scratch_payload() {
     let processed = run_pipeline(doc, &config).await.unwrap();
 
     // Restore the real captioning processor for subsequent tests in this module.
-    crate::plugins::processor::builtin::captioning::register().unwrap();
+    retry_while_registry_in_use(crate::plugins::processor::builtin::captioning::register);
     clear_processor_cache().unwrap();
 
     assert_eq!(
@@ -2222,44 +2272,15 @@ mod data_base64_pass_tests {
     }
 }
 
-#[tokio::test]
-#[serial]
-async fn test_pdf_run_fallback_not_suppressed_without_images_config() {
-    use crate::core::config::ImageExtractionConfig;
-
-    let default_no_images = crate::core::config::ExtractionConfig::default();
-    assert!(
-        default_no_images.images.is_none(),
-        "baseline: default config has no images section"
-    );
-
-    let skip_fallback = default_no_images
-        .images
-        .as_ref()
-        .map(|i| i.run_ocr_on_images)
-        .unwrap_or(false);
-    assert!(
-        !skip_fallback,
-        "RunFallback must NOT be suppressed when config.images is None"
-    );
-
-    let with_images_opted_in = crate::core::config::ExtractionConfig {
-        images: Some(ImageExtractionConfig {
-            run_ocr_on_images: true,
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let skip_fallback_opted_in = with_images_opted_in
-        .images
-        .as_ref()
-        .map(|i| i.run_ocr_on_images)
-        .unwrap_or(false);
-    assert!(
-        skip_fallback_opted_in,
-        "RunFallback must be suppressed when images.run_ocr_on_images=true"
-    );
-}
+// #1576: `images.run_ocr_on_images` (per-extracted-image OCR) is a different setting from
+// document-level page OCR. A test here used to re-derive the buggy suppression logic inline
+// (`config.images.map(|i| i.run_ocr_on_images).unwrap_or(false)`) and assert that
+// `run_ocr_on_images=true` suppressed `RunFallback` -- that assertion WAS the bug, not the
+// contract. `extractors/pdf/mod.rs`'s `OcrGateOutcome::RunFallback` arm no longer reads
+// `config.images` at all, so there is nothing left to unit-test at that granularity; the
+// regression coverage is an end-to-end extraction in
+// `extractors::pdf::tests::images_config_does_not_suppress_scanned_page_ocr`. Left as a plain
+// comment, not a doc comment: it documents a removed test, not the module below it. ~keep
 
 mod document_counts {
     use super::super::populate_document_counts;
@@ -2288,6 +2309,7 @@ mod document_counts {
             speaker_notes: None,
             section_name: None,
             sheet_name: None,
+            ocr_confidence: None,
         }
     }
 

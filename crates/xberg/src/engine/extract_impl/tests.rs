@@ -742,6 +742,7 @@ async fn url_markdown_page_runs_through_pipeline_and_preserves_source_mime() {
         "alpha beta gamma delta epsilon zeta eta theta".to_string(),
         true,
         "text/html; charset=utf-8",
+        "",
         links,
         &config,
     )
@@ -760,6 +761,7 @@ async fn url_page_rejects_untrusted_content_type_as_public_mime() {
         "safe content".to_string(),
         true,
         "text/html\r\nx-injected: value",
+        "",
         Vec::new(),
         &ExtractionConfig::default(),
     )
@@ -767,6 +769,55 @@ async fn url_page_rejects_untrusted_content_type_as_public_mime() {
     .unwrap();
 
     assert_eq!(result.mime_type, "text/html");
+}
+
+/// GH CI E2E `test_metadata_access`: a crawled page is restamped `text/html`, so
+/// `metadata.format.html` must be populated even though the extraction itself ran over
+/// crawlberg's pre-rendered markdown and never touched the HTML extractor.
+#[cfg(all(feature = "url-ingestion", feature = "html"))]
+#[tokio::test]
+async fn url_html_page_recovers_format_metadata_from_source_html_when_content_is_markdown() {
+    let source_html = "<html><head><title>Simple Table Test</title></head><body><h1>Heading</h1></body></html>";
+
+    let result = run_url_page_pipeline(
+        "# Heading\n\nalpha beta gamma".to_string(),
+        true,
+        "text/html",
+        source_html,
+        Vec::new(),
+        &ExtractionConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.mime_type, "text/html");
+    let Some(crate::types::FormatMetadata::Html(html_metadata)) = result.metadata.format else {
+        panic!("expected FormatMetadata::Html; got {:?}", result.metadata.format);
+    };
+    assert_eq!(html_metadata.title.as_deref(), Some("Simple Table Test"));
+}
+
+/// Negative control for the test above: with no source HTML to recover from, the format field
+/// stays `None` rather than being invented.
+#[cfg(all(feature = "url-ingestion", feature = "html"))]
+#[tokio::test]
+async fn url_page_without_source_html_leaves_format_metadata_unset() {
+    let result = run_url_page_pipeline(
+        "alpha beta gamma".to_string(),
+        true,
+        "text/html",
+        "",
+        Vec::new(),
+        &ExtractionConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        result.metadata.format.is_none(),
+        "format must stay None with no HTML to read; got {:?}",
+        result.metadata.format
+    );
 }
 
 #[cfg(feature = "tree-sitter")]

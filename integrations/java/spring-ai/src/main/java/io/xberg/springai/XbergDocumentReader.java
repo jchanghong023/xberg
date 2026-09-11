@@ -33,7 +33,7 @@ import org.springframework.core.io.Resource;
  * A Spring AI {@link DocumentReader} that uses Xberg for document extraction.
  *
  * <p>
- * Supports 106 document formats including PDF, DOCX, PPTX, images (with OCR),
+ * Supports 107 document formats including PDF, DOCX, PPTX, images (with OCR),
  * and more. Each extracted document is split into Spring AI {@link Document}
  * instances using a priority-based strategy: chunks &gt; elements &gt; pages
  * &gt; whole document.

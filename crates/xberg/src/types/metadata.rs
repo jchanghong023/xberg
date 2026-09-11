@@ -686,7 +686,7 @@ pub struct XmlMetadata {
 }
 
 /// A link extracted from Markdown.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MarkdownLink {
     /// Visible link text.
     pub text: String,
@@ -701,15 +701,9 @@ enum MarkdownLinkWire {
     Named { text: String, url: String },
 }
 
-impl Serialize for MarkdownLink {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (&self.text, &self.url).serialize(serializer)
-    }
-}
-
+// ~keep Positional-array JSON is still accepted here (and on the sibling
+// MarkdownCodeBlock/KeyValueAttribute/ImageDimensions types below) for 1.0.x wire
+// compatibility; only the named-object form is emitted now.
 impl<'de> Deserialize<'de> for MarkdownLink {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -735,7 +729,7 @@ impl From<MarkdownLink> for (String, String) {
 }
 
 /// A fenced code block extracted from Markdown.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MarkdownCodeBlock {
     /// Declared language identifier, or an empty string when absent.
     pub language: String,
@@ -748,15 +742,6 @@ pub struct MarkdownCodeBlock {
 enum MarkdownCodeBlockWire {
     Positional((String, String)),
     Named { language: String, code: String },
-}
-
-impl Serialize for MarkdownCodeBlock {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (&self.language, &self.code).serialize(serializer)
-    }
 }
 
 impl<'de> Deserialize<'de> for MarkdownCodeBlock {
@@ -784,7 +769,7 @@ impl From<MarkdownCodeBlock> for (String, String) {
 }
 
 /// A string key-value attribute.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct KeyValueAttribute {
     /// Attribute name.
     pub key: String,
@@ -797,15 +782,6 @@ pub struct KeyValueAttribute {
 enum KeyValueAttributeWire {
     Positional((String, String)),
     Named { key: String, value: String },
-}
-
-impl Serialize for KeyValueAttribute {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (&self.key, &self.value).serialize(serializer)
-    }
 }
 
 impl<'de> Deserialize<'de> for KeyValueAttribute {
@@ -833,7 +809,7 @@ impl From<KeyValueAttribute> for (String, String) {
 }
 
 /// Image dimensions in pixels.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct ImageDimensions {
     /// Width in pixels.
     pub width: u32,
@@ -846,15 +822,6 @@ pub struct ImageDimensions {
 enum ImageDimensionsWire {
     Positional((u32, u32)),
     Named { width: u32, height: u32 },
-}
-
-impl Serialize for ImageDimensions {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (self.width, self.height).serialize(serializer)
-    }
 }
 
 impl<'de> Deserialize<'de> for ImageDimensions {
@@ -870,23 +837,26 @@ impl<'de> Deserialize<'de> for ImageDimensions {
 }
 
 #[cfg(feature = "api")]
-fn legacy_pair_schema(
+fn named_pair_schema(
+    first_field: &str,
+    second_field: &str,
     item_type: utoipa::openapi::schema::Type,
 ) -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-    use utoipa::openapi::schema::{ArrayBuilder, ArrayItems, Object};
+    use utoipa::openapi::schema::{Object, ObjectBuilder, Type};
 
-    ArrayBuilder::new()
-        .items(ArrayItems::False)
-        .prefix_items([Object::with_type(item_type.clone()), Object::with_type(item_type)])
-        .min_items(Some(2))
-        .max_items(Some(2))
+    ObjectBuilder::new()
+        .schema_type(Type::Object)
+        .property(first_field, Object::with_type(item_type.clone()))
+        .required(first_field)
+        .property(second_field, Object::with_type(item_type))
+        .required(second_field)
         .into()
 }
 
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for MarkdownLink {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        legacy_pair_schema(utoipa::openapi::schema::Type::String)
+        named_pair_schema("text", "url", utoipa::openapi::schema::Type::String)
     }
 }
 
@@ -896,7 +866,7 @@ impl utoipa::ToSchema for MarkdownLink {}
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for MarkdownCodeBlock {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        legacy_pair_schema(utoipa::openapi::schema::Type::String)
+        named_pair_schema("language", "code", utoipa::openapi::schema::Type::String)
     }
 }
 
@@ -906,7 +876,7 @@ impl utoipa::ToSchema for MarkdownCodeBlock {}
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for KeyValueAttribute {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        legacy_pair_schema(utoipa::openapi::schema::Type::String)
+        named_pair_schema("key", "value", utoipa::openapi::schema::Type::String)
     }
 }
 
@@ -916,7 +886,7 @@ impl utoipa::ToSchema for KeyValueAttribute {}
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for ImageDimensions {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        legacy_pair_schema(utoipa::openapi::schema::Type::Integer)
+        named_pair_schema("width", "height", utoipa::openapi::schema::Type::Integer)
     }
 }
 
@@ -1609,26 +1579,92 @@ mod binding_value_serde_tests {
     use serde_json::json;
 
     #[cfg(feature = "api")]
-    fn assert_legacy_array_schema<T: utoipa::PartialSchema>(length: usize) {
+    fn assert_named_object_schema<T: utoipa::PartialSchema>(fields: &[(&str, &str)]) {
         let schema = serde_json::to_value(T::schema()).expect("schema must serialize");
-        assert_eq!(schema["type"], "array");
-        assert_eq!(schema["minItems"], length);
-        assert_eq!(schema["maxItems"], length);
-        assert_eq!(schema["items"], false);
-        assert_eq!(schema["prefixItems"].as_array().map(Vec::len), Some(length));
+        assert_eq!(schema["type"], "object");
+
+        let mut required: Vec<String> = schema["required"]
+            .as_array()
+            .expect("required must be an array")
+            .iter()
+            .map(|value| value.as_str().expect("required entry must be a string").to_string())
+            .collect();
+        required.sort();
+        let mut expected_required: Vec<String> = fields.iter().map(|(name, _)| (*name).to_string()).collect();
+        expected_required.sort();
+        assert_eq!(required, expected_required);
+
+        for (name, expected_type) in fields {
+            assert_eq!(schema["properties"][*name]["type"], *expected_type, "field {name} type");
+        }
     }
 
     #[cfg(feature = "api")]
     #[test]
-    fn should_describe_binding_dtos_as_legacy_array_schemas() {
-        assert_legacy_array_schema::<MarkdownLink>(2);
-        assert_legacy_array_schema::<MarkdownCodeBlock>(2);
-        assert_legacy_array_schema::<KeyValueAttribute>(2);
-        assert_legacy_array_schema::<ImageDimensions>(2);
+    fn should_describe_binding_dtos_as_named_object_schemas() {
+        assert_named_object_schema::<MarkdownLink>(&[("text", "string"), ("url", "string")]);
+        assert_named_object_schema::<MarkdownCodeBlock>(&[("language", "string"), ("code", "string")]);
+        assert_named_object_schema::<KeyValueAttribute>(&[("key", "string"), ("value", "string")]);
+        assert_named_object_schema::<ImageDimensions>(&[("width", "integer"), ("height", "integer")]);
     }
 
     #[test]
-    fn should_preserve_legacy_markdown_tuple_wire_format() {
+    fn should_serialize_markdown_link_and_code_block_as_named_objects() {
+        let link = MarkdownLink {
+            text: "Xberg".into(),
+            url: "https://xberg.io".into(),
+        };
+        let code_block = MarkdownCodeBlock {
+            language: "rust".into(),
+            code: "fn main() {}".into(),
+        };
+        let metadata = TextMetadata {
+            line_count: 4,
+            word_count: 7,
+            character_count: 42,
+            headers: None,
+            links: Some(vec![link.clone()]),
+            code_blocks: Some(vec![code_block.clone()]),
+        };
+
+        assert_eq!(
+            serde_json::to_value(&link).expect("link must serialize"),
+            json!({"text": "Xberg", "url": "https://xberg.io"})
+        );
+        assert_eq!(
+            serde_json::to_value(&code_block).expect("code block must serialize"),
+            json!({"language": "rust", "code": "fn main() {}"})
+        );
+        assert_eq!(
+            serde_json::to_value(metadata).expect("metadata must serialize"),
+            json!({
+                "line_count": 4,
+                "word_count": 7,
+                "character_count": 42,
+                "links": [{"text": "Xberg", "url": "https://xberg.io"}],
+                "code_blocks": [{"language": "rust", "code": "fn main() {}"}]
+            })
+        );
+    }
+
+    #[test]
+    fn should_still_accept_legacy_positional_array_for_markdown_link_and_code_block() {
+        let expected_link = MarkdownLink {
+            text: "Xberg".into(),
+            url: "https://xberg.io".into(),
+        };
+        let expected_code_block = MarkdownCodeBlock {
+            language: "rust".into(),
+            code: "fn main() {}".into(),
+        };
+
+        let link: MarkdownLink =
+            serde_json::from_value(json!(["Xberg", "https://xberg.io"])).expect("legacy link array must deserialize");
+        let code_block: MarkdownCodeBlock =
+            serde_json::from_value(json!(["rust", "fn main() {}"])).expect("legacy code block array must deserialize");
+        assert_eq!(link, expected_link);
+        assert_eq!(code_block, expected_code_block);
+
         let legacy = json!({
             "line_count": 4,
             "word_count": 7,
@@ -1636,59 +1672,38 @@ mod binding_value_serde_tests {
             "links": [["Xberg", "https://xberg.io"]],
             "code_blocks": [["rust", "fn main() {}"]]
         });
+        let metadata: TextMetadata = serde_json::from_value(legacy).expect("legacy metadata must deserialize");
+        assert_eq!(metadata.links, Some(vec![expected_link]));
+        assert_eq!(metadata.code_blocks, Some(vec![expected_code_block]));
+    }
 
-        let metadata: TextMetadata = serde_json::from_value(legacy.clone()).expect("legacy metadata must deserialize");
-        let named_link: MarkdownLink = serde_json::from_value(json!({
-            "text": "Xberg",
-            "url": "https://xberg.io"
-        }))
-        .expect("named Markdown link must deserialize");
-        let named_code_block: MarkdownCodeBlock = serde_json::from_value(json!({
-            "language": "rust",
-            "code": "fn main() {}"
-        }))
-        .expect("named code block must deserialize");
-        let link = metadata
-            .links
-            .as_ref()
-            .and_then(|links| links.first())
-            .expect("link must be present");
-        let code_block = metadata
-            .code_blocks
-            .as_ref()
-            .and_then(|blocks| blocks.first())
-            .expect("code block must be present");
+    #[test]
+    fn should_serialize_key_value_attribute_and_image_dimensions_as_named_objects() {
+        let attribute = KeyValueAttribute {
+            key: "role".into(),
+            value: "button".into(),
+        };
+        let dimensions = ImageDimensions {
+            width: 640,
+            height: 480,
+        };
+
         assert_eq!(
-            link,
-            &MarkdownLink {
-                text: "Xberg".into(),
-                url: "https://xberg.io".into()
-            }
+            serde_json::to_value(attribute).expect("attribute must serialize"),
+            json!({"key": "role", "value": "button"})
         );
         assert_eq!(
-            code_block,
-            &MarkdownCodeBlock {
-                language: "rust".into(),
-                code: "fn main() {}".into()
-            }
-        );
-        assert_eq!(serde_json::to_value(metadata).expect("metadata must serialize"), legacy);
-        assert_eq!(
-            serde_json::to_value(named_link).expect("named Markdown link must serialize"),
-            json!(["Xberg", "https://xberg.io"])
-        );
-        assert_eq!(
-            serde_json::to_value(named_code_block).expect("named code block must serialize"),
-            json!(["rust", "fn main() {}"])
+            serde_json::to_value(dimensions).expect("dimensions must serialize"),
+            json!({"width": 640, "height": 480})
         );
     }
 
     #[test]
-    fn should_preserve_legacy_attribute_and_dimension_tuple_wire_format() {
+    fn should_still_accept_legacy_positional_array_for_attribute_and_dimensions() {
         let attribute: KeyValueAttribute =
-            serde_json::from_value(json!(["role", "button"])).expect("legacy attribute must deserialize");
+            serde_json::from_value(json!(["role", "button"])).expect("legacy attribute array must deserialize");
         let dimensions: ImageDimensions =
-            serde_json::from_value(json!([640, 480])).expect("legacy dimensions must deserialize");
+            serde_json::from_value(json!([640, 480])).expect("legacy dimensions array must deserialize");
         let named_attribute: KeyValueAttribute = serde_json::from_value(json!({"key": "role", "value": "button"}))
             .expect("named attribute must deserialize");
         let named_dimensions: ImageDimensions = serde_json::from_value(json!({"width": 640, "height": 480}))
@@ -1700,21 +1715,5 @@ mod binding_value_serde_tests {
         assert_eq!(dimensions.height, 480);
         assert_eq!(named_attribute, attribute);
         assert_eq!(named_dimensions, dimensions);
-        assert_eq!(
-            serde_json::to_value(attribute).expect("attribute must serialize"),
-            json!(["role", "button"])
-        );
-        assert_eq!(
-            serde_json::to_value(dimensions).expect("dimensions must serialize"),
-            json!([640, 480])
-        );
-        assert_eq!(
-            serde_json::to_value(named_attribute).expect("named attribute must serialize"),
-            json!(["role", "button"])
-        );
-        assert_eq!(
-            serde_json::to_value(named_dimensions).expect("named dimensions must serialize"),
-            json!([640, 480])
-        );
     }
 }

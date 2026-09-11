@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# This harness drives bench_local_profiles.sh, which it sources: the variables assigned here are
+# the inputs those sourced functions read, so shellcheck cannot see their use. ~keep
+# shellcheck disable=SC2034
 
 set -euo pipefail
 

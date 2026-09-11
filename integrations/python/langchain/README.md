@@ -7,7 +7,7 @@
 
 # langchain-xberg
 
-A [LangChain](https://www.langchain.com/) document loader backed by [Xberg](https://github.com/xberg-io/xberg). `XbergLoader` extracts text and metadata from 106 formats — running OCR where needed — and returns LangChain `Document` objects. Extraction is async at the core; multiple sources go through Xberg's `extract_batch` in a single native call, so concurrency happens Rust-side.
+A [LangChain](https://www.langchain.com/) document loader backed by [Xberg](https://github.com/xberg-io/xberg). `XbergLoader` extracts text and metadata from 107 formats — running OCR where needed — and returns LangChain `Document` objects. Extraction is async at the core; multiple sources go through Xberg's `extract_batch` in a single native call, so concurrency happens Rust-side.
 
 ## Install
 

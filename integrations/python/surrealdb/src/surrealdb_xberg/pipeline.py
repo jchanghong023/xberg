@@ -1,5 +1,6 @@
 """Chunked extraction with optional embedding for RAG pipelines."""
 
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 from surrealdb import RecordID
@@ -88,10 +89,12 @@ class DocumentPipeline(BaseIngester):
     def _build_extraction_config(self) -> ExtractionConfig:
         """Build ExtractionConfig with chunking and optional embedding.
 
-        ``ExtractionConfig`` is a ``TypedDict``. If the user provided one with a
-        ``ChunkingConfig``, preserve their chunking parameters (``max_characters``,
-        ``overlap``, ``preset``) and only inject the embedding configuration.
-        The user's dict is mutated in place so callers keep their reference.
+        ``ExtractionConfig`` and ``ChunkingConfig`` are frozen dataclasses. If
+        the user provided a config with a ``ChunkingConfig``, its chunking
+        parameters (``max_characters``, ``overlap``, ``preset``) are preserved
+        and only the embedding configuration is replaced. Returns a new
+        ``ExtractionConfig``; the caller's original object, if any, is not
+        mutated.
 
         Returns:
             A fully configured ExtractionConfig with chunking (and optionally
@@ -100,18 +103,13 @@ class DocumentPipeline(BaseIngester):
         """
         embedding = EmbeddingConfig(model=self._embedding_model_type) if self._embed else None
 
-        config: ExtractionConfig = self._config if self._config is not None else ExtractionConfig()
-        user_chunking = config.get("chunking")
+        config = self._config if self._config is not None else ExtractionConfig()
+        user_chunking = config.chunking
         if user_chunking is not None:
-            config["chunking"] = ChunkingConfig(
-                max_characters=user_chunking.max_characters,
-                overlap=user_chunking.overlap,
-                preset=user_chunking.preset,
-                embedding=embedding,
-            )
+            chunking = replace(user_chunking, embedding=embedding)
         else:
-            config["chunking"] = ChunkingConfig(embedding=embedding)
-        return config
+            chunking = ChunkingConfig(embedding=embedding)
+        return replace(config, chunking=chunking)
 
     async def _probe_embedding_dimensions(self) -> int:
         """Determine the embedding dimension by embedding a short probe string.

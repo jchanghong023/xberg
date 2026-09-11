@@ -84,6 +84,7 @@ pub(super) fn assemble_mixed_ocr_page_document(
             &doc.tables,
             Some(&doc.images),
             &[],
+            &Default::default(),
         );
         assembled.processing_warnings = std::mem::take(&mut doc.processing_warnings);
         doc = assembled;
@@ -596,7 +597,7 @@ pub(crate) fn merge_ocr_pages_into_native(
     apply_ocr_page_replacements(native_text, boundaries, &accepted)
 }
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
-pub(crate) fn destructive_ocr_information_loss(
+pub(super) fn destructive_ocr_information_loss(
     native_page: &str,
     ocr_text: &str,
     thresholds: &OcrQualityThresholds,
@@ -1881,6 +1882,7 @@ pub(super) fn heuristically_restructured_ocr_pages(
             collected_tables,
             None,
             &[],
+            &Default::default(),
         ));
     }
 
@@ -2105,5 +2107,6 @@ pub(super) fn recognized_table_to_public_table(
         }),
         table_id: Some(format!("table-{}", table_index + 1)),
         columns: recognized.cells.first().cloned(),
+        cell_styles: Vec::new(),
     }
 }

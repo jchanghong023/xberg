@@ -1,6 +1,6 @@
 # xberg
 
-Extract text, tables, metadata, and images from 106 document formats — PDF, Office, images with OCR, HTML, email, archives, academic — using the local `xberg` CLI in your agent.
+Extract text, tables, metadata, and images from 107 document formats — PDF, Office, images with OCR, HTML, email, archives, academic — using the local `xberg` CLI in your agent.
 
 <!-- ~keep TODO: add screenshot -->
 
@@ -51,7 +51,7 @@ sudo apt install tesseract-ocr-*   # Debian/Ubuntu
 
 | Skill | Trigger |
 |-------|---------|
-| **xberg** | Extract text, tables, metadata, and images from 106 document formats (PDF, Office, images, HTML, email, archives, academic) using Xberg. Use when writing code that calls Xberg APIs in Python, Node.js/TypeScript, Rust, or CLI. Covers installation, extraction (sync/async), configuration (OCR, chunking, output format), batch processing, error handling, and plugins. |
+| **xberg** | Extract text, tables, metadata, and images from 107 document formats (PDF, Office, images, HTML, email, archives, academic) using Xberg. Use when writing code that calls Xberg APIs in Python, Node.js/TypeScript, Rust, or CLI. Covers installation, extraction (sync/async), configuration (OCR, chunking, output format), batch processing, error handling, and plugins. |
 | **extracting-with-ocr** | Use when extracting text from scanned PDFs, photographed pages, or images that have no embedded text layer. Covers OCR backends, language packs, force-OCR, and performance tuning. |
 | **extracting-tables** | Use when extracting tabular data from PDFs, spreadsheets, or images. Covers layout-aware table detection, table model selection, output formats (markdown / JSON cells), and known limits. |
 | **chunking** | Use when splitting extracted text into chunks for LLM context windows or RAG ingestion. Covers chunk size, overlap, markdown/yaml/semantic chunkers, tokenizer-based sizing, and the standalone `chunk` command. |

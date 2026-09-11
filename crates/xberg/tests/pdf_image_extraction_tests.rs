@@ -790,6 +790,12 @@ fn test_no_decompression_trace_when_images_disabled() {
 /// the native path the decompression was unbounded.  The OCR path was never
 /// covered by a test, so a regression disabling decompression for
 /// `ocr_inline_images=true` would be invisible.
+// Gated on `ocr`, NOT on `ocr-pipeline`: `ocr = ["ocr-pipeline", ...]`, so the
+// pipeline feature can be on with no backend registered, and this test then fails
+// with `OCR backend 'tesseract' not registered` rather than being skipped. Without
+// any gate it fails a step earlier, at config validation, on every `pdf`-only leg.
+// Both reds read exactly like a real regression. ~keep
+#[cfg(feature = "ocr")]
 #[test]
 fn test_ocr_inline_images_enters_decompression_path() {
     use xberg::PdfConfig;
@@ -1170,6 +1176,14 @@ fn test_include_page_rasters_emits_warning_on_document_level_ocr_bypass() {
         force_ocr: true,
         images: Some(ImageExtractionConfig {
             include_page_rasters: true,
+            ..Default::default()
+        }),
+        // Zero margins are what select the document-level OCR path; the non-zero defaults
+        // (0.06 / 0.05) route to per-page image OCR instead, and this mock's `process_image`
+        // panics by design. See `should_use_per_page_ocr_only_when_effective_margins_are_nonzero`. ~keep
+        pdf_options: Some(xberg::PdfConfig {
+            top_margin_fraction: Some(0.0),
+            bottom_margin_fraction: Some(0.0),
             ..Default::default()
         }),
         use_cache: false,

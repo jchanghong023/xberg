@@ -11,7 +11,7 @@ function errorMessage(error: unknown): string {
 }
 
 /**
- * Reader for 106 document formats powered by xberg's Rust extraction engine.
+ * Reader for 107 document formats powered by xberg's Rust extraction engine.
  *
  * Supports file paths, raw bytes, batch input, per-page splitting, and true
  * async via xberg's native `extract` / `extractBatch` functions. A single input

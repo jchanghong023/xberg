@@ -2,7 +2,7 @@
 title: "CrewAI"
 ---
 
-The `crewai-xberg` package gives [CrewAI](https://www.crewai.com/) agents document intelligence. It wraps Xberg's extraction pipeline as agent tools that pull text, metadata, keywords, entities, and summaries from 106 file formats, with OCR where needed.
+The `crewai-xberg` package gives [CrewAI](https://www.crewai.com/) agents document intelligence. It wraps Xberg's extraction pipeline as agent tools that pull text, metadata, keywords, entities, and summaries from 107 file formats, with OCR where needed.
 
 [![PyPI](https://img.shields.io/pypi/v/crewai-xberg)](https://pypi.org/project/crewai-xberg/)
 [![Python](https://img.shields.io/pypi/pyversions/crewai-xberg)](https://pypi.org/project/crewai-xberg/)

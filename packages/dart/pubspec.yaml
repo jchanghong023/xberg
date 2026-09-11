@@ -1,6 +1,6 @@
 name: xberg
 description: High-performance document intelligence library
-version: 1.1.0
+version: 1.1.6
 repository: https://github.com/xberg-io/xberg
 homepage: https://xberg.io
 environment:
@@ -26,6 +26,6 @@ dev_dependencies:
   # `>=1.0.0` bound) even though pub itself resolves it happily. Stable 4.0.0
   # needs Dart SDK >=3.13.0, ahead of this package's ">=3.11.0 <4.0.0"
   # constraint, so stay on the 3.x line until the SDK floor moves.
-  freezed: "^3.2.5"
+  freezed: ^4.0.1
   build_runner: "^2.15.0"
   json_serializable: "^6.13.2"

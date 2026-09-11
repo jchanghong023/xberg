@@ -10,6 +10,11 @@
 //! - Uses system fonts as fallback when embedded fonts aren't available
 //! - Renders text using harfrust for shaping and tiny-skia for drawing glyph paths
 
+// TODO(xberg-io/xberg#1567): 4 cyclomatic-complexity and 28 size/complexity findings
+// in this file, currently excluded via the quality-debt baseline in alef.toml. Splitting
+// these needs compiler-in-the-loop verification, not a mechanical pass. Delete this
+// note and the file's baseline entry together once it goes green. Help wanted.
+
 use super::{create_fill_paint, guarded_fill_path};
 use crate::content::GraphicsState;
 use crate::content::operators::TextElement;

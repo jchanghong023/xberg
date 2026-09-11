@@ -1,8 +1,13 @@
 //! Heading classification for paragraphs using font-size clustering.
 
+// TODO(xberg-io/xberg#1567): 4 cyclomatic-complexity and 12 size/complexity findings
+// in this file, currently excluded via the quality-debt baseline in alef.toml. Splitting
+// these needs compiler-in-the-loop verification, not a mechanical pass. Delete this
+// note and the file's baseline entry together once it goes green. Help wanted.
+
 use super::constants::{
-    MAX_BOLD_HEADING_WORD_COUNT, MAX_HEADING_DISTANCE_MULTIPLIER, MAX_HEADING_WORD_COUNT, MIN_BLOCKS_FOR_FONT_HEADING,
-    MIN_HEADING_FONT_GAP, MIN_HEADING_FONT_RATIO,
+    MAX_BOLD_HEADING_WORD_COUNT, MAX_HEADING_DISTANCE_MULTIPLIER, MAX_HEADING_WORD_COUNT, MAX_TITLE_WORD_COUNT,
+    MIN_BLOCKS_FOR_FONT_HEADING, MIN_HEADING_FONT_GAP, MIN_HEADING_FONT_RATIO,
 };
 use super::regions::{looks_like_bare_url, looks_like_figure_label};
 use super::types::{LayoutHintClass, PdfParagraph};
@@ -136,6 +141,7 @@ pub(super) fn classify_paragraphs(paragraphs: &mut [PdfParagraph], heading_map: 
             && word_count <= MAX_HEADING_WORD_COUNT
             && !super::layout_classify::is_separator_text(&para_text)
             && !looks_like_bare_url(&para_text)
+            && !reads_as_body_content(&para_text, word_count)
         {
             para.heading_level = Some(level);
             continue;
@@ -445,7 +451,7 @@ fn is_numeric_prose_continuation(text: &str) -> bool {
 /// marked as code blocks. This handles code snippets that don't have explicit
 /// code block markers.
 fn detect_monospace_code_blocks(paragraphs: &mut [PdfParagraph]) {
-    if paragraphs.len() < 2 {
+    if paragraphs.is_empty() {
         return;
     }
 
@@ -461,6 +467,23 @@ fn detect_monospace_code_blocks(paragraphs: &mut [PdfParagraph]) {
         let is_all_monospace = !para.lines.is_empty() && para.lines.iter().all(|l| l.is_monospace);
 
         if !is_all_monospace {
+            i += 1;
+            continue;
+        }
+
+        // A lone paragraph that already carries two or more monospace lines is a
+        // complete multi-line code listing by itself — it does not need a consecutive
+        // monospace neighbor to qualify, unlike the one-monospace-line-per-paragraph
+        // case merged below (common when code line-leading splits each line into its
+        // own paragraph). This purely font-based signal cannot distinguish a genuine
+        // code listing from a document set entirely in a monospace face, or from a
+        // 2-line caption/table cell that happens to share that font — both are
+        // accepted, pre-existing limitations of this heuristic (unchanged by this
+        // addition, which only mirrors pipeline.rs's identical paragraph-level gate),
+        // not something overlooked here. ~keep
+        if para.lines.len() >= 2 {
+            paragraphs[i].is_code_block = true;
+            paragraphs[i].layout_class = Some(LayoutHintClass::Code);
             i += 1;
             continue;
         }
@@ -997,6 +1020,38 @@ fn infer_section_level(text: &str) -> u8 {
 /// A trailing ellipsis (`...` or the `…` glyph) is a truncation marker — common
 /// in headings and truncated titles ("Impaired Glucose Tolerance ...") — not a
 /// sentence terminator, so it does not disqualify a line from being a heading.
+/// Whether `text` reads as body content rather than a heading.
+///
+/// Two signals, both of which the heading gates previously lacked entirely.
+///
+/// A leading list bullet disqualifies outright: a heading is not a bullet. On the Intel SDM this
+/// alone accounts for 1231 blocks that were emitted as `# ` headings -- every one of them a
+/// sentence in a bulleted list, and 1199 of them ending in a full stop.
+///
+/// Beyond [`MAX_TITLE_WORD_COUNT`] words, a sentence shape disqualifies too: the block either closes
+/// a sentence or runs on past an interior one. The word floor is what keeps a genuine title that
+/// happens to end in a period ("TableFormer: Table Structure Understanding with Transformers.") --
+/// titles are short, and the prose that was being promoted is not. An interior boundary counts only
+/// when a capital follows it, so a decimal, an abbreviation or a numbered prefix does not trip it,
+/// and [`is_section_pattern`] keeps "ARTICLE IV." and "3.2. Methods" exactly as it does for the bold
+/// branch. GH#1599. ~keep
+pub(super) fn reads_as_body_content(text: &str, word_count: usize) -> bool {
+    let trimmed = text.trim();
+    if trimmed.starts_with(['\u{2022}', '\u{00B7}', '\u{25E6}', '\u{25AA}']) {
+        return true;
+    }
+    if is_section_pattern(trimmed) || word_count <= MAX_TITLE_WORD_COUNT {
+        return false;
+    }
+    if ends_with_sentence_period(trimmed) {
+        return true;
+    }
+    let characters: Vec<char> = trimmed.chars().collect();
+    characters
+        .windows(3)
+        .any(|window| window[0] == '.' && window[1] == ' ' && window[2].is_uppercase())
+}
+
 pub(super) fn ends_with_sentence_period(text: &str) -> bool {
     let t = text.trim_end();
     t.ends_with('.') && !t.ends_with("..")
@@ -1030,8 +1085,24 @@ pub(super) fn is_section_pattern(text: &str) -> bool {
 ///
 /// A single-level number followed by mixed-case text ("1. Énumération") is a
 /// list item and returns `false`.
+///
+/// A heading may also put a keyword in front of its number -- "ARTIKEL 1.
+/// TOEPASSELIJKHEID", "Appendix 1 Product list", "Exhibit A PRODUCT LIST". That
+/// form is recognised by shape rather than by a keyword list; see
+/// [`section_keyword_prefix`]. Behind a keyword the remainder need only be
+/// capitalised, which is what keeps "Artikel 12 van de wet is van toepassing."
+/// classified as the prose it is. See #1608.
 pub(super) fn is_numbered_section_heading(text: &str) -> bool {
     let t = text.trim();
+    if is_bare_numbered_section_heading(t) {
+        return true;
+    }
+    section_keyword_prefix(t).is_some_and(is_keyword_numbered_section_heading)
+}
+
+/// The enumerator-first half of [`is_numbered_section_heading`]: the number,
+/// or the roman numeral, is the line's own first token.
+fn is_bare_numbered_section_heading(t: &str) -> bool {
     let bytes = t.as_bytes();
     if bytes.is_empty() {
         return false;
@@ -1081,6 +1152,95 @@ pub(super) fn is_numbered_section_heading(text: &str) -> bool {
             .chars()
             .filter(|c| c.is_alphabetic())
             .all(|c| c.is_uppercase())
+}
+
+/// A leading section keyword is a word, not a preposition. Without a floor,
+/// `Op 3 MAART` and `In 5 STAPPEN` read as section numbering, because an
+/// all-caps remainder satisfies every other term. See #1608. ~keep
+const MIN_SECTION_KEYWORD_CHARS: usize = 3;
+
+/// Split a leading section keyword (`ARTIKEL`, `Appendix`, `Annex`, `Chapter`,
+/// `Artículo`, ...) off `t` and return what follows it.
+///
+/// Deliberately NOT a keyword list: enumerating them is endless and
+/// language-bound, and measured on GH#1608's reproducer a list would still have
+/// missed two of the five shapes. What identifies the form is its shape -- one
+/// capitalised alphabetic word standing in front of an enumerator -- while the
+/// enumerator and the case of the remainder do the discriminating. See #1608. ~keep
+fn section_keyword_prefix(t: &str) -> Option<&str> {
+    if !t.chars().next()?.is_uppercase() {
+        return None;
+    }
+    let word_end = t.find(char::is_whitespace)?;
+    let word = &t[..word_end];
+    if !word.chars().all(char::is_alphabetic) || word.chars().count() < MIN_SECTION_KEYWORD_CHARS {
+        return None;
+    }
+    Some(t[word_end..].trim_start())
+}
+
+/// Whether `rest` -- a line with its leading section keyword removed -- reads as
+/// a numbered section heading.
+fn is_keyword_numbered_section_heading(rest: &str) -> bool {
+    let Some(after_enumerator) = section_enumerator_end(rest) else {
+        return false;
+    };
+    let remainder = rest[after_enumerator..].trim_start_matches(['.', ')']).trim_start();
+    // `Artikel 12 van de wet is van toepassing.` is prose and must stay prose;
+    // `Appendix 1 Product list` is a heading. Keyword and enumerator are the same
+    // shape in both, so the case of the first letter after the enumerator is the
+    // only thing separating them. A bare enumerator keeps the stricter all-caps
+    // rule -- there the keyword is not there to vouch for it. See #1608. ~keep
+    match remainder.chars().find(|c| c.is_alphabetic()) {
+        None => true,
+        Some(first) => first.is_uppercase(),
+    }
+}
+
+/// Byte offset just past a leading enumerator in `rest`: arabic digits with
+/// optional `.`-separated levels, a roman numeral, or a single uppercase letter.
+///
+/// The enumerator must be terminated by end of line, `.`, `)` or a space, so
+/// `Article 7a` and `Annex IVX` do not read as enumerated. The single-letter arm
+/// exists for `Exhibit A` / `Annex B`, and is reachable only behind a keyword --
+/// a bare `A.` is far more often a list marker than a section number. ~keep
+fn section_enumerator_end(rest: &str) -> Option<usize> {
+    let bytes = rest.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let terminated = |end: usize| matches!(bytes.get(end), None | Some(b'.' | b')' | b' '));
+
+    let mut end = 0usize;
+    loop {
+        let digit_len = bytes[end..]
+            .iter()
+            .position(|b| !b.is_ascii_digit())
+            .unwrap_or(bytes.len() - end);
+        if digit_len == 0 {
+            break;
+        }
+        end += digit_len;
+        if bytes.get(end) == Some(&b'.') && bytes.get(end + 1).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    if end > 0 {
+        return terminated(end).then_some(end);
+    }
+
+    let roman_chars: &[u8] = b"IVXLCDM";
+    let roman_end = bytes
+        .iter()
+        .position(|b| !roman_chars.contains(b))
+        .unwrap_or(bytes.len());
+    if roman_end > 0 && terminated(roman_end) && is_valid_roman(&rest[..roman_end]) {
+        return Some(roman_end);
+    }
+
+    (bytes[0].is_ascii_uppercase() && terminated(1)).then_some(1)
 }
 
 /// Check if text starts with a section number pattern (e.g., "1 ", "2.1 ", "A.", "III.").
@@ -1300,8 +1460,24 @@ pub(super) fn is_body_size_bold_signal(para: &PdfParagraph, body_font_size: f32)
         && !super::layout_classify::is_separator_text(trimmed)
 }
 
+/// On typography alone a bold body-size line needs at least this many words to read
+/// as a heading -- shorter bold fragments are far more often emphasis, a label, or a
+/// run-in lead. See [`is_body_size_bold_heading_candidate`] for the exemption. ~keep
+const MIN_BOLD_HEADING_WORD_COUNT: usize = 3;
+
 pub(super) fn is_body_size_bold_heading_candidate(para: &PdfParagraph, body_font_size: f32) -> bool {
-    is_body_size_bold_signal(para, body_font_size) && para.word_count > 2
+    if !is_body_size_bold_signal(para, body_font_size) {
+        return false;
+    }
+    // A numbered section heading carries its own evidence and does not need to clear
+    // the word-count floor. Requiring three words silently excluded every two-word
+    // numbered title -- `3. PRIJZEN`, `1. INTRODUCTION` -- from heading promotion, so
+    // it stayed a plain bold paragraph and a RUN of them coalesced into a single bold
+    // line in the rendered output while the element stream still showed them apart.
+    // Measured on GH#1611: `ARTIKEL 1. TOEPASSELIJKHEID` (3 words) was promoted and
+    // `1. TOEPASSELIJKHEID` (2 words) was not, at identical font, weight and body
+    // size -- the keyword contributed nothing but the third word. See #1611. ~keep
+    para.word_count >= MIN_BOLD_HEADING_WORD_COUNT || is_numbered_section_heading(paragraph_plain_text(para).trim())
 }
 
 /// Preserve peer H2 sections when a sparse document repeats their font tier at
@@ -1840,6 +2016,61 @@ pub(super) fn mark_cross_page_repeating_short_text(all_pages: &mut [Vec<PdfParag
 
 #[cfg(test)]
 mod tests {
+    use super::reads_as_body_content;
+
+    /// GH#1599: the font-size heading gates had no shape test, so a block whose cluster landed above
+    /// the body font became a heading on word count alone. On the Intel SDM that promoted 1852
+    /// bulleted sentences to `# ` headings.
+    #[test]
+    fn should_treat_a_bulleted_line_as_body_content() {
+        assert!(reads_as_body_content(
+            "\u{00B7} Streaming loads must be 16-byte aligned.",
+            6
+        ));
+        assert!(reads_as_body_content(
+            "\u{2022} PCD and PWT pins (Pentium processor)",
+            6
+        ));
+    }
+
+    /// A block that runs on past an interior full stop is prose, however its font clustered.
+    #[test]
+    fn should_treat_a_line_running_past_a_sentence_boundary_as_body_content() {
+        assert!(reads_as_body_content(
+            "Site 07 access blocked by washout on county rd 12. Attempted alternate route via ridge trail",
+            15,
+        ));
+    }
+
+    /// The other side, and the reason the period test alone was not enough: a real title may end in
+    /// a full stop. Dropping this one cost a paper its `# ` title in the corpus measurement.
+    #[test]
+    fn should_keep_a_short_title_that_ends_in_a_period() {
+        assert!(!reads_as_body_content(
+            "TableFormer: Table Structure Understanding with Transformers.",
+            7,
+        ));
+    }
+
+    /// Section patterns legitimately end in a period at any length.
+    #[test]
+    fn should_keep_a_numbered_section_heading_that_ends_in_a_period() {
+        assert!(!reads_as_body_content(
+            "3.2. Methods and Materials Used Throughout This Study.",
+            8
+        ));
+        assert!(!reads_as_body_content("ARTICLE IV.", 2));
+    }
+
+    /// A long heading with no sentence shape at all is still a heading.
+    #[test]
+    fn should_keep_a_long_heading_with_no_sentence_shape() {
+        assert!(!reads_as_body_content(
+            "Determining an Access Sub Page Write Permission For Extended Page Tables",
+            11,
+        ));
+    }
+
     use super::*;
     use crate::pdf::hierarchy::SegmentData;
 
@@ -3218,6 +3449,111 @@ mod tests {
 
         assert!(pages.iter().all(|page| !page[0].is_page_furniture));
     }
+
+    fn make_line_paragraph(line_count: usize, is_monospace: bool) -> PdfParagraph {
+        let lines: Vec<super::super::types::PdfLine> = (0..line_count)
+            .map(|i| super::super::types::PdfLine {
+                segments: vec![SegmentData {
+                    text: format!("line{i}"),
+                    x: 0.0,
+                    y: 700.0 - i as f32 * 12.0,
+                    width: 40.0,
+                    height: 10.0,
+                    font_size: 10.0,
+                    is_bold: false,
+                    is_italic: false,
+                    is_monospace,
+                    baseline_y: 700.0 - i as f32 * 12.0,
+                    rotation_degrees: 0.0,
+                    assigned_role: None,
+                }],
+                baseline_y: 700.0 - i as f32 * 12.0,
+                dominant_font_size: 10.0,
+                is_bold: false,
+                is_monospace,
+            })
+            .collect();
+        let word_count = PdfParagraph::compute_word_count("", &lines);
+
+        PdfParagraph {
+            text: String::new(),
+            lines,
+            dominant_font_size: 10.0,
+            heading_level: None,
+            is_bold: false,
+            is_list_item: false,
+            is_code_block: false,
+            is_formula: false,
+            is_page_furniture: false,
+            layout_class: None,
+            layout_region_path: None,
+            caption_for: None,
+            block_bbox: None,
+            word_count,
+        }
+    }
+
+    #[test]
+    fn detect_monospace_code_blocks_fences_a_lone_multi_line_paragraph() {
+        // Regression test for GH#1557: a standalone 2-line monospace paragraph (no
+        // consecutive monospace neighbor) must still be recognized as a code block. ~keep
+        let mut paragraphs = vec![make_line_paragraph(2, true), make_line_paragraph(3, false)];
+
+        detect_monospace_code_blocks(&mut paragraphs);
+
+        assert!(
+            paragraphs[0].is_code_block,
+            "a standalone 2-line all-monospace paragraph must be fenced as code"
+        );
+        assert_eq!(paragraphs[0].layout_class, Some(LayoutHintClass::Code));
+        assert!(
+            !paragraphs[1].is_code_block,
+            "an ordinary multi-line prose paragraph must not be fenced as code"
+        );
+    }
+
+    #[test]
+    fn detect_monospace_code_blocks_still_merges_one_line_per_paragraph_listings() {
+        // Pre-existing behavior must be unaffected: a code listing split into
+        // one-line-per-paragraph still merges across consecutive monospace paragraphs. ~keep
+        let mut paragraphs = vec![
+            make_line_paragraph(1, true),
+            make_line_paragraph(1, true),
+            make_line_paragraph(1, true),
+            make_line_paragraph(1, false),
+        ];
+
+        detect_monospace_code_blocks(&mut paragraphs);
+
+        assert!(paragraphs[0].is_code_block);
+        assert!(paragraphs[1].is_code_block);
+        assert!(paragraphs[2].is_code_block);
+        assert!(!paragraphs[3].is_code_block);
+    }
+
+    #[test]
+    fn detect_monospace_code_blocks_renders_singleton_with_original_lines() {
+        let mut paragraph = make_line_paragraph(3, true);
+        paragraph.lines[0].segments[0].text = "import java.net.URI;".to_string();
+        paragraph.lines[1].segments[0].text = "public class Example {".to_string();
+        paragraph.lines[2].segments[0].text = "}".to_string();
+        let mut paragraphs = vec![paragraph];
+
+        detect_monospace_code_blocks(&mut paragraphs);
+
+        assert!(
+            paragraphs[0].is_code_block,
+            "a singleton multi-line listing must be fenced"
+        );
+        let document =
+            super::super::assembly::assemble_internal_document(vec![paragraphs], &[], None, &[], &Default::default());
+        let markdown = crate::rendering::render_markdown(&document);
+        assert_eq!(
+            markdown.trim(),
+            "```\nimport java.net.URI;\npublic class Example {\n}\n```",
+            "assembly and Markdown rendering must preserve the code listing's physical lines"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3250,6 +3586,45 @@ mod numbered_section_heading_tests {
         assert!(!is_numbered_section_heading("1. Énumération 1"));
         assert!(!is_numbered_section_heading("12) apples and oranges"));
         assert!(!is_numbered_section_heading("1.\nÉnumération 1"));
+    }
+
+    /// GH#1608: a heading that puts a keyword in front of its number was invisible
+    /// to this predicate, which is the only boundary signal the paragraph grouper
+    /// has for a heading sharing font, weight and spacing with its neighbour.
+    #[test]
+    fn keyword_numbered_section_headings_are_headings() {
+        assert!(is_numbered_section_heading(
+            "ARTIKEL 1. TOEPASSELIJKHEID VAN DE INKOOPVOORWAARDEN"
+        ));
+        assert!(is_numbered_section_heading("Appendix 1 PRODUCT LIST"));
+        assert!(is_numbered_section_heading("Annex III SCOPE OF THE WORKS"));
+        // The enumeration is a letter, which the bare roman/arabic scan cannot read.
+        assert!(is_numbered_section_heading("Exhibit A PRODUCT LIST"));
+        // A single-level number with a MIXED-CASE tail, which a bare enumerator rejects.
+        assert!(is_numbered_section_heading("Appendix 1 Product list"));
+        assert!(is_numbered_section_heading("Chapter 1"));
+        assert!(is_numbered_section_heading("Artículo 5 CONDICIONES"));
+    }
+
+    /// The guard the widening must not breach: the same keyword and the same
+    /// enumerator shape occur in ordinary prose, and only the case of the word
+    /// after the enumerator separates them. GH#1608 page 8.
+    #[test]
+    fn prose_opening_with_a_keyword_and_a_number_is_not_a_heading() {
+        assert!(!is_numbered_section_heading("Artikel 12 van de wet is van toepassing."));
+        assert!(!is_numbered_section_heading("Article 7 of the contract applies here"));
+        assert!(!is_numbered_section_heading("Bijlage bij de overeenkomst"));
+        // `7a` is not a terminated enumerator.
+        assert!(!is_numbered_section_heading("Article 7a IS NOT ENUMERATED"));
+    }
+
+    /// `MIN_SECTION_KEYWORD_CHARS` is load-bearing, not decoration: a two-letter
+    /// preposition in front of a number and an all-caps tail satisfies every
+    /// other term of the keyword arm.
+    #[test]
+    fn a_short_word_before_a_number_is_not_a_section_keyword() {
+        assert!(!is_numbered_section_heading("Op 3 MAART"));
+        assert!(!is_numbered_section_heading("In 5 STAPPEN"));
     }
 
     #[test]

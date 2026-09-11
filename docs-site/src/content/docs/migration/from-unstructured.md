@@ -267,7 +267,7 @@ curl -X POST "http://localhost:8000/extract" \
 
 1. **Richer Metadata**: Format-specific discriminated unions (PDF, Excel, Email, etc.)
 2. **Native Per-Page**: `PageContent` with byte offsets, hierarchy, tables, images per page
-3. **106 Formats**: vs Unstructured's ~30 formats
+3. **107 Formats**: vs Unstructured's ~30 formats
 4. **Performance**: Rust-based native implementation (vs Python-based)
 5. **15 Language Bindings**: Rust, Python, TypeScript/Node, Ruby, PHP, Go, Java, C#, Elixir, Dart, Kotlin Android, Swift, Zig, WASM, C FFI
 6. **Built-in Embeddings**: ONNX models via `/embed` endpoint (no external API)

@@ -60,6 +60,11 @@ pub(super) const MIN_HEADING_FONT_RATIO: f32 = 1.15;
 /// doc comment for why an OR/min-style combinator with this same absolute constant was
 /// scale-unsafe there.
 pub(super) const MIN_HEADING_FONT_GAP: f32 = 1.5;
+/// Maximum word count for a heading short enough that a trailing period does not make it prose.
+///
+/// A document or section title can legitimately end in a full stop; running prose promoted by font
+/// size cannot be told apart from one any other way. See `classify::reads_as_body_content`. ~keep
+pub(super) const MAX_TITLE_WORD_COUNT: usize = 12;
 /// Maximum word count for a bold paragraph to be promoted to a section heading.
 pub(super) const MAX_BOLD_HEADING_WORD_COUNT: usize = 12;
 /// Minimum layout-hint confidence required for a `Text`/`Caption`/`Footnote` hint to

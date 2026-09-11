@@ -381,6 +381,13 @@ fn collect_txbx_content_text(reader: &mut Reader<&[u8]>, budget: &mut SecurityBu
             },
             Ok(Event::Text(e)) if in_text => {
                 let text = e.xml10_content();
+                budget.check_entity(&text)?;
+                budget.account_text(text.len())?;
+                current.push_str(&text);
+            }
+            Ok(Event::GeneralRef(ref e)) if in_text => {
+                let text = crate::utils::xml_utils::resolve_general_ref(e);
+                budget.account_text(text.len())?;
                 current.push_str(&text);
             }
             Ok(Event::End(ref e)) => {

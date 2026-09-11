@@ -292,74 +292,66 @@ fn extract_pptx_from_container<R: std::io::Read + std::io::Seek>(
         collect_slide_hyperlinks(&slide, &mut collected_hyperlinks);
         collect_slide_formulas(&slide, &mut collected_formulas);
 
-        if config.extract_images {
-            match iterator.get_slide_images(&slide) {
-                Ok(image_data) => {
-                    let mut placement_index = 0usize;
-                    for element_index in slide.ordered_element_indices() {
-                        let SlideElement::Image(img_ref, pos) = &slide.elements[element_index] else {
-                            continue;
-                        };
-                        let current_placement = placement_index;
-                        placement_index += 1;
-                        let Some(data) = image_data.get(&img_ref.id) else {
-                            push_warning(
-                                warnings,
-                                "pptx",
-                                format!(
-                                    "image_index={} slide={} format=unknown stage=placement_association reason=relationship target or media missing",
-                                    current_placement, slide.slide_number
-                                ),
-                            );
-                            continue;
-                        };
-
-                        let format = detect_image_format(data);
-                        let image_index = extracted_images.len();
-                        let width = if pos.cx > 0 { Some((pos.cx / 9525) as u32) } else { None };
-                        let height = if pos.cy > 0 { Some((pos.cy / 9525) as u32) } else { None };
-                        let bbox = position_to_bbox(pos);
-                        let (image_kind, kind_confidence) = crate::extraction::image_kind::classify(
-                            data,
-                            format.as_ref(),
-                            width,
-                            height,
-                            None,
-                            None,
-                            false,
-                        );
-
-                        extracted_images.push(ExtractedImage {
-                            data: Bytes::from(data.clone()),
-                            format,
-                            image_index: image_index as u32,
-                            page_number: Some(slide.slide_number),
-                            width,
-                            height,
-                            colorspace: None,
-                            bits_per_component: None,
-                            is_mask: false,
-                            description: img_ref.description.clone(),
-                            ocr_result: None,
-                            bounding_box: bbox,
-                            source_path: Some(img_ref.target.clone()),
-                            image_kind: Some(image_kind),
-                            kind_confidence: Some(kind_confidence),
-                            cluster_id: None,
-                            caption: None,
-                            qr_codes: None,
-                            data_base64: None,
-                        });
-                    }
+        if config.extract_images
+            && let Ok(image_data) = iterator.get_slide_images(&slide)
+        {
+            // Pair each image element with its bytes by relationship ID, not by
+            // iteration position: `image_data` is a hash map, so its iteration
+            // order is unrelated to the document order of `slide.elements`.
+            // Indexing into a separately-collected, document-ordered Vec by a
+            // hash-map enumeration index silently mismatched dimensions/alt-text
+            // with the wrong shape whenever a slide had more than one image (#91).
+            for (img_ref, pos) in slide.elements.iter().filter_map(|e| {
+                if let SlideElement::Image(img_ref, pos) = e {
+                    Some((img_ref, pos))
+                } else {
+                    None
                 }
-                Err(_error) => push_warning(
-                    warnings,
-                    "pptx",
-                    format!(
-                        "image_index=unknown slide={} format=unknown stage=placement_association reason=slide image collection failed",
-                        slide.slide_number
-                    ),
-                ),
+            }) {
+                let Some(data) = image_data.get(&img_ref.id) else {
+                    push_warning(
+                        warnings,
+                        "pptx",
+                        format!(
+                            "Image '{}' referenced on slide {} could not be read; it was not extracted",
+                            img_ref.id, slide.slide_number
+                        ),
+                    );
+                    continue;
+                };
+
+                let format = detect_image_format(data);
+                let image_index = extracted_images.len();
+
+                let width = if pos.cx > 0 { Some((pos.cx / 9525) as u32) } else { None };
+                let height = if pos.cy > 0 { Some((pos.cy / 9525) as u32) } else { None };
+                let description = img_ref.description.clone();
+                let bbox = position_to_bbox(pos);
+
+                let (image_kind, kind_confidence) =
+                    crate::extraction::image_kind::classify(data, format.as_ref(), width, height, None, None, false);
+
+                extracted_images.push(ExtractedImage {
+                    data: Bytes::from(data.clone()),
+                    format,
+                    image_index: image_index as u32,
+                    page_number: Some(slide.slide_number),
+                    width,
+                    height,
+                    colorspace: None,
+                    bits_per_component: None,
+                    is_mask: false,
+                    description,
+                    ocr_result: None,
+                    bounding_box: bbox,
+                    source_path: None,
+                    image_kind: Some(image_kind),
+                    kind_confidence: Some(kind_confidence),
+                    cluster_id: None,
+                    caption: None,
+                    qr_codes: None,
+                    data_base64: None,
+                });
             }
         }
 
@@ -369,14 +361,12 @@ fn extract_pptx_from_container<R: std::io::Read + std::io::Seek>(
 
     let (content, boundaries, mut page_contents) = content_builder.build();
 
-    if let Some(pcs) = &mut page_contents {
+    if let Some(ref mut pcs) = page_contents {
         for pc in pcs.iter_mut() {
-            pc.image_indices = extracted_images
+            if extracted_images
                 .iter()
-                .enumerate()
-                .filter_map(|(index, image)| (image.page_number == Some(pc.page_number)).then_some(index as u32))
-                .collect();
-            if !pc.image_indices.is_empty() {
+                .any(|img| img.page_number == Some(pc.page_number))
+            {
                 pc.is_blank = Some(false);
             }
         }
@@ -505,7 +495,11 @@ fn build_slide_structure(
     doc_builder: &mut DocumentStructureBuilder,
     image_index_counter: &mut u32,
 ) {
-    let sorted_indices = slide.ordered_element_indices();
+    let mut sorted_indices: Vec<usize> = (0..slide.elements.len()).collect();
+    sorted_indices.sort_by_key(|&i| {
+        let pos = slide.elements[i].position();
+        (pos.y, pos.x)
+    });
 
     let slide_title = sorted_indices
         .iter()
@@ -714,7 +708,7 @@ fn runs_to_text_and_math(runs: &[Run]) -> (String, Vec<String>) {
 
 impl elements::Slide {
     fn from_xml(slide_number: u32, xml_data: &[u8], rels_data: Option<&[u8]>) -> Result<Self> {
-        let mut elements = parser::parse_slide_xml(xml_data)?;
+        let elements = parser::parse_slide_xml(xml_data)?;
 
         let (images, hyperlinks, rel_targets) = if let Some(rels) = rels_data {
             let slide_rels = parser::parse_slide_rels(rels)?;
@@ -722,13 +716,6 @@ impl elements::Slide {
         } else {
             (Vec::new(), Vec::new(), AHashMap::new())
         };
-        for element in &mut elements {
-            if let SlideElement::Image(image, _) = element
-                && let Some(target) = rel_targets.get(&image.id)
-            {
-                image.target.clone_from(target);
-            }
-        }
 
         Ok(Self {
             slide_number,
@@ -739,15 +726,6 @@ impl elements::Slide {
         })
     }
 
-    fn ordered_element_indices(&self) -> Vec<usize> {
-        let mut indices: Vec<usize> = (0..self.elements.len()).collect();
-        indices.sort_by_key(|&index| {
-            let position = self.elements[index].position();
-            (position.y, position.x, index)
-        });
-        indices
-    }
-
     fn to_markdown(&self, config: &ParserConfig) -> String {
         let mut builder = ContentBuilder::new(config.plain);
 
@@ -755,7 +733,11 @@ impl elements::Slide {
             builder.add_slide_header(self.slide_number);
         }
 
-        let element_indices = self.ordered_element_indices();
+        let mut element_indices: Vec<usize> = (0..self.elements.len()).collect();
+        element_indices.sort_by_key(|&i| {
+            let pos = self.elements[i].position();
+            (pos.y, pos.x)
+        });
 
         let title_idx = element_indices
             .iter()
@@ -837,7 +819,13 @@ impl elements::Slide {
                 }
                 SlideElement::Image(img_ref, _) => {
                     if config.inject_placeholders {
-                        builder.add_image_with_desc(&img_ref.id, img_ref.description.as_deref(), &img_ref.target);
+                        let target = self
+                            .images
+                            .iter()
+                            .find(|rel| rel.id == img_ref.id)
+                            .map(|rel| rel.target.as_str())
+                            .unwrap_or("");
+                        builder.add_image_with_desc(&img_ref.id, img_ref.description.as_deref(), target);
                     }
                 }
                 SlideElement::Chart(chart_ref, _) => {

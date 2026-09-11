@@ -2,7 +2,8 @@
 
 use super::NativeDocument;
 use super::span_geometry::{
-    has_same_rotation, is_horizontal_ltr, is_ltr_writing_mode, upright_advance_extent, upright_cross_extent,
+    has_same_rotation, is_horizontal_ltr, is_ltr_writing_mode, is_unrotated, upright_advance_extent,
+    upright_cross_extent,
 };
 use crate::core::config::{ExtractionConfig, PageConfig};
 use crate::pdf::error::{PdfError, Result};
@@ -16,8 +17,13 @@ use xberg_native_pdf::document::ReadingOrder;
 /// Result type for PDF text extraction with optional page tracking.
 type PdfTextExtractionResult = (String, Option<Vec<PageBoundary>>, Option<Vec<PageContent>>);
 
-const DEFAULT_TOP_MARGIN_FRACTION: f32 = 0.06;
-const DEFAULT_BOTTOM_MARGIN_FRACTION: f32 = 0.05;
+// #1574: these were 0.06/0.05 through 1.1.0. `top_margin_fraction`/`bottom_margin_fraction`
+// went from a dead config knob (unread before commit ddba546dca5) to an active OCR-paragraph
+// filter in 1.1.0 without a changelog entry, so a default-config scan lost every page title
+// that happened to sit in the top 6% band with no warning at all. Restoring 0.0 makes the
+// filter opt-in: it now only runs when a caller sets a margin explicitly. ~keep
+const DEFAULT_TOP_MARGIN_FRACTION: f32 = 0.0;
+const DEFAULT_BOTTOM_MARGIN_FRACTION: f32 = 0.0;
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PageMarginFractions {
@@ -283,6 +289,7 @@ fn extract_text_with_tracking(
                 speaker_notes: None,
                 section_name: None,
                 sheet_name: None,
+                ocr_confidence: None,
             });
         }
 
@@ -910,6 +917,57 @@ const LINE_Y_TOLERANCE_PTS: f32 = 0.5;
 // same density bar `MIN_DENSE_COLUMN_SPANS_PER_SIDE` applies to a column's
 // population, to the evidence for the gutter's existence.
 const MIN_DENSE_COLUMN_SPLIT_LINES: usize = MIN_DENSE_COLUMN_SPANS_PER_SIDE;
+// GH#1603: a single outlier line (one long justified line, one stray word) can close
+// the true gutter as a page-wide corridor while a same-shaped-but-irrelevant corridor
+// sits elsewhere on the page -- on a hanging-number/list-label layout, that corridor
+// is the number-to-text indent, present on *every* line, so it always wins
+// `redirect_split_out_of_content`'s `max_by(width)` once the real gutter is narrower
+// than `min_gutter` or closed by that one outlier. Bounding how far the widest
+// corridor may move the split distinguishes a legitimate relocation from an
+// illegitimate one without having to characterise the corridor's shape at all.
+// Measured: GH#1545's misdetected table/prose median moves 61.6pt to the real
+// table/prose gutter; the reporter's corpus records genuine `detect_split_x` misses
+// relocated by up to 92.7pt (30.9pt and 38.3pt elsewhere in the same corpus). GH#1603
+// itself relocates the split 230pt, straight into a clause's own hanging-number
+// indent. 25% of page width (149pt on A4) sits with ~57pt of headroom above the
+// largest legitimate move measured and ~80pt of margin below the smallest
+// illegitimate one. ~keep
+const MAX_REDIRECT_DISTANCE_FRACTION: f32 = 0.25;
+// GH#1545: two regions with different leading (a table on 8.05pt beside prose on
+// 10.45pt) are never grouped into a shared line by `group_into_lines`, so per-line
+// gutter evidence only ever sees each region's *internal* gaps and the median lands
+// inside one of them. A page-wide whitespace corridor does see the boundary between
+// them. The per-line median stays authoritative whenever it already sits in such a
+// corridor -- which is every ordinary two-column page, and every page whose corridor
+// is closed by narrow gutter-crossing furniture (the case per-line evidence exists
+// for) -- so the corridor is consulted only when the median demonstrably sits inside
+// content rather than inside whitespace. ~keep
+// Two sides of a gutter that pair up row-for-row are one table whose rows carry the
+// meaning (label left, value right); reordering column-major would destroy them, which
+// is what `dense_two_column_table_keeps_row_order` guards. Two sides that do NOT pair
+// up are independent regions and may be separated. Measured on the two fixtures: the
+// GH#1545 table/prose page pairs 3 of 47 lines (0.064) while the table guard pairs 8 of
+// 8 (1.000), so 0.5 sits in open space with no fixture anywhere near it. ~keep
+const MAX_CROSS_GUTTER_ROW_PAIRING_FRACTION: f32 = 0.5;
+// A repeated label/value panel ("Sex % Sex %") welds its two halves per row when the
+// region is emitted row-major. The panel boundary cannot be found by gutter width --
+// measured on the GH#1545 page it is 3.28pt against a 1.95pt word space, a 1.3pt margin
+// at a 6.475pt font -- but the columns' left edges repeat exactly, so the boundary is
+// recoverable as "a text column immediately following a numeric one". The measured
+// per-column numeric fractions there are 0.02 / 0.96 / 0.00 / 1.00, so these thresholds
+// sit in a gap almost as wide as the range itself and a table that does not separate
+// this cleanly declines instead of guessing. ~keep
+const MIN_PANEL_VALUE_COLUMN_NUMERIC_FRACTION: f32 = 0.8;
+const MAX_PANEL_LABEL_COLUMN_NUMERIC_FRACTION: f32 = 0.2;
+// A panel needs a label column and a value column, so splitting is only meaningful
+// from four columns up, and a boundary that would leave a one-column panel is rejected. ~keep
+const MIN_PANEL_SPLIT_COLUMNS: usize = 4;
+const MIN_COLUMNS_PER_PANEL: usize = 2;
+// A caption or title inside the region runs across every column as ordinary prose, so
+// its words land between the column edges rather than on them. Emitting it panel-major
+// would tear it in half. Measured on the GH#1545 page the title aligns 0.20 of its
+// spans to a column edge while all 30 real rows align 0.50 or more. ~keep
+const MIN_GRID_ROW_COLUMN_ALIGNMENT_FRACTION: f32 = 0.4;
 
 /// One visual line: span indices in left-to-right (`x` ascending) order.
 type SpanLine = Vec<usize>;
@@ -1030,6 +1088,94 @@ fn detect_split_x(spans: &[xberg_native_pdf::layout::TextSpan], lines: &[SpanLin
     } else {
         midpoints[mid]
     })
+}
+
+/// Move a split that still cuts through a word after snapping to the page's own
+/// whitespace corridor (GH#1545).
+///
+/// A split is only a gutter if nothing is written across it. `detect_split_x`'s
+/// median can land inside content when the page's per-line evidence is drawn from
+/// one region only — a table on 8.05pt leading beside prose on 10.45pt is never
+/// grouped into shared lines, so every midpoint comes from the table's internal
+/// gaps and the median sits between two of the table's own columns.
+///
+/// Deliberately applied *after* `snap_split_left_of_hanging_labels`, which is the
+/// existing remedy for the one case where a split legitimately starts out inside a
+/// span: a hanging clause number. On the GH#1484 fixture the median cuts six label
+/// spans and snapping already resolves it, so this pass sees a clean split and
+/// leaves it alone. Only a split that survives snapping still cutting a word is
+/// redirected here.
+///
+/// GH#1603: the widest corridor is not always the right one. On a hanging-number
+/// page the number-to-text indent is present on every line and is wider than a true
+/// gutter narrower than `min_gutter` (or one closed by a single outlier line), so
+/// `max_by` hands back the indent -- moving the split into a clause instead of onto
+/// its gutter. `MAX_REDIRECT_DISTANCE_FRACTION` bounds how far this pass may move the
+/// split from the incoming (detected/snapped) one; a move past that bound falls back
+/// to `split_x` unchanged rather than relocating into unrelated content.
+fn redirect_split_out_of_content(
+    spans: &[xberg_native_pdf::layout::TextSpan],
+    lines: &[SpanLine],
+    page_width: f32,
+    split_x: f32,
+) -> f32 {
+    let cuts_a_span = spans
+        .iter()
+        .any(|span| span.bbox.left() < split_x && span.bbox.right() > split_x);
+    if !cuts_a_span {
+        return split_x;
+    }
+    let furniture_width = page_width * FULL_WIDTH_FURNITURE_FRACTION;
+    let min_gutter = (page_width * MIN_DENSE_COLUMN_GUTTER_FRACTION).max(MIN_DENSE_COLUMN_GUTTER_PTS);
+    let Some((left, right)) = page_whitespace_corridors(spans, lines, furniture_width, min_gutter)
+        .into_iter()
+        .max_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0)))
+    else {
+        return split_x;
+    };
+    let candidate = (left + right) / 2.0;
+    let max_redirect_distance = page_width * MAX_REDIRECT_DISTANCE_FRACTION;
+    if (candidate - split_x).abs() > max_redirect_distance {
+        return split_x;
+    }
+    candidate
+}
+
+/// Every maximal x-interval at least `min_gutter` wide that no non-furniture span
+/// occupies anywhere on the page.
+///
+/// This is the whole-page projection the per-line detector above deliberately
+/// replaced, kept here as *corroboration* rather than as the primary signal. Its
+/// known weakness is unchanged — furniture narrower than `furniture_width` that
+/// crosses a gutter closes the corridor — but that only ever removes a candidate,
+/// so a page it cannot read simply falls back to the per-line median.
+fn page_whitespace_corridors(
+    spans: &[xberg_native_pdf::layout::TextSpan],
+    lines: &[SpanLine],
+    furniture_width: f32,
+    min_gutter: f32,
+) -> Vec<(f32, f32)> {
+    let mut extents: Vec<(f32, f32)> = lines
+        .iter()
+        .filter(|&line| !line_has_width_furniture(spans, line, furniture_width))
+        .flat_map(|line| line.iter())
+        .map(|&index| (spans[index].bbox.left(), spans[index].bbox.right()))
+        .filter(|(left, right)| left.is_finite() && right.is_finite())
+        .collect();
+    extents.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let mut corridors = Vec::new();
+    let mut running_right = match extents.first() {
+        Some(&(_, right)) => right,
+        None => return corridors,
+    };
+    for (left, right) in extents {
+        if left - running_right >= min_gutter {
+            corridors.push((running_right, left));
+        }
+        running_right = running_right.max(right);
+    }
+    corridors
 }
 
 /// Move a gutter estimate out of a repeated hanging-label band.
@@ -1163,12 +1309,232 @@ fn reorder_band_columns(
     if left.len() < MIN_DENSE_COLUMN_SPANS_PER_SIDE || right.len() < MIN_DENSE_COLUMN_SPANS_PER_SIDE {
         return None;
     }
-    let left_class = xberg_native_pdf::layout::classify_region(spans, &left);
-    let right_class = xberg_native_pdf::layout::classify_region(spans, &right);
-    if !left_class.is_reorderable_column() || !right_class.is_reorderable_column() {
+    let left_reorderable = xberg_native_pdf::layout::classify_region(spans, &left).is_reorderable_column();
+    let right_reorderable = xberg_native_pdf::layout::classify_region(spans, &right).is_reorderable_column();
+    if !left_reorderable && !right_reorderable {
         return None;
     }
+    if !(left_reorderable && right_reorderable)
+        && cross_gutter_row_pairing_fraction(spans, band, split_x) > MAX_CROSS_GUTTER_ROW_PAIRING_FRACTION
+    {
+        return None;
+    }
+    let left = if left_reorderable {
+        left
+    } else {
+        order_region_by_panels(spans, left)
+    };
+    let right = if right_reorderable {
+        right
+    } else {
+        order_region_by_panels(spans, right)
+    };
     Some(left.into_iter().chain(right).collect())
+}
+
+/// Group one region's spans into visual rows, top-to-bottom then left-to-right.
+fn region_rows(spans: &[xberg_native_pdf::layout::TextSpan], region: &[usize]) -> Vec<SpanLine> {
+    let mut order = region.to_vec();
+    order.sort_by(|&a, &b| {
+        spans[b]
+            .bbox
+            .y
+            .total_cmp(&spans[a].bbox.y)
+            .then_with(|| spans[a].bbox.x.total_cmp(&spans[b].bbox.x))
+    });
+    group_into_lines(spans, &order)
+}
+
+/// Fraction of the band's rows that place spans on both sides of `split_x`.
+///
+/// One table with a label column and a value column pairs every row across the
+/// gutter; two regions that merely sit side by side (a table beside a prose
+/// column, each on its own leading) pair almost none. That is the difference
+/// between a page whose rows carry the meaning and a page whose regions do.
+fn cross_gutter_row_pairing_fraction(
+    spans: &[xberg_native_pdf::layout::TextSpan],
+    band: &[usize],
+    split_x: f32,
+) -> f32 {
+    let rows = region_rows(spans, band);
+    if rows.is_empty() {
+        return 0.0;
+    }
+    let paired = rows
+        .iter()
+        .filter(|row| {
+            row.iter().any(|&index| spans[index].bbox.x < split_x)
+                && row.iter().any(|&index| spans[index].bbox.x >= split_x)
+        })
+        .count();
+    paired as f32 / rows.len() as f32
+}
+
+/// True when `text` is a bare numeric cell rather than a label.
+///
+/// `-` is deliberately excluded: a range label such as `18-24` is a row label,
+/// not a value, and admitting it would make a label column read as numeric.
+fn is_numeric_cell(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .all(|character| character.is_ascii_digit() || matches!(character, '.' | ',' | '%'))
+}
+
+/// Left-edge x positions that at least `MIN_DENSE_COLUMN_SPLIT_LINES` distinct
+/// rows agree on — the region's column grid.
+fn strong_column_edges(spans: &[xberg_native_pdf::layout::TextSpan], rows: &[SpanLine]) -> Vec<f32> {
+    let mut edges: Vec<(f32, usize)> = rows
+        .iter()
+        .enumerate()
+        .flat_map(|(row_index, row)| row.iter().map(move |&index| (index, row_index)))
+        .map(|(index, row_index)| (spans[index].bbox.left(), row_index))
+        .collect();
+    edges.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let mut columns = Vec::new();
+    let mut cluster: Vec<(f32, usize)> = Vec::new();
+    for edge in edges {
+        let split = cluster
+            .first()
+            .is_some_and(|&(first, _)| edge.0 - first > DENSE_COLUMN_SPLIT_SNAP_X_TOLERANCE_PTS);
+        if split {
+            push_supported_column(&mut columns, &cluster);
+            cluster.clear();
+        }
+        cluster.push(edge);
+    }
+    push_supported_column(&mut columns, &cluster);
+    columns
+}
+
+fn push_supported_column(columns: &mut Vec<f32>, cluster: &[(f32, usize)]) {
+    let Some(&(first, _)) = cluster.first() else {
+        return;
+    };
+    let mut supporting: Vec<usize> = cluster.iter().map(|&(_, row)| row).collect();
+    supporting.sort_unstable();
+    supporting.dedup();
+    if supporting.len() >= MIN_DENSE_COLUMN_SPLIT_LINES {
+        columns.push(first);
+    }
+}
+
+/// Index of the rightmost column whose left edge is at or left of `x`.
+fn column_index_for_x(columns: &[f32], x: f32) -> Option<usize> {
+    columns
+        .iter()
+        .rposition(|&column| x >= column - DENSE_COLUMN_SPLIT_SNAP_X_TOLERANCE_PTS)
+}
+
+/// Column indices at which a repeated label/value panel restarts, i.e. a
+/// predominantly textual column immediately following a predominantly numeric one.
+fn panel_boundary_columns(
+    spans: &[xberg_native_pdf::layout::TextSpan],
+    rows: &[SpanLine],
+    columns: &[f32],
+) -> Vec<usize> {
+    let mut totals = vec![0usize; columns.len()];
+    let mut numeric = vec![0usize; columns.len()];
+    for &index in rows.iter().flatten() {
+        if let Some(column) = column_index_for_x(columns, spans[index].bbox.left()) {
+            totals[column] += 1;
+            numeric[column] += usize::from(is_numeric_cell(&spans[index].text));
+        }
+    }
+    let fraction = |column: usize| {
+        if totals[column] == 0 {
+            return None;
+        }
+        Some(numeric[column] as f32 / totals[column] as f32)
+    };
+    (0..columns.len().saturating_sub(1))
+        .filter(|&column| {
+            let (Some(value), Some(label)) = (fraction(column), fraction(column + 1)) else {
+                return false;
+            };
+            value >= MIN_PANEL_VALUE_COLUMN_NUMERIC_FRACTION && label <= MAX_PANEL_LABEL_COLUMN_NUMERIC_FRACTION
+        })
+        .map(|column| column + 1)
+        .collect()
+}
+
+fn panels_are_wide_enough(boundaries: &[usize], column_count: usize) -> bool {
+    let mut start = 0usize;
+    for &boundary in boundaries {
+        if boundary.saturating_sub(start) < MIN_COLUMNS_PER_PANEL {
+            return false;
+        }
+        start = boundary;
+    }
+    column_count.saturating_sub(start) >= MIN_COLUMNS_PER_PANEL
+}
+
+/// True when `row`'s spans sit on the column grid rather than running across it.
+///
+/// A caption or title inside the region is ordinary prose: its words land between
+/// the column edges, not on them.
+fn row_follows_column_grid(spans: &[xberg_native_pdf::layout::TextSpan], row: &SpanLine, columns: &[f32]) -> bool {
+    if row.is_empty() {
+        return false;
+    }
+    let aligned = row
+        .iter()
+        .filter(|&&index| {
+            let left = spans[index].bbox.left();
+            columns
+                .iter()
+                .any(|&column| (left - column).abs() <= DENSE_COLUMN_SPLIT_SNAP_X_TOLERANCE_PTS)
+        })
+        .count();
+    aligned as f32 / row.len() as f32 >= MIN_GRID_ROW_COLUMN_ALIGNMENT_FRACTION
+}
+
+/// Reorder a non-prose region panel-major (GH#1545's second symptom).
+///
+/// A statistics table that repeats the same label/value pair across the page
+/// ("Sex % Sex %") welds its two halves on every row when the region is emitted
+/// row-major. The panel boundary is not findable by gutter width — it is a few
+/// tenths of a point wider than a word space — so it is recovered from the column
+/// grid instead. Returns `region` unchanged whenever the grid does not clearly
+/// support a split, so an ordinary table is never rearranged on a guess.
+fn order_region_by_panels(spans: &[xberg_native_pdf::layout::TextSpan], region: Vec<usize>) -> Vec<usize> {
+    let rows = region_rows(spans, &region);
+    let columns = strong_column_edges(spans, &rows);
+    if columns.len() < MIN_PANEL_SPLIT_COLUMNS {
+        return region;
+    }
+    let boundaries = panel_boundary_columns(spans, &rows, &columns);
+    if boundaries.is_empty() || !panels_are_wide_enough(&boundaries, columns.len()) {
+        return region;
+    }
+
+    let leading = rows
+        .iter()
+        .take_while(|row| !row_follows_column_grid(spans, row, &columns))
+        .count();
+    if rows[leading..]
+        .iter()
+        .any(|row| !row_follows_column_grid(spans, row, &columns))
+    {
+        return region;
+    }
+
+    let panel_of = |index: usize| {
+        let column = column_index_for_x(&columns, spans[index].bbox.left());
+        boundaries
+            .iter()
+            .filter(|&&boundary| column.is_some_and(|column| column >= boundary))
+            .count()
+    };
+    let mut ordered: Vec<usize> = rows[..leading].iter().flatten().copied().collect();
+    for panel in 0..=boundaries.len() {
+        for row in &rows[leading..] {
+            ordered.extend(row.iter().copied().filter(|&index| panel_of(index) == panel));
+        }
+    }
+    ordered
 }
 
 /// Concatenate bands into the final emission order (the emission-ordering
@@ -1260,6 +1626,7 @@ pub(crate) fn reorder_dense_two_column_page(spans: &mut [xberg_native_pdf::layou
         return false;
     };
     let split_x = snap_split_left_of_hanging_labels(spans, &lines, page_width, detected_split_x);
+    let split_x = redirect_split_out_of_content(spans, &lines, page_width, split_x);
 
     let furniture_width = page_width * FULL_WIDTH_FURNITURE_FRACTION;
     let bands = build_bands(spans, &lines, furniture_width, split_x);
@@ -1267,6 +1634,14 @@ pub(crate) fn reorder_dense_two_column_page(spans: &mut [xberg_native_pdf::layou
         return false;
     };
 
+    tracing::debug!(
+        target: "xberg::pdf::column_split",
+        detected_split_x,
+        final_split_x = split_x,
+        page_width,
+        span_count = spans.len(),
+        "dense two-column page reordered"
+    );
     apply_span_order(spans, &final_order);
     true
 }
@@ -1333,13 +1708,56 @@ pub(crate) fn baseline_is_inside_page_margins(
     baseline_y >= bottom_cutoff && baseline_y <= top_cutoff
 }
 
+/// `(low, high)` of a span's extent along **page** y, honouring its rotation.
+///
+/// A span's `bbox.width`/`bbox.height` are flattened onto the run's own axis
+/// (see `span_geometry`), so for a rotated run the page-y extent is driven by
+/// the advance (`width`), not the font height: a 90-degree run advances along
+/// page-y. The `span_geometry` helpers work in the span's *upright* frame,
+/// where the cross axis maps to page-x for such a run, so they are the wrong
+/// tool for a page-space margin test. ~keep
+fn span_page_y_extent(span: &xberg_native_pdf::layout::TextSpan) -> (f32, f32) {
+    let (sin, cos) = span.rotation_degrees.to_radians().sin_cos();
+    let origin = span.bbox.y;
+    let advance = span.bbox.width * sin;
+    let cross = span.bbox.height * cos;
+    let corners = [origin, origin + advance, origin + cross, origin + advance + cross];
+    corners
+        .iter()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), corner| {
+            (low.min(*corner), high.max(*corner))
+        })
+}
+
+/// Whether a span escapes the header/footer furniture bands.
+///
+/// Unrotated spans keep the original single-baseline test byte-for-byte: their
+/// origin y is representative of a shallow horizontal line of text. A rotated
+/// run's origin is not — a side stamp anchored in the footer band can extend
+/// most of the way up the page, and testing only its origin deleted the whole
+/// run as furniture (`rotated_text_repair.rs`). Its midpoint is the equivalent
+/// representative interior point, so a stamp genuinely confined to the band is
+/// still dropped. ~keep
+fn span_is_inside_page_margins(
+    span: &xberg_native_pdf::layout::TextSpan,
+    page_bottom: f32,
+    page_top: f32,
+    margins: PageMarginFractions,
+) -> bool {
+    if is_unrotated(span) {
+        return baseline_is_inside_page_margins(span.bbox.y, page_bottom, page_top, margins);
+    }
+    let (low, high) = span_page_y_extent(span);
+    baseline_is_inside_page_margins((low + high) / 2.0, page_bottom, page_top, margins)
+}
+
 fn retain_spans_inside_page_margins(
     spans: &mut Vec<xberg_native_pdf::layout::TextSpan>,
     page_bottom: f32,
     page_top: f32,
     margins: PageMarginFractions,
 ) {
-    spans.retain(|span| baseline_is_inside_page_margins(span.bbox.y, page_bottom, page_top, margins));
+    spans.retain(|span| span_is_inside_page_margins(span, page_bottom, page_top, margins));
 }
 
 /// Extract text from one page with column-aware ordering and guarded repairs.
@@ -1473,8 +1891,45 @@ mod tests {
         );
     }
 
+    /// A 90-degree side stamp anchored in the footer band must survive: its
+    /// origin sits inside the band, but a rotated run advances along page-y, so
+    /// the stamp reaches far into the body. Testing only `bbox.y` deleted the
+    /// whole run (`rotated_text_repair.rs`'s side-stamp assertion). The second
+    /// span is the control: rotated too, but genuinely confined to the band, so
+    /// the filter must still drop it. ~keep
     #[test]
-    fn should_resolve_default_margins_and_account_for_non_zero_page_origin() {
+    fn should_keep_a_rotated_side_stamp_that_reaches_out_of_the_footer_band() {
+        let mut stamp = span_with_width("side stamp", 60.0, 18.0, 112.0, 11.0, 9.0);
+        stamp.rotation_degrees = 90.0;
+        let mut confined = span_with_width("rotated footer", 300.0, 18.0, 12.0, 11.0, 9.0);
+        confined.rotation_degrees = 90.0;
+
+        let mut spans = vec![stamp, confined];
+        // #1574: `PageMarginFractions::default()` is now 0.0/0.0 (opt-in filter), so this
+        // geometry test -- which is about the rotated-run advance, not about defaults --
+        // uses the pre-1574 default fractions explicitly. ~keep
+        retain_spans_inside_page_margins(
+            &mut spans,
+            0.0,
+            792.0,
+            PageMarginFractions {
+                top: 0.06,
+                bottom: 0.05,
+            },
+        );
+
+        assert_eq!(
+            spans.iter().map(|span| span.text.as_str()).collect::<Vec<_>>(),
+            ["side stamp"],
+            "a rotated run reaching into the body must survive while one confined to the band is dropped"
+        );
+    }
+
+    /// #1574: default margins are 0.0, so `PageMarginFractions::default()` must not
+    /// remove anything -- the header and footer here would have been dropped by the
+    /// pre-fix 0.06/0.05 defaults. ~keep
+    #[test]
+    fn should_not_filter_by_default_margins() {
         let mut spans = vec![
             span("header", 20.0, 860.0, 10.0, 10.0),
             span("body", 20.0, 500.0, 10.0, 10.0),
@@ -1485,8 +1940,57 @@ mod tests {
 
         assert_eq!(
             spans.iter().map(|span| span.text.as_str()).collect::<Vec<_>>(),
+            ["header", "body", "footer"]
+        );
+    }
+
+    /// Same geometry as the removed default-margin case above, but with explicit
+    /// non-zero fractions -- keeps the non-zero-page-origin accounting under test now
+    /// that the defaults themselves resolve to 0.0.
+    #[test]
+    fn should_resolve_configured_margins_and_account_for_non_zero_page_origin() {
+        let mut spans = vec![
+            span("header", 20.0, 860.0, 10.0, 10.0),
+            span("body", 20.0, 500.0, 10.0, 10.0),
+            span("footer", 20.0, 130.0, 10.0, 10.0),
+        ];
+
+        retain_spans_inside_page_margins(
+            &mut spans,
+            100.0,
+            900.0,
+            PageMarginFractions {
+                top: 0.06,
+                bottom: 0.05,
+            },
+        );
+
+        assert_eq!(
+            spans.iter().map(|span| span.text.as_str()).collect::<Vec<_>>(),
             ["body"]
         );
+    }
+
+    /// #1574: a default-config document (`pdf_options: None`, and `Some(PdfConfig::default())`
+    /// with both margin fields `None`) must resolve to no filtering at all -- through 1.1.0 this
+    /// resolved to 0.06/0.05 and silently dropped a top-of-page title on every default scan.
+    #[test]
+    fn should_resolve_no_margins_for_a_default_config() {
+        let margins = PageMarginFractions::from_extraction_config(None);
+        assert_eq!(margins.top, 0.0);
+        assert_eq!(margins.bottom, 0.0);
+
+        let margins = PageMarginFractions::from_extraction_config(Some(&ExtractionConfig::default()));
+        assert_eq!(margins.top, 0.0);
+        assert_eq!(margins.bottom, 0.0);
+
+        let config = ExtractionConfig {
+            pdf_options: Some(crate::core::config::PdfConfig::default()),
+            ..ExtractionConfig::default()
+        };
+        let margins = PageMarginFractions::from_extraction_config(Some(&config));
+        assert_eq!(margins.top, 0.0);
+        assert_eq!(margins.bottom, 0.0);
     }
 
     #[test]
@@ -2483,6 +2987,646 @@ mod tests {
         assert_eq!(
             spans.iter().map(|span| span.text.as_str()).collect::<Vec<_>>(),
             original.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+    }
+
+    /// GH#1545: a two-panel statistics table beside a prose column was emitted in
+    /// full-width Y order, splicing the prose apart mid-sentence and welding the
+    /// table's own panels together row by row.
+    ///
+    /// Three gates declined in cascade, and the issue's own proposed fix (have
+    /// `detect_split_x` return the *set* of gutters) addressed none of them:
+    ///
+    /// 1. `detect_split_x` returned 232.99 — inside the table. The table (8.05pt
+    ///    leading) and the prose (10.45pt) are not baseline-aligned, so
+    ///    `group_into_lines` never groups them into a shared line and per-line gutter
+    ///    evidence only ever saw the table's internal gaps. A page-wide whitespace
+    ///    corridor does see the real boundary; `page_whitespace_corridors` supplies it.
+    /// 2. Even forced to the ideal split the gate declined: the table side classifies
+    ///    `Form`, and `reorder_band_columns` required *both* sides to be
+    ///    `is_reorderable_column()`. That was the binding constraint.
+    ///    `MAX_CROSS_GUTTER_ROW_PAIRING_FRACTION` now admits one non-prose side when
+    ///    the two do not pair up row for row.
+    /// 3. With the repair declining, `apply_xy_cut_if_column_aware` also declined —
+    ///    `select_reading_order` needs prose lines on both sides — so the page fell
+    ///    through to plain top-to-bottom order, which is the reported defect.
+    ///
+    /// Geometry is transcribed verbatim, one span per `<word>`, from `pdftotext
+    /// -bbox`'s output on page 1 of the GH#1545 repro PDF: `x = xMin`,
+    /// `width = xMax - xMin`, `height = yMax - yMin`. `pdftotext -bbox` is
+    /// top-left-origin/y-down; this crate's `Rect`/`TextSpan::bbox` is
+    /// bottom-left-origin/y-up (see `group_into_lines`'s descending-`y`
+    /// top-to-bottom sort, and every `y` in the `dense_two_column_*` fixtures
+    /// above decreasing top-to-bottom on the page), so `y = PAGE_HEIGHT - yMin`.
+    /// This transcription is the only surviving copy of that geometry. No position
+    /// is invented and no word's measured gap is pre-merged into a wider span — if
+    /// `xberg_native_pdf`'s own glyph-to-span coalescing fuses adjacent words in
+    /// production, that fusion happens upstream of this function's input.
+    #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one span literal per pdftotext word, transcribed verbatim for fidelity"
+    )]
+    fn gh1545_table_beside_prose_emits_table_then_prose() {
+        const PAGE_WIDTH: f32 = 595.0;
+        // The table's rightmost measured value column ends at x=285.622; the
+        // prose column starts at x=303.600. 295.0 is the midpoint of that
+        // real gutter — the split a correct "table beside prose" reorder
+        // would have to use, independent of whatever `detect_split_x` finds. ~keep
+        const IDEAL_TABLE_PROSE_SPLIT_X: f32 = 295.0;
+        // The measured edges either side of that gutter, and the left edge of the
+        // table's second label/value panel. ~keep
+        const TABLE_RIGHT_EDGE_X: f32 = 285.622;
+        const PROSE_LEFT_EDGE_X: f32 = 303.600;
+        const PANEL_B_LEFT_EDGE_X: f32 = 164.803;
+        // The title row sits above every table row and runs across both panels. ~keep
+        const TITLE_ROW_Y: f32 = 730.0;
+
+        #[rustfmt::skip]
+        let mut spans = vec![
+            span_with_width("Table", 47.700, 735.026, 17.507, 6.475, 6.475),
+            span_with_width("1", 67.153, 735.026, 3.892, 6.475, 6.475),
+            span_with_width("Sample", 72.991, 735.026, 23.730, 6.475, 6.475),
+            span_with_width("characteristics", 98.667, 735.026, 44.730, 6.475, 6.475),
+            span_with_width("of", 145.343, 735.026, 5.838, 6.475, 6.475),
+            span_with_width("the", 153.127, 735.026, 9.730, 6.475, 6.475),
+            span_with_width("Northfield", 164.803, 735.026, 29.953, 6.475, 6.475),
+            span_with_width("and", 196.702, 735.026, 11.676, 6.475, 6.475),
+            span_with_width("Eastgate", 210.324, 735.026, 27.629, 6.475, 6.475),
+            span_with_width("cohorts.", 239.899, 735.026, 24.899, 6.475, 6.475),
+            span_with_width("Sex", 47.700, 718.926, 12.061, 6.475, 6.475),
+            span_with_width("Female", 47.700, 710.876, 23.338, 6.475, 6.475),
+            span_with_width("Male", 47.700, 702.826, 15.169, 6.475, 6.475),
+            span_with_width("Age", 47.700, 694.776, 12.453, 6.475, 6.475),
+            span_with_width("18-24", 62.099, 694.776, 17.899, 6.475, 6.475),
+            span_with_width("25-34", 47.700, 686.726, 17.899, 6.475, 6.475),
+            span_with_width("35-44", 47.700, 678.676, 17.899, 6.475, 6.475),
+            span_with_width("45-54", 47.700, 670.626, 17.899, 6.475, 6.475),
+            span_with_width("55-64", 47.700, 662.576, 17.899, 6.475, 6.475),
+            span_with_width("Ethnicity", 47.700, 654.526, 26.453, 6.475, 6.475),
+            span_with_width("Group", 47.700, 646.476, 19.453, 6.475, 6.475),
+            span_with_width("one", 69.099, 646.476, 11.676, 6.475, 6.475),
+            span_with_width("Group", 47.700, 638.426, 19.453, 6.475, 6.475),
+            span_with_width("two", 69.099, 638.426, 10.892, 6.475, 6.475),
+            span_with_width("Group", 47.700, 630.376, 19.453, 6.475, 6.475),
+            span_with_width("three", 69.099, 630.376, 15.953, 6.475, 6.475),
+            span_with_width("Group", 47.700, 622.326, 19.453, 6.475, 6.475),
+            span_with_width("four", 69.099, 622.326, 12.061, 6.475, 6.475),
+            span_with_width("Group", 47.700, 614.276, 19.453, 6.475, 6.475),
+            span_with_width("five", 69.099, 614.276, 10.892, 6.475, 6.475),
+            span_with_width("Living", 47.700, 606.226, 18.284, 6.475, 6.475),
+            span_with_width("location", 67.930, 606.226, 24.122, 6.475, 6.475),
+            span_with_width("City", 47.700, 598.176, 12.054, 6.475, 6.475),
+            span_with_width("Suburb", 47.700, 590.126, 22.568, 6.475, 6.475),
+            span_with_width("Town", 47.700, 582.076, 17.115, 6.475, 6.475),
+            span_with_width("Rural", 47.700, 574.026, 16.723, 6.475, 6.475),
+            span_with_width("Highest", 47.700, 565.976, 23.730, 6.475, 6.475),
+            span_with_width("education", 73.376, 565.976, 30.352, 6.475, 6.475),
+            span_with_width("No", 47.700, 557.926, 8.946, 6.475, 6.475),
+            span_with_width("qualifications", 58.592, 557.926, 40.460, 6.475, 6.475),
+            span_with_width("Secondary", 47.700, 549.876, 33.460, 6.475, 6.475),
+            span_with_width("school", 83.106, 549.876, 20.230, 6.475, 6.475),
+            span_with_width("Diploma", 47.700, 541.826, 25.669, 6.475, 6.475),
+            span_with_width("Undergraduate", 47.700, 533.776, 46.690, 6.475, 6.475),
+            span_with_width("degree", 96.336, 533.776, 21.791, 6.475, 6.475),
+            span_with_width("Postgraduate", 47.700, 525.726, 41.636, 6.475, 6.475),
+            span_with_width("degree", 91.282, 525.726, 21.791, 6.475, 6.475),
+            span_with_width("Employment", 47.700, 517.676, 38.899, 6.475, 6.475),
+            span_with_width("status", 88.545, 517.676, 18.676, 6.475, 6.475),
+            span_with_width("Full-time", 47.700, 509.626, 26.831, 6.475, 6.475),
+            span_with_width("employed", 76.477, 509.626, 30.345, 6.475, 6.475),
+            span_with_width("Part-time", 47.700, 501.576, 28.392, 6.475, 6.475),
+            span_with_width("employed", 78.038, 501.576, 30.345, 6.475, 6.475),
+            span_with_width("Retired", 47.700, 493.526, 22.561, 6.475, 6.475),
+            span_with_width("Not", 47.700, 485.476, 10.892, 6.475, 6.475),
+            span_with_width("employed", 60.538, 485.476, 30.345, 6.475, 6.475),
+            span_with_width("%", 148.100, 718.926, 6.223, 6.475, 6.475),
+            span_with_width("Sex", 165.000, 718.926, 12.061, 6.475, 6.475),
+            span_with_width("51.5", 148.100, 710.876, 13.622, 6.475, 6.475),
+            span_with_width("Female", 165.000, 710.876, 23.338, 6.475, 6.475),
+            span_with_width("48.2", 148.100, 702.826, 13.622, 6.475, 6.475),
+            span_with_width("Male", 165.000, 702.826, 15.169, 6.475, 6.475),
+            span_with_width("11.1", 148.100, 694.776, 13.622, 6.475, 6.475),
+            span_with_width("Age", 165.000, 694.776, 12.453, 6.475, 6.475),
+            span_with_width("18-24", 179.399, 694.776, 17.899, 6.475, 6.475),
+            span_with_width("19.2", 148.100, 686.726, 13.622, 6.475, 6.475),
+            span_with_width("25-34", 165.000, 686.726, 17.899, 6.475, 6.475),
+            span_with_width("20.6", 148.100, 678.676, 13.622, 6.475, 6.475),
+            span_with_width("35-44", 165.000, 678.676, 17.899, 6.475, 6.475),
+            span_with_width("15.9", 148.100, 670.626, 13.622, 6.475, 6.475),
+            span_with_width("45-54", 165.000, 670.626, 17.899, 6.475, 6.475),
+            span_with_width("21.0", 148.100, 662.576, 13.622, 6.475, 6.475),
+            span_with_width("55-64", 165.000, 662.576, 17.899, 6.475, 6.475),
+            span_with_width("%", 272.000, 718.926, 6.223, 6.475, 6.475),
+            span_with_width("51.7", 272.000, 710.876, 13.622, 6.475, 6.475),
+            span_with_width("48.3", 272.000, 702.826, 13.622, 6.475, 6.475),
+            span_with_width("12.1", 272.000, 694.776, 13.622, 6.475, 6.475),
+            span_with_width("18.8", 272.000, 686.726, 13.622, 6.475, 6.475),
+            span_with_width("17.4", 272.000, 678.676, 13.622, 6.475, 6.475),
+            span_with_width("20.2", 272.000, 670.626, 13.622, 6.475, 6.475),
+            span_with_width("17.2", 272.000, 662.576, 13.622, 6.475, 6.475),
+            span_with_width("17.3", 148.100, 646.476, 13.622, 6.475, 6.475),
+            span_with_width("Group", 165.000, 646.476, 19.453, 6.475, 6.475),
+            span_with_width("one", 186.399, 646.476, 11.676, 6.475, 6.475),
+            span_with_width("1.9", 148.100, 638.426, 9.730, 6.475, 6.475),
+            span_with_width("Group", 165.000, 638.426, 19.453, 6.475, 6.475),
+            span_with_width("two", 186.399, 638.426, 10.892, 6.475, 6.475),
+            span_with_width("0.3", 148.100, 630.376, 9.730, 6.475, 6.475),
+            span_with_width("Group", 165.000, 630.376, 19.453, 6.475, 6.475),
+            span_with_width("three", 186.399, 630.376, 15.953, 6.475, 6.475),
+            span_with_width("0.4", 148.100, 622.326, 9.730, 6.475, 6.475),
+            span_with_width("Group", 165.000, 622.326, 19.453, 6.475, 6.475),
+            span_with_width("four", 186.399, 622.326, 12.061, 6.475, 6.475),
+            span_with_width("3.2", 148.100, 614.276, 9.730, 6.475, 6.475),
+            span_with_width("Group", 165.000, 614.276, 19.453, 6.475, 6.475),
+            span_with_width("five", 186.399, 614.276, 10.892, 6.475, 6.475),
+            span_with_width("14.2", 272.000, 646.476, 13.622, 6.475, 6.475),
+            span_with_width("2.4", 272.000, 638.426, 9.730, 6.475, 6.475),
+            span_with_width("0.6", 272.000, 630.376, 9.730, 6.475, 6.475),
+            span_with_width("1.1", 272.000, 622.326, 9.730, 6.475, 6.475),
+            span_with_width("2.8", 272.000, 614.276, 9.730, 6.475, 6.475),
+            span_with_width("24.5", 148.100, 598.176, 13.622, 6.475, 6.475),
+            span_with_width("City", 165.000, 598.176, 12.054, 6.475, 6.475),
+            span_with_width("18.1", 148.100, 590.126, 13.622, 6.475, 6.475),
+            span_with_width("Suburb", 165.000, 590.126, 22.568, 6.475, 6.475),
+            span_with_width("26.8", 148.100, 582.076, 13.622, 6.475, 6.475),
+            span_with_width("Town", 165.000, 582.076, 17.115, 6.475, 6.475),
+            span_with_width("28.8", 148.100, 574.026, 13.622, 6.475, 6.475),
+            span_with_width("Rural", 165.000, 574.026, 16.723, 6.475, 6.475),
+            span_with_width("26.1", 272.000, 598.176, 13.622, 6.475, 6.475),
+            span_with_width("19.4", 272.000, 590.126, 13.622, 6.475, 6.475),
+            span_with_width("24.9", 272.000, 582.076, 13.622, 6.475, 6.475),
+            span_with_width("29.6", 272.000, 574.026, 13.622, 6.475, 6.475),
+            span_with_width("1.2", 148.100, 557.926, 9.730, 6.475, 6.475),
+            span_with_width("No", 165.000, 557.926, 8.946, 6.475, 6.475),
+            span_with_width("qualifications", 175.892, 557.926, 40.460, 6.475, 6.475),
+            span_with_width("6.4", 148.100, 549.876, 9.730, 6.475, 6.475),
+            span_with_width("Secondary", 165.000, 549.876, 33.460, 6.475, 6.475),
+            span_with_width("school", 200.406, 549.876, 20.230, 6.475, 6.475),
+            span_with_width("22.5", 148.100, 541.826, 13.622, 6.475, 6.475),
+            span_with_width("Diploma", 165.000, 541.826, 25.669, 6.475, 6.475),
+            span_with_width("19.8", 148.100, 533.776, 13.622, 6.475, 6.475),
+            span_with_width("Undergraduate", 165.000, 533.776, 46.690, 6.475, 6.475),
+            span_with_width("degree", 213.636, 533.776, 21.791, 6.475, 6.475),
+            span_with_width("27.9", 148.100, 525.726, 13.622, 6.475, 6.475),
+            span_with_width("Postgraduate", 165.000, 525.726, 41.636, 6.475, 6.475),
+            span_with_width("degree", 208.582, 525.726, 21.791, 6.475, 6.475),
+            span_with_width("1.8", 272.000, 557.926, 9.730, 6.475, 6.475),
+            span_with_width("7.1", 272.000, 549.876, 9.730, 6.475, 6.475),
+            span_with_width("21.8", 272.000, 541.826, 13.622, 6.475, 6.475),
+            span_with_width("20.4", 272.000, 533.776, 13.622, 6.475, 6.475),
+            span_with_width("26.3", 272.000, 525.726, 13.622, 6.475, 6.475),
+            span_with_width("43.3", 148.100, 509.626, 13.622, 6.475, 6.475),
+            span_with_width("Full-time", 165.000, 509.626, 26.831, 6.475, 6.475),
+            span_with_width("employed", 193.777, 509.626, 30.345, 6.475, 6.475),
+            span_with_width("15.7", 148.100, 501.576, 13.622, 6.475, 6.475),
+            span_with_width("Part-time", 165.000, 501.576, 28.392, 6.475, 6.475),
+            span_with_width("employed", 195.338, 501.576, 30.345, 6.475, 6.475),
+            span_with_width("15.0", 148.100, 493.526, 13.622, 6.475, 6.475),
+            span_with_width("Retired", 165.000, 493.526, 22.561, 6.475, 6.475),
+            span_with_width("8.4", 148.100, 485.476, 9.730, 6.475, 6.475),
+            span_with_width("Not", 165.000, 485.476, 10.892, 6.475, 6.475),
+            span_with_width("employed", 177.838, 485.476, 30.345, 6.475, 6.475),
+            span_with_width("41.9", 272.000, 509.626, 13.622, 6.475, 6.475),
+            span_with_width("16.4", 272.000, 501.576, 13.622, 6.475, 6.475),
+            span_with_width("14.6", 272.000, 493.526, 13.622, 6.475, 6.475),
+            span_with_width("9.2", 272.000, 485.476, 9.730, 6.475, 6.475),
+            span_with_width("Participants", 303.600, 736.103, 44.404, 7.862, 7.862),
+            span_with_width("in", 350.367, 736.103, 6.613, 7.862, 7.862),
+            span_with_width("the", 359.343, 736.103, 11.815, 7.862, 7.862),
+            span_with_width("Northfield", 373.521, 736.103, 36.371, 7.862, 7.862),
+            span_with_width("cohort", 412.255, 736.103, 23.622, 7.862, 7.862),
+            span_with_width("who", 438.240, 736.103, 15.589, 7.862, 7.862),
+            span_with_width("reported", 456.192, 736.103, 31.654, 7.862, 7.862),
+            span_with_width("low", 490.209, 736.103, 12.750, 7.862, 7.862),
+            span_with_width("confidence", 303.600, 725.653, 41.106, 7.863, 7.863),
+            span_with_width("in", 347.069, 725.653, 6.613, 7.863, 7.863),
+            span_with_width("the", 356.045, 725.653, 11.815, 7.863, 7.863),
+            span_with_width("programme", 370.223, 725.653, 43.452, 7.863, 7.863),
+            span_with_width("were,", 416.038, 725.653, 20.782, 7.863, 7.863),
+            span_with_width("compared", 439.183, 725.653, 37.791, 7.863, 7.863),
+            span_with_width("with", 479.337, 725.653, 15.113, 7.863, 7.863),
+            span_with_width("those", 496.813, 725.653, 20.791, 7.863, 7.863),
+            span_with_width("who", 303.600, 715.203, 15.589, 7.863, 7.863),
+            span_with_width("reported", 321.552, 715.203, 31.654, 7.863, 7.863),
+            span_with_width("high", 355.569, 715.203, 16.065, 7.863, 7.863),
+            span_with_width("confidence,", 373.997, 715.203, 43.469, 7.863, 7.863),
+            span_with_width("more", 419.829, 715.203, 19.363, 7.863, 7.863),
+            span_with_width("likely", 441.555, 715.203, 18.887, 7.863, 7.863),
+            span_with_width("to", 462.805, 715.203, 7.089, 7.863, 7.863),
+            span_with_width("be", 472.257, 715.203, 9.452, 7.863, 7.863),
+            span_with_width("aged", 484.072, 715.203, 18.904, 7.863, 7.863),
+            span_with_width("35", 505.339, 715.203, 9.452, 7.863, 7.863),
+            span_with_width("to", 303.600, 704.753, 7.089, 7.862, 7.862),
+            span_with_width("44", 313.052, 704.753, 9.452, 7.862, 7.862),
+            span_with_width("years,", 324.867, 704.753, 23.145, 7.862, 7.862),
+            span_with_width("to", 350.375, 704.753, 7.089, 7.862, 7.862),
+            span_with_width("live", 359.827, 704.753, 12.750, 7.862, 7.862),
+            span_with_width("in", 374.940, 704.753, 6.613, 7.862, 7.862),
+            span_with_width("a", 383.916, 704.753, 4.726, 7.862, 7.862),
+            span_with_width("city,", 391.005, 704.753, 15.113, 7.862, 7.862),
+            span_with_width("to", 408.481, 704.753, 7.089, 7.862, 7.862),
+            span_with_width("hold", 417.933, 704.753, 16.065, 7.862, 7.862),
+            span_with_width("no", 436.361, 704.753, 9.452, 7.862, 7.862),
+            span_with_width("post-school", 448.176, 704.753, 43.461, 7.862, 7.862),
+            span_with_width("qualification,", 303.600, 694.303, 47.243, 7.863, 7.863),
+            span_with_width("and", 353.206, 694.303, 14.178, 7.863, 7.863),
+            span_with_width("to", 369.747, 694.303, 7.089, 7.863, 7.863),
+            span_with_width("report", 379.199, 694.303, 22.202, 7.863, 7.863),
+            span_with_width("that", 403.764, 694.303, 14.178, 7.863, 7.863),
+            span_with_width("they", 420.305, 694.303, 16.065, 7.863, 7.863),
+            span_with_width("had", 438.733, 694.303, 14.178, 7.863, 7.863),
+            span_with_width("not", 455.274, 694.303, 11.815, 7.863, 7.863),
+            span_with_width("voted", 469.452, 694.303, 20.791, 7.863, 7.863),
+            span_with_width("at", 492.606, 694.303, 7.089, 7.863, 7.863),
+            span_with_width("the", 303.600, 683.853, 11.815, 7.863, 7.863),
+            span_with_width("most", 317.778, 683.853, 18.419, 7.863, 7.863),
+            span_with_width("recent", 338.560, 683.853, 23.622, 7.863, 7.863),
+            span_with_width("municipal", 364.545, 683.853, 35.895, 7.863, 7.863),
+            span_with_width("election.", 402.803, 683.853, 31.654, 7.863, 7.863),
+            span_with_width("The", 436.820, 683.853, 14.646, 7.863, 7.863),
+            span_with_width("same", 453.829, 683.853, 20.782, 7.863, 7.863),
+            span_with_width("pattern", 476.974, 683.853, 26.461, 7.863, 7.863),
+            span_with_width("was", 505.798, 683.853, 15.113, 7.863, 7.863),
+            span_with_width("not", 303.600, 673.403, 11.815, 7.862, 7.862),
+            span_with_width("observed", 317.778, 673.403, 34.960, 7.862, 7.862),
+            span_with_width("in", 355.101, 673.403, 6.613, 7.862, 7.862),
+            span_with_width("the", 364.077, 673.403, 11.815, 7.862, 7.862),
+            span_with_width("Eastgate", 378.255, 673.403, 33.550, 7.862, 7.862),
+            span_with_width("cohort,", 414.168, 673.403, 25.984, 7.862, 7.862),
+            span_with_width("where", 442.515, 673.403, 23.146, 7.862, 7.862),
+            span_with_width("the", 468.024, 673.403, 11.815, 7.862, 7.862),
+            span_with_width("strongest", 482.202, 673.403, 34.961, 7.862, 7.862),
+            span_with_width("association", 303.600, 662.953, 42.517, 7.863, 7.863),
+            span_with_width("was", 348.480, 662.953, 15.113, 7.863, 7.863),
+            span_with_width("with", 365.956, 662.953, 15.113, 7.863, 7.863),
+            span_with_width("employment", 383.432, 662.953, 46.291, 7.863, 7.863),
+            span_with_width("status", 432.086, 662.953, 22.678, 7.863, 7.863),
+            span_with_width("rather", 457.127, 662.953, 22.202, 7.863, 7.863),
+            span_with_width("than", 481.692, 662.953, 16.541, 7.863, 7.863),
+            span_with_width("with", 500.596, 662.953, 15.113, 7.863, 7.863),
+            span_with_width("age", 303.600, 652.503, 14.178, 7.862, 7.862),
+            span_with_width("or", 320.141, 652.503, 7.556, 7.862, 7.862),
+            span_with_width("education.", 330.060, 652.503, 39.219, 7.862, 7.862),
+            span_with_width("Full", 371.642, 652.503, 13.694, 7.862, 7.862),
+            span_with_width("model", 387.699, 652.503, 23.145, 7.862, 7.862),
+            span_with_width("output", 413.207, 652.503, 23.630, 7.862, 7.862),
+            span_with_width("for", 439.200, 652.503, 9.920, 7.862, 7.862),
+            span_with_width("both", 451.483, 652.503, 16.541, 7.862, 7.862),
+            span_with_width("cohorts", 470.387, 652.503, 27.872, 7.862, 7.862),
+            span_with_width("is", 500.622, 652.503, 6.137, 7.862, 7.862),
+            span_with_width("given", 303.600, 642.053, 20.315, 7.863, 7.863),
+            span_with_width("in", 326.278, 642.053, 6.613, 7.863, 7.863),
+            span_with_width("Tables", 335.254, 642.053, 25.508, 7.863, 7.863),
+            span_with_width("2", 363.125, 642.053, 4.726, 7.863, 7.863),
+            span_with_width("and", 370.214, 642.053, 14.178, 7.863, 7.863),
+            span_with_width("3.", 386.755, 642.053, 7.089, 7.863, 7.863),
+            span_with_width("Percentages", 396.207, 642.053, 47.719, 7.863, 7.863),
+            span_with_width("in", 446.289, 642.053, 6.613, 7.863, 7.863),
+            span_with_width("Table", 455.265, 642.053, 21.259, 7.863, 7.863),
+            span_with_width("1", 478.887, 642.053, 4.726, 7.863, 7.863),
+            span_with_width("are", 485.976, 642.053, 12.283, 7.863, 7.863),
+            span_with_width("column", 303.600, 631.603, 27.395, 7.863, 7.863),
+            span_with_width("percentages", 333.358, 631.603, 46.776, 7.863, 7.863),
+            span_with_width("and", 382.497, 631.603, 14.178, 7.863, 7.863),
+            span_with_width("may", 399.038, 631.603, 16.056, 7.863, 7.863),
+            span_with_width("not", 417.457, 631.603, 11.815, 7.863, 7.863),
+            span_with_width("sum", 431.635, 631.603, 16.057, 7.863, 7.863),
+            span_with_width("to", 450.055, 631.603, 7.089, 7.863, 7.863),
+            span_with_width("one", 459.507, 631.603, 14.178, 7.863, 7.863),
+            span_with_width("hundred", 476.048, 631.603, 31.187, 7.863, 7.863),
+            span_with_width("where", 509.598, 631.603, 23.146, 7.863, 7.863),
+            span_with_width("a", 303.600, 621.153, 4.726, 7.862, 7.862),
+            span_with_width("category", 310.689, 621.153, 32.597, 7.862, 7.862),
+            span_with_width("was", 345.649, 621.153, 15.113, 7.862, 7.862),
+            span_with_width("left", 363.125, 621.153, 11.339, 7.862, 7.862),
+            span_with_width("blank", 376.827, 621.153, 20.315, 7.862, 7.862),
+            span_with_width("by", 399.505, 621.153, 8.976, 7.862, 7.862),
+            span_with_width("the", 410.844, 621.153, 11.815, 7.862, 7.862),
+            span_with_width("respondent.", 425.022, 621.153, 44.889, 7.862, 7.862),
+            span_with_width("Weighting", 472.274, 621.153, 37.791, 7.862, 7.862),
+            span_with_width("was", 303.600, 610.703, 15.113, 7.863, 7.863),
+            span_with_width("applied", 321.076, 610.703, 27.404, 7.863, 7.863),
+            span_with_width("to", 350.843, 610.703, 7.089, 7.863, 7.863),
+            span_with_width("the", 360.295, 610.703, 11.815, 7.863, 7.863),
+            span_with_width("age", 374.473, 610.703, 14.178, 7.863, 7.863),
+            span_with_width("and", 391.014, 610.703, 14.178, 7.863, 7.863),
+            span_with_width("sex", 407.555, 610.703, 13.226, 7.863, 7.863),
+            span_with_width("margins", 423.144, 610.703, 30.226, 7.863, 7.863),
+            span_with_width("of", 455.733, 610.703, 7.089, 7.863, 7.863),
+            span_with_width("each", 465.185, 610.703, 18.428, 7.863, 7.863),
+            span_with_width("cohort", 485.976, 610.703, 23.622, 7.863, 7.863),
+            span_with_width("separately,", 303.600, 600.253, 41.573, 7.862, 7.862),
+            span_with_width("using", 347.536, 600.253, 20.315, 7.862, 7.862),
+            span_with_width("the", 370.214, 600.253, 11.815, 7.862, 7.862),
+            span_with_width("published", 384.392, 600.253, 36.380, 7.862, 7.862),
+            span_with_width("municipal", 423.135, 600.253, 35.896, 7.862, 7.862),
+            span_with_width("register", 461.394, 600.253, 28.339, 7.862, 7.862),
+            span_with_width("as", 492.096, 600.253, 8.976, 7.862, 7.862),
+            span_with_width("the", 303.600, 589.803, 11.815, 7.863, 7.863),
+            span_with_width("reference", 317.778, 589.803, 35.904, 7.863, 7.863),
+            span_with_width("distribution", 356.045, 589.803, 41.097, 7.863, 7.863),
+            span_with_width("for", 399.505, 589.803, 9.920, 7.863, 7.863),
+            span_with_width("both.", 411.788, 589.803, 18.904, 7.863, 7.863),
+            span_with_width("Respondents", 433.055, 589.803, 50.082, 7.863, 7.863),
+            span_with_width("who", 485.500, 589.803, 15.589, 7.863, 7.863),
+            span_with_width("completed", 303.600, 579.353, 39.210, 7.863, 7.863),
+            span_with_width("fewer", 345.173, 579.353, 20.783, 7.863, 7.863),
+            span_with_width("than", 368.319, 579.353, 16.541, 7.863, 7.863),
+            span_with_width("half", 387.223, 579.353, 13.702, 7.863, 7.863),
+            span_with_width("of", 403.288, 579.353, 7.089, 7.863, 7.863),
+            span_with_width("the", 412.740, 579.353, 11.815, 7.863, 7.863),
+            span_with_width("items", 426.918, 579.353, 20.306, 7.863, 7.863),
+            span_with_width("were", 449.587, 579.353, 18.420, 7.863, 7.863),
+            span_with_width("excluded", 470.370, 579.353, 34.017, 7.863, 7.863),
+            span_with_width("before", 303.600, 568.903, 24.097, 7.863, 7.863),
+            span_with_width("weighting,", 330.060, 568.903, 38.267, 7.863, 7.863),
+            span_with_width("which", 370.690, 568.903, 21.726, 7.863, 7.863),
+            span_with_width("removed", 394.779, 568.903, 33.065, 7.863, 7.863),
+            span_with_width("a", 430.207, 568.903, 4.726, 7.863, 7.863),
+            span_with_width("small", 437.296, 568.903, 19.831, 7.863, 7.863),
+            span_with_width("number", 459.490, 568.903, 28.815, 7.863, 7.863),
+            span_with_width("of", 490.668, 568.903, 7.089, 7.863, 7.863),
+            span_with_width("cases", 500.120, 568.903, 22.202, 7.863, 7.863),
+            span_with_width("from", 303.600, 558.453, 17.000, 7.862, 7.862),
+            span_with_width("each", 322.963, 558.453, 18.428, 7.862, 7.862),
+            span_with_width("cohort", 343.754, 558.453, 23.621, 7.862, 7.862),
+            span_with_width("and", 369.738, 558.453, 14.178, 7.862, 7.862),
+            span_with_width("did", 386.279, 558.453, 11.339, 7.862, 7.862),
+            span_with_width("not", 399.981, 558.453, 11.815, 7.862, 7.862),
+            span_with_width("change", 414.159, 558.453, 27.880, 7.862, 7.862),
+            span_with_width("the", 444.402, 558.453, 11.815, 7.862, 7.862),
+            span_with_width("direction", 458.580, 558.453, 32.122, 7.862, 7.862),
+            span_with_width("of", 493.065, 558.453, 7.089, 7.862, 7.862),
+            span_with_width("any", 502.517, 558.453, 13.702, 7.862, 7.862),
+            span_with_width("reported", 303.600, 548.003, 31.654, 7.863, 7.863),
+            span_with_width("association.", 337.617, 548.003, 44.880, 7.863, 7.863),
+            span_with_width("The", 384.860, 548.003, 14.645, 7.863, 7.863),
+            span_with_width("analysis", 401.868, 548.003, 30.702, 7.863, 7.863),
+            span_with_width("was", 434.933, 548.003, 15.113, 7.863, 7.863),
+            span_with_width("pre-registered.", 452.409, 548.003, 55.267, 7.863, 7.863),
+        ];
+
+        let prose_order_before: Vec<String> = spans
+            .iter()
+            .filter(|span| span.bbox.x >= IDEAL_TABLE_PROSE_SPLIT_X)
+            .map(|span| span.text.clone())
+            .collect();
+
+        let order = spans_sorted_top_to_bottom(&spans);
+        let lines = group_into_lines(&spans, &order);
+        let detected = detect_split_x(&spans, &lines, PAGE_WIDTH).expect("a split is detectable");
+        let snapped = snap_split_left_of_hanging_labels(&spans, &lines, PAGE_WIDTH, detected);
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.bbox.left() < snapped && span.bbox.right() > snapped),
+            "the per-line median is expected to still cut a word here ({snapped}); if it no longer \
+             does, this fixture has stopped exercising the redirect"
+        );
+        let split_x = redirect_split_out_of_content(&spans, &lines, PAGE_WIDTH, snapped);
+        assert!(
+            split_x > TABLE_RIGHT_EDGE_X && split_x < PROSE_LEFT_EDGE_X,
+            "split must land in the real table/prose gutter, got {split_x}"
+        );
+
+        assert!(
+            reorder_dense_two_column_page(&mut spans, PAGE_WIDTH),
+            "a table beside a prose column must be reordered, not left in full-width Y order"
+        );
+
+        let table_spans = spans
+            .iter()
+            .filter(|span| span.bbox.x < IDEAL_TABLE_PROSE_SPLIT_X)
+            .count();
+        let first_prose = spans
+            .iter()
+            .position(|span| span.bbox.x >= IDEAL_TABLE_PROSE_SPLIT_X)
+            .expect("the prose column survives the reorder");
+        assert_eq!(
+            first_prose, table_spans,
+            "every table span must be emitted before every prose span"
+        );
+
+        let prose_order_after: Vec<&str> = spans
+            .iter()
+            .filter(|span| span.bbox.x >= IDEAL_TABLE_PROSE_SPLIT_X)
+            .map(|span| span.text.as_str())
+            .collect();
+        assert_eq!(
+            prose_order_after, prose_order_before,
+            "the prose column's own reading order must be untouched"
+        );
+
+        let prose = prose_order_after.join(" ");
+        assert!(
+            prose.contains("more likely to be aged 35 to 44 years"),
+            "the sentence must not be spliced by table rows, got: {prose}"
+        );
+
+        // Panel-major emission: panel A is the label/value pair rooted at x=47.700
+        // and x=148.100, panel B the pair at x=164.803 and x=272.000. Every span of
+        // the first must precede every span of the second, so a row no longer welds
+        // "51.5" onto the next panel's "Female". The title is measured out: it runs
+        // across both panels as ordinary prose and is emitted ahead of them as a
+        // non-grid row, so it legitimately holds spans on both sides. ~keep
+        let panel_of_row = |span: &xberg_native_pdf::layout::TextSpan| {
+            (span.bbox.y < TITLE_ROW_Y && span.bbox.x < IDEAL_TABLE_PROSE_SPLIT_X)
+                .then(|| usize::from(span.bbox.x >= PANEL_B_LEFT_EDGE_X))
+        };
+        let last_panel_a = spans.iter().rposition(|span| panel_of_row(span) == Some(0));
+        let first_panel_b = spans.iter().position(|span| panel_of_row(span) == Some(1));
+        let (Some(last_panel_a), Some(first_panel_b)) = (last_panel_a, first_panel_b) else {
+            panic!("both table panels must survive the reorder");
+        };
+        assert!(
+            last_panel_a < first_panel_b,
+            "panel A must be emitted whole before panel B, but panel A's last span sits at \
+             {last_panel_a} and panel B's first at {first_panel_b}"
+        );
+    }
+
+    // GH#1603: on a two-column page with hanging clause numbers, a corridor formed
+    // by the number-to-text indent is present on EVERY line, while the true gutter
+    // between columns can be closed by a single justified line whose text pokes past
+    // it. `page_whitespace_corridors` then offers only the indent to `max_by`, and
+    // `redirect_split_out_of_content` relocates the split from the real gutter into
+    // the middle of a column -- separating every clause number from its own text.
+    const GH1603_PAGE_WIDTH: f32 = 595.32;
+    // The true gutter's per-line median, and the indent it must not be replaced by.
+    const GH1603_TRUE_GUTTER_SPLIT_X: f32 = 293.92;
+    const GH1603_LEFT_INDENT_MID_X: f32 = 63.84;
+
+    /// A4-width, two-column, hanging-clause-number page whose real gutter (~10pt,
+    /// between x=283.84/295.84 and x=304.0) is narrower than `min_gutter` (11.9pt),
+    /// while the number-to-text indent on each side (~20pt / ~15pt) comfortably
+    /// clears it. Row 3's left clause line is deliberately long enough (222pt) to
+    /// straddle the true gutter's per-line median, forcing `redirect_split_out_of_content`
+    /// to fire; every other row is a plain-width control so the true gutter still wins
+    /// `detect_split_x`'s per-line vote.
+    ///
+    /// Left and right columns are baseline-offset by 1.32pt (rows 4-11) so their lines
+    /// never group across the gutter -- the same structure the issue's real PDF has --
+    /// except for rows 0-3, which stay aligned so their combined line's widest gap is
+    /// the true gutter itself, giving `detect_split_x` the votes it needs to find it.
+    fn gh1603_narrow_gutter_hanging_number_spans() -> Vec<TextSpan> {
+        let mut spans = Vec::new();
+        // Rows 0-3: left and right columns aligned on the same baseline. Row 3 is the
+        // outlier whose left text (73.84 + 222.0 = 295.84) pokes past the true gutter.
+        for row in 0..4 {
+            let y = 900.0 - row as f32 * 14.0;
+            let left_text_width = if row == 3 { 222.0 } else { 210.0 };
+            spans.push(span_with_width(&format!("{row}.1"), 36.0, y, 17.84, 11.0, 11.0));
+            spans.push(span_with_width(
+                &format!("The left clause line {row} continues with ordinary agreement terms"),
+                73.84,
+                y,
+                left_text_width,
+                11.0,
+                11.0,
+            ));
+            spans.push(span_with_width(&format!("{row}.2"), 304.0, y, 17.84, 11.0, 11.0));
+            spans.push(span_with_width(
+                &format!("The right clause line {row} continues with ordinary agreement terms"),
+                336.84,
+                y,
+                220.0,
+                11.0,
+                11.0,
+            ));
+        }
+        // Rows 4-7: left has its own hanging number; right is a plain continuation
+        // line (no number) on an offset baseline.
+        for row in 4..8 {
+            let y = 900.0 - row as f32 * 14.0;
+            spans.push(span_with_width(&format!("{row}.1"), 36.0, y, 17.84, 11.0, 11.0));
+            spans.push(span_with_width(
+                &format!("The left clause line {row} continues with ordinary agreement terms"),
+                73.84,
+                y,
+                210.0,
+                11.0,
+                11.0,
+            ));
+            spans.push(span_with_width(
+                &format!("The right continuation line {row} follows the previous clause"),
+                336.84,
+                y - 1.32,
+                220.0,
+                11.0,
+                11.0,
+            ));
+        }
+        // Rows 8-11: mirror image -- left is a plain continuation line, right has its
+        // own hanging number.
+        for row in 8..12 {
+            let y = 900.0 - row as f32 * 14.0;
+            spans.push(span_with_width(
+                &format!("The left continuation line {row} follows the previous clause"),
+                73.84,
+                y,
+                210.0,
+                11.0,
+                11.0,
+            ));
+            spans.push(span_with_width(&format!("{row}.2"), 304.0, y - 1.32, 17.84, 11.0, 11.0));
+            spans.push(span_with_width(
+                &format!("The right clause line {row} continues with ordinary agreement terms"),
+                336.84,
+                y - 1.32,
+                220.0,
+                11.0,
+                11.0,
+            ));
+        }
+        spans
+    }
+
+    /// GH#1603: `redirect_split_out_of_content` must not relocate the split into a
+    /// hanging-number indent. `detect_split_x` correctly finds the true (narrow)
+    /// gutter; only row 3's outlier line straddles it, which is enough to trigger the
+    /// redirect. Before the fix, `page_whitespace_corridors` offers only the left
+    /// number-to-text indent (the true gutter is closed by row 3 and falls below
+    /// `min_gutter`), and `max_by` hands it back -- moving the split 230pt into the
+    /// left margin, between every clause number and its own text.
+    #[test]
+    fn redirect_split_out_of_content_must_not_relocate_into_a_hanging_number_indent_gh1603() {
+        let spans = gh1603_narrow_gutter_hanging_number_spans();
+        let order = spans_sorted_top_to_bottom(&spans);
+        let lines = group_into_lines(&spans, &order);
+
+        let detected = detect_split_x(&spans, &lines, GH1603_PAGE_WIDTH).expect("hanging-number page has a gutter");
+        assert!(
+            (detected - GH1603_TRUE_GUTTER_SPLIT_X).abs() < 0.01,
+            "detect_split_x must find the true gutter, got {detected}"
+        );
+
+        let snapped = snap_split_left_of_hanging_labels(&spans, &lines, GH1603_PAGE_WIDTH, detected);
+        assert_eq!(
+            snapped, detected,
+            "no narrow span straddles the true gutter, so the snap must leave it alone"
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.bbox.left() < snapped && span.bbox.right() > snapped),
+            "row 3's outlier line is expected to still straddle the split ({snapped}); if it no \
+             longer does, this fixture has stopped exercising the redirect"
+        );
+
+        let redirected = redirect_split_out_of_content(&spans, &lines, GH1603_PAGE_WIDTH, snapped);
+        assert!(
+            (redirected - GH1603_LEFT_INDENT_MID_X).abs() > 1.0,
+            "redirect must not relocate the split into the hanging-number indent at \
+             {GH1603_LEFT_INDENT_MID_X}, got {redirected}"
+        );
+        assert_eq!(
+            redirected, snapped,
+            "with both hanging-number indents excluded there is no legitimate replacement \
+             corridor, so the split must fall back to the true gutter, got {redirected}"
+        );
+    }
+
+    /// GH#1603 end-to-end: every clause number must stay immediately followed by its
+    /// own clause text after the reorder, never hoisted ahead of the whole column.
+    #[test]
+    fn dense_two_column_hanging_numbers_survive_narrow_gutter_redirect_gh1603() {
+        let mut spans = gh1603_narrow_gutter_hanging_number_spans();
+        assert!(
+            reorder_dense_two_column_page(&mut spans, GH1603_PAGE_WIDTH),
+            "a hanging-number two-column page must still be reordered"
+        );
+
+        let mut checked = 0;
+        for (index, span) in spans.iter().enumerate() {
+            let Some((row_str, side)) = span.text.split_once('.') else {
+                continue;
+            };
+            if side != "1" && side != "2" {
+                continue;
+            }
+            let Ok(row) = row_str.parse::<usize>() else {
+                continue;
+            };
+            let expected_prefix = if side == "1" {
+                format!("The left clause line {row}")
+            } else {
+                format!("The right clause line {row}")
+            };
+            let next = spans.get(index + 1).map(|s| s.text.as_str()).unwrap_or("");
+            assert!(
+                next.starts_with(&expected_prefix),
+                "clause number {:?} at position {index} must be immediately followed by its own \
+                 clause text, found {next:?} -- numbers must never be hoisted ahead of their clauses",
+                span.text
+            );
+            checked += 1;
+        }
+        // Rows 0-3 each carry both a left and right number (8), rows 4-7 carry only a
+        // left number (4), and rows 8-11 carry only a right number (4).
+        assert_eq!(
+            checked, 16,
+            "all 16 clause numbers in the fixture must have been checked"
         );
     }
 }

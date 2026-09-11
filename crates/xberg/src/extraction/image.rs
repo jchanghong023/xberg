@@ -439,16 +439,7 @@ fn decode_jbig2_to_gray_with_security_limits(bytes: &[u8], limits: &SecurityLimi
 /// / `hayro-jbig2` for decoding, falling back to the standard `image` crate
 /// for all other formats.
 #[cfg(feature = "ocr")]
-pub(crate) fn load_image_for_ocr(image_bytes: &[u8]) -> Result<image::DynamicImage> {
-    load_image_for_ocr_with_security_limits(image_bytes, &SecurityLimits::default())
-}
-
-/// Load image bytes for OCR using caller-provided security limits.
-#[cfg(feature = "ocr")]
-pub(crate) fn load_image_for_ocr_with_security_limits(
-    image_bytes: &[u8],
-    limits: &SecurityLimits,
-) -> Result<image::DynamicImage> {
+pub(crate) fn load_image_for_ocr(image_bytes: &[u8], limits: &SecurityLimits) -> Result<image::DynamicImage> {
     decode_image_to_rgb8_with_security_limits(image_bytes, limits).map(image::DynamicImage::ImageRgb8)
 }
 
@@ -681,6 +672,7 @@ pub(crate) fn extract_text_from_image_with_ocr(
             speaker_notes: None,
             section_name: None,
             sheet_name: None,
+            ocr_confidence: None,
         });
 
         byte_offset = frame_end;
@@ -744,6 +736,41 @@ mod tests {
             .expect("normal image within the decoded-byte budget should load");
 
         assert_eq!((image.width(), image.height()), (2, 2));
+    }
+
+    /// GH#1554 regression: `load_image_for_ocr` hardcoded `SecurityLimits::default()`
+    /// instead of taking the caller's configured limits, so a legitimate high-resolution
+    /// scan the caller had explicitly permitted was refused anyway. A 6100x6100 solid-color
+    /// image decodes to 6100 * 6100 * 3 = 111,630,000 bytes, which exceeds the default
+    /// `max_content_size` of 100 MiB (104,857,600 bytes) but fits comfortably under a
+    /// caller-configured 200 MiB limit. PNG compresses a solid color to a few hundred bytes,
+    /// so the encoded fixture stays small even though the decoded budget does not. ~keep
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn should_permit_high_resolution_scan_under_configured_limit_default_rejects() {
+        let width = 6100;
+        let height = 6100;
+        let img: RgbImage = ImageBuffer::from_pixel(width, height, Rgb([200u8, 100, 50]));
+        let mut bytes: Vec<u8> = Vec::new();
+        img.write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png).unwrap();
+
+        let default_limits = SecurityLimits::default();
+        let default_error = load_image_for_ocr(&bytes, &default_limits)
+            .expect_err("a 111,630,000-byte decode must be refused under the 100 MiB default");
+        assert!(matches!(default_error, XbergError::Validation { .. }));
+        let default_message = default_error.to_string();
+        assert!(
+            default_message.contains("security_limits.max_content_size (104857600 bytes)"),
+            "the refusal must identify the default field and ceiling actually enforced: {default_message}"
+        );
+
+        let configured_limits = SecurityLimits {
+            max_content_size: 200 * 1024 * 1024,
+            ..Default::default()
+        };
+        let image = load_image_for_ocr(&bytes, &configured_limits)
+            .expect("a caller-configured 200 MiB limit must permit the same 111,630,000-byte decode");
+        assert_eq!((image.width(), image.height()), (width, height));
     }
 
     #[test]

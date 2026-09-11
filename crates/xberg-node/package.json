@@ -1,6 +1,6 @@
 {
   "name": "@xberg-io/xberg",
-  "version": "1.1.0",
+  "version": "1.1.6",
   "description": "High-performance document intelligence library",
   "license": "MIT",
   "repository": {
@@ -17,14 +17,6 @@
     }
   },
   "files": ["index.js", "index.d.ts", "*.node"],
-  "optionalDependencies": {
-    "@xberg-io/xberg-linux-x64-gnu": "1.1.0",
-    "@xberg-io/xberg-linux-arm64-gnu": "1.1.0",
-    "@xberg-io/xberg-linux-x64-musl": "1.1.0",
-    "@xberg-io/xberg-linux-arm64-musl": "1.1.0",
-    "@xberg-io/xberg-darwin-arm64": "1.1.0",
-    "@xberg-io/xberg-win32-x64-msvc": "1.1.0"
-  },
   "napi": {
     "packageName": "@xberg-io/xberg",
     "binaryName": "xberg-node",
@@ -42,7 +34,14 @@
     "artifacts": "npx --yes -p @napi-rs/cli@^3.7.3 napi artifacts",
     "prepublishOnly": "npx --yes -p @napi-rs/cli@^3.7.3 napi prepublish -t npm --skip-optional-publish"
   },
-  "engines": { "node": ">= 22" },
-  "publishConfig": { "access": "public" },
-  "devDependencies": { "@napi-rs/cli": "^3.7.3", "@types/node": "^26.0.0" }
+  "engines": {
+    "node": ">= 22"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3.9.1",
+    "@types/node": "^26.5.1"
+  }
 }

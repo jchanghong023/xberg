@@ -1,12 +1,18 @@
 ```typescript title="TypeScript"
-import { ExtractInputKind, PiiCategory, RedactionStrategy, extract } from '@xberg-io/xberg';
+import { ExtractInputKind, RedactionStrategy, extract } from '@xberg-io/xberg';
 
 const output = await extract({
     kind: ExtractInputKind.Uri,
     uri: "contract.pdf",
 }, {
     redaction: {
-        categories: [PiiCategory.Email, PiiCategory.Phone, PiiCategory.Ssn, PiiCategory.CreditCard, PiiCategory.Iban],
+        categories: [
+            { type: 'email' },
+            { type: 'phone' },
+            { type: 'ssn' },
+            { type: 'credit_card' },
+            { type: 'iban' },
+        ],
         strategy: RedactionStrategy.Mask,
     },
 });

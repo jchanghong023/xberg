@@ -2,7 +2,7 @@
 
 use crate::Result;
 use crate::core::config::ExtractionConfig;
-use crate::core::mime::KML_MIME_TYPE;
+use crate::core::mime::{KML_MIME_TYPE, ODG_FLAT_MIME_TYPE};
 use crate::extraction::xml::{parse_xml, parse_xml_svg};
 use crate::extractors::SyncExtractor;
 use crate::extractors::security::SecurityBudget;
@@ -27,7 +27,6 @@ fn heading_level(depth: u16) -> u8 {
 /// selected (see `plugins::registry::RendererRegistry`), so matching the
 /// renderer name here is the same test `derive_extraction_result` uses to
 /// decide which renderer runs — not a looser proxy for it.
-#[cfg(feature = "svg")]
 fn wants_dot_output(config: &ExtractionConfig) -> bool {
     matches!(&config.output_format, crate::core::config::OutputFormat::Custom(name) if name == "dot")
 }
@@ -261,6 +260,16 @@ impl SyncExtractor for XmlExtractor {
             doc.diagrams.push(graph);
         }
 
+        // A flat ODF drawing names its own shapes and connectors outright
+        // (`draw:id`, `draw:start-shape`, `draw:end-shape`), so recovery here
+        // is an exact lookup rather than the geometric matching SVG needs. ~keep
+        if mime_type == ODG_FLAT_MIME_TYPE
+            && wants_dot_output(config)
+            && let Some(graph) = crate::extraction::diagram::odf::recover(content)
+        {
+            doc.diagrams.push(graph);
+        }
+
         doc.metadata = Metadata {
             format: Some(crate::types::FormatMetadata::Xml(crate::types::XmlMetadata {
                 element_count: xml_result.element_count as u32,
@@ -292,6 +301,7 @@ impl InternalDocumentExtractor for XmlExtractor {
             KML_MIME_TYPE,
             "image/svg+xml",
             "application/x-endnote+xml",
+            ODG_FLAT_MIME_TYPE,
         ]
     }
 
@@ -446,7 +456,8 @@ mod tests {
                 "text/xml",
                 KML_MIME_TYPE,
                 "image/svg+xml",
-                "application/x-endnote+xml"
+                "application/x-endnote+xml",
+                ODG_FLAT_MIME_TYPE
             ]
         );
         assert_eq!(extractor.priority(), 50);

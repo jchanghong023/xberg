@@ -76,7 +76,7 @@ fn test_ocr_invalid_psm_mode() {
             backend: "tesseract".to_string(),
             language: vec!["eng".to_string()],
             tesseract_config: Some(TesseractConfig {
-                psm: 999,
+                psm: Some(999),
                 ..Default::default()
             }),
             ..Default::default()
@@ -90,8 +90,12 @@ fn test_ocr_invalid_psm_mode() {
     match result {
         Err(XbergError::Ocr { message, .. }) | Err(XbergError::Validation { message, .. }) => {
             tracing::debug!("Expected error for invalid PSM: {}", message);
+            // Matched case-insensitively: the validator writes "PSM" in caps, so the
+            // lowercase-only check could never fire. It went unnoticed until the config
+            // validators were wired into the extract path and this branch became reachable. ~keep
+            let lowered = message.to_lowercase();
             assert!(
-                message.contains("psm") || message.contains("segmentation") || message.contains("mode"),
+                lowered.contains("psm") || lowered.contains("segmentation") || lowered.contains("mode"),
                 "Error message should mention PSM issue: {}",
                 message
             );
@@ -285,7 +289,7 @@ fn test_ocr_negative_psm() {
             backend: "tesseract".to_string(),
             language: vec!["eng".to_string()],
             tesseract_config: Some(TesseractConfig {
-                psm: -5,
+                psm: Some(-5),
                 ..Default::default()
             }),
             ..Default::default()

@@ -1,7 +1,7 @@
 //! Format-specific extraction results and OCR configuration types.
 
 use bytes::Bytes;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
 use super::document_structure::DocumentStructure;
@@ -125,7 +125,7 @@ pub struct TextExtractionResult {
 }
 
 /// A hyperlink discovered in a presentation slide.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PresentationHyperlink {
     /// Link destination.
     pub url: String,
@@ -144,15 +144,6 @@ enum PresentationHyperlinkWire {
     },
 }
 
-impl Serialize for PresentationHyperlink {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (&self.url, &self.label).serialize(serializer)
-    }
-}
-
 impl<'de> Deserialize<'de> for PresentationHyperlink {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -168,19 +159,17 @@ impl<'de> Deserialize<'de> for PresentationHyperlink {
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for PresentationHyperlink {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        use utoipa::openapi::schema::{ArrayBuilder, ArrayItems, Object, ObjectBuilder, Schema, SchemaType, Type};
+        use utoipa::openapi::schema::{Object, ObjectBuilder, SchemaType, Type};
 
         let nullable_string = ObjectBuilder::new()
             .schema_type(SchemaType::from_iter([Type::String, Type::Null]))
             .build();
-        ArrayBuilder::new()
-            .items(ArrayItems::False)
-            .prefix_items([
-                Schema::Object(Object::with_type(Type::String)),
-                Schema::Object(nullable_string),
-            ])
-            .min_items(Some(2))
-            .max_items(Some(2))
+
+        ObjectBuilder::new()
+            .property("url", Object::with_type(Type::String))
+            .required("url")
+            .property("label", nullable_string)
+            .required("label")
             .into()
     }
 }
@@ -456,13 +445,25 @@ pub struct TesseractConfig {
     #[serde(deserialize_with = "deserialize_languages")]
     pub language: Vec<String>,
 
-    /// Page Segmentation Mode (0-13).
+    /// Page Segmentation Mode (1-13).
     ///
-    /// Common values:
-    /// - 3: Fully automatic page segmentation (native default)
-    /// - 6: Assume a single uniform block of text (WASM default — avoids layout-analysis hang)
+    /// PSM 0 is rejected: Tesseract's `PSM_OSD_ONLY` performs orientation and script
+    /// detection with no character recognition, so it cannot satisfy a text-extraction
+    /// request and previously yielded an empty document (GH#1586).
+    ///
+    /// `None` (the default) means the caller made no explicit choice: the extraction
+    /// pipeline applies its own context-appropriate PSM (whole-image PSM 11, vertical-
+    /// language PSM 5, layout-region PSM 6, or the sparse-text retry's PSM 3) exactly as
+    /// it would with no `TesseractConfig` at all — see issue #1573. Setting any other
+    /// field on this struct no longer changes that behaviour.
+    ///
+    /// Common explicit values:
+    /// - 3: Fully automatic page segmentation (native engine default)
+    /// - 6: Assume a single uniform block of text (WASM engine default — avoids
+    ///   layout-analysis hang)
     /// - 11: Sparse text with no particular order
-    pub psm: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub psm: Option<i32>,
 
     /// Output format ("text" or "markdown")
     pub output_format: String,
@@ -541,10 +542,7 @@ impl Default for TesseractConfig {
     fn default() -> Self {
         Self {
             language: vec!["eng".to_string()],
-            #[cfg(target_arch = "wasm32")]
-            psm: 6,
-            #[cfg(not(target_arch = "wasm32"))]
-            psm: 3,
+            psm: None,
             output_format: "markdown".to_string(),
             oem: 3,
             min_confidence: 0.0,
@@ -574,7 +572,7 @@ impl Default for TesseractConfig {
 ///
 /// Tracks the transformations applied to an image during OCR preprocessing,
 /// including DPI normalization, resizing, and resampling.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct PixelDimensions {
     /// Width in pixels.
     pub width: usize,
@@ -587,15 +585,6 @@ pub struct PixelDimensions {
 enum PixelDimensionsWire {
     Positional((usize, usize)),
     Named { width: usize, height: usize },
-}
-
-impl Serialize for PixelDimensions {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (self.width, self.height).serialize(serializer)
-    }
 }
 
 impl<'de> Deserialize<'de> for PixelDimensions {
@@ -613,13 +602,13 @@ impl<'de> Deserialize<'de> for PixelDimensions {
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for PixelDimensions {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        use utoipa::openapi::schema::{ArrayBuilder, ArrayItems, Object, Type};
+        use utoipa::openapi::schema::{Object, ObjectBuilder, Type};
 
-        ArrayBuilder::new()
-            .items(ArrayItems::False)
-            .prefix_items([Object::with_type(Type::Integer), Object::with_type(Type::Integer)])
-            .min_items(Some(2))
-            .max_items(Some(2))
+        ObjectBuilder::new()
+            .property("width", Object::with_type(Type::Integer))
+            .required("width")
+            .property("height", Object::with_type(Type::Integer))
+            .required("height")
             .into()
     }
 }
@@ -640,7 +629,7 @@ impl From<PixelDimensions> for (usize, usize) {
 }
 
 /// Horizontal and vertical image resolution in dots per inch.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct ImageDpi {
     /// Horizontal resolution.
     pub horizontal: f64,
@@ -653,15 +642,6 @@ pub struct ImageDpi {
 enum ImageDpiWire {
     Positional((f64, f64)),
     Named { horizontal: f64, vertical: f64 },
-}
-
-impl Serialize for ImageDpi {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (self.horizontal, self.vertical).serialize(serializer)
-    }
 }
 
 impl<'de> Deserialize<'de> for ImageDpi {
@@ -679,13 +659,13 @@ impl<'de> Deserialize<'de> for ImageDpi {
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for ImageDpi {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        use utoipa::openapi::schema::{ArrayBuilder, ArrayItems, Object, Type};
+        use utoipa::openapi::schema::{Object, ObjectBuilder, Type};
 
-        ArrayBuilder::new()
-            .items(ArrayItems::False)
-            .prefix_items([Object::with_type(Type::Number), Object::with_type(Type::Number)])
-            .min_items(Some(2))
-            .max_items(Some(2))
+        ObjectBuilder::new()
+            .property("horizontal", Object::with_type(Type::Number))
+            .required("horizontal")
+            .property("vertical", Object::with_type(Type::Number))
+            .required("vertical")
             .into()
     }
 }
@@ -770,68 +750,111 @@ mod tests {
     use serde_json::json;
 
     #[cfg(feature = "api")]
-    fn assert_legacy_array_schema<T: utoipa::PartialSchema>(length: usize) {
+    fn assert_named_object_schema<T: utoipa::PartialSchema>(expected: serde_json::Value) {
         let schema = serde_json::to_value(T::schema()).expect("schema must serialize");
-        assert_eq!(schema["type"], "array");
-        assert_eq!(schema["minItems"], length);
-        assert_eq!(schema["maxItems"], length);
-        assert_eq!(schema["items"], false);
-        assert_eq!(schema["prefixItems"].as_array().map(Vec::len), Some(length));
+        assert_eq!(schema, expected);
     }
 
     #[cfg(feature = "api")]
     #[test]
-    fn should_describe_binding_dtos_as_legacy_array_schemas() {
-        assert_legacy_array_schema::<PresentationHyperlink>(2);
-        assert_legacy_array_schema::<PixelDimensions>(2);
-        assert_legacy_array_schema::<ImageDpi>(2);
+    fn should_describe_binding_dtos_as_named_object_schemas() {
+        assert_named_object_schema::<PresentationHyperlink>(json!({
+            "type": "object",
+            "required": ["url", "label"],
+            "properties": {
+                "url": {"type": "string"},
+                "label": {"type": ["string", "null"]}
+            }
+        }));
+        assert_named_object_schema::<PixelDimensions>(json!({
+            "type": "object",
+            "required": ["width", "height"],
+            "properties": {
+                "width": {"type": "integer"},
+                "height": {"type": "integer"}
+            }
+        }));
+        assert_named_object_schema::<ImageDpi>(json!({
+            "type": "object",
+            "required": ["horizontal", "vertical"],
+            "properties": {
+                "horizontal": {"type": "number"},
+                "vertical": {"type": "number"}
+            }
+        }));
     }
 
     #[test]
-    fn should_preserve_legacy_presentation_hyperlink_tuple_wire_format() {
+    fn should_serialize_presentation_hyperlink_as_named_object() {
         let legacy = json!(["https://xberg.io", "Xberg"]);
+        let named_json = json!({"url": "https://xberg.io", "label": "Xberg"});
         let hyperlink: PresentationHyperlink =
-            serde_json::from_value(legacy.clone()).expect("legacy hyperlink must deserialize");
-        let named: PresentationHyperlink = serde_json::from_value(json!({
-            "url": "https://xberg.io",
-            "label": "Xberg"
-        }))
-        .expect("named hyperlink must deserialize");
+            serde_json::from_value(legacy).expect("legacy hyperlink must deserialize");
+        let named: PresentationHyperlink =
+            serde_json::from_value(named_json.clone()).expect("named hyperlink must deserialize");
 
         assert_eq!(hyperlink.url, "https://xberg.io");
         assert_eq!(hyperlink.label.as_deref(), Some("Xberg"));
         assert_eq!(named, hyperlink);
         assert_eq!(
             serde_json::to_value(hyperlink).expect("hyperlink must serialize"),
-            legacy
+            named_json
         );
         assert_eq!(
             serde_json::to_value(named).expect("named hyperlink must serialize"),
-            legacy
+            named_json
         );
     }
 
     #[test]
-    fn should_preserve_missing_hyperlink_label_as_legacy_null() {
+    fn should_serialize_missing_hyperlink_label_as_named_null() {
         let legacy = json!(["https://xberg.io", null]);
+        let named_json = json!({"url": "https://xberg.io", "label": null});
         let positional: PresentationHyperlink =
-            serde_json::from_value(legacy.clone()).expect("legacy null label must deserialize");
+            serde_json::from_value(legacy).expect("legacy null label must deserialize");
         let named: PresentationHyperlink =
             serde_json::from_value(json!({"url": "https://xberg.io"})).expect("omitted named label must deserialize");
 
         assert_eq!(named, positional);
         assert_eq!(
             serde_json::to_value(positional).expect("hyperlink must serialize"),
-            legacy
+            named_json
         );
         assert_eq!(
             serde_json::to_value(named).expect("named hyperlink must serialize"),
-            legacy
+            named_json
         );
     }
 
     #[test]
-    fn should_preserve_legacy_preprocessing_tuple_wire_format() {
+    fn should_still_accept_legacy_positional_array_for_pixel_dimensions() {
+        let dimensions: PixelDimensions =
+            serde_json::from_str("[1200, 800]").expect("legacy pixel dimensions must deserialize");
+
+        assert_eq!(
+            dimensions,
+            PixelDimensions {
+                width: 1200,
+                height: 800
+            }
+        );
+    }
+
+    #[test]
+    fn should_still_accept_legacy_positional_array_for_image_dpi() {
+        let dpi: ImageDpi = serde_json::from_str("[72.0, 96.0]").expect("legacy image DPI must deserialize");
+
+        assert_eq!(
+            dpi,
+            ImageDpi {
+                horizontal: 72.0,
+                vertical: 96.0
+            }
+        );
+    }
+
+    #[test]
+    fn should_serialize_preprocessing_metadata_with_named_nested_types() {
         let legacy = json!({
             "original_dimensions": [1200, 800],
             "original_dpi": [72.0, 96.0],
@@ -846,8 +869,22 @@ mod tests {
             "skipped_resize": false,
             "resize_error": null
         });
+        let named = json!({
+            "original_dimensions": {"width": 1200, "height": 800},
+            "original_dpi": {"horizontal": 72.0, "vertical": 96.0},
+            "target_dpi": 300,
+            "scale_factor": 2.0,
+            "auto_adjusted": true,
+            "final_dpi": 288,
+            "new_dimensions": {"width": 2400, "height": 1600},
+            "resample_method": "LANCZOS3",
+            "dimension_clamped": false,
+            "calculated_dpi": 288,
+            "skipped_resize": false,
+            "resize_error": null
+        });
         let metadata: ImagePreprocessingMetadata =
-            serde_json::from_value(legacy.clone()).expect("legacy preprocessing metadata must deserialize");
+            serde_json::from_value(legacy).expect("legacy preprocessing metadata must deserialize");
         let named_dimensions: PixelDimensions = serde_json::from_value(json!({"width": 1200, "height": 800}))
             .expect("named pixel dimensions must deserialize");
         let named_dpi: ImageDpi = serde_json::from_value(json!({"horizontal": 72.0, "vertical": 96.0}))
@@ -876,15 +913,15 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(metadata).expect("preprocessing metadata must serialize"),
-            legacy
+            named
         );
         assert_eq!(
             serde_json::to_value(named_dimensions).expect("named pixel dimensions must serialize"),
-            json!([1200, 800])
+            json!({"width": 1200, "height": 800})
         );
         assert_eq!(
             serde_json::to_value(named_dpi).expect("named image DPI must serialize"),
-            json!([72.0, 96.0])
+            json!({"horizontal": 72.0, "vertical": 96.0})
         );
     }
 

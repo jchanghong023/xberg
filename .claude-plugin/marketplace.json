@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "xberg",
-      "description": "Local document extraction: text, tables, metadata, images from 106 formats with optional OCR.",
+      "description": "Local document extraction: text, tables, metadata, images from 107 formats with optional OCR.",
       "source": "./plugin"
     }
   ]

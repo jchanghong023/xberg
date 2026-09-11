@@ -11,7 +11,7 @@
 
 A [LangChain.js](https://js.langchain.com) document loader for [Xberg](https://github.com/xberg-io/xberg).
 Point it at a file, a directory, or raw bytes and it returns LangChain `Document`s with the extracted
-text, tables, and rich metadata from 106 document formats — with optional OCR for scans and images.
+text, tables, and rich metadata from 107 document formats — with optional OCR for scans and images.
 
 Extraction runs locally in-process through the `@xberg-io/xberg` native binding. No API key, no cloud
 call, no data leaves your machine.
@@ -69,13 +69,13 @@ const pages = await loader.load(); // metadata.page is 0-indexed
 
 ## Supported formats
 
-Xberg extracts from 106 formats including PDF, DOCX, PPTX, XLSX, HTML, EPUB, images, and more. See the
+Xberg extracts from 107 formats including PDF, DOCX, PPTX, XLSX, HTML, EPUB, images, and more. See the
 [Xberg documentation](https://docs.xberg.io) for the full list and the extraction configuration
 reference.
 
 ## Part of Xberg.io
 
-- [Xberg](https://github.com/xberg-io/xberg) — document intelligence: text, tables, metadata from 106 formats with optional OCR.
+- [Xberg](https://github.com/xberg-io/xberg) — document intelligence: text, tables, metadata from 107 formats with optional OCR.
 - [Xberg Enterprise](https://github.com/xberg-io/xberg-enterprise) — managed extraction API with SDKs, dashboards, and observability.
 
 ## License

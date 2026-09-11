@@ -591,6 +591,7 @@ fn finish_cached_layout_document(
         speaker_notes: None,
         section_name: None,
         sheet_name: None,
+        ocr_confidence: None,
         image_preprocessing: whole_image_doc.metadata.image_preprocessing.clone(),
     }]);
     ImageExtractor::mark_ocr_extraction(&mut assembled);
@@ -1198,22 +1199,29 @@ fn configured_region_ocr(
     if region_config.acceleration.is_none() {
         region_config.acceleration = config.acceleration.clone();
     }
-    region_config.security_limits = config.security_limits.clone();
     Ok((backend, region_config))
 }
 
+/// Applies `psm` whenever the caller has not explicitly set one, whether or not a
+/// `TesseractConfig` is present. Keyed on the `psm` field itself, not on struct
+/// presence (#1573) — an explicitly materialised `TesseractConfig` that leaves `psm`
+/// unset still gets the automatic default, and any other field the caller did set is
+/// preserved rather than overwritten.
 #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
 fn apply_default_tesseract_psm(config: &mut crate::core::config::OcrConfig, psm: i32) {
-    if config.backend != "tesseract" || config.tesseract_config.is_some() {
+    if config.backend != "tesseract" {
         return;
     }
 
-    let tesseract_config = crate::types::TesseractConfig {
-        language: config.language.clone(),
-        psm,
-        ..Default::default()
-    };
-    config.tesseract_config = Some(tesseract_config);
+    let tesseract_config = config
+        .tesseract_config
+        .get_or_insert_with(|| crate::types::TesseractConfig {
+            language: config.language.clone(),
+            ..Default::default()
+        });
+    if tesseract_config.psm.is_none() {
+        tesseract_config.psm = Some(psm);
+    }
 }
 
 #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
@@ -1226,10 +1234,12 @@ fn apply_default_whole_image_tesseract_psm(config: &mut crate::core::config::Ocr
     apply_default_tesseract_psm(config, psm);
 }
 
+/// Checks the same reconciled language `config_to_tesseract` resolves (#1572), so a
+/// `jpn_vert` set only on `tesseract_config.language` still selects the vertical PSM.
 #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
 fn has_vertical_tesseract_language(config: &crate::core::config::OcrConfig) -> bool {
     config
-        .language
+        .effective_tesseract_language()
         .iter()
         .flat_map(|language| language.split('+'))
         .any(|language| language.trim().to_ascii_lowercase().ends_with("_vert"))
@@ -1271,7 +1281,9 @@ fn should_retry_sparse_image_ocr(
     any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
 ))]
 fn is_implicit_horizontal_tesseract(config: &crate::core::config::OcrConfig) -> bool {
-    config.backend == "tesseract" && config.tesseract_config.is_none() && !has_vertical_tesseract_language(config)
+    config.backend == "tesseract"
+        && config.tesseract_config.as_ref().and_then(|c| c.psm).is_none()
+        && !has_vertical_tesseract_language(config)
 }
 
 #[cfg(all(
@@ -1304,7 +1316,7 @@ fn sparse_image_ocr_fallback_config(
 ) -> crate::core::config::OcrConfig {
     let mut fallback_config = whole_image_config.clone();
     let tesseract_config = fallback_config.tesseract_config.get_or_insert_default();
-    tesseract_config.psm = SPARSE_IMAGE_OCR_FALLBACK_PSM;
+    tesseract_config.psm = Some(SPARSE_IMAGE_OCR_FALLBACK_PSM);
     let preprocessing = crate::types::ImagePreprocessingConfig {
         deskew: false,
         contrast_enhance: true,
@@ -1611,7 +1623,6 @@ impl ImageExtractor {
         apply_default_whole_image_tesseract_psm(&mut ocr_config_with_format);
         ocr_config_with_format.output_format = Some(config.output_format.clone());
         ocr_config_with_format.acceleration = config.acceleration.clone();
-        ocr_config_with_format.security_limits = config.security_limits.clone();
         #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
         let include_words = should_use_layout_ocr(config);
         #[cfg(not(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm"))))]
@@ -1686,6 +1697,21 @@ impl ImageExtractor {
         #[cfg(feature = "ocr")]
         let ocr_internal_document = ocr_result.ocr_internal_document;
 
+        // ~keep The whole image is one OCR run, so its confidence describes page 1 and only
+        // page 1. The multi-frame TIFF branch below splits that single run's text by byte
+        // offset into several pages with no per-frame OCR of their own, so those pages keep
+        // `ocr_confidence: None` rather than repeating a figure that was never measured for
+        // them (#1568). Gated on `pdf` because the shared builder lives in that module.
+        #[cfg(all(feature = "ocr", feature = "pdf"))]
+        let whole_image_ocr_confidence = crate::extractors::pdf::ocr::page_ocr_confidence(
+            backend.confidence_semantics(),
+            crate::extractors::pdf::ocr::mean_text_conf_of(&ocr_metadata.additional),
+            crate::extractors::pdf::ocr::word_count_of(&ocr_metadata.additional).unwrap_or(0),
+            backend.name(),
+        );
+        #[cfg(all(feature = "ocr", not(feature = "pdf")))]
+        let whole_image_ocr_confidence: Option<crate::types::page::PageOcrConfidence> = None;
+
         #[cfg(feature = "ocr")]
         {
             let ocr_extraction_result = crate::extraction::image::extract_text_from_image_with_ocr(
@@ -1706,9 +1732,20 @@ impl ImageExtractor {
             // pass: multi-frame TIFF page tracking slices `content` by byte
             // offset and has no per-frame correspondence to hOCR elements, so it
             // keeps the flat paragraph-split fallback.
+            //
+            // `internal_doc.elements` can be legitimately empty even when OCR found
+            // text: `perform_ocr` (execution.rs) drops any hOCR paragraph entirely
+            // claimed by a detected table before this code ever sees it (#1571), and
+            // a page that is nothing but a table empties the list that way. Falling
+            // back to `ocr_extraction_result.content` in that case would resurrect
+            // the same table text as prose alongside the `OcrTable` pushed below --
+            // exactly the duplication being fixed. Once any table was detected, trust
+            // the (possibly empty) filtered element list instead of that fallback. ~keep
             let use_hocr_headings = ocr_extraction_result.page_contents.is_none();
+            let hocr_has_content_or_tables =
+                |internal_doc: &InternalDocument| !internal_doc.elements.is_empty() || !ocr_tables.is_empty();
             let mut doc = match &ocr_internal_document {
-                Some(internal_doc) if use_hocr_headings && !internal_doc.elements.is_empty() => {
+                Some(internal_doc) if use_hocr_headings && hocr_has_content_or_tables(internal_doc) => {
                     build_image_internal_document_from_hocr_elements(&internal_doc.elements)
                 }
                 _ => build_image_internal_document(Some(&ocr_extraction_result.content), None),
@@ -1753,6 +1790,7 @@ impl ImageExtractor {
                         speaker_notes: None,
                         section_name: None,
                         sheet_name: None,
+                        ocr_confidence: whole_image_ocr_confidence,
                     }]);
                 }
             }
@@ -1783,6 +1821,7 @@ impl ImageExtractor {
                     speaker_notes: None,
                     section_name: None,
                     sheet_name: None,
+                    ocr_confidence: None,
                 }]);
             }
             Ok(doc)
@@ -1817,17 +1856,27 @@ impl ImageExtractor {
         let image = image::DynamicImage::ImageRgb8(image);
         let images = [image];
 
-        let (text, _tables, ocr_elements, pipeline_doc, llm_usage, _page_texts, _rasters, formulas, _) =
-            Box::pin(crate::extractors::pdf::ocr::run_ocr_pipeline(
-                None,
-                Some(&images),
-                #[cfg(feature = "layout-detection")]
-                None,
-                config,
-                pipeline,
-                None,
-            ))
-            .await?;
+        let (
+            text,
+            _tables,
+            ocr_elements,
+            pipeline_doc,
+            llm_usage,
+            _page_texts,
+            _rasters,
+            formulas,
+            _,
+            mut pipeline_ocr_confidence,
+        ) = Box::pin(crate::extractors::pdf::ocr::run_ocr_pipeline(
+            None,
+            Some(&images),
+            #[cfg(feature = "layout-detection")]
+            None,
+            config,
+            pipeline,
+            None,
+        ))
+        .await?;
 
         // Build a clean image document from the pipeline text (keeping the "image"
         // doc type and shape the rest of the image path produces), then carry over
@@ -1863,6 +1912,9 @@ impl ImageExtractor {
                 speaker_notes: None,
                 section_name: None,
                 sheet_name: None,
+                // ~keep The lone image was handed to the runner as page 0, so the winning
+                // stage keys its summary at page 1 -- the same page this builds (#1568).
+                ocr_confidence: pipeline_ocr_confidence.remove(&1),
             }]);
         }
 
@@ -2524,7 +2576,7 @@ mod tests {
         let tesseract_config = ocr_config
             .tesseract_config
             .expect("whole-image OCR must materialize Tesseract configuration");
-        assert_eq!(tesseract_config.psm, VERTICAL_BLOCK_TESSERACT_PSM);
+        assert_eq!(tesseract_config.psm, Some(VERTICAL_BLOCK_TESSERACT_PSM));
         assert_eq!(tesseract_config.language, vec!["jpn_vert"]);
     }
 
@@ -2541,7 +2593,7 @@ mod tests {
         let tesseract_config = ocr_config
             .tesseract_config
             .expect("whole-image OCR must materialize Tesseract configuration");
-        assert_eq!(tesseract_config.psm, WHOLE_IMAGE_TESSERACT_PSM);
+        assert_eq!(tesseract_config.psm, Some(WHOLE_IMAGE_TESSERACT_PSM));
         assert_eq!(tesseract_config.language, vec!["eng"]);
     }
 
@@ -2552,7 +2604,7 @@ mod tests {
             language: vec!["jpn_vert".to_string()],
             tesseract_config: Some(crate::types::TesseractConfig {
                 language: vec!["jpn_vert".to_string()],
-                psm: 4,
+                psm: Some(4),
                 ..Default::default()
             }),
             ..Default::default()
@@ -2561,8 +2613,68 @@ mod tests {
         apply_default_whole_image_tesseract_psm(&mut ocr_config);
 
         let tesseract_config = ocr_config.tesseract_config.expect("explicit config must remain");
-        assert_eq!(tesseract_config.psm, 4);
+        assert_eq!(tesseract_config.psm, Some(4));
         assert_eq!(tesseract_config.language, vec!["jpn_vert"]);
+    }
+
+    // Regression test for #1573: `TesseractConfig()` with every field left at its
+    // default must produce the SAME effective PSM as no `TesseractConfig` at all, not
+    // fall back to the internal engine default (PSM 3 native / 6 wasm). Previously
+    // `apply_default_tesseract_psm` keyed off `tesseract_config.is_some()`, so a caller
+    // who materialized the struct (even with every field default) silently lost the
+    // whole-image PSM.
+    #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
+    #[test]
+    fn should_apply_same_default_psm_whether_or_not_tesseract_config_struct_is_present() {
+        let mut without_struct = crate::core::config::OcrConfig {
+            language: vec!["eng".to_string()],
+            ..Default::default()
+        };
+        let mut with_default_struct = crate::core::config::OcrConfig {
+            language: vec!["eng".to_string()],
+            tesseract_config: Some(crate::types::TesseractConfig::default()),
+            ..Default::default()
+        };
+
+        apply_default_whole_image_tesseract_psm(&mut without_struct);
+        apply_default_whole_image_tesseract_psm(&mut with_default_struct);
+
+        let psm_without_struct = without_struct
+            .tesseract_config
+            .expect("whole-image OCR must materialize Tesseract configuration")
+            .psm;
+        let psm_with_default_struct = with_default_struct
+            .tesseract_config
+            .expect("struct was already present")
+            .psm;
+
+        assert_eq!(psm_without_struct, Some(WHOLE_IMAGE_TESSERACT_PSM));
+        assert_eq!(
+            psm_without_struct, psm_with_default_struct,
+            "TesseractConfig::default() must resolve to the same effective PSM as no TesseractConfig at all"
+        );
+    }
+
+    // An explicitly set `psm`, alongside another explicitly set field, must still be
+    // honoured and not overwritten by the automatic default (#1573).
+    #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
+    #[test]
+    fn should_not_overwrite_explicit_psm_when_another_field_is_also_set() {
+        let mut ocr_config = crate::core::config::OcrConfig {
+            language: vec!["eng".to_string()],
+            tesseract_config: Some(crate::types::TesseractConfig {
+                psm: Some(7),
+                enable_table_detection: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        apply_default_whole_image_tesseract_psm(&mut ocr_config);
+
+        let tesseract_config = ocr_config.tesseract_config.expect("explicit config must remain");
+        assert_eq!(tesseract_config.psm, Some(7));
+        assert!(!tesseract_config.enable_table_detection);
     }
 
     #[cfg(feature = "ocr")]
@@ -2696,10 +2808,13 @@ mod tests {
         }
 
         #[test]
-        fn should_exclude_explicit_and_vertical_tesseract_from_sparse_retry() {
+        fn should_exclude_explicit_psm_and_vertical_tesseract_from_sparse_retry() {
             let result = result_with_word_confidences(&[0.10]);
-            let explicit_config = crate::core::config::OcrConfig {
-                tesseract_config: Some(crate::types::TesseractConfig::default()),
+            let explicit_psm_config = crate::core::config::OcrConfig {
+                tesseract_config: Some(crate::types::TesseractConfig {
+                    psm: Some(4),
+                    ..Default::default()
+                }),
                 ..Default::default()
             };
             let vertical_config = crate::core::config::OcrConfig {
@@ -2711,9 +2826,29 @@ mod tests {
                 ..Default::default()
             };
 
-            assert!(!should_retry_sparse_image_ocr(&explicit_config, &result));
+            assert!(!should_retry_sparse_image_ocr(&explicit_psm_config, &result));
             assert!(!should_retry_sparse_image_ocr(&vertical_config, &result));
             assert!(!should_retry_sparse_image_ocr(&other_backend_config, &result));
+        }
+
+        // Regression test for #1573: a `TesseractConfig` may be present for a reason
+        // unrelated to `psm` (e.g. table detection toggled off). The sparse-text retry
+        // must still trigger as long as `psm` itself is unset — struct presence alone
+        // no longer disables it. Previously `is_implicit_horizontal_tesseract` keyed off
+        // `tesseract_config.is_none()`, so this case never retried.
+        #[test]
+        fn should_retry_sparse_image_ocr_when_tesseract_config_present_but_psm_unset() {
+            let config = crate::core::config::OcrConfig {
+                tesseract_config: Some(crate::types::TesseractConfig {
+                    enable_table_detection: false,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let confidences = vec![0.10; SPARSE_IMAGE_OCR_WORD_LIMIT];
+            let result = result_with_word_confidences(&confidences);
+
+            assert!(should_retry_sparse_image_ocr(&config, &result));
         }
 
         #[test]
@@ -2746,7 +2881,7 @@ mod tests {
                 .tesseract_config
                 .expect("fallback must materialize Tesseract configuration");
 
-            assert_eq!(tesseract_config.psm, SPARSE_IMAGE_OCR_FALLBACK_PSM);
+            assert_eq!(tesseract_config.psm, Some(SPARSE_IMAGE_OCR_FALLBACK_PSM));
             assert_eq!(
                 tesseract_config
                     .preprocessing
@@ -2941,6 +3076,7 @@ mod tests {
             speaker_notes: None,
             section_name: None,
             sheet_name: None,
+            ocr_confidence: None,
         }]);
         doc.metadata.additional.insert(
             std::borrow::Cow::Borrowed(crate::ocr_metadata_keys::OCR_PROCESSED_IMAGE_WIDTH_METADATA_KEY),
@@ -3140,7 +3276,7 @@ mod tests {
             Some(crate::core::config::OutputFormat::Plain)
         );
         assert_eq!(tesseract_config.output_format, "text");
-        assert_eq!(tesseract_config.psm, 6);
+        assert_eq!(tesseract_config.psm, Some(6));
         assert!(!tesseract_config.enable_table_detection);
         assert!(ocr_config.tesseract_config.is_none());
     }
@@ -3151,7 +3287,7 @@ mod tests {
         let extraction_config = ExtractionConfig::default();
         let ocr_config = crate::core::config::OcrConfig {
             tesseract_config: Some(crate::types::TesseractConfig {
-                psm: 4,
+                psm: Some(4),
                 ..Default::default()
             }),
             ..Default::default()
@@ -3161,7 +3297,7 @@ mod tests {
 
         assert_eq!(
             region_config.tesseract_config.expect("explicit config must remain").psm,
-            4
+            Some(4)
         );
     }
 
@@ -4316,8 +4452,12 @@ mod tests {
 
     /// Full-pipeline regression for #732: InternalDocument.images must survive the
     /// derive.rs conversion so ExtractedDocument.images is Some after run_pipeline.
+    // Holds a `ProcessorSnapshotLease` for the whole `run_pipeline` call. Without `#[serial]`
+    // this raced the `#[serial]`-guarded lifecycle tests in `core::pipeline::tests`, whose
+    // mutations are refused while any snapshot lease is live. ~keep
     #[cfg(feature = "ocr")]
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_pipeline_images_some_after_ocr_with_captioning() {
         use crate::core::config::{CaptioningConfig, LlmConfig, OcrConfig};
         use crate::core::pipeline::run_pipeline;

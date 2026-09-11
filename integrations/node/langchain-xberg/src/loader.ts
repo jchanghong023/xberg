@@ -22,7 +22,7 @@ export interface XbergLoaderOptions {
 }
 
 /**
- * Load documents using Xberg, supporting 106 file formats with true async extraction.
+ * Load documents using Xberg, supporting 107 file formats with true async extraction.
  *
  * By default each source becomes one Document. Enable `chunking` on the
  * `ExtractionConfig` to emit one Document per chunk, or `pages` for one Document
@@ -67,7 +67,7 @@ export class XbergLoader extends BaseDocumentLoader {
       result = batch ? await extractBatch(inputs, this.config ?? null) : await extract(inputs[0], this.config ?? null);
     } catch (error) {
       const source = sources[0] ?? "input";
-      throw new Error(`Failed to extract '${source}': ${errorMessage(error)}`);
+      throw new Error(`Failed to extract '${source}': ${errorMessage(error)}`, { cause: error });
     }
 
     return resultToDocuments(result as unknown as ResultEnvelope, sources, {

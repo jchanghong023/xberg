@@ -2,6 +2,7 @@
 #define XBERG_H
 
 /* Cargo features enabled in this build. */
+#define XBERG_FEATURE_ANALYSIS 1
 #define XBERG_FEATURE_API 1
 #define XBERG_FEATURE_API_TYPES 1
 #define XBERG_FEATURE_ARCHIVES 1
@@ -18,6 +19,7 @@
 #define XBERG_FEATURE_EMBEDDING_PRESETS 1
 #define XBERG_FEATURE_ENRICHMENT 1
 #define XBERG_FEATURE_EXCEL 1
+#define XBERG_FEATURE_FORMULA_RECOGNITION 1
 #define XBERG_FEATURE_HEURISTICS 1
 #define XBERG_FEATURE_HTML 1
 #define XBERG_FEATURE_HWP 1
@@ -33,6 +35,7 @@
 #define XBERG_FEATURE_LITER_LLM 1
 #define XBERG_FEATURE_MARKDOWN_FOOTNOTES 1
 #define XBERG_FEATURE_MCP 1
+#define XBERG_FEATURE_MCP_HTTP 1
 #define XBERG_FEATURE_MDX 1
 #define XBERG_FEATURE_NER_LLM 1
 #define XBERG_FEATURE_NER_ONNX 1
@@ -45,17 +48,23 @@
 #define XBERG_FEATURE_QR_CODES 1
 #define XBERG_FEATURE_QUALITY 1
 #define XBERG_FEATURE_REDACTION 1
+#define XBERG_FEATURE_REDACTION_ML 1
+#define XBERG_FEATURE_REDACTION_REHYDRATE 1
 #define XBERG_FEATURE_RERANKER 1
 #define XBERG_FEATURE_RERANKER_PRESETS 1
 #define XBERG_FEATURE_SCEPTRE_OCR 1
 #define XBERG_FEATURE_SPARSE_EMBEDDINGS 1
 #define XBERG_FEATURE_SPARSE_EMBEDDING_PRESETS 1
+#define XBERG_FEATURE_STATIC_EMBEDDINGS 1
 #define XBERG_FEATURE_STOPWORDS 1
 #define XBERG_FEATURE_STRUCTURED 1
+#define XBERG_FEATURE_SUMMARIZATION 1
+#define XBERG_FEATURE_SUMMARIZATION_LLM 1
 #define XBERG_FEATURE_SVG 1
 #define XBERG_FEATURE_TOKIO_RUNTIME 1
 #define XBERG_FEATURE_TRANSCRIPTION 1
 #define XBERG_FEATURE_TRANSCRIPTION_TYPES 1
+#define XBERG_FEATURE_TRANSLATION 1
 #define XBERG_FEATURE_TREE_SITTER 1
 #define XBERG_FEATURE_URL_CONFIG_TYPES 1
 #define XBERG_FEATURE_URL_INGESTION 1
@@ -1864,6 +1873,17 @@ typedef struct XBERGPageDimensions XBERGPageDimensions;
 typedef struct XBERGPageHierarchy XBERGPageHierarchy;
 typedef struct XBERGPageInfo XBERGPageInfo;
 /**
+ * Aggregate OCR legibility score for a page, reported by the backend that
+ * produced its text.
+ *
+ * This is distinct from `OcrConfidence`, which scores a single detected element
+ * (a word or line) using detection/recognition confidence from the OCR engine
+ * itself. `PageOcrConfidence` is a page-level summary computed after noise
+ * filtering, intended for triage of which pages are worth a closer look, not
+ * for comparing OCR engines against each other.
+ */
+typedef struct XBERGPageOcrConfidence XBERGPageOcrConfidence;
+/**
  * How a backend copes with a page raster whose text is not upright.
  *
  * Rotated-page handling is a backend capability, not a universal guarantee. An
@@ -2557,6 +2577,15 @@ typedef struct XBERGTable XBERGTable;
  * Future extension point for rich table support with cell-level metadata.
  */
 typedef struct XBERGTableCell XBERGTableCell;
+/**
+ * The paragraph style a single table cell's text carries, located by grid
+ * position.
+ *
+ * Flat rather than a nested `Vec<Vec<Option<..>>>`: the nested shape marshals
+ * badly across the FFI bindings, and the data is sparse anyway. See
+ * `Table.cell_styles`.
+ */
+typedef struct XBERGTableCellStyle XBERGTableCellStyle;
 /**
  * Controls how markdown tables are handled when they exceed the chunk size
  * limit.
@@ -13401,6 +13430,35 @@ int32_t xberg_grid_cell_is_header(XBERGAlefHandle handle);
 XBERGAlefHandle xberg_grid_cell_bbox(XBERGAlefHandle handle);
 
 /**
+ * Get the `heading_level` field from a `GridCell`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint8_t xberg_grid_cell_heading_level(XBERGAlefHandle handle);
+
+/**
+ * Report whether the `heading_level` field on a `GridCell` is `Some`.
+ *
+ * `xberg_grid_cell_heading_level` cannot distinguish a `None` field from a
+ * legitimate zero-valued `Some` at the C ABI boundary -- there is no null
+ * representation for a numeric return, so both collapse to the same sentinel.
+ * Call this function first: `1` means the field getter's return value is
+ * meaningful, `0` means the field is absent and the getter's sentinel must be
+ * ignored, `-1` reports an invalid handle (see `xberg_last_error_code`). #
+ * Safety Pointer must be a valid handle returned by this library.
+ */
+int32_t xberg_grid_cell_has_heading_level(XBERGAlefHandle handle);
+
+/**
+ * Get the `style_name` field from a `GridCell`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_grid_cell_style_name(XBERGAlefHandle handle);
+
+/**
  * Create a `HeaderMetadata` from a JSON string. Returns null on failure.
  * # Safety
  * JSON string must be valid UTF-8 and null-terminated.
@@ -19229,6 +19287,15 @@ char *xberg_page_content_section_name(XBERGAlefHandle handle);
 char *xberg_page_content_sheet_name(XBERGAlefHandle handle);
 
 /**
+ * Get the `ocr_confidence` field from a `PageContent`.
+ * A non-null returned handle is owned by the caller.
+ * It must be freed with `xberg_page_ocr_confidence_free`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+XBERGAlefHandle xberg_page_content_ocr_confidence(XBERGAlefHandle handle);
+
+/**
  * Create a `PageDimensions` from a JSON string. Returns null on failure.
  * # Safety
  * JSON string must be valid UTF-8 and null-terminated.
@@ -19438,6 +19505,65 @@ int32_t xberg_page_info_has_is_blank(XBERGAlefHandle handle);
  * Pointer must be a valid handle returned by this library.
  */
 int32_t xberg_page_info_has_vector_graphics(XBERGAlefHandle handle);
+
+/**
+ * Create a `PageOcrConfidence` from a JSON string. Returns null on failure.
+ * # Safety
+ * JSON string must be valid UTF-8 and null-terminated.
+ * Returned handle must be freed with `xberg_page_ocr_confidence_free`.
+ */
+XBERGAlefHandle xberg_page_ocr_confidence_from_json(const char *json);
+
+/**
+ * Serialize a `PageOcrConfidence` to a JSON string. Returns null on failure.
+ * # Safety
+ * `handle` must be a valid, non-zero handle returned by a `xberg` function.
+ * The returned string must be freed with `xberg_free_string`.
+ */
+char *xberg_page_ocr_confidence_to_json(XBERGAlefHandle handle);
+
+/**
+ * Free a `PageOcrConfidence` handle.
+ * # Safety
+ * Handle must have been returned by this library, or be zero.
+ */
+void xberg_page_ocr_confidence_free(XBERGAlefHandle handle);
+
+/**
+ * Get the `score` field from a `PageOcrConfidence`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+double xberg_page_ocr_confidence_score(XBERGAlefHandle handle);
+
+/**
+ * Report whether the `score` field on a `PageOcrConfidence` is `Some`.
+ *
+ * `xberg_page_ocr_confidence_score` cannot distinguish a `None` field from a
+ * legitimate zero-valued `Some` at the C ABI boundary -- there is no null
+ * representation for a numeric return, so both collapse to the same sentinel.
+ * Call this function first: `1` means the field getter's return value is
+ * meaningful, `0` means the field is absent and the getter's sentinel must be
+ * ignored, `-1` reports an invalid handle (see `xberg_last_error_code`). #
+ * Safety Pointer must be a valid handle returned by this library.
+ */
+int32_t xberg_page_ocr_confidence_has_score(XBERGAlefHandle handle);
+
+/**
+ * Get the `word_count` field from a `PageOcrConfidence`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint32_t xberg_page_ocr_confidence_word_count(XBERGAlefHandle handle);
+
+/**
+ * Get the `backend` field from a `PageOcrConfidence`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_page_ocr_confidence_backend(XBERGAlefHandle handle);
 
 #if defined(XBERG_FEATURE_HEURISTICS)
 /**
@@ -23658,6 +23784,15 @@ XBERGAlefHandle xberg_table_bounding_box(XBERGAlefHandle handle);
 char *xberg_table_table_id(XBERGAlefHandle handle);
 
 /**
+ * Get the `cell_styles` field from a `Table`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_table_cell_styles(XBERGAlefHandle handle);
+
+/**
  * Get the `columns` field from a `Table`.
  * A non-null returned pointer is owned by the caller.
  * It must be freed with `xberg_free_string`.
@@ -23718,6 +23853,72 @@ uint32_t xberg_table_cell_col_span(XBERGAlefHandle handle);
  * Pointer must be a valid handle returned by this library.
  */
 int32_t xberg_table_cell_is_header(XBERGAlefHandle handle);
+
+/**
+ * Create a `TableCellStyle` from a JSON string. Returns null on failure.
+ * # Safety
+ * JSON string must be valid UTF-8 and null-terminated.
+ * Returned handle must be freed with `xberg_table_cell_style_free`.
+ */
+XBERGAlefHandle xberg_table_cell_style_from_json(const char *json);
+
+/**
+ * Serialize a `TableCellStyle` to a JSON string. Returns null on failure.
+ * # Safety
+ * `handle` must be a valid, non-zero handle returned by a `xberg` function.
+ * The returned string must be freed with `xberg_free_string`.
+ */
+char *xberg_table_cell_style_to_json(XBERGAlefHandle handle);
+
+/**
+ * Free a `TableCellStyle` handle.
+ * # Safety
+ * Handle must have been returned by this library, or be zero.
+ */
+void xberg_table_cell_style_free(XBERGAlefHandle handle);
+
+/**
+ * Get the `row` field from a `TableCellStyle`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint32_t xberg_table_cell_style_row(XBERGAlefHandle handle);
+
+/**
+ * Get the `col` field from a `TableCellStyle`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint32_t xberg_table_cell_style_col(XBERGAlefHandle handle);
+
+/**
+ * Get the `heading_level` field from a `TableCellStyle`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint8_t xberg_table_cell_style_heading_level(XBERGAlefHandle handle);
+
+/**
+ * Report whether the `heading_level` field on a `TableCellStyle` is `Some`.
+ *
+ * `xberg_table_cell_style_heading_level` cannot distinguish a `None` field from
+ * a legitimate zero-valued `Some` at the C ABI boundary -- there is no null
+ * representation for a numeric return, so both collapse to the same sentinel.
+ * Call this function first: `1` means the field getter's return value is
+ * meaningful, `0` means the field is absent and the getter's sentinel must be
+ * ignored, `-1` reports an invalid handle (see `xberg_last_error_code`). #
+ * Safety Pointer must be a valid handle returned by this library.
+ */
+int32_t xberg_table_cell_style_has_heading_level(XBERGAlefHandle handle);
+
+/**
+ * Get the `style_name` field from a `TableCellStyle`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_table_cell_style_style_name(XBERGAlefHandle handle);
 
 #if defined(XBERG_FEATURE_DIFF)
 /**
@@ -23861,6 +24062,19 @@ char *xberg_tesseract_config_language(XBERGAlefHandle handle);
  * Pointer must be a valid handle returned by this library.
  */
 int32_t xberg_tesseract_config_psm(XBERGAlefHandle handle);
+
+/**
+ * Report whether the `psm` field on a `TesseractConfig` is `Some`.
+ *
+ * `xberg_tesseract_config_psm` cannot distinguish a `None` field from a
+ * legitimate zero-valued `Some` at the C ABI boundary -- there is no null
+ * representation for a numeric return, so both collapse to the same sentinel.
+ * Call this function first: `1` means the field getter's return value is
+ * meaningful, `0` means the field is absent and the getter's sentinel must be
+ * ignored, `-1` reports an invalid handle (see `xberg_last_error_code`). #
+ * Safety Pointer must be a valid handle returned by this library.
+ */
+int32_t xberg_tesseract_config_has_psm(XBERGAlefHandle handle);
 
 /**
  * Get the `output_format` field from a `TesseractConfig`.

@@ -12,6 +12,8 @@
 //! agreeing on nothing but the intermediates, and what would let a third
 //! format (DrawingML, EMF) join them without touching the matching at all.
 
+#[cfg(feature = "xml")]
+pub(crate) mod odf;
 #[cfg(feature = "pdf")]
 pub(crate) mod pdf;
 mod polyline;

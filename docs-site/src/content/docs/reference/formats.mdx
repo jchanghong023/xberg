@@ -4,7 +4,7 @@ title: "Format Support"
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
-Xberg supports 106 file formats across 140 unique file extensions and accepts 53 compatibility MIME aliases.
+Xberg supports 107 file formats across 140 unique file extensions and accepts 53 compatibility MIME aliases.
 
 ## Overview
 
@@ -534,7 +534,6 @@ config = ExtractionConfig(
     ocr=OcrConfig(
         tesseract_config=TesseractConfig(
             language=["eng", "deu"],  # English and German
-            psm=3,                    # Page segmentation mode: Auto
             oem=1                     # OCR Engine mode: LSTM neural net
         )
     ),

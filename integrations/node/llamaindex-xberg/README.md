@@ -11,7 +11,7 @@
 
 A [LlamaIndex.TS](https://ts.llamaindex.ai) reader and node parser for [Xberg](https://github.com/xberg-io/xberg).
 `XbergReader` turns a file, a directory, or raw bytes into LlamaIndex `Document`s with the extracted
-text, tables, and rich metadata from 106 formats — with optional OCR for scans and images.
+text, tables, and rich metadata from 107 formats — with optional OCR for scans and images.
 `XbergNodeParser` then splits those documents into `TextNode`s along Xberg's own semantic boundaries
 (native chunks, or structural elements) instead of a blind character window.
 
@@ -69,13 +69,13 @@ embedding input; the parser consumes them and strips them from the emitted nodes
 
 ## Supported formats
 
-Xberg extracts from 106 formats including PDF, DOCX, PPTX, XLSX, HTML, EPUB, images, and more. See the
+Xberg extracts from 107 formats including PDF, DOCX, PPTX, XLSX, HTML, EPUB, images, and more. See the
 [Xberg documentation](https://docs.xberg.io) for the full list and the extraction configuration
 reference.
 
 ## Part of Xberg.io
 
-- [Xberg](https://github.com/xberg-io/xberg) — document intelligence: text, tables, metadata from 106 formats with optional OCR.
+- [Xberg](https://github.com/xberg-io/xberg) — document intelligence: text, tables, metadata from 107 formats with optional OCR.
 - [Xberg Enterprise](https://github.com/xberg-io/xberg-enterprise) — managed extraction API with SDKs, dashboards, and observability.
 
 ## License

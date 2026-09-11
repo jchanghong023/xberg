@@ -279,7 +279,7 @@ Need help? Join the [Discord](https://discord.gg/xt9WY3GnKR) or open an issue wi
 
 ## Part of Xberg.io
 
-- [Xberg](https://github.com/xberg-io/xberg) — the open-source content-intelligence engine: text, tables, and metadata from 106 formats (140 file extensions), with OCR, transcription, and code intelligence. MIT.
+- [Xberg](https://github.com/xberg-io/xberg) — the open-source content-intelligence engine: text, tables, and metadata from 107 formats (141 file extensions), with OCR, transcription, and code intelligence. MIT.
 - [Xberg Pro](https://xberg.io) — a complete self-hosted content-intelligence backend in a single container. Commercial.
 - [Xberg Enterprise](https://xberg.io) — the distributed, governed content-intelligence platform, scaled on Kubernetes with team governance and support. Commercial.
 - [crawlberg](https://github.com/xberg-io/crawlberg) — web crawling and scraping with HTML→Markdown and headless-Chrome fallback.

@@ -776,7 +776,7 @@ fn parse_paragraph(
         lines.retain(|line| !is_dictionary_noise_line(line, filter));
         removed_line_count = lines_before - lines.len();
         if removed_line_count > 0 {
-            tracing::warn!(
+            tracing::debug!(
                 page,
                 removed_line_count,
                 max_invalid_ratio = filter.max_invalid_ratio,

@@ -40,7 +40,7 @@ export default defineConfig({
         title: "Xberg",
         description:
           "Full content intelligence engine: extract text, tables, entities, and embeddings from " +
-          "106 formats with OCR, transcription, code intelligence, and LLM integration. Native " +
+          "107 formats with OCR, transcription, code intelligence, and LLM integration. Native " +
           "bindings for 15 languages.",
         githubUrl: "https://github.com/xberg-io/xberg",
         editBaseUrl: "https://github.com/xberg-io/xberg/edit/main/docs-site/",
@@ -75,7 +75,7 @@ export default defineConfig({
               {
                 label: "Reference",
                 description:
-                  "Per-language API docs, configuration schema, types, errors, formats, and CLI/MCP " + "reference.",
+                  "Per-language API docs, configuration schema, types, errors, formats, and CLI/MCP reference.",
                 paths: ["reference/**"],
               },
               {

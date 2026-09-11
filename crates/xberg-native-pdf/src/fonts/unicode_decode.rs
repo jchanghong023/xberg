@@ -510,8 +510,16 @@ pub(crate) fn decode_text_to_unicode(
         // No font - fallback to Latin-1 (ISO 8859-1) encoding
         // Per PDF Spec ISO 32000-1:2008, Section 9.6.6, Latin-1 maps bytes 0x00-0xFF
         // directly to Unicode code points U+0000-U+00FF ~keep
-        tracing::warn!(
-            "⚠️  No font provided for {} bytes, using Latin-1 fallback (PDF spec compliant)",
+        crate::extractors::recovery_tally::record(|counts| {
+            counts
+                .missing_font_decodes
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            counts
+                .missing_font_bytes
+                .fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        });
+        tracing::trace!(
+            "No font provided for {} bytes, using Latin-1 fallback (PDF spec compliant)",
             bytes.len()
         );
         bytes.iter().map(|&b| char::from(b)).collect()

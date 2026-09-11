@@ -20,6 +20,12 @@ const MODEL_BYTES: &[u8] = b"verified model bytes";
 const MODEL_SHA256: &str = "03cfa25d83f5eaa1faac98ed6ceaaf0e7afe3c273a1e1502c2714ebe10b8263e";
 const ALTERED_MODEL_BYTES: &[u8] = b"altered model bytes";
 const BUILD_SCRIPT: &str = include_str!("../build.rs");
+const LINK_SEARCH_FORMAT: &str = "\"cargo:rustc-link-search=native={}\"";
+const WINDOWS_MAX_PATH: usize = 260;
+/// `OUT_DIR` as GitHub Actions lays it out for the Windows MSVC release job, with the sixteen
+/// hexadecimal digits Cargo appends to the build directory name stood in for.
+const CI_BUILD_OUT_DIR: &str =
+    r"D:\a\xberg\xberg\target\x86_64-pc-windows-msvc\release\build\xberg-tesseract-0123456789abcdef\out";
 #[cfg(unix)]
 const OWNER_ONLY_DIRECTORY_MODE: u32 = 0o700;
 #[cfg(unix)]
@@ -66,6 +72,15 @@ fn should_normalize_every_cmake_source_path() {
     assert!(!BUILD_SCRIPT.contains("Config::new(leptonica_src)"));
 }
 
+#[test]
+fn should_strip_verbatim_prefix_from_every_cmake_definition() {
+    assert!(
+        BUILD_SCRIPT.contains("windows_cmake_argument_path(&path.to_string_lossy())"),
+        "CMake -D values must strip the Windows verbatim prefix rather than only swapping separators, \
+         or `install(EXPORT ...)` package files resolve no IMPORTED_LOCATION for any configuration"
+    );
+}
+
 #[cfg(windows)]
 #[test]
 fn should_preserve_source_identity_when_normalizing_for_cmake() {
@@ -99,6 +114,129 @@ fn should_convert_windows_verbatim_unc_prefix_for_cmake() {
     .expect("normalized Windows UNC path");
 
     assert_eq!(normalized, r"\\server\share\third_party\tesseract");
+}
+
+#[test]
+fn should_strip_verbatim_prefix_from_cmake_argument_path() {
+    let path = r"\\?\D:\a\xberg\xberg\target\debug\build\xberg-tesseract-abc\out\leptonica";
+
+    let normalized = source_cache::windows_cmake_argument_path(path);
+
+    assert_eq!(
+        normalized,
+        "D:/a/xberg/xberg/target/debug/build/xberg-tesseract-abc/out/leptonica"
+    );
+    assert!(
+        !normalized.starts_with("//?/"),
+        "CMake reads a //?/ prefix as a UNC root, which breaks install(EXPORT) package files: {normalized}"
+    );
+}
+
+#[test]
+fn should_convert_verbatim_unc_prefix_in_cmake_argument_path() {
+    let path = r"\\?\UNC\server\share\out\leptonica";
+
+    let normalized = source_cache::windows_cmake_argument_path(path);
+
+    assert_eq!(normalized, "//server/share/out/leptonica");
+}
+
+#[test]
+fn should_keep_plain_windows_path_in_cmake_argument_path() {
+    let path = r"D:\a\xberg\out\leptonica\lib\cmake\leptonica";
+
+    let normalized = source_cache::windows_cmake_argument_path(path);
+
+    assert_eq!(normalized, "D:/a/xberg/out/leptonica/lib/cmake/leptonica");
+}
+
+#[test]
+fn should_strip_verbatim_prefix_from_link_search_directory_keeping_native_separators() {
+    let leptonica_lib_dir = format!(r"{CI_BUILD_OUT_DIR}\leptonica\lib");
+    let verbatim = format!(r"\\?\{leptonica_lib_dir}");
+
+    let normalized = String::from_utf16(&source_cache::windows_cmake_source_units(
+        &verbatim.encode_utf16().collect::<Vec<_>>(),
+    ))
+    .expect("normalized Windows link search directory");
+
+    assert_eq!(normalized, leptonica_lib_dir);
+    assert!(
+        !normalized.contains('/'),
+        "a linker search directory keeps native separators, unlike a CMake -D value: {normalized}"
+    );
+}
+
+#[test]
+fn should_keep_stripped_link_search_directory_within_windows_max_path() {
+    let leptonica_lib_dir = format!(r"{CI_BUILD_OUT_DIR}\leptonica\lib");
+    let tesseract_include_dir = format!(r"{CI_BUILD_OUT_DIR}\tesseract\include");
+    let deepest_header = format!(r"{tesseract_include_dir}\tesseract\capi.h");
+
+    assert_eq!(leptonica_lib_dir.len(), 111);
+    assert_eq!(tesseract_include_dir.len(), 115);
+    assert_eq!(deepest_header.len(), 132);
+    assert!(
+        deepest_header.len() < WINDOWS_MAX_PATH,
+        "dropping the verbatim prefix must not reintroduce a MAX_PATH failure: {} >= {WINDOWS_MAX_PATH}",
+        deepest_header.len()
+    );
+}
+
+#[test]
+fn should_leave_paths_without_a_verbatim_prefix_unchanged_for_tool_arguments() {
+    let temp_dir = TestDir::new();
+    let canonical = fs::canonicalize(temp_dir.path()).expect("canonical directory");
+
+    assert_eq!(source_cache::tool_argument_path(&canonical), canonical);
+}
+
+#[test]
+fn should_route_every_canonicalized_link_search_through_tool_argument_path() {
+    let unwrapped = link_search_arguments(BUILD_SCRIPT)
+        .filter(|argument| !argument.starts_with("tool_argument_path("))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        unwrapped,
+        vec![
+            "parent.display()",
+            "env::var(\"OUT_DIR\").unwrap()",
+            "sysroot_lib.display()",
+            "sysroot_lib_noeh.display()",
+            "rt_dir.display()",
+        ],
+        "only search directories that never pass through fs::canonicalize may skip the verbatim-prefix strip"
+    );
+}
+
+#[test]
+fn should_report_a_link_search_argument_that_skips_tool_argument_path() {
+    let snippet = r#"
+        println!("cargo:rustc-link-search=native={}", leptonica_lib_dir.display());
+        println!(
+            "cargo:rustc-link-search=native={}",
+            tool_argument_path(&tesseract_lib_dir).display()
+        );
+    "#;
+
+    assert_eq!(
+        link_search_arguments(snippet).collect::<Vec<_>>(),
+        vec![
+            "leptonica_lib_dir.display()",
+            "tool_argument_path(&tesseract_lib_dir).display()",
+        ],
+        "the contract check must read both println! shapes the build script uses"
+    );
+}
+
+#[test]
+fn should_strip_verbatim_prefix_from_the_compiler_include_directory() {
+    assert!(
+        BUILD_SCRIPT.contains(".include(tool_argument_path(&tesseract_install_dir.join(\"include\")))"),
+        "a verbatim /I directory cannot resolve #include <tesseract/capi.h>: the forward slash is an \
+         ordinary filename character inside a \\\\?\\ path"
+    );
 }
 
 #[test]
@@ -641,6 +779,36 @@ fn source_artifact() -> SourceArtifact<'static> {
 
 fn expected_cache_path(root: &Path) -> PathBuf {
     root.join("native-sources").join(ARCHIVE_SHA256).join("tesseract.zip")
+}
+
+/// Yield the argument expression of every `cargo:rustc-link-search=native=` directive the build
+/// script emits, so a new search directory cannot quietly skip the verbatim-prefix strip.
+fn link_search_arguments(build_script: &str) -> impl Iterator<Item = &str> {
+    build_script.match_indices(LINK_SEARCH_FORMAT).map(|(index, marker)| {
+        let tail = build_script[index + marker.len()..]
+            .trim_start()
+            .strip_prefix(',')
+            .expect("a link search directive formats exactly one argument")
+            .trim_start();
+        let mut depth = 0usize;
+        let end = tail
+            .char_indices()
+            .find(|(_, character)| match character {
+                '(' => {
+                    depth += 1;
+                    false
+                }
+                ')' if depth == 0 => true,
+                ')' => {
+                    depth -= 1;
+                    false
+                }
+                _ => false,
+            })
+            .map(|(offset, _)| offset)
+            .expect("a link search argument closes the println! that formats it");
+        tail[..end].trim_end()
+    })
 }
 
 fn validate_build_source_contract(build_script: &str) -> Result<(), &'static str> {

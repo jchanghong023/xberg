@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "High-performance document intelligence library for Rust. Extract text, metadata, and structured data from PDFs, Office documents, images, and 106 formats and 371 programming languages via tree-sitter code intelligence with async/sync APIs."
+description = "High-performance document intelligence library for Rust. Extract text, metadata, and structured data from PDFs, Office documents, images, and 107 formats and 371 programming languages via tree-sitter code intelligence with async/sync APIs."
 license.workspace = true
 repository = "https://github.com/xberg-io/xberg"
 homepage = "https://xberg.io"
@@ -665,8 +665,13 @@ prometheus = ["api", "otel", "dep:opentelemetry-prometheus", "dep:prometheus"]
 # Excluded:
 # - liter-llm: tokenizers → hf-hub → ureq 2.12.1 → rustls 0.23 + socks 0.3 (both wasm-incompatible).
 #   Added to android-target explicitly; WASM does not use LLM for now.
-# - hwpx: unhwp → zip → xz2 → lzma-sys (native C, missing wasm stdlib). Native-only;
-#   re-enabled in android-target.
+# hwpx is NOT excluded here: unhwp's own Cargo.toml target-gates its `zip` dependency —
+# non-wasm32 gets `zip = "2.2"` with default features (pulls xz2 → lzma-sys, native C), but
+# `cfg(target_arch = "wasm32")` gets `zip = "2.2", default-features = false, features =
+# ["deflate"]`, which never touches xz2/lzma-sys. unhwp's other deps (cfb, flate2, regex,
+# pulldown-cmark, quick-xml, serde, thiserror, unicode-normalization, uncore, unrefine) are
+# pure Rust and already compiled into this wasm-target build via `hwp`/base deps; `rayon` is
+# also `cfg(not(wasm32))`-gated out by unhwp itself. See `wasm-target` for the enabling flag.
 no-ort-target = [
     "pdf",
     "html",
@@ -737,6 +742,11 @@ wasm-target = [
     "layout-tract",
     "auto-rotate-tract",
     "ner-candle-wasm",
+    # unhwp gates its own `zip` dep to a deflate-only, lzma-free build under
+    # `cfg(target_arch = "wasm32")` (see the `no-ort-target` comment above); every other
+    # transitive dep is pure Rust and already compiled in via `hwp`/base deps. Small ZIP+XML
+    # format, no bundled data/grammar — expected to be a modest size add, unlike tree-sitter.
+    "hwpx",
 ]
 # android-target: no-ort-target plus native-Linux variants that work on Android ABI
 # (excel with tokio, native tree-sitter, Tesseract OCR, and API/MCP transport).
@@ -1252,9 +1262,9 @@ codepage = "0.1.2"
 comrak = { workspace = true }
 crawlberg = { workspace = true, optional = true }
 dbase = { workspace = true, optional = true }
-dirs = "6"
+dirs = "7"
 either = { version = "1", optional = true }
-encoding_rs = { version = "0.8.35" }
+encoding_rs = { version = "0.8.41" }
 fast_image_resize = { version = "6.1.0", optional = true }
 flate2 = { version = "1.1", optional = true }
 hayro-jbig2 = { version = "0.3", default-features = false, features = ["std"], optional = true }
@@ -1275,11 +1285,11 @@ image = { workspace = true, default-features = false, features = [
     "rayon",
 ], optional = true }
 include_dir = { version = "0.7", optional = true }
-indexmap = "2.14.1"
+indexmap = "2.14.2"
 infer = "0.22.0"
 itertools = { workspace = true, optional = true }
 jotdown = "0.10"
-jsonschema = { version = "0.52", optional = true, default-features = false }
+jsonschema = { version = "0.56", optional = true, default-features = false }
 libc = { workspace = true }
 # lofty: pure-Rust audio tag reader (ID3v1/v2, MP4 atoms, Vorbis comments, FLAC, etc.)
 # MIT license. Used for metadata extraction independent of the inference backend.
@@ -1288,8 +1298,8 @@ lofty = { version = "0.25", optional = true }
 # pulls reqwest/rustls → aws-lc-rs → aws-lc-sys; the MSVC build is handled by the fix shipped in
 # xberg-io/liter-llm). hf-hub 1.0 now rides the same reqwest/aws-lc-rs stack.
 log = { workspace = true }
-lopdf = { version = "0.44.0", optional = true, default-features = false }
-mail-parser = { version = "0.11.8", features = ["full_encoding"], optional = true }
+lopdf = { version = "0.45.0", optional = true, default-features = false }
+mail-parser = { version = "0.11.9", features = ["full_encoding"], optional = true }
 # AsciiMath parser, used to reach LaTeX through the shared MathML converter.
 mathemascii = { version = "0.4.0", optional = true }
 mel_spec = { version = "0.4", optional = true }
@@ -1339,7 +1349,7 @@ rake = { version = "0.3.6", optional = true }
 rayon = { workspace = true }
 regex = "1.13.1"
 resvg = { workspace = true, optional = true }
-rmcp = { version = "3.1.4", features = [
+rmcp = { version = "3.2.0", features = [
     "server",
     "macros",
     "base64",
@@ -1416,7 +1426,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["s
 tract-onnx = { workspace = true, optional = true }
 # Typst's own parser, used to convert Typst math to LaTeX.
 typst-syntax = { version = "0.15.1", optional = true }
-unhwp = { version = "0.9.1", default-features = false, features = ["hwpx"], optional = true }
+unhwp = { version = "0.10.0", default-features = false, features = ["hwpx"], optional = true }
 unicode-normalization = { version = "0.1.25", optional = true }
 url = { workspace = true }
 urlencoding = "2"
@@ -1434,8 +1444,8 @@ xberg-gliner = { workspace = true, optional = true }
 # (xberg-io/xberg#1541). `xberg-libheif` gates every version-dependent call, including a
 # `#[cfg(not(feature = "v1_20"))]` fallback to `heif_image_get_plane_readonly`, so this only
 # gives up newer libheif APIs, not functionality. ~keep
-xberg-libheif = { path = "../xberg-libheif", version = "1.1.0", optional = true, default-features = false, features = ["v1_19"] }
-xberg-libwpd = { path = "../xberg-libwpd", version = "1.1.0", optional = true }
+xberg-libheif = { path = "../xberg-libheif", version = "1.1.6", optional = true, default-features = false, features = ["v1_19"] }
+xberg-libwpd = { path = "../xberg-libwpd", version = "1.1.6", optional = true }
 xberg-native-pdf = { workspace = true, optional = true }
 # No `version` on this path-dep: xberg-tesseract carries `links =
 # "xberg_tesseract"`, and a versioned path-dep makes the maturin sdist
@@ -1495,10 +1505,10 @@ tokenizers = { version = "0.23", default-features = false, features = ["fancy-re
 # why `candle-vlm-ocr` is safe in `full`/`windows-target`. GPU acceleration (cudarc / metal) is
 # strictly opt-in via candle-cuda/metal/mkl/accelerate and must be enabled with platform awareness.
 # CI uses `--features full` which keeps GPU accel off.
-xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.1.0", optional = true }
+xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.1.6", optional = true }
 # PaddleOCR via ONNX Runtime or tract (vendored from paddle-ocr-rs). The backend is selected
 # by the enabling feature (`paddle-ocr-ort` / `paddle-ocr-tract`), never by a default.
-xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.1.0", optional = true, default-features = false }
+xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.1.6", optional = true, default-features = false }
 
 # Desktop / server hosts (Linux + macOS, NOT Android): xberg's direct `ureq` client uses
 # ring-backed rustls plus `platform-verifier`, which trusts the OS certificate store
@@ -1537,11 +1547,10 @@ ureq = { version = "3.4", default-features = false, features = [
     "json",
 ], optional = true }
 # Candle-based VLM OCR backends - pure-Rust transformer inference, not on WASM yet.
-xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.1.0", optional = true }
+xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.1.6", optional = true }
 # PaddleOCR via ONNX Runtime or tract (vendored from paddle-ocr-rs). The backend is selected
 # by the enabling feature (`paddle-ocr-ort` / `paddle-ocr-tract`), never by a default.
-xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.1.0", optional = true, default-features = false }
-xberg-windows-metafile = { path = "../xberg-windows-metafile", version = "1.1.0" }
+xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.1.6", optional = true, default-features = false }
 
 # tokio OS features (every native target, including Android and Windows): `process`, `fs`, and
 # `rt-multi-thread` all fail to compile on wasm32 — tokio's own wasm32 gate only allows
@@ -1670,7 +1679,7 @@ dotenvy = "0.15"
 filetime = "0.2"
 image = { workspace = true, default-features = false, features = ["png"] }
 # Test retrieval features prove runtime compilation stays offline under Cargo feature unification. ~keep
-jsonschema = { version = "0.52", default-features = false, features = ["resolve-file", "resolve-http", "tls-ring"] }
+jsonschema = { version = "0.56", default-features = false, features = ["resolve-file", "resolve-http", "tls-ring"] }
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 # Test-only: builds an in-memory model2vec fixture (safetensors bytes) for the
 # static_engine unit tests, without a network fetch.
@@ -1682,6 +1691,7 @@ tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "time"] }
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = "1"
 wiremock = "0.6"
 zip = { version = ">=7.0.0, <8.7.0", default-features = false, features = ["deflate-flate2"] }
 

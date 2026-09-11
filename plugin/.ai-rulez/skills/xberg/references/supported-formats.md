@@ -1,6 +1,6 @@
 # Supported Formats Reference
 
-Xberg supports 106 formats across 140 unique file extensions and accepts 53 compatibility MIME aliases. The tables below summarize the current extension families; `xberg formats` and the [generated format reference](https://docs.xberg.io/reference/formats/) are authoritative for individual MIME mappings and feature-gated availability.
+Xberg supports 107 formats across 140 unique file extensions and accepts 53 compatibility MIME aliases. The tables below summarize the current extension families; `xberg formats` and the [generated format reference](https://docs.xberg.io/reference/formats/) are authoritative for individual MIME mappings and feature-gated availability.
 
 ## Office Documents
 

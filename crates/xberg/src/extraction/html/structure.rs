@@ -692,12 +692,22 @@ impl<'a, 'b> HtmlWalker<'a, 'b> {
             }
             "figure" => {
                 if let Some(fig) = self.figure.take() {
-                    let desc = fig
-                        .caption
-                        .as_deref()
-                        .map(|s| s.trim())
-                        .filter(|s| !s.is_empty())
-                        .or(fig.img_alt.as_deref());
+                    // `alt` and `figcaption` are different content: alt is the image's text
+                    // alternative, the caption is prose about it. Preferring the caption with
+                    // `.or(alt)` dropped the alt text outright whenever a figure had both, so
+                    // it never reached any rendered output. Keep both when they differ. ~keep
+                    let caption = fig.caption.as_deref().map(str::trim).filter(|s| !s.is_empty());
+                    let alt = fig.img_alt.as_deref().map(str::trim).filter(|s| !s.is_empty());
+                    let combined;
+                    let desc = match (alt, caption) {
+                        (Some(alt_text), Some(caption_text)) if alt_text != caption_text => {
+                            combined = format!("{alt_text}. {caption_text}");
+                            Some(combined.as_str())
+                        }
+                        (Some(text), None) => Some(text),
+                        (_, Some(text)) => Some(text),
+                        (None, None) => None,
+                    };
                     let idx = self
                         .builder
                         .push_image_with_src(desc, fig.img_src.as_deref(), None, None, None);
@@ -764,6 +774,8 @@ impl<'a, 'b> HtmlWalker<'a, 'b> {
                     col_span: cell.col_span,
                     is_header: cell.is_header,
                     bbox: None,
+                    heading_level: None,
+                    style_name: None,
                 });
             },
         );

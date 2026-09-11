@@ -5,8 +5,13 @@
 //! DOCX/PPTX) with the `xl/embeddings/` prefix, attaching results to
 //! `ExtractedDocument.children`.
 
-#![allow(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)] // ~keep: test/bench binaries print by design; org logging policy exempts tests
-#![cfg(feature = "office")]
+#![allow(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)]
+// ~keep: test/bench binaries print by design; org logging policy exempts tests
+// Gated on `excel` as well as `office`: every test here extracts an XLSX, and
+// `office` does not enable `excel`. Under `--features office` alone the file
+// compiled and every test failed with UnsupportedFormat -- a spurious red on a
+// valid feature combination, which is the mirror of a vacuous green.
+#![cfg(all(feature = "office", feature = "excel"))]
 
 use std::io::Write as _;
 use zip::write::{SimpleFileOptions, ZipWriter};

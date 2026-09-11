@@ -40,9 +40,15 @@ const SPURIOUS_COLUMN_MIN_DATA_ROWS: usize = 20;
 const SPURIOUS_COLUMN_MIN_COLUMNS: usize = 6;
 const SPURIOUS_COLUMN_MIN_RETAINED_DENSITY_PERCENT: usize = 75;
 const FOOTER_MIN_ALPHA_PERCENT: usize = 70;
+/// Minimum percentage of a data column's non-ambiguous cells that must parse as a bare
+/// numeric literal (after dash-glyph normalisation) for the column to receive
+/// `normalize_data_cell`'s dash/exponent rewriting (xberg-io/xberg#1582).
+const NUMERIC_COLUMN_MIN_NUMERIC_PERCENT: usize = 60;
 
 #[cfg(feature = "pdf")]
 use super::hierarchy::SegmentData;
+#[cfg(feature = "pdf")]
+use super::structure::lines::segments_are_touching;
 
 /// Convert a PDF `SegmentData` to an `HocrWord` for table reconstruction, adding
 /// `advance_offset`/`top_offset` to the segment's upright-frame position before
@@ -268,13 +274,74 @@ pub(crate) fn page_has_lifted_rotation_frame(segments: &[SegmentData], page_heig
 #[cfg(feature = "pdf")]
 pub(crate) fn segments_to_words(segments: &[SegmentData], page_height: f32) -> Vec<HocrWord> {
     let lifts = rotation_lifts_for_page(segments, page_height);
-    segments
+    let per_segment_words: Vec<Vec<HocrWord>> = segments
         .iter()
-        .flat_map(|seg| {
+        .map(|seg| {
             let (advance_offset, top_offset) = lift_for_rotation(&lifts, seg.rotation_degrees);
             split_segment_to_words_lifted(seg, page_height, advance_offset, top_offset)
         })
-        .collect()
+        .collect();
+    merge_touching_segment_boundaries(segments, per_segment_words)
+}
+
+/// Merges a touching word split across two adjacent segments (xberg-io/xberg#1566) into a
+/// single `HocrWord` before table-cell assignment, so `assign_words_to_cells`'s
+/// `cell_words.join(" ")` never re-inserts the space that `split_segment_to_words_lifted`
+/// dropped by construction. `HocrWord` is `u32`-rounded and carries no font size or baseline,
+/// so a sub-point gap like the reported case (0.069 pt) is not representable once words exist
+/// — the check must run here, on `SegmentData`, one segment boundary at a time.
+///
+/// Only the last word of one segment's group and the first word of the next segment's group
+/// can ever be a split-word boundary, since a single segment's own words were already produced
+/// by whitespace-splitting its own text.
+#[cfg(feature = "pdf")]
+fn merge_touching_segment_boundaries(
+    segments: &[SegmentData],
+    mut per_segment_words: Vec<Vec<HocrWord>>,
+) -> Vec<HocrWord> {
+    for boundary in 0..per_segment_words.len().saturating_sub(1) {
+        let is_touching = match (
+            per_segment_words[boundary].last(),
+            per_segment_words[boundary + 1].first(),
+        ) {
+            (Some(prev_word), Some(next_word)) => segments_are_touching(
+                &segments[boundary],
+                &prev_word.text,
+                &segments[boundary + 1],
+                &next_word.text,
+            ),
+            _ => false,
+        };
+        if !is_touching {
+            continue;
+        }
+        let prev_word = per_segment_words[boundary].pop().expect("checked Some above");
+        let next_word = per_segment_words[boundary + 1].remove(0);
+        per_segment_words[boundary + 1].insert(0, merge_hocr_words(prev_word, next_word));
+    }
+    per_segment_words.into_iter().flatten().collect()
+}
+
+/// Combines two `HocrWord`s that are one split word into a single word: text concatenated
+/// with no separator, bounding box the union of both, confidence the lower of the two.
+#[cfg(feature = "pdf")]
+fn merge_hocr_words(prev: HocrWord, next: HocrWord) -> HocrWord {
+    let left = prev.left.min(next.left);
+    let top = prev.top.min(next.top);
+    let right = (prev.left + prev.width).max(next.left + next.width);
+    let bottom = (prev.top + prev.height).max(next.top + next.height);
+
+    let mut text = prev.text;
+    text.push_str(&next.text);
+
+    HocrWord {
+        text,
+        left,
+        top,
+        width: right - left,
+        height: bottom - top,
+        confidence: prev.confidence.min(next.confidence),
+    }
 }
 
 /// Column-wise merge of several table rows into a single logical row.
@@ -359,6 +426,42 @@ fn min_columns_for(layout_guided: bool, allow_single_column: bool) -> usize {
     } else {
         3
     }
+}
+
+/// Whether `text` is a bare ordered/bulleted list marker: a run of digits or a single
+/// lowercase letter followed by `.` or `)` (`"1."`, `"12)"`, `"a."`, `"b)"`), or a lone
+/// bullet glyph (`•`, `-`, `–`, `*`). Hand-rolled rather than pulling in `regex` for three
+/// fixed shapes this small (xberg-io/xberg#1570).
+fn is_list_marker_cell(text: &str) -> bool {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_digit() => {
+            let mut rest = chars.as_str();
+            while let Some(next_char) = rest.chars().next() {
+                if !next_char.is_ascii_digit() {
+                    break;
+                }
+                rest = &rest[next_char.len_utf8()..];
+            }
+            rest == "." || rest == ")"
+        }
+        Some(first) if first.is_ascii_lowercase() => {
+            let rest = chars.as_str();
+            rest == "." || rest == ")"
+        }
+        Some('•' | '-' | '–' | '*') => chars.as_str().is_empty(),
+        _ => false,
+    }
+}
+
+/// Whether every whitespace-separated token in `text` is a list marker. Column 0 of a
+/// reconstructed list region is not always one marker per cell: `merge_rows_columnwise`
+/// collapses a multi-row header into a single cell, so the header of a four-item list can
+/// read `"1. 2."`. Testing token-wise sees that as marker content while still rejecting a
+/// genuine header label like `"Line"` or `"Item #"` (xberg-io/xberg#1570). ~keep
+fn is_list_marker_content(text: &str) -> bool {
+    let mut tokens = text.split_whitespace().peekable();
+    tokens.peek().is_some() && tokens.all(is_list_marker_cell)
 }
 
 fn post_process_table_inner(
@@ -490,7 +593,15 @@ fn post_process_table_inner(
     let mut data_rows = table[data_start..].to_vec();
 
     if header_rows.len() > 2 {
-        header_rows = header_rows[header_rows.len() - 2..].to_vec();
+        // Keep the established two-row header cap, but do not discard an
+        // unusually long prefix inferred by `find_data_start`. Earlier rows
+        // are still table content; demote them to data in their original
+        // order while retaining the two rows closest to the detected data
+        // boundary as the header. ~keep
+        let surplus_header_rows = header_rows.len() - 2;
+        let mut demoted_rows: Vec<Vec<String>> = header_rows.drain(..surplus_header_rows).collect();
+        demoted_rows.append(&mut data_rows);
+        data_rows = demoted_rows;
     }
 
     if header_rows.is_empty() {
@@ -639,6 +750,36 @@ fn post_process_table_inner(
         }
     }
 
+    // A candidate whose column 0 is bare list markers ("1.", "a)", "•") end to end — the
+    // header row included — is an ordered/bulleted list, not a table: the marker is
+    // line-numbering supplied by the source layout, not a discrete data value
+    // (xberg-io/xberg#1570). Including row 0 is what separates the two lookalikes. A
+    // genuine numbered parts or invoice table carries a header label above its numbers
+    // ("Line", "#", "Item"), so its column 0 is not markers end to end and this guard
+    // leaves it alone; a fabricated list region has a list item in row 0 like every other
+    // row. Scoped to `!layout_guided`: a layout-guided region already has ML confirmation
+    // it is a real table, and both routes that produced the fabricated-table bug
+    // (Tesseract TSV clustering and PaddleOCR word clustering) call this validator with
+    // `layout_guided=false`. ~keep
+    if !layout_guided {
+        let all_col0: Vec<&str> = processed
+            .iter()
+            .filter_map(|row| row.first().map(|cell| cell.trim()))
+            .filter(|cell| !cell.is_empty())
+            .collect();
+        if !all_col0.is_empty() && all_col0.iter().all(|cell| is_list_marker_content(cell)) {
+            tracing::debug!(
+                target: "xberg::table_reconstruct",
+                reason = "list_marker_first_column",
+                marker_rows = all_col0.len(),
+                rows = processed.len(),
+                cols = processed[0].len(),
+                "post_process_table_inner: rejected table"
+            );
+            return None;
+        }
+    }
+
     let dense_numeric_grid = is_dense_numeric_grid(&processed);
 
     if processed[0].len() >= 5 {
@@ -681,6 +822,13 @@ fn post_process_table_inner(
     }
 
     if processed[0].len() >= 2 {
+        // The marker relaxation below applies only when column 0 has no header label of its
+        // own. A header cell like "Line" or "#" means the punctuated numbers beneath it are
+        // row-number *data* in a real table, not list markers (#1570). ~keep
+        let header_col0_is_marker = processed[0]
+            .first()
+            .map(|cell| cell.trim())
+            .is_some_and(is_list_marker_content);
         let mut flow_rows = 0usize;
         let mut eligible_rows = 0usize;
         for row in processed.iter().skip(1) {
@@ -690,10 +838,26 @@ fn post_process_table_inner(
                 continue;
             }
             eligible_rows += 1;
-            let ends_without_punct =
-                !col0.ends_with('.') && !col0.ends_with('?') && !col0.ends_with('!') && !col0.ends_with(':');
+            let col0_is_list_marker = is_list_marker_content(col0);
+            // A list marker's own trailing `.`/`)` is punctuation supplied by the marker
+            // convention, not a sentence-final period — it must not exempt the row from
+            // the flow signal below the way real prose punctuation does (#1570).
+            let ends_without_punct = col0_is_list_marker
+                || (!col0.ends_with('.') && !col0.ends_with('?') && !col0.ends_with('!') && !col0.ends_with(':'));
             let starts_lowercase = col1.chars().next().is_some_and(|c| c.is_lowercase());
-            if ends_without_punct && starts_lowercase {
+            // A real list item's second field is typically a new capitalized clause, not a
+            // lowercase sentence continuation, so `starts_lowercase` is the wrong signal
+            // once col0 is known to be a marker — any non-empty col1 already means this
+            // marker is not standing alone as a discrete column value. Gated on
+            // `header_col0_is_marker` so a headed row-number column keeps the strict
+            // signal, and on `!layout_guided` because a layout-guided region is
+            // ML-confirmed as a real table (#1570). ~keep
+            let flows = if col0_is_list_marker && header_col0_is_marker && !layout_guided {
+                ends_without_punct
+            } else {
+                ends_without_punct && starts_lowercase
+            };
+            if flows {
                 flow_rows += 1;
             }
         }
@@ -901,9 +1065,23 @@ fn post_process_table_inner(
         *cell = text;
     }
 
+    // Gated per column, not applied to every data cell end to end: `normalize_data_cell`'s
+    // dash/exponent rewriting is correct for a financial column (an em-dash cell means nil,
+    // `1.5E-05` is scientific notation) and corrupts a prose column (`Functionaliteit—12`, a
+    // part code `HRE - HReco`). Row 0 already never reaches this loop, kept above (xberg-io/
+    // xberg#1582). ~keep
+    let numeric_columns: Vec<bool> = (0..processed[0].len())
+        .map(|col| column_is_numeric_for_normalization(&processed, col))
+        .collect();
+
     for row in processed.iter_mut().skip(1) {
-        for cell in row.iter_mut() {
-            normalize_data_cell(cell);
+        for (col, cell) in row.iter_mut().enumerate() {
+            if numeric_columns.get(col).copied().unwrap_or(false) {
+                normalize_data_cell(cell);
+            } else {
+                let trimmed = cell.trim().to_string();
+                *cell = trimmed;
+            }
         }
     }
 
@@ -1895,12 +2073,31 @@ fn drop_column_position(column_positions: Option<&mut Vec<u32>>, col: usize) {
 }
 
 fn normalize_data_cell(cell: &mut String) {
-    let mut text = cell.trim().to_string();
-    if text.is_empty() {
+    let trimmed = cell.trim();
+    if trimmed.is_empty() {
         cell.clear();
         return;
     }
 
+    let mut text = normalize_dash_glyphs_and_spacing(trimmed);
+    text = text.replace("E-", "e-").replace("E+", "e+");
+
+    if text == "-" {
+        text.clear();
+    }
+
+    *cell = text;
+}
+
+/// Rewrites em-dash, en-dash and minus-sign glyphs to an ASCII hyphen and collapses the
+/// whitespace `normalize_data_cell` expects around a leading or embedded hyphen (`"- 3"` ->
+/// `"-3"`), without the exponent lowercasing or lone-dash clearing that follow it. Shared
+/// with [`column_is_numeric_for_normalization`], which needs the same dash-normalised
+/// preview to decide whether a cell is numeric *before* `normalize_data_cell` runs on it —
+/// testing the raw, unnormalised text would miss `"- 3"`, which only reads as a number once
+/// this rewrite has run (xberg-io/xberg#1582). ~keep
+fn normalize_dash_glyphs_and_spacing(text: &str) -> String {
+    let mut text = text.to_string();
     for ch in ['\u{2014}', '\u{2013}', '\u{2212}'] {
         text = text.replace(ch, "-");
     }
@@ -1911,13 +2108,73 @@ fn normalize_data_cell(cell: &mut String) {
 
     text = text.replace("- ", "-");
     text = text.replace(" -", "-");
-    text = text.replace("E-", "e-").replace("E+", "e+");
+    text
+}
 
-    if text == "-" {
-        text.clear();
+/// Whether column `col`'s data rows (everything but the header) are predominantly bare
+/// numeric literals once dash glyphs are normalised — the gate that keeps
+/// `normalize_data_cell` off a prose column. A cell that is nothing but a dash is
+/// nil-or-N/A and cannot decide the question on its own, so it is excluded from the vote
+/// and left to the column's other cells (xberg-io/xberg#1582).
+fn column_is_numeric_for_normalization(table: &[Vec<String>], col: usize) -> bool {
+    let mut evidence = 0usize;
+    let mut numeric = 0usize;
+    for row in table.iter().skip(1) {
+        let Some(cell) = row.get(col) else { continue };
+        let trimmed = cell.trim();
+        if trimmed.is_empty() || is_lone_dash_cell(trimmed) {
+            continue;
+        }
+        evidence += 1;
+        if looks_like_numeric_literal(&normalize_dash_glyphs_and_spacing(trimmed)) {
+            numeric += 1;
+        }
     }
+    evidence > 0 && numeric.saturating_mul(100) >= evidence.saturating_mul(NUMERIC_COLUMN_MIN_NUMERIC_PERCENT)
+}
 
-    *cell = text;
+/// Whether `text` is nothing but one dash glyph (em, en, minus sign or ASCII hyphen) —
+/// ambiguous nil-or-N/A content that carries no evidence either way for
+/// [`column_is_numeric_for_normalization`].
+fn is_lone_dash_cell(text: &str) -> bool {
+    matches!(text, "-" | "\u{2014}" | "\u{2013}" | "\u{2212}")
+}
+
+/// Whether `text` — already run through [`normalize_dash_glyphs_and_spacing`] — is a bare
+/// numeric literal: an optional leading `-`, one or more digits with at most one `.`, and
+/// an optional exponent (`e`/`E`, optional sign, one or more digits). Anything containing a
+/// letter outside that exponent marker, or no digits at all, is not a number (xberg-io/
+/// xberg#1582).
+fn looks_like_numeric_literal(text: &str) -> bool {
+    let text = text.strip_prefix('-').unwrap_or(text);
+    let (mantissa, exponent) = match text.find(['e', 'E']) {
+        Some(index) => (&text[..index], Some(&text[index + 1..])),
+        None => (text, None),
+    };
+    if !is_numeric_mantissa(mantissa) {
+        return false;
+    }
+    exponent.is_none_or(|exp| {
+        let digits = exp.strip_prefix(['-', '+']).unwrap_or(exp);
+        !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit())
+    })
+}
+
+/// Whether `text` is one or more ASCII digits with at most one `.` separator.
+fn is_numeric_mantissa(text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    let mut seen_dot = false;
+    let mut seen_digit = false;
+    for character in text.chars() {
+        match character {
+            '0'..='9' => seen_digit = true,
+            '.' if !seen_dot => seen_dot = true,
+            _ => return false,
+        }
+    }
+    seen_digit
 }
 
 #[cfg(test)]
@@ -2006,6 +2263,70 @@ mod tests {
         assert_eq!(words.len(), 2);
         assert_eq!(words[0].text, "Hello");
         assert_eq!(words[1].text, "World");
+    }
+
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn issue_1566_touching_table_segments_merge_into_one_word() {
+        let seg_a = make_seg("2 per ketel, pri", 287.864, 331.641, 46.631, 8.999996);
+        let mut seg_b = make_seg("js per meter", 334.564, 331.641, 41.161, 8.999996);
+        seg_b.is_bold = true;
+
+        let words = segments_to_words(&[seg_a, seg_b], 800.0);
+        let texts: Vec<&str> = words.iter().map(|word| word.text.as_str()).collect();
+        assert_eq!(texts, vec!["2", "per", "ketel,", "prijs", "per", "meter"]);
+    }
+
+    /// FINDING 1 (adversarial review): determines the exact gutter, in points at a 9pt
+    /// font, at which `segments_are_touching` starts fusing two *different table columns*
+    /// (a "100" cell followed by a "5" cell) rather than a genuine split word. The
+    /// analytic threshold is `font_size * TOUCHING_SPAN_GAP_EM_RATIO` = `9.0 * 0.025` =
+    /// 0.225pt (confirmed in f32 arithmetic separately). This test pins that boundary
+    /// empirically through the real `segments_to_words` path, not just the predicate.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn digit_column_fusion_boundary_for_9pt_font() {
+        let font_size = 9.0_f32;
+        let build = |gap: f32| {
+            let seg_a = make_seg("100", 100.0, 500.0, 15.0, font_size);
+            let seg_b = make_seg("5", 100.0 + 15.0 + gap, 500.0, 5.0, font_size);
+            segments_to_words(&[seg_a, seg_b], 800.0)
+        };
+
+        // Just under the 0.225pt threshold: the guard still treats this as one
+        // split word and fuses "100" + "5" into "1005".
+        let texts: Vec<String> = build(0.20).into_iter().map(|w| w.text).collect();
+        assert_eq!(
+            texts,
+            vec!["1005".to_string()],
+            "expected fusion just below the 0.225pt threshold"
+        );
+
+        // At/just over the 0.225pt threshold: the two columns stay separate words.
+        let texts: Vec<String> = build(0.25).into_iter().map(|w| w.text).collect();
+        assert_eq!(
+            texts,
+            vec!["100".to_string(), "5".to_string()],
+            "expected no fusion at/above the 0.225pt threshold"
+        );
+    }
+
+    /// FINDING 1 (adversarial review), continued: is a sub-quarter-point gutter
+    /// physically achievable in a real ruled table? A hairline rule stroke is
+    /// commonly ~0.5pt and cell text needs a non-zero clearance from that rule on
+    /// each side to avoid visually touching it (a documents-in-the-wild minimum is
+    /// on the order of 0.5-1pt per side). This test uses a deliberately tight but
+    /// still physically real gutter (1.5pt: a 0.5pt rule plus 0.5pt padding on each
+    /// side) between two adjacent numeric-column segments and asserts they do NOT
+    /// fuse — guarding the currently-unmodified behavior rather than a hypothetical.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn ruled_table_realistic_gutter_does_not_fuse_adjacent_numeric_columns() {
+        let seg_a = make_seg("100", 287.864, 331.641, 15.0, 9.0);
+        let seg_b = make_seg("5", 287.864 + 15.0 + 1.5, 331.641, 5.0, 9.0);
+        let words = segments_to_words(&[seg_a, seg_b], 800.0);
+        let texts: Vec<&str> = words.iter().map(|word| word.text.as_str()).collect();
+        assert_eq!(texts, vec!["100", "5"]);
     }
 
     #[test]
@@ -2257,6 +2578,48 @@ mod tests {
 
         assert_eq!(find_data_start(&table, true), 2);
         assert_eq!(find_data_start(&table, false), 0);
+    }
+
+    #[test]
+    fn issue_1558_surplus_inferred_header_rows_are_demoted_not_dropped() {
+        let table: Vec<Vec<String>> = (1..=18)
+            .map(|row| {
+                vec![
+                    format!("{row} 8000{row:02}"),
+                    "Fastening screw".into(),
+                    format!("{row},10"),
+                    if row == 7 {
+                        "package of 30".into()
+                    } else {
+                        "available".into()
+                    },
+                ]
+            })
+            .collect();
+
+        assert_eq!(find_data_start(&table, true), 6);
+        let processed = post_process_table(table, true, false).expect("dense parts table should remain valid");
+
+        // Six inferred header rows become one merged header plus four demoted
+        // data rows. No source row may disappear.
+        assert_eq!(processed.len(), 17);
+        let flattened = processed.iter().flatten().cloned().collect::<Vec<_>>().join(" ");
+        for row in 1..=18 {
+            let article = format!("8000{row:02}");
+            assert_eq!(
+                flattened.matches(&article).count(),
+                1,
+                "{article} must survive exactly once"
+            );
+        }
+        assert!(
+            processed[0]
+                .iter()
+                .any(|cell| cell.contains("800005") && cell.contains("800006"))
+        );
+        assert!(processed[1].iter().any(|cell| cell.contains("800001")));
+        assert!(processed[4].iter().any(|cell| cell.contains("800004")));
+        assert!(processed[5].iter().any(|cell| cell.contains("800007")));
     }
 
     #[test]
@@ -3675,5 +4038,404 @@ mod tests {
         assert_eq!(straddled_boundary_ratio(&region, &[0]), 0.0);
         assert_eq!(straddled_boundary_ratio(&region, &[]), 0.0);
         assert_eq!(straddled_boundary_ratio(&[], &[0, 100]), 0.0);
+    }
+
+    #[test]
+    fn test_is_list_marker_cell_matches_the_three_shapes() {
+        assert!(is_list_marker_cell("1."));
+        assert!(is_list_marker_cell("12)"));
+        assert!(is_list_marker_cell("a."));
+        assert!(is_list_marker_cell("b)"));
+        assert!(is_list_marker_cell("•"));
+        assert!(is_list_marker_cell("-"));
+        assert!(is_list_marker_cell("–"));
+        assert!(is_list_marker_cell("*"));
+    }
+
+    #[test]
+    fn test_is_list_marker_cell_rejects_non_marker_shapes() {
+        assert!(
+            !is_list_marker_cell("1"),
+            "a bare digit run with no trailing punctuation is not a marker"
+        );
+        assert!(
+            !is_list_marker_cell("ab."),
+            "multi-letter prefix is not a single-letter ordinal"
+        );
+        assert!(
+            !is_list_marker_cell("A."),
+            "spec covers lowercase ordinals only, not uppercase"
+        );
+        assert!(!is_list_marker_cell("Feature"));
+        assert!(!is_list_marker_cell(""));
+        assert!(!is_list_marker_cell("10"));
+        assert!(
+            !is_list_marker_cell("$4.25"),
+            "currency is not a marker even though it contains digits and a dot"
+        );
+    }
+
+    /// Word-geometry fixture for a one-page scanned PDF: a title, a heading, and a
+    /// four-item numbered list, laid out the way the reported #1570 page actually OCRs —
+    /// each list line's words fall into three x-clusters (marker / early phrase / late
+    /// phrase) separated by gaps well above `CELL_MERGE_GAP_HEIGHT_RATIO * median height`,
+    /// so `merge_words_into_cell_tokens` collapses each line into ~3 dense tokens and
+    /// `detect_columns` mints exactly 3 columns from them — reproducing the "spurious
+    /// 3-column table" the issue describes. Built directly with `HocrWord`/geometry and
+    /// run through the real `cluster_words_into_table_regions` / `reconstruct_table` /
+    /// `post_process_table` pipeline, matching the Tesseract route's own call shape
+    /// (`ocr::processor::execution`, `table_column_threshold: 50`,
+    /// `table_row_threshold_ratio: 0.5`, `post_process_table(table, false, false)`). ~keep
+    #[cfg(feature = "ocr")]
+    fn numbered_list_page_words() -> Vec<HocrWord> {
+        fn hocr_word(text: &str, left: u32, top: u32, width: u32, height: u32) -> HocrWord {
+            HocrWord {
+                text: text.to_string(),
+                left,
+                top,
+                width,
+                height,
+                confidence: 95.0,
+            }
+        }
+
+        vec![
+            // Title line (isolated by a large vertical gap from everything below it).
+            hocr_word("Engine", 100, 88, 60, 24),
+            hocr_word("Oil", 165, 88, 30, 24),
+            hocr_word("Change", 200, 88, 65, 24),
+            hocr_word("Procedure", 270, 88, 85, 24),
+            // Heading line (isolated the same way).
+            hocr_word("Required", 100, 288, 75, 24),
+            hocr_word("Steps", 180, 288, 45, 24),
+            // "1. Drain old oil from engine"
+            hocr_word("1.", 100, 488, 20, 24),
+            hocr_word("Drain", 180, 488, 50, 24),
+            hocr_word("old", 234, 488, 30, 24),
+            hocr_word("oil", 400, 488, 25, 24),
+            hocr_word("from", 429, 488, 35, 24),
+            hocr_word("engine", 468, 488, 55, 24),
+            // "2. Replace oil filter"
+            hocr_word("2.", 100, 528, 20, 24),
+            hocr_word("Replace", 180, 528, 65, 24),
+            hocr_word("oil", 400, 528, 25, 24),
+            hocr_word("filter", 429, 528, 45, 24),
+            // "3. Add 5.5 quarts of synthetic 5W-30 oil"
+            hocr_word("3.", 100, 568, 20, 24),
+            hocr_word("Add", 180, 568, 35, 24),
+            hocr_word("5.5", 219, 568, 30, 24),
+            hocr_word("quarts", 400, 568, 55, 24),
+            hocr_word("of", 459, 568, 20, 24),
+            hocr_word("synthetic", 483, 568, 80, 24),
+            hocr_word("5W-30", 567, 568, 50, 24),
+            hocr_word("oil", 621, 568, 25, 24),
+            // "4. Check oil level with dipstick"
+            hocr_word("4.", 100, 608, 20, 24),
+            hocr_word("Check", 180, 608, 50, 24),
+            hocr_word("oil", 234, 608, 25, 24),
+            hocr_word("level", 400, 608, 40, 24),
+            hocr_word("with", 444, 608, 35, 24),
+            hocr_word("dipstick", 483, 608, 65, 24),
+        ]
+    }
+
+    /// #1570: reconstructing the numbered-list region through the real pipeline must no
+    /// longer produce an accepted table. Asserts the FIXED behavior (`None`) — this is the
+    /// TDD-red assertion: it fails against the pre-fix validator (which returns
+    /// `Some(3-column grid)`, fabricating a table out of prose and, worse, deleting that
+    /// prose from the surrounding page per #1571's centre-in-bbox rule) and passes once
+    /// the list-marker guards land.
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn test_numbered_list_region_is_not_reconstructed_as_a_table() {
+        let words = numbered_list_page_words();
+        let regions = crate::table_core::cluster_words_into_table_regions(&words);
+
+        let list_region = regions
+            .into_iter()
+            .find(|region| region.len() >= crate::table_core::MIN_TABLE_CANDIDATE_WORDS)
+            .expect("the numbered list must cluster into its own table-candidate region");
+        assert_eq!(
+            list_region.len(),
+            24,
+            "the list region must isolate all 24 list words from the title/heading"
+        );
+
+        let table = reconstruct_table(&list_region, 50, 0.5);
+        assert!(
+            !table.is_empty(),
+            "precondition: the list must reconstruct into a non-empty grid"
+        );
+        assert_eq!(
+            table[0].len(),
+            3,
+            "precondition: the list reconstructs into 3 columns, matching the bug report"
+        );
+
+        let result = post_process_table(table, false, false);
+        assert!(
+            result.is_none(),
+            "a numbered list rendered as a 3-column grid must be rejected, not accepted as a fabricated table"
+        );
+    }
+
+    /// Precision regression: a genuine layout-guided table (ML-confirmed region) whose
+    /// first column happens to be numeric-and-punctuated ("1.", "2.", ...) must still be
+    /// accepted. The new list-marker guard is scoped to `!layout_guided`, so this path
+    /// never reaches it at all.
+    #[test]
+    fn test_layout_guided_numeric_first_column_table_is_still_accepted() {
+        let table = vec![
+            vec![
+                "Line".to_string(),
+                "Part Description".to_string(),
+                "Unit Price".to_string(),
+            ],
+            vec![
+                "1.".to_string(),
+                "Stainless Steel Bolt M8x40".to_string(),
+                "$4.25".to_string(),
+            ],
+            vec![
+                "2.".to_string(),
+                "Anodized Aluminum Bracket".to_string(),
+                "$12.90".to_string(),
+            ],
+            vec![
+                "3.".to_string(),
+                "Rubber Grommet Assembly".to_string(),
+                "$1.15".to_string(),
+            ],
+            vec![
+                "4.".to_string(),
+                "Tempered Glass Panel".to_string(),
+                "$38.00".to_string(),
+            ],
+        ];
+        let result = post_process_table(table, true, false);
+        assert!(
+            result.is_some(),
+            "a layout-guided table with a punctuated numeric first column must not be eaten by the #1570 fix"
+        );
+    }
+
+    /// Precision regression, non-layout-guided: the SAME genuine numeric-first-column
+    /// table, reconstructed WITHOUT ML layout confirmation, must still be accepted. Its
+    /// "Line" header is the signal that separates it from a numbered list — a list has a
+    /// marker in every column-0 cell including the first, this table does not (#1570).
+    #[test]
+    fn test_headed_numeric_first_column_table_survives_the_list_marker_guard() {
+        let table = vec![
+            vec![
+                "Line".to_string(),
+                "Part Description".to_string(),
+                "Unit Price".to_string(),
+            ],
+            vec![
+                "1.".to_string(),
+                "Stainless Steel Bolt M8x40".to_string(),
+                "$4.25".to_string(),
+            ],
+            vec![
+                "2.".to_string(),
+                "Anodized Aluminum Bracket".to_string(),
+                "$12.90".to_string(),
+            ],
+            vec![
+                "3.".to_string(),
+                "Rubber Grommet Assembly".to_string(),
+                "$1.15".to_string(),
+            ],
+            vec![
+                "4.".to_string(),
+                "Tempered Glass Panel".to_string(),
+                "$38.00".to_string(),
+            ],
+        ];
+        let result = post_process_table(table, false, false);
+        assert!(
+            result.is_some(),
+            "a headed numeric-first-column table must survive the #1570 list-marker guard without ML confirmation"
+        );
+    }
+
+    /// A list whose markers did not all survive OCR ("Note" where "3." should be) no
+    /// longer satisfies the end-to-end guard, so rejection has to come from the relaxed
+    /// `column_text_flow` signal instead. Proves that relaxation is live, not dead code
+    /// shadowed by the guard above it (#1570).
+    #[test]
+    fn test_partially_ocred_list_markers_are_still_rejected_by_text_flow() {
+        let table = vec![
+            vec!["1.".to_string(), "Drain old".to_string(), "oil from engine".to_string()],
+            vec![
+                "2.".to_string(),
+                "Replace oil".to_string(),
+                "filter and gasket".to_string(),
+            ],
+            vec![
+                "Note".to_string(),
+                "Add 5.5".to_string(),
+                "quarts of synthetic".to_string(),
+            ],
+            vec![
+                "4.".to_string(),
+                "Check oil".to_string(),
+                "level with dipstick".to_string(),
+            ],
+            vec![
+                "5.".to_string(),
+                "Reset the".to_string(),
+                "service indicator".to_string(),
+            ],
+        ];
+        let result = post_process_table(table, false, false);
+        assert!(
+            result.is_none(),
+            "a list with one mis-OCRed marker must still be rejected as prose flow"
+        );
+    }
+
+    /// A prose column's em-dash must survive table normalisation: `normalize_data_cell`'s
+    /// dash rewriting is correct for a financial column but not for a title welded to an
+    /// em-dash leader (xberg-io/xberg#1582).
+    #[test]
+    fn test_prose_column_em_dash_survives_table_normalization() {
+        let table = vec![
+            vec![
+                "Line".to_string(),
+                "Part Description".to_string(),
+                "Unit Price".to_string(),
+            ],
+            vec![
+                "1.".to_string(),
+                "Functionaliteit\u{2014}12".to_string(),
+                "$4.25".to_string(),
+            ],
+            vec![
+                "2.".to_string(),
+                "Anodized Aluminum Bracket".to_string(),
+                "$12.90".to_string(),
+            ],
+            vec![
+                "3.".to_string(),
+                "Rubber Grommet Assembly".to_string(),
+                "$1.15".to_string(),
+            ],
+            vec![
+                "4.".to_string(),
+                "Tempered Glass Panel".to_string(),
+                "$38.00".to_string(),
+            ],
+        ];
+        let processed = post_process_table(table, true, false).expect("headed prose+price table must be accepted");
+        assert_eq!(
+            processed[1][1], "Functionaliteit\u{2014}12",
+            "a prose cell's em-dash must not be rewritten to an ASCII hyphen"
+        );
+    }
+
+    /// A part code split by a spaced hyphen (`"HRE - HReco"`) must not be corrupted by the
+    /// numeric normaliser's `E-` -> `e-` rewrite, which is only correct inside a scientific
+    /// notation exponent (xberg-io/xberg#1582).
+    #[test]
+    fn test_prose_column_part_code_survives_table_normalization() {
+        let table = vec![
+            vec![
+                "Line".to_string(),
+                "Part Description".to_string(),
+                "Unit Price".to_string(),
+            ],
+            vec![
+                "1.".to_string(),
+                "Montagebeugel HRE - HReco".to_string(),
+                "$4.25".to_string(),
+            ],
+            vec![
+                "2.".to_string(),
+                "Anodized Aluminum Bracket".to_string(),
+                "$12.90".to_string(),
+            ],
+            vec![
+                "3.".to_string(),
+                "Rubber Grommet Assembly".to_string(),
+                "$1.15".to_string(),
+            ],
+            vec![
+                "4.".to_string(),
+                "Tempered Glass Panel".to_string(),
+                "$38.00".to_string(),
+            ],
+        ];
+        let processed = post_process_table(table, true, false).expect("headed prose+price table must be accepted");
+        assert_eq!(
+            processed[1][1], "Montagebeugel HRE - HReco",
+            "a part code must not be lowercased or have its hyphen spacing collapsed"
+        );
+    }
+
+    /// A prose cell whose entire content is a single em-dash means something in a document
+    /// (an unfilled field, "not applicable") and must not be silently emptied the way a nil
+    /// marker in a numeric column is (xberg-io/xberg#1582).
+    #[test]
+    fn test_prose_column_lone_em_dash_cell_is_not_emptied() {
+        let table = vec![
+            vec![
+                "Line".to_string(),
+                "Part Description".to_string(),
+                "Unit Price".to_string(),
+            ],
+            vec!["1.".to_string(), "\u{2014}".to_string(), "$4.25".to_string()],
+            vec![
+                "2.".to_string(),
+                "Anodized Aluminum Bracket".to_string(),
+                "$12.90".to_string(),
+            ],
+            vec![
+                "3.".to_string(),
+                "Rubber Grommet Assembly".to_string(),
+                "$1.15".to_string(),
+            ],
+            vec![
+                "4.".to_string(),
+                "Tempered Glass Panel".to_string(),
+                "$38.00".to_string(),
+            ],
+        ];
+        let processed = post_process_table(table, true, false).expect("headed prose+price table must be accepted");
+        assert_eq!(
+            processed[1][1], "\u{2014}",
+            "a lone em-dash in a prose column must not be cleared to an empty cell"
+        );
+    }
+
+    /// Regression: a genuine numeric/financial table must keep getting the full
+    /// normalisation — an em-dash nil cell emptied, `"- 3"` joined to `"-3"`, and a
+    /// scientific-notation exponent lowercased — exactly as before #1582.
+    #[test]
+    fn test_numeric_column_normalization_is_unchanged_by_prose_gate() {
+        let table = vec![
+            vec!["Item".to_string(), "2024".to_string(), "2023".to_string()],
+            vec!["Omzet".to_string(), "1234".to_string(), "1100".to_string()],
+            vec![
+                "Bijzondere baten".to_string(),
+                "\u{2014}".to_string(),
+                "- 3".to_string(),
+            ],
+            vec!["Meetfout".to_string(), "1.5E-05".to_string(), "2.0E-06".to_string()],
+            vec!["Afschrijving".to_string(), "-12".to_string(), "-9".to_string()],
+        ];
+        let processed = post_process_table(table, true, false).expect("financial table must be accepted");
+        assert_eq!(
+            processed[2],
+            vec!["Bijzondere baten".to_string(), String::new(), "-3".to_string()]
+        );
+        assert_eq!(
+            processed[3],
+            vec!["Meetfout".to_string(), "1.5e-05".to_string(), "2.0e-06".to_string()]
+        );
+        assert_eq!(
+            processed[4],
+            vec!["Afschrijving".to_string(), "-12".to_string(), "-9".to_string()]
+        );
     }
 }

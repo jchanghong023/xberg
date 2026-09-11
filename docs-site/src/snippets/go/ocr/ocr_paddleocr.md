@@ -10,7 +10,7 @@ import (
 func main() {
 	cfg := xberg.ExtractionConfig{
 		Ocr: &xberg.OcrConfig{
-			Backend:  "paddle-ocr",
+			Backend:  xberg.Ptr("paddle-ocr"),
 			Language: []string{"en"},
 		},
 	}

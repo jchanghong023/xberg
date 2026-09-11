@@ -13,6 +13,12 @@ use serial_test::serial;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use xberg::core::config::{ExtractionConfig, OcrConfig};
+// `PdfConfig` lives behind the `pdf` feature, but this file is gated only on `ocr`. The
+// narrow no-ORT tract leg enables `ocr` WITHOUT `pdf`, so an unconditional import made the
+// whole test binary fail to compile there while every wide-feature leg stayed green -- a
+// `--workspace` clippy cannot fail on a feature combination it never builds. ~keep
+#[cfg(feature = "pdf")]
+use xberg::core::config::PdfConfig;
 use xberg::plugins::registry::get_ocr_backend_registry;
 use xberg::plugins::{OcrBackend, OcrBackendType, Plugin};
 use xberg::types::{ExtractedDocument, Metadata};
@@ -941,6 +947,9 @@ fn test_ocr_backend_document_processing_fallback() {
     }
 }
 
+// Exercises the document-level OCR override against a PDF, so it needs the `pdf` feature
+// that supplies `pdf_options`. ~keep
+#[cfg(feature = "pdf")]
 #[serial]
 #[test]
 fn test_ocr_backend_document_processing_override() {
@@ -972,9 +981,19 @@ fn test_ocr_backend_document_processing_override() {
         ..Default::default()
     };
 
+    // Document-level OCR is only taken when the effective page margins are zero: it processes
+    // the whole file at once and so cannot crop per-page headers/footers. The defaults are
+    // non-zero (0.06 / 0.05), which routes to the per-page image path -- see
+    // `should_use_per_page_ocr_only_when_effective_margins_are_nonzero`. Opt out explicitly so
+    // this test exercises the document override it is named for. ~keep
     let config = ExtractionConfig {
         ocr: Some(ocr_config),
         force_ocr: true,
+        pdf_options: Some(PdfConfig {
+            top_margin_fraction: Some(0.0),
+            bottom_margin_fraction: Some(0.0),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 

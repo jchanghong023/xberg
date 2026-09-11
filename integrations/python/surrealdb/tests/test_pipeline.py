@@ -64,19 +64,19 @@ def test_pipeline_custom_chunk_table(mock_client: AsyncMock) -> None:
 def test_pipeline_extraction_config_has_chunking(mock_client: AsyncMock) -> None:
     pipeline = DocumentPipeline(db=mock_client)
     assert pipeline._config is not None
-    assert pipeline._config["chunking"] is not None
+    assert pipeline._config.chunking is not None
 
 
 def test_pipeline_embed_true_has_embedding(mock_client: AsyncMock) -> None:
     pipeline = DocumentPipeline(db=mock_client, embed=True)
     assert pipeline._config is not None
-    assert pipeline._config["chunking"].embedding is not None
+    assert pipeline._config.chunking.embedding is not None
 
 
 def test_pipeline_embed_false_no_embedding(mock_client: AsyncMock) -> None:
     pipeline = DocumentPipeline(db=mock_client, embed=False)
     assert pipeline._config is not None
-    assert pipeline._config["chunking"].embedding is None
+    assert pipeline._config.chunking.embedding is None
 
 
 def test_pipeline_user_extraction_config_gets_chunking(mock_client: AsyncMock) -> None:
@@ -85,10 +85,12 @@ def test_pipeline_user_extraction_config_gets_chunking(mock_client: AsyncMock) -
     user_config = ExtractionConfig()
     pipeline = DocumentPipeline(db=mock_client, config=user_config)
 
-    # ExtractionConfig is a TypedDict; the user's dict is mutated in place. ~keep
-    assert pipeline._config is user_config
-    assert pipeline._config["chunking"] is not None
-    assert pipeline._config["chunking"].embedding is not None
+    # ExtractionConfig is a frozen dataclass; a new config is returned and the
+    # user's original object is left untouched. ~keep
+    assert pipeline._config is not user_config
+    assert user_config.chunking is None
+    assert pipeline._config.chunking is not None
+    assert pipeline._config.chunking.embedding is not None
 
 
 def test_pipeline_preserves_user_chunking_params(mock_client: AsyncMock) -> None:
@@ -99,10 +101,11 @@ def test_pipeline_preserves_user_chunking_params(mock_client: AsyncMock) -> None
     )
     pipeline = DocumentPipeline(db=mock_client, config=user_config)
 
-    assert pipeline._config is user_config
-    assert pipeline._config["chunking"].max_characters == 512
-    assert pipeline._config["chunking"].overlap == 100
-    assert pipeline._config["chunking"].embedding is not None
+    assert pipeline._config is not user_config
+    assert user_config.chunking.embedding is None
+    assert pipeline._config.chunking.max_characters == 512
+    assert pipeline._config.chunking.overlap == 100
+    assert pipeline._config.chunking.embedding is not None
 
 
 def test_pipeline_preserves_user_chunking_params_embed_false(mock_client: AsyncMock) -> None:
@@ -114,9 +117,9 @@ def test_pipeline_preserves_user_chunking_params_embed_false(mock_client: AsyncM
     pipeline = DocumentPipeline(db=mock_client, config=user_config, embed=False)
 
     assert pipeline._config is not None
-    assert pipeline._config["chunking"] is not None
-    assert pipeline._config["chunking"].max_characters == 256
-    assert pipeline._config["chunking"].embedding is None
+    assert pipeline._config.chunking is not None
+    assert pipeline._config.chunking.max_characters == 256
+    assert pipeline._config.chunking.embedding is None
 
 
 @patch(_PIPELINE_EXTRACT, new_callable=AsyncMock)

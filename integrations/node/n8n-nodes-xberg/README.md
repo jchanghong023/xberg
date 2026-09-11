@@ -91,7 +91,7 @@ format-appropriate MIME type and extension.
 
 ## Supported formats
 
-Xberg extracts from 106 formats including PDF, DOCX, PPTX, XLSX, HTML, EPUB, images, and more. See
+Xberg extracts from 107 formats including PDF, DOCX, PPTX, XLSX, HTML, EPUB, images, and more. See
 the [Xberg documentation](https://docs.xberg.io) for the full list.
 
 ## Compatibility
@@ -100,7 +100,7 @@ Tested against n8n's `n8n-workflow` 2.x node API (`n8nNodesApiVersion` 1).
 
 ## Part of Xberg.io
 
-- [Xberg](https://github.com/xberg-io/xberg) — document intelligence: text, tables, metadata from 106 formats with optional OCR.
+- [Xberg](https://github.com/xberg-io/xberg) — document intelligence: text, tables, metadata from 107 formats with optional OCR.
 - [Xberg Enterprise](https://github.com/xberg-io/xberg-enterprise) — managed extraction API with SDKs, dashboards, and observability.
 
 ## License

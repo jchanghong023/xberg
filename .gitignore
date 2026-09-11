@@ -252,6 +252,7 @@ crates/xberg-pdfium-render/*.jpg
 .playwright-mcp/
 .fastembed_cache/
 */.fastembed_cache/
+AGENTS.md
 CLAUDE.md
 GEMINI.md
 .cursorrules

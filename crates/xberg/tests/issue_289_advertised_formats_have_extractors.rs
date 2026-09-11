@@ -76,9 +76,9 @@ const FORMATS_TABLE_FOOTER: &str = "\n];";
 /// trips it.
 const MIN_ENTRIES_WITH_EXTENSIONS: usize = 80;
 
-const EXPECTED_FORMAT_COUNT: usize = 106;
-const EXPECTED_EXTENSION_COUNT: usize = 140;
-const EXPECTED_ALIAS_COUNT: usize = 53;
+const EXPECTED_FORMAT_COUNT: usize = 107;
+const EXPECTED_EXTENSION_COUNT: usize = 141;
+const EXPECTED_ALIAS_COUNT: usize = 56;
 
 const MIME_ONLY_FORMATS: &[&str] = &[
     "text/x-gfm",

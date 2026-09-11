@@ -19,7 +19,7 @@
 [![Hugging Face](https://img.shields.io/badge/Hugging%20Face-Xberg-007ec6)](https://huggingface.co/xberg-io)
 [![Discord](https://img.shields.io/badge/Discord-Chat-007ec6)](https://discord.gg/xt9WY3GnKR)
 
-High-performance document intelligence library for Rust. Extract text, metadata, transcripts, and structured information from PDFs, Office documents, images, audio/video, and 106 formats.
+High-performance document intelligence library for Rust. Extract text, metadata, transcripts, and structured information from PDFs, Office documents, images, audio/video, and 107 formats.
 
 This is the core Rust library that powers the Python, TypeScript, and Ruby bindings.
 

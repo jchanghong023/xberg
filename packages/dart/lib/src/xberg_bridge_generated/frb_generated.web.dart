@@ -923,6 +923,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PageHierarchy dco_decode_box_autoadd_page_hierarchy(dynamic raw);
 
   @protected
+  PageOcrConfidence dco_decode_box_autoadd_page_ocr_confidence(dynamic raw);
+
+  @protected
   PageStructure dco_decode_box_autoadd_page_structure(dynamic raw);
 
   @protected
@@ -1840,6 +1843,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<Table> dco_decode_list_table(dynamic raw);
 
   @protected
+  List<TableCellStyle> dco_decode_list_table_cell_style(dynamic raw);
+
+  @protected
   List<TableDiff> dco_decode_list_table_diff(dynamic raw);
 
   @protected
@@ -2257,6 +2263,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PageHierarchy? dco_decode_opt_box_autoadd_page_hierarchy(dynamic raw);
 
   @protected
+  PageOcrConfidence? dco_decode_opt_box_autoadd_page_ocr_confidence(
+    dynamic raw,
+  );
+
+  @protected
   PageStructure? dco_decode_opt_box_autoadd_page_structure(dynamic raw);
 
   @protected
@@ -2490,6 +2501,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PageInfo dco_decode_page_info(dynamic raw);
+
+  @protected
+  PageOcrConfidence dco_decode_page_ocr_confidence(dynamic raw);
 
   @protected
   PageOrientationHandling dco_decode_page_orientation_handling(dynamic raw);
@@ -2734,6 +2748,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   TableCell dco_decode_table_cell(dynamic raw);
+
+  @protected
+  TableCellStyle dco_decode_table_cell_style(dynamic raw);
 
   @protected
   TableChunkingMode dco_decode_table_chunking_mode(dynamic raw);
@@ -3676,6 +3693,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   PageHierarchy sse_decode_box_autoadd_page_hierarchy(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PageOcrConfidence sse_decode_box_autoadd_page_ocr_confidence(
     SseDeserializer deserializer,
   );
 
@@ -4819,6 +4841,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<Table> sse_decode_list_table(SseDeserializer deserializer);
 
   @protected
+  List<TableCellStyle> sse_decode_list_table_cell_style(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   List<TableDiff> sse_decode_list_table_diff(SseDeserializer deserializer);
 
   @protected
@@ -5360,6 +5387,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  PageOcrConfidence? sse_decode_opt_box_autoadd_page_ocr_confidence(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PageStructure? sse_decode_opt_box_autoadd_page_structure(
     SseDeserializer deserializer,
   );
@@ -5677,6 +5709,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PageInfo sse_decode_page_info(SseDeserializer deserializer);
 
   @protected
+  PageOcrConfidence sse_decode_page_ocr_confidence(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PageOrientationHandling sse_decode_page_orientation_handling(
     SseDeserializer deserializer,
   );
@@ -5955,6 +5992,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   TableCell sse_decode_table_cell(SseDeserializer deserializer);
+
+  @protected
+  TableCellStyle sse_decode_table_cell_style(SseDeserializer deserializer);
 
   @protected
   TableChunkingMode sse_decode_table_chunking_mode(
@@ -7245,6 +7285,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_page_hierarchy(
     PageHierarchy self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_page_ocr_confidence(
+    PageOcrConfidence self,
     SseSerializer serializer,
   );
 
@@ -8746,6 +8792,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_list_table(List<Table> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_table_cell_style(
+    List<TableCellStyle> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_table_diff(
     List<TableDiff> self,
     SseSerializer serializer,
@@ -9397,6 +9449,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_page_ocr_confidence(
+    PageOcrConfidence? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_page_structure(
     PageStructure? self,
     SseSerializer serializer,
@@ -9802,6 +9860,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_page_info(PageInfo self, SseSerializer serializer);
 
   @protected
+  void sse_encode_page_ocr_confidence(
+    PageOcrConfidence self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_page_orientation_handling(
     PageOrientationHandling self,
     SseSerializer serializer,
@@ -10172,6 +10236,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_table_cell(TableCell self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_table_cell_style(
+    TableCellStyle self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_table_chunking_mode(

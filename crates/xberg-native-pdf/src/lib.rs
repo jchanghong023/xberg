@@ -478,6 +478,56 @@ pub(crate) mod utils {
         });
     }
 
+    /// Sort into visual rows without making row membership depend on an
+    /// absolute coordinate-grid boundary.
+    ///
+    /// Items are first ordered strictly top-to-bottom. Each row is then swept
+    /// from a fixed topmost anchor and sorted left-to-right. The tolerance is
+    /// proportional to the largest text scale seen in that row, bounded so it
+    /// absorbs baseline jitter without chaining adjacent lines together.
+    pub fn sort_by_visual_rows<T>(
+        items: &mut [T],
+        get_y: impl Fn(&T) -> f32,
+        get_x: impl Fn(&T) -> f32,
+        get_scale: impl Fn(&T) -> f32,
+    ) {
+        const ROW_TOLERANCE_SCALE_FACTOR: f32 = 0.25;
+
+        let all_finite = items
+            .iter()
+            .all(|item| get_y(item).is_finite() && get_x(item).is_finite() && get_scale(item).is_finite());
+        if !all_finite {
+            items.sort_by(|a, b| row_aware_span_cmp(get_y(a), get_x(a), get_y(b), get_x(b)));
+            return;
+        }
+
+        items.sort_by(|a, b| {
+            get_y(b)
+                .total_cmp(&get_y(a))
+                .then_with(|| get_x(a).total_cmp(&get_x(b)))
+        });
+
+        let mut row_start = 0;
+        while row_start < items.len() {
+            let anchor_y = get_y(&items[row_start]);
+            let mut row_scale = get_scale(&items[row_start]).abs();
+            let mut row_end = row_start + 1;
+            while row_end < items.len() {
+                let candidate_scale = get_scale(&items[row_end]).abs();
+                let tolerance =
+                    (row_scale.max(candidate_scale) * ROW_TOLERANCE_SCALE_FACTOR).min(ROW_BAND_TOLERANCE_PT);
+                if anchor_y - get_y(&items[row_end]) > tolerance {
+                    break;
+                }
+                row_scale = row_scale.max(candidate_scale);
+                row_end += 1;
+            }
+
+            items[row_start..row_end].sort_by(|a, b| get_x(a).total_cmp(&get_x(b)));
+            row_start = row_end;
+        }
+    }
+
     /// Total-order wrapper over `f32` for use as a sort key. For finite values
     /// `total_cmp` is identical to `safe_float_cmp` / `partial_cmp`.
     #[derive(Clone, Copy, PartialEq)]
@@ -514,6 +564,49 @@ pub(crate) mod utils {
             sort_by_row_band(&mut a, |t| t.0, |t| t.1);
             b.sort_by(|p, q| row_aware_span_cmp(p.0, p.1, q.0, q.1));
             assert_eq!(a, b, "cached-key sort must match the comparator permutation");
+        }
+
+        #[test]
+        fn issue_1560_visual_rows_ignore_absolute_band_boundaries() {
+            let mut spans = [
+                (623.481_f32, 68.279_f32, 8.6_f32, "article"),
+                (622.401, 50.0, 8.6, "position"),
+                (622.401, 124.9, 8.6, "description"),
+            ];
+
+            sort_by_visual_rows(&mut spans, |span| span.0, |span| span.1, |span| span.2);
+
+            assert_eq!(spans.map(|span| span.3), ["position", "article", "description"]);
+        }
+
+        #[test]
+        fn issue_1560_visual_row_sort_is_translation_invariant() {
+            let source = [
+                (623.481_f32, 68.279_f32, 8.6_f32, "article"),
+                (622.401, 50.0, 8.6, "position"),
+                (610.0, 50.0, 8.6, "next-row"),
+            ];
+            let mut original = source;
+            let mut translated = source.map(|(y, x, scale, id)| (y + 1.6, x, scale, id));
+
+            sort_by_visual_rows(&mut original, |span| span.0, |span| span.1, |span| span.2);
+            sort_by_visual_rows(&mut translated, |span| span.0, |span| span.1, |span| span.2);
+
+            assert_eq!(
+                original.map(|span| span.3),
+                translated.map(|span| span.3),
+                "shifting a page across the old 3pt bands must not change reading order"
+            );
+            assert_eq!(original.map(|span| span.3), ["position", "article", "next-row"]);
+        }
+
+        #[test]
+        fn issue_1560_visual_row_tolerance_scales_down_for_tiny_text() {
+            let mut spans = [(10.0_f32, 90.0_f32, 1.0_f32, "top"), (9.7, 10.0, 1.0, "bottom")];
+
+            sort_by_visual_rows(&mut spans, |span| span.0, |span| span.1, |span| span.2);
+
+            assert_eq!(spans.map(|span| span.3), ["top", "bottom"]);
         }
 
         #[test]

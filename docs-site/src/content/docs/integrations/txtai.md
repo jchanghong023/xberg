@@ -2,7 +2,7 @@
 title: "txtai"
 ---
 
-The `txtai-xberg` package feeds Xberg's document extraction into [txtai](https://github.com/neuml/txtai). `XbergPipeline` extracts text and metadata from 106 formats — running OCR where needed — and flattens the result into documents ready for `txtai.Embeddings.index`. With Xberg's native chunking enabled, each chunk becomes one embedding-sized segment instead of a single blob.
+The `txtai-xberg` package feeds Xberg's document extraction into [txtai](https://github.com/neuml/txtai). `XbergPipeline` extracts text and metadata from 107 formats — running OCR where needed — and flattens the result into documents ready for `txtai.Embeddings.index`. With Xberg's native chunking enabled, each chunk becomes one embedding-sized segment instead of a single blob.
 
 [![PyPI](https://img.shields.io/pypi/v/txtai-xberg)](https://pypi.org/project/txtai-xberg)
 [![Python](https://img.shields.io/pypi/pyversions/txtai-xberg)](https://pypi.org/project/txtai-xberg)

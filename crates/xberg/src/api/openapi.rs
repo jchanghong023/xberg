@@ -16,7 +16,7 @@ use utoipa::OpenApi;
     info(
         title = "Xberg API",
         version = env!("CARGO_PKG_VERSION"),
-        description = "High-performance document intelligence API for extracting text, metadata, and structured data from PDFs, Office documents, images, and 106 formats.",
+        description = "High-performance document intelligence API for extracting text, metadata, and structured data from PDFs, Office documents, images, and 107 formats.",
         contact(
             name = "Xberg",
             url = "https://xberg.io"

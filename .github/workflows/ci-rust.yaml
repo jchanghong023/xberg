@@ -59,7 +59,14 @@ jobs:
     name: Rust (${{ matrix.os }})
     if: github.repository == 'xberg-io/xberg' && github.actor != 'dependabot[bot]' && github.event.pull_request.draft != true
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 90
+    # Raised from 90m, which was silently marginal: the legs used to abort early on the
+    # first failure and finish in 35-82m, so nobody saw that a leg running to COMPLETION
+    # exceeds 90m. Removing the early aborts (--no-fail-fast in run-unit-tests.sh, and
+    # doctests no longer stopping at the first crate) did not make this job slower than
+    # a full run always was -- it unmasked it. Measured on 3f9b1aa0: ubuntu-latest
+    # completed in 87m, while macos-latest and ubuntu-24.04-arm were both cancelled at
+    # exactly 90m, so their true completion time is unknown and above it. ~keep
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -145,7 +152,27 @@ jobs:
         shell: bash
 
       - name: Run tests
-        run: task rust:test:ci
+        # ~keep `task rust:test:ci` is gated on its exit code alone, which cannot distinguish a
+        # real pass from a run that executed nothing: a feature-gating typo that drops an entire
+        # `#[cfg(test)]` module still exits 0. The sibling legs in this file (tract-no-ort,
+        # pdfium-engine, the cli feature legs) already assert a nonzero pass count; this is the
+        # broadest leg and was the one without that guard. The total is echoed so a silent
+        # collapse is visible in the log as a number, not inferred from the word "ok" -- note
+        # ~23 test binaries legitimately report "ok. 0 passed", so only the SUM is meaningful.
+        run: |
+          set -euo pipefail
+          task rust:test:ci 2>&1 | tee /tmp/rust-tests.log
+          # awk, not grep|paste|bc: this job also runs on windows-latest where `bc` is absent,
+          # and a no-match `grep` under `set -e` would abort with its own exit 1 before the
+          # explicit error below could ever be printed. awk always exits 0 and prints 0. ~keep
+          total="$(awk '/^test result: ok\./ {
+            for (i = 1; i <= NF; i++) { if ($i ~ /^passed;?$/) { s += $(i - 1) } }
+          } END { print s + 0 }' /tmp/rust-tests.log)"
+          echo "::notice::rust workspace tests passed: ${total}"
+          if [ "${total}" -eq 0 ]; then
+            echo "::error::the rust workspace test leg reported 0 passing tests -- the suite ran nothing" >&2
+            exit 1
+          fi
         shell: bash
         env:
           LD_LIBRARY_PATH: ${{ env.LD_LIBRARY_PATH || '' }}
@@ -172,7 +199,28 @@ jobs:
             features=full-no-heic,heic,formula-recognition
           fi
           echo "xberg doctest features: ${features}"
-          cargo test --locked -p xberg --features "${features}" --doc
+
+          # Every crate's doctests run even when an earlier crate fails. This step is
+          # nine cargo invocations under `bash -eo pipefail`, so one failure used to
+          # abort the rest: each red cycle surfaced exactly one problem, and the next
+          # was only discovered after a fix for the first had landed. That cost four
+          # cycles on this workflow alone. Collect and report them together, the same
+          # reason scripts/ci/rust/run-unit-tests.sh passes --no-fail-fast. ~keep
+          failed=()
+          doctest() {
+            label="$1"
+            shift
+            echo "::group::doctests ${label}"
+            if cargo test --locked --doc "$@"; then
+              echo "::endgroup::"
+            else
+              echo "::endgroup::"
+              echo "::error::doctests failed for ${label}"
+              failed+=("${label}")
+            fi
+          }
+
+          doctest xberg -p xberg --features "${features}"
 
           # The sibling library crates, for the same reason. `-p xberg` alone left the
           # other first-party crates with no doctest coverage at all, and xberg-tesseract
@@ -182,14 +230,34 @@ jobs:
           # Most carry no examples yet; gating them now is what stops the next one from
           # rotting the same way. xberg-cli is a binary with no lib target, so it does
           # not belong here. ~keep
-          cargo test --locked -p xberg-tesseract --doc
-          cargo test --locked -p xberg-gliner --doc
-          cargo test --locked -p xberg-candle-ocr --doc
-          cargo test --locked -p xberg-libheif --doc
-          cargo test --locked -p xberg-libwpd --doc
-          cargo test --locked -p xberg-native-pdf --doc
+          doctest xberg-tesseract -p xberg-tesseract
+          doctest xberg-gliner -p xberg-gliner
+
+          # xberg-candle-ocr pulls candle and so gemm-f16, whose aarch64 inline asm needs
+          # the fullfp16 target feature this runner's baseline lacks -- the same wall the
+          # `xberg` feature substitution above sidesteps, and that scripts/ci/rust/
+          # run-unit-tests.sh excludes xberg-gliner and xberg-wasm for. Confirmed against
+          # the log of job 100200362578: `error: instruction requires: fullfp16` x11 in
+          # gemm-common-0.19.0/src/simd.rs, `could not compile gemm-f16`.
+          # xberg-gliner is clean by default here because its candle backend is opt-in.
+          # x86_64 Linux and macOS still run these doctests. ~keep
+          if [ "$(uname -s)" = "Linux" ] && [ "$(uname -m)" = "aarch64" ]; then
+            echo "Skipping xberg-candle-ocr doctests on Linux aarch64 (gemm-f16 needs fullfp16)"
+          else
+            doctest xberg-candle-ocr -p xberg-candle-ocr
+          fi
+
+          doctest xberg-libheif -p xberg-libheif
+          doctest xberg-libwpd -p xberg-libwpd
+          doctest xberg-native-pdf -p xberg-native-pdf
           # Refuses to build without an inference backend selected.
-          cargo test --locked -p xberg-paddle-ocr --features ort --doc
+          doctest xberg-paddle-ocr -p xberg-paddle-ocr --features ort
+
+          if [ ${#failed[@]} -ne 0 ]; then
+            echo "Doctests failed in ${#failed[@]} crate(s): ${failed[*]}"
+            exit 1
+          fi
+          echo "Doctests passed in all crates."
         shell: bash
         env:
           LD_LIBRARY_PATH: ${{ env.LD_LIBRARY_PATH || '' }}
@@ -268,7 +336,7 @@ jobs:
     name: Rust (windows-latest, static-embeddings link)
     if: github.repository == 'xberg-io/xberg' && github.actor != 'dependabot[bot]' && github.event.pull_request.draft != true
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
         with:
@@ -306,7 +374,7 @@ jobs:
     name: Rust (windows-latest)
     if: github.repository == 'xberg-io/xberg' && github.actor != 'dependabot[bot]' && github.event.pull_request.draft != true
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
         with:
@@ -363,7 +431,7 @@ jobs:
     name: Rust tract-only (no-ORT)
     if: github.repository == 'xberg-io/xberg' && github.actor != 'dependabot[bot]' && github.event.pull_request.draft != true
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 20
+    timeout-minutes: 360
     env:
       TRACT_FEATURES: "ocr,auto-rotate-tract,layout-tract,sceptre-ocr-tract,paddle-ocr-tract"
     steps:
@@ -455,7 +523,7 @@ jobs:
     name: Narrow feature leg (${{ matrix.name }})
     if: github.repository == 'xberg-io/xberg' && github.actor != 'dependabot[bot]' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -496,7 +564,7 @@ jobs:
     name: Narrow feature leg (wasm-target, wasm32)
     if: github.repository == 'xberg-io/xberg' && github.actor != 'dependabot[bot]' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
         with:
@@ -537,7 +605,7 @@ jobs:
     name: xberg-cli feature leg (${{ matrix.name }})
     if: github.repository == 'xberg-io/xberg' && github.actor != 'dependabot[bot]' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -652,7 +720,7 @@ jobs:
     name: Rust pdfium engine (real library)
     if: github.repository == 'xberg-io/xberg' && github.actor != 'dependabot[bot]' && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
         with:
@@ -701,7 +769,7 @@ jobs:
     name: Live HF preset tests
     if: github.repository == 'xberg-io/xberg' && github.actor != 'dependabot[bot]' && github.event.pull_request.draft != true
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 45
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v7
         with:

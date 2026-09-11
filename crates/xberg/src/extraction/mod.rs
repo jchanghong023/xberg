@@ -68,8 +68,6 @@ pub mod html;
 
 #[cfg(feature = "office")]
 pub mod doc;
-#[cfg(feature = "office")]
-pub(crate) mod visio;
 
 #[cfg(feature = "office")]
 pub mod docx;

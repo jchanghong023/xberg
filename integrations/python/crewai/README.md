@@ -7,7 +7,7 @@
 
 # crewai-xberg
 
-[CrewAI](https://www.crewai.com/) tools backed by [Xberg](https://github.com/xberg-io/xberg). Give an agent document intelligence: extract text, metadata, keywords, entities, and summaries from 106 file formats — PDF, DOCX, XLSX, HTML, images with OCR, and more. Extraction is async at the core; the batch tool routes many files through Xberg's `extract_batch` in a single native call.
+[CrewAI](https://www.crewai.com/) tools backed by [Xberg](https://github.com/xberg-io/xberg). Give an agent document intelligence: extract text, metadata, keywords, entities, and summaries from 107 file formats — PDF, DOCX, XLSX, HTML, images with OCR, and more. Extraction is async at the core; the batch tool routes many files through Xberg's `extract_batch` in a single native call.
 
 ## Install
 

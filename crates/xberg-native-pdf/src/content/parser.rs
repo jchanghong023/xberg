@@ -13,6 +13,11 @@
 //! ET
 //! ```
 
+// TODO(xberg-io/xberg#1567): 4 cyclomatic-complexity and 12 size/complexity findings
+// in this file, currently excluded via the quality-debt baseline in alef.toml. Splitting
+// these needs compiler-in-the-loop verification, not a mechanical pass. Delete this
+// note and the file's baseline entry together once it goes green. Help wanted.
+
 use crate::content::operators::{Operator, TextElement};
 use crate::error::Result;
 use crate::object::Object;
@@ -364,22 +369,7 @@ pub fn parse_content_stream_paths_only(data: &[u8]) -> Result<Vec<Operator>> {
                 }
             }
             SCAN_BRACKET => {
-                i += 1;
-                let mut depth = 1u32;
-                while i < len && depth > 0 {
-                    match data[i] {
-                        b'[' => depth += 1,
-                        b']' => depth -= 1,
-                        b'(' => {
-                            if let Some(end) = skip_literal_string_raw(data, i) {
-                                i = end;
-                                continue;
-                            }
-                        }
-                        _ => {}
-                    }
-                    i += 1;
-                }
+                i = skip_bracket_array_scan(data, i);
             }
             SCAN_SLASH => {
                 i = skip_name_raw(data, i);
@@ -405,6 +395,31 @@ pub fn parse_content_stream_paths_only(data: &[u8]) -> Result<Vec<Operator>> {
     }
 
     Ok(operators)
+}
+
+/// Skips a `[...]`-delimited array in the paths-only fast scanner, honoring
+/// nested arrays and literal-string parens so a `)` or `]` inside a string
+/// doesn't terminate the array early. Pure code motion out of the
+/// `SCAN_BRACKET` arm of `parse_content_stream_paths_only`. ~keep
+fn skip_bracket_array_scan(data: &[u8], start: usize) -> usize {
+    let len = data.len();
+    let mut i = start + 1;
+    let mut depth = 1u32;
+    while i < len && depth > 0 {
+        match data[i] {
+            b'[' => depth += 1,
+            b']' => depth -= 1,
+            b'(' => {
+                if let Some(end) = skip_literal_string_raw(data, i) {
+                    i = end;
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    i
 }
 
 /// Parse a content stream for text extraction, skipping pure graphics operators.
@@ -481,71 +496,112 @@ pub fn parse_content_stream_text_only(data: &[u8]) -> Result<Vec<Operator>> {
         } else {
             // Outside BT/ET: byte-level scan — skip operands and graphics
             // operators using raw index arithmetic (no nom IResult overhead). ~keep
-            match scan_graphics_region(input, &mut consecutive_errors) {
-                ScanResult::EndOfData => break,
-                ScanResult::FoundBT { rest } => {
-                    operators.push(Operator::BeginText);
-                    input = rest;
-                    inside_text = true;
-                }
-                ScanResult::InlineImage { rest } => match parse_inline_image(rest) {
-                    Ok((rest2, _)) => input = rest2,
-                    Err(_) => input = rest,
-                },
-                ScanResult::NeedFullParse {
-                    operand_start,
-                    after_op,
-                } => match parse_operator_with_operands(operand_start) {
-                    Ok((rest2, op)) => {
-                        operators.push(op);
-                        input = rest2;
-                    }
-                    Err(_) => input = after_op,
-                },
-                ScanResult::DeferredThenText {
-                    deferred_start,
-                    trigger_start,
-                } => {
-                    // Re-parse the deferred q/cm/Q region to emit CTM-affecting ops.
-                    // The trigger (BT/BI/Do/etc.) is NOT included — the next iteration
-                    // of the outer loop re-enters scan_graphics_region which returns
-                    // the trigger via FoundBT / InlineImage / NeedFullParse. ~keep
-                    let mut remaining = deferred_start;
-                    while remaining.len() > trigger_start.len() {
-                        match parse_operator_with_operands(remaining) {
-                            Ok((rest2, op)) => {
-                                operators.push(op);
-                                remaining = rest2;
-                            }
-                            Err(_) => {
-                                if remaining.len() > 1 {
-                                    remaining = &remaining[1..];
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    input = trigger_start;
-                    consecutive_errors = 0;
-                }
-                ScanResult::SimpleOp { op, rest } => {
-                    operators.push(op);
-                    input = rest;
-                }
-                ScanResult::TooManyErrors { remaining } => {
-                    tracing::warn!(
-                        count = MAX_CONSECUTIVE_ERRORS,
-                        bytes = remaining.len(),
-                        "content stream had too many consecutive parse errors; bailing out"
-                    );
-                    break;
-                }
+            let should_continue = handle_graphics_region_step_buffered(
+                &mut input,
+                &mut consecutive_errors,
+                &mut operators,
+                &mut inside_text,
+            );
+            if !should_continue {
+                break;
             }
         }
     }
 
     Ok(operators)
+}
+
+/// Handles one iteration of `parse_content_stream_text_only`'s outer loop
+/// while outside a `BT`/`ET` text block: dispatches on `scan_graphics_region`
+/// and pushes any operator it should emit into `operators`. Returns `false`
+/// when the caller's loop should stop (end of data or too many consecutive
+/// errors). Pure code motion out of the function's `else` branch. ~keep
+fn handle_graphics_region_step_buffered(
+    input: &mut &[u8],
+    consecutive_errors: &mut usize,
+    operators: &mut Vec<Operator>,
+    inside_text: &mut bool,
+) -> bool {
+    match scan_graphics_region(input, consecutive_errors) {
+        ScanResult::EndOfData => false,
+        ScanResult::FoundBT { rest } => {
+            operators.push(Operator::BeginText);
+            *input = rest;
+            *inside_text = true;
+            true
+        }
+        ScanResult::InlineImage { rest } => {
+            match parse_inline_image(rest) {
+                Ok((rest2, _)) => *input = rest2,
+                Err(_) => *input = rest,
+            }
+            true
+        }
+        ScanResult::NeedFullParse {
+            operand_start,
+            after_op,
+        } => {
+            match parse_operator_with_operands(operand_start) {
+                Ok((rest2, op)) => {
+                    operators.push(op);
+                    *input = rest2;
+                }
+                Err(_) => *input = after_op,
+            }
+            true
+        }
+        ScanResult::DeferredThenText {
+            deferred_start,
+            trigger_start,
+        } => {
+            // Re-parse the deferred q/cm/Q region to emit CTM-affecting ops.
+            // The trigger (BT/BI/Do/etc.) is NOT included — the next iteration
+            // of the outer loop re-enters scan_graphics_region which returns
+            // the trigger via FoundBT / InlineImage / NeedFullParse. ~keep
+            replay_deferred_operators(deferred_start, trigger_start, operators);
+            *input = trigger_start;
+            *consecutive_errors = 0;
+            true
+        }
+        ScanResult::SimpleOp { op, rest } => {
+            operators.push(op);
+            *input = rest;
+            true
+        }
+        ScanResult::TooManyErrors { remaining } => {
+            tracing::warn!(
+                count = MAX_CONSECUTIVE_ERRORS,
+                bytes = remaining.len(),
+                "content stream had too many consecutive parse errors; bailing out"
+            );
+            false
+        }
+    }
+}
+
+/// Replays operators from `deferred_start` up to (but not including)
+/// `trigger_start`, pushing each into `operators`. Used when the
+/// graphics-region scanner defers CTM-affecting operators (q/cm/Q) ahead of a
+/// BT/BI/Do trigger it hasn't consumed yet. Pure code motion out of the
+/// `DeferredThenText` handling shared by the vec-building content-stream
+/// parsers. ~keep
+fn replay_deferred_operators(deferred_start: &[u8], trigger_start: &[u8], operators: &mut Vec<Operator>) {
+    let mut remaining = deferred_start;
+    while remaining.len() > trigger_start.len() {
+        match parse_operator_with_operands(remaining) {
+            Ok((rest2, op)) => {
+                operators.push(op);
+                remaining = rest2;
+            }
+            Err(_) => {
+                if remaining.len() > 1 {
+                    remaining = &remaining[1..];
+                } else {
+                    break;
+                }
+            }
+        }
+    }
 }
 
 /// Text-state parameters tracked by [`forward_scan_ctm`].
@@ -734,21 +790,7 @@ fn forward_scan_ctm(data: &[u8], text_positions: &[usize]) -> Option<Vec<Prescan
                     // because the surrounding bytes are unlikely to
                     // be whitespace). ~keep
                     num_count = 0;
-                    let mut j = i;
-                    while j + 1 < len {
-                        if data[j] == b'E' && data[j + 1] == b'I' {
-                            let before_ok = j == 0 || data[j - 1].is_ascii_whitespace();
-                            let after_ok = j + 2 >= len
-                                || data[j + 2].is_ascii_whitespace()
-                                || matches!(data[j + 2], b'(' | b'<' | b'[' | b'/' | b'%');
-                            if before_ok && after_ok {
-                                j += 2;
-                                break;
-                            }
-                        }
-                        j += 1;
-                    }
-                    i = j;
+                    i = skip_inline_image_scan(data, i);
                     continue;
                 }
                 b"q" => {
@@ -781,98 +823,54 @@ fn forward_scan_ctm(data: &[u8], text_positions: &[usize]) -> Option<Vec<Prescan
                     num_count = 0;
                 }
                 b"Tf" => {
-                    if num_count >= 1 {
-                        let size = num_buf[num_count - 1];
-                        if let Some(ref name) = last_name {
-                            let idx = font_table.len();
-                            font_table.push((name.clone(), size));
-                            current_font_idx = Some(idx);
-                        }
-                    }
+                    record_scan_font(&num_buf, num_count, &last_name, &mut font_table, &mut current_font_idx);
                     num_count = 0;
                 }
                 b"Tc" => {
-                    if num_count >= 1 {
-                        text_state.char_spacing = num_buf[num_count - 1];
-                    }
+                    apply_scan_text_state_f32(&num_buf, num_count, &mut text_state.char_spacing);
                     num_count = 0;
                 }
                 b"Tw" => {
-                    if num_count >= 1 {
-                        text_state.word_spacing = num_buf[num_count - 1];
-                    }
+                    apply_scan_text_state_f32(&num_buf, num_count, &mut text_state.word_spacing);
                     num_count = 0;
                 }
                 b"Tz" => {
-                    if num_count >= 1 {
-                        text_state.horiz_scaling = num_buf[num_count - 1];
-                    }
+                    apply_scan_text_state_f32(&num_buf, num_count, &mut text_state.horiz_scaling);
                     num_count = 0;
                 }
                 b"TL" => {
-                    if num_count >= 1 {
-                        text_state.leading = num_buf[num_count - 1];
-                    }
+                    apply_scan_text_state_f32(&num_buf, num_count, &mut text_state.leading);
                     num_count = 0;
                 }
                 b"Ts" => {
-                    if num_count >= 1 {
-                        text_state.rise = num_buf[num_count - 1];
-                    }
+                    apply_scan_text_state_f32(&num_buf, num_count, &mut text_state.rise);
                     num_count = 0;
                 }
                 b"Tr" => {
-                    if num_count >= 1 {
-                        text_state.render_mode = num_buf[num_count - 1] as u8;
-                    }
+                    apply_scan_render_mode(&num_buf, num_count, &mut text_state.render_mode);
                     num_count = 0;
                 }
                 b"TD" => {
                     // `tx ty TD` also sets the leading to -ty (§9.4.2). ~keep
-                    if num_count >= 2 {
-                        text_state.leading = -num_buf[num_count - 1];
-                    }
+                    apply_scan_leading_from_td(&num_buf, num_count, &mut text_state.leading);
                     num_count = 0;
                 }
                 b"rg" => {
-                    if num_count >= 3 {
-                        fill_op = Some(Operator::SetFillRgb {
-                            r: num_buf[num_count - 3],
-                            g: num_buf[num_count - 2],
-                            b: num_buf[num_count - 1],
-                        });
-                    }
-                    fill_space = None;
+                    apply_scan_fill_rgb(&num_buf, num_count, &mut fill_op, &mut fill_space);
                     num_count = 0;
                 }
                 b"g" => {
-                    if num_count >= 1 {
-                        fill_op = Some(Operator::SetFillGray {
-                            gray: num_buf[num_count - 1],
-                        });
-                    }
-                    fill_space = None;
+                    apply_scan_fill_gray(&num_buf, num_count, &mut fill_op, &mut fill_space);
                     num_count = 0;
                 }
                 b"k" => {
-                    if num_count >= 4 {
-                        fill_op = Some(Operator::SetFillCmyk {
-                            c: num_buf[num_count - 4],
-                            m: num_buf[num_count - 3],
-                            y: num_buf[num_count - 2],
-                            k: num_buf[num_count - 1],
-                        });
-                    }
-                    fill_space = None;
+                    apply_scan_fill_cmyk(&num_buf, num_count, &mut fill_op, &mut fill_space);
                     num_count = 0;
                 }
                 b"cs" => {
                     // `cs` resets the fill color to the space's initial value,
                     // so any earlier color operator no longer applies. ~keep
-                    if let Some(name) = last_name.take() {
-                        fill_space = Some(name);
-                        fill_op = None;
-                    }
+                    apply_scan_fill_colorspace(&mut last_name, &mut fill_space, &mut fill_op);
                     num_count = 0;
                 }
                 b"sc" => {
@@ -882,20 +880,11 @@ fn forward_scan_ctm(data: &[u8], text_positions: &[usize]) -> Option<Vec<Prescan
                     // longer proves a complete window; replay only the 1-4
                     // component device-sized spaces rather than a truncated,
                     // plausible-looking wrong color. ~keep
-                    if (1..=4).contains(&num_count) {
-                        fill_op = Some(Operator::SetFillColor {
-                            components: num_buf[..num_count].to_vec(),
-                        });
-                    }
+                    apply_scan_fill_sc(&num_buf, num_count, &mut fill_op);
                     num_count = 0;
                 }
                 b"scn" => {
-                    if (1..=4).contains(&num_count) || (num_count == 0 && last_name.is_some()) {
-                        fill_op = Some(Operator::SetFillColorN {
-                            components: num_buf[..num_count].to_vec(),
-                            name: last_name.take().map(Box::new),
-                        });
-                    }
+                    apply_scan_fill_scn(&num_buf, num_count, &mut last_name, &mut fill_op);
                     num_count = 0;
                 }
                 _ => {
@@ -942,29 +931,10 @@ fn forward_scan_ctm(data: &[u8], text_positions: &[usize]) -> Option<Vec<Prescan
             continue;
         }
         if b == b'<' {
-            if i + 1 < len && data[i + 1] == b'<' {
-                i += 2;
-                let mut depth = 1u32;
-                while i + 1 < len && depth > 0 {
-                    if data[i] == b'<' && data[i + 1] == b'<' {
-                        depth += 1;
-                        i += 2;
-                    } else if data[i] == b'>' && data[i + 1] == b'>' {
-                        depth -= 1;
-                        i += 2;
-                    } else {
-                        i += 1;
-                    }
-                }
+            let (new_i, was_dict) = skip_dict_or_hex_string_scan(data, i);
+            i = new_i;
+            if was_dict {
                 num_count = 0;
-            } else {
-                i += 1;
-                while i < len && data[i] != b'>' {
-                    i += 1;
-                }
-                if i < len {
-                    i += 1;
-                }
             }
             continue;
         }
@@ -1008,6 +978,207 @@ fn forward_scan_ctm(data: &[u8], text_positions: &[usize]) -> Option<Vec<Prescan
     }
 
     Some(results)
+}
+
+/// Skips the binary data of an inline image (`BI ... ID <bytes> EI`) during
+/// the forward CTM scan, using an `EI` heuristic bounded by
+/// whitespace/delimiter bytes so `EI`-shaped bytes inside the image data
+/// don't terminate it early. Pure code motion out of forward_scan_ctm's `BI`
+/// match arm. ~keep
+fn skip_inline_image_scan(data: &[u8], start: usize) -> usize {
+    let len = data.len();
+    let mut j = start;
+    while j + 1 < len {
+        if data[j] == b'E' && data[j + 1] == b'I' {
+            let before_ok = j == 0 || data[j - 1].is_ascii_whitespace();
+            let after_ok = j + 2 >= len
+                || data[j + 2].is_ascii_whitespace()
+                || matches!(data[j + 2], b'(' | b'<' | b'[' | b'/' | b'%');
+            if before_ok && after_ok {
+                j += 2;
+                break;
+            }
+        }
+        j += 1;
+    }
+    j
+}
+
+/// Handles the `Tf` operator during the forward CTM scan: pushes the
+/// resolved (font name, size) pair into `font_table` and records its index,
+/// if both a font name and a size operand are available. Pure code motion
+/// out of forward_scan_ctm's `Tf` match arm. ~keep
+fn record_scan_font(
+    num_buf: &[f32; 6],
+    num_count: usize,
+    last_name: &Option<String>,
+    font_table: &mut Vec<(String, f32)>,
+    current_font_idx: &mut Option<usize>,
+) {
+    if num_count < 1 {
+        return;
+    }
+    let size = num_buf[num_count - 1];
+    let Some(name) = last_name else {
+        return;
+    };
+    let idx = font_table.len();
+    font_table.push((name.clone(), size));
+    *current_font_idx = Some(idx);
+}
+
+/// Sets a persistent text-state field from the last pending numeric operand,
+/// mirroring the `if num_count >= 1 { field = num_buf[num_count - 1]; }`
+/// shape shared by `Tc`, `Tw`, `Tz`, `TL`, and `Ts` in the forward CTM scan.
+/// Pure code motion, generalized over which field is written. ~keep
+fn apply_scan_text_state_f32(num_buf: &[f32; 6], num_count: usize, field: &mut f32) {
+    if num_count >= 1 {
+        *field = num_buf[num_count - 1];
+    }
+}
+
+/// Handles the `Tr` operator during the forward CTM scan. Pure code motion. ~keep
+fn apply_scan_render_mode(num_buf: &[f32; 6], num_count: usize, render_mode: &mut u8) {
+    if num_count >= 1 {
+        *render_mode = num_buf[num_count - 1] as u8;
+    }
+}
+
+/// Handles the `TD` operator during the forward CTM scan: `tx ty TD` also
+/// sets the leading to `-ty` (ISO 32000-1 §9.4.2). Pure code motion. ~keep
+fn apply_scan_leading_from_td(num_buf: &[f32; 6], num_count: usize, leading: &mut f32) {
+    if num_count >= 2 {
+        *leading = -num_buf[num_count - 1];
+    }
+}
+
+/// Handles the `rg` operator during the forward CTM scan. Pure code motion. ~keep
+fn apply_scan_fill_rgb(
+    num_buf: &[f32; 6],
+    num_count: usize,
+    fill_op: &mut Option<Operator>,
+    fill_space: &mut Option<String>,
+) {
+    if num_count >= 3 {
+        *fill_op = Some(Operator::SetFillRgb {
+            r: num_buf[num_count - 3],
+            g: num_buf[num_count - 2],
+            b: num_buf[num_count - 1],
+        });
+    }
+    *fill_space = None;
+}
+
+/// Handles the `g` operator during the forward CTM scan. Pure code motion. ~keep
+fn apply_scan_fill_gray(
+    num_buf: &[f32; 6],
+    num_count: usize,
+    fill_op: &mut Option<Operator>,
+    fill_space: &mut Option<String>,
+) {
+    if num_count >= 1 {
+        *fill_op = Some(Operator::SetFillGray {
+            gray: num_buf[num_count - 1],
+        });
+    }
+    *fill_space = None;
+}
+
+/// Handles the `k` operator during the forward CTM scan. Pure code motion. ~keep
+fn apply_scan_fill_cmyk(
+    num_buf: &[f32; 6],
+    num_count: usize,
+    fill_op: &mut Option<Operator>,
+    fill_space: &mut Option<String>,
+) {
+    if num_count >= 4 {
+        *fill_op = Some(Operator::SetFillCmyk {
+            c: num_buf[num_count - 4],
+            m: num_buf[num_count - 3],
+            y: num_buf[num_count - 2],
+            k: num_buf[num_count - 1],
+        });
+    }
+    *fill_space = None;
+}
+
+/// Handles the `cs` operator during the forward CTM scan. `cs` resets the
+/// fill color to the space's initial value, so any earlier color operator no
+/// longer applies. Pure code motion. ~keep
+fn apply_scan_fill_colorspace(
+    last_name: &mut Option<String>,
+    fill_space: &mut Option<String>,
+    fill_op: &mut Option<Operator>,
+) {
+    if let Some(name) = last_name.take() {
+        *fill_space = Some(name);
+        *fill_op = None;
+    }
+}
+
+/// Handles the `sc` operator during the forward CTM scan. Operands are the
+/// TAIL of the rolling buffer, like every other arm. The buffer holds 6, so
+/// at 7+ operands the leading ones have rotated away and a full count no
+/// longer proves a complete window; replay only the 1-4 component
+/// device-sized spaces rather than a truncated, plausible-looking wrong
+/// color. Pure code motion. ~keep
+fn apply_scan_fill_sc(num_buf: &[f32; 6], num_count: usize, fill_op: &mut Option<Operator>) {
+    if (1..=4).contains(&num_count) {
+        *fill_op = Some(Operator::SetFillColor {
+            components: num_buf[..num_count].to_vec(),
+        });
+    }
+}
+
+/// Handles the `scn` operator during the forward CTM scan. Pure code motion. ~keep
+fn apply_scan_fill_scn(
+    num_buf: &[f32; 6],
+    num_count: usize,
+    last_name: &mut Option<String>,
+    fill_op: &mut Option<Operator>,
+) {
+    if (1..=4).contains(&num_count) || (num_count == 0 && last_name.is_some()) {
+        *fill_op = Some(Operator::SetFillColorN {
+            components: num_buf[..num_count].to_vec(),
+            name: last_name.take().map(Box::new),
+        });
+    }
+}
+
+/// Skips a `<<...>>` dictionary or `<...>` hex string during the forward CTM
+/// scan, honoring nested dictionaries so a `>>` inside a nested dict doesn't
+/// terminate the outer one early. Returns the new scan position and whether a
+/// dictionary was skipped (which resets the pending numeric-operand buffer,
+/// same as the original inline logic). Pure code motion out of
+/// forward_scan_ctm. ~keep
+fn skip_dict_or_hex_string_scan(data: &[u8], start: usize) -> (usize, bool) {
+    let len = data.len();
+    let mut i = start;
+    if i + 1 < len && data[i + 1] == b'<' {
+        i += 2;
+        let mut depth = 1u32;
+        while i + 1 < len && depth > 0 {
+            if data[i] == b'<' && data[i + 1] == b'<' {
+                depth += 1;
+                i += 2;
+            } else if data[i] == b'>' && data[i + 1] == b'>' {
+                depth -= 1;
+                i += 2;
+            } else {
+                i += 1;
+            }
+        }
+        (i, true)
+    } else {
+        i += 1;
+        while i < len && data[i] != b'>' {
+            i += 1;
+        }
+        if i < len {
+            i += 1;
+        }
+        (i, false)
+    }
 }
 
 /// Result of pre-scanning a content stream for text regions.
@@ -1058,10 +1229,6 @@ impl PrescanResult {
 /// Returns `None` if the forward scan fails, signaling the caller to fall back
 /// to full stream parsing.
 fn prescan_text_regions(data: &[u8]) -> Option<PrescanResult> {
-    fn is_boundary(b: u8) -> bool {
-        b.is_ascii_whitespace() || matches!(b, b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%')
-    }
-
     let len = data.len();
     let mut text_positions: Vec<usize> = Vec::new();
     let mut offset = 0;
@@ -1073,19 +1240,13 @@ fn prescan_text_regions(data: &[u8]) -> Option<PrescanResult> {
                 let pos = offset + rel_pos;
                 offset = pos + 1;
 
-                #[allow(clippy::if_same_then_else)]
-                if data[pos] == b'B' && pos + 1 < len && data[pos + 1] == b'T' {
-                    let before_ok = pos == 0 || is_boundary(data[pos - 1]);
-                    let after_ok = pos + 2 >= len || is_boundary(data[pos + 2]);
-                    if before_ok && after_ok {
-                        text_positions.push(pos);
-                    }
-                } else if data[pos] == b'D' && pos + 1 < len && data[pos + 1] == b'o' {
-                    let before_ok = pos == 0 || is_boundary(data[pos - 1]);
-                    let after_ok = pos + 2 >= len || is_boundary(data[pos + 2]);
-                    if before_ok && after_ok {
-                        text_positions.push(pos);
-                    }
+                let is_match = match data[pos] {
+                    b'B' => is_bounded_two_byte_operator(data, pos, b'T'),
+                    b'D' => is_bounded_two_byte_operator(data, pos, b'o'),
+                    _ => false,
+                };
+                if is_match {
+                    text_positions.push(pos);
                 }
             }
         }
@@ -1134,52 +1295,7 @@ fn prescan_text_regions(data: &[u8]) -> Option<PrescanResult> {
     }
 
     if needs_forward_ctm {
-        // At least one BT was too far from the start of the stream for the
-        // backward scan to capture all enclosing CTM context. Run a lightweight
-        // forward scan to get the full graphics state at each BT/Do position.
-        //
-        // Regions start at the BT/Do position itself (not the backward-scanned
-        // q) to avoid q/Q nesting issues with the SaveState/RestoreState
-        // wrapping. The forward scan also tracks font state so BT blocks that
-        // inherit fonts from prior state get the correct Tf injected. ~keep
-        let states = forward_scan_ctm(data, &text_positions)?;
-
-        // Build BT-based regions with their graphics state.
-        // Extend each region to include preceding BDC/BMC and following EMC
-        // so that marked-content operators are preserved in tagged PDFs. ~keep
-        let mut ctm_regions: Vec<(usize, usize)> = Vec::new();
-        for &tp in &text_positions {
-            let region_start = find_preceding_marked_content(data, tp);
-            let region_end = if data[tp] == b'B' {
-                let et_end = find_matching_et(data, tp + 2).unwrap_or(len);
-                find_following_emc(data, et_end)
-            } else {
-                tp + 2
-            };
-            ctm_regions.push((region_start, region_end.min(len)));
-        }
-
-        let mut indexed: Vec<((usize, usize), PrescanState)> = ctm_regions.into_iter().zip(states).collect();
-        indexed.sort_by_key(|&(r, _)| r.0);
-
-        let mut merged: Vec<(usize, usize)> = Vec::new();
-        let mut merged_states: Vec<PrescanState> = Vec::new();
-
-        for (r, state) in indexed {
-            if let Some(last) = merged.last_mut()
-                && r.0 <= last.1
-            {
-                last.1 = last.1.max(r.1);
-                continue; // Merged — keep the state from the first region ~keep
-            }
-            merged.push(r);
-            merged_states.push(state);
-        }
-
-        return Some(PrescanResult::RegionsWithCtm {
-            regions: merged,
-            region_states: merged_states,
-        });
+        return build_ctm_regions(data, &text_positions);
     }
 
     regions.sort_unstable_by_key(|r| r.0);
@@ -1195,6 +1311,80 @@ fn prescan_text_regions(data: &[u8]) -> Option<PrescanResult> {
     }
 
     Some(PrescanResult::Regions(merged))
+}
+
+/// Whether `b` delimits a token boundary (whitespace or a PDF delimiter
+/// byte), used to confirm a memchr hit is a real operator rather than a
+/// substring inside another token. Pure code motion out of
+/// prescan_text_regions. ~keep
+fn is_boundary(b: u8) -> bool {
+    b.is_ascii_whitespace() || matches!(b, b'(' | b')' | b'<' | b'>' | b'[' | b']' | b'{' | b'}' | b'/' | b'%')
+}
+
+/// Checks whether `data[pos..pos+2]` is a boundary-delimited two-byte
+/// operator (e.g. `BT` or `Do`), used to filter memchr matches down to real
+/// operators. Pure code motion out of prescan_text_regions's memchr loop,
+/// generalized over the second byte. ~keep
+fn is_bounded_two_byte_operator(data: &[u8], pos: usize, second_byte: u8) -> bool {
+    let len = data.len();
+    if pos + 1 >= len || data[pos + 1] != second_byte {
+        return false;
+    }
+    let before_ok = pos == 0 || is_boundary(data[pos - 1]);
+    let after_ok = pos + 2 >= len || is_boundary(data[pos + 2]);
+    before_ok && after_ok
+}
+
+/// Builds CTM-aware text regions once the backward scan couldn't capture
+/// full enclosing graphics-state context for at least one BT/Do position. At
+/// least one BT was too far from the start of the stream for the backward
+/// scan to capture all enclosing CTM context, so this runs a lightweight
+/// forward scan to get the full graphics state at each BT/Do position.
+///
+/// Regions start at the BT/Do position itself (not the backward-scanned q)
+/// to avoid q/Q nesting issues with the SaveState/RestoreState wrapping. The
+/// forward scan also tracks font state so BT blocks that inherit fonts from
+/// prior state get the correct Tf injected. Extends each region to include
+/// preceding BDC/BMC and following EMC so that marked-content operators are
+/// preserved in tagged PDFs, then merges overlapping regions (keeping the
+/// state of the first). Pure code motion out of prescan_text_regions. ~keep
+fn build_ctm_regions(data: &[u8], text_positions: &[usize]) -> Option<PrescanResult> {
+    let len = data.len();
+    let states = forward_scan_ctm(data, text_positions)?;
+
+    let mut ctm_regions: Vec<(usize, usize)> = Vec::new();
+    for &tp in text_positions {
+        let region_start = find_preceding_marked_content(data, tp);
+        let region_end = if data[tp] == b'B' {
+            let et_end = find_matching_et(data, tp + 2).unwrap_or(len);
+            find_following_emc(data, et_end)
+        } else {
+            tp + 2
+        };
+        ctm_regions.push((region_start, region_end.min(len)));
+    }
+
+    let mut indexed: Vec<((usize, usize), PrescanState)> = ctm_regions.into_iter().zip(states).collect();
+    indexed.sort_by_key(|&(r, _)| r.0);
+
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    let mut merged_states: Vec<PrescanState> = Vec::new();
+
+    for (r, state) in indexed {
+        if let Some(last) = merged.last_mut()
+            && r.0 <= last.1
+        {
+            last.1 = last.1.max(r.1);
+            continue; // Merged — keep the state from the first region ~keep
+        }
+        merged.push(r);
+        merged_states.push(state);
+    }
+
+    Some(PrescanResult::RegionsWithCtm {
+        regions: merged,
+        region_states: merged_states,
+    })
 }
 
 /// Scan backwards from `pos` to find the start of the graphics state context.
@@ -1238,42 +1428,19 @@ fn find_region_start(data: &[u8], pos: usize) -> (usize, bool) {
 
         if b == b'q' || b == b'Q' {
             let abs_pos = scan_start + i;
-            let before_ok = i == 0 || {
-                let prev = region[i - 1];
-                prev.is_ascii_whitespace() || matches!(prev, b')' | b'>' | b']')
-            };
-            let after_ok = i + 1 >= region.len() || {
-                let next = region[i + 1];
-                next.is_ascii_whitespace()
-                    || matches!(next, b'(' | b'<' | b'[' | b'/' | b'%')
-                    || next.is_ascii_digit()
-                    || next == b'-'
-                    || next == b'.'
-            };
-
-            if before_ok && after_ok {
+            if is_bounded_q_or_capital_q(region, i) {
                 if b == b'Q' {
                     q_depth += 1;
+                } else if q_depth > 0 {
+                    q_depth -= 1;
                 } else {
-                    if q_depth > 0 {
-                        q_depth -= 1;
-                    } else {
-                        best_q_pos = abs_pos;
-                        break;
-                    }
+                    best_q_pos = abs_pos;
+                    break;
                 }
             }
         } else if b == b'm' && i > 0 && region[i - 1] == b'c' && q_depth == 0 {
             let tok_start = i - 1;
-            let before_ok = tok_start == 0 || {
-                let prev = region[tok_start - 1];
-                prev.is_ascii_whitespace() || matches!(prev, b')' | b'>' | b']')
-            };
-            let after_ok = i + 1 >= region.len() || {
-                let next = region[i + 1];
-                next.is_ascii_whitespace() || next == b'%'
-            };
-            if before_ok && after_ok {
+            if is_bounded_top_level_cm(region, tok_start, i) {
                 saw_top_level_cm = true;
             }
         }
@@ -1288,6 +1455,42 @@ fn find_region_start(data: &[u8], pos: usize) -> (usize, bool) {
     // byte 0 of the stream. ~keep
     let hit_limit = scan_start > 0 || saw_top_level_cm;
     (best_q_pos, hit_limit)
+}
+
+/// Boundary check for a `q`/`Q` operator candidate during find_region_start's
+/// backward scan: the operator must be delimited by whitespace/closing-delim
+/// bytes before and whitespace/opening-delim/numeric bytes after, since a
+/// bare `q`/`Q` byte can appear inside a longer token. Pure code motion out
+/// of find_region_start. ~keep
+fn is_bounded_q_or_capital_q(region: &[u8], i: usize) -> bool {
+    let before_ok = i == 0 || {
+        let prev = region[i - 1];
+        prev.is_ascii_whitespace() || matches!(prev, b')' | b'>' | b']')
+    };
+    let after_ok = i + 1 >= region.len() || {
+        let next = region[i + 1];
+        next.is_ascii_whitespace()
+            || matches!(next, b'(' | b'<' | b'[' | b'/' | b'%')
+            || next.is_ascii_digit()
+            || next == b'-'
+            || next == b'.'
+    };
+    before_ok && after_ok
+}
+
+/// Boundary check for a top-level `cm` operator candidate during
+/// find_region_start's backward scan. Pure code motion out of
+/// find_region_start. ~keep
+fn is_bounded_top_level_cm(region: &[u8], tok_start: usize, i: usize) -> bool {
+    let before_ok = tok_start == 0 || {
+        let prev = region[tok_start - 1];
+        prev.is_ascii_whitespace() || matches!(prev, b')' | b'>' | b']')
+    };
+    let after_ok = i + 1 >= region.len() || {
+        let next = region[i + 1];
+        next.is_ascii_whitespace() || next == b'%'
+    };
+    before_ok && after_ok
 }
 
 /// Scan backward from `pos` to find any immediately preceding BDC/BMC operator.
@@ -1357,6 +1560,82 @@ fn find_matching_et(data: &[u8], start: usize) -> Option<usize> {
     }
 }
 
+/// Runs the per-region CTM/font/text-state injection for
+/// `PrescanResult::RegionsWithCtm`: wraps each region in
+/// `SaveState`/`RestoreState` so state from one region doesn't leak into the
+/// next, and injects the graphics state the forward scan captured before
+/// parsing the region itself. Pure code motion out of
+/// `parse_and_execute_text_only`'s `RegionsWithCtm` match arm. ~keep
+fn run_regions_with_ctm<F>(
+    data: &[u8],
+    regions: &[(usize, usize)],
+    region_states: &[PrescanState],
+    handler: &mut F,
+) -> Result<()>
+where
+    F: FnMut(Operator) -> Result<()>,
+{
+    for (i, (start, end)) in regions.iter().enumerate() {
+        let state = &region_states[i];
+        let (a, b, c, d, e, f) = state.ctm;
+        handler(Operator::SaveState)?;
+        handler(Operator::Cm { a, b, c, d, e, f })?;
+        // Re-inject inherited fill color: glyph color reads the
+        // fill state, which the region wrap would otherwise
+        // reset to black. Space first so components are
+        // interpreted in the right color space. ~keep
+        if let Some(ref name) = state.fill_space {
+            handler(Operator::SetFillColorSpace { name: name.clone() })?;
+        }
+        if let Some(ref op) = state.fill_op {
+            handler(op.clone())?;
+        }
+        // Inject font state if the forward scan tracked one.
+        // This handles BT blocks that inherit Tf from a prior
+        // scope instead of setting their own. ~keep
+        if let Some((ref font_name, font_size)) = state.font {
+            handler(Operator::Tf {
+                font: font_name.clone(),
+                size: font_size,
+            })?;
+        }
+        // Re-inject inherited text state the same way. These
+        // parameters persist across BT/ET, so a region may rely
+        // on a value set by an earlier region — which the
+        // SaveState/RestoreState wrap would otherwise reset.
+        // Only non-default values are injected, keeping the
+        // operator stream unchanged for the common case. ~keep
+        let ts = &state.text;
+        if ts.char_spacing != 0.0 {
+            handler(Operator::Tc {
+                char_space: ts.char_spacing,
+            })?;
+        }
+        if ts.word_spacing != 0.0 {
+            handler(Operator::Tw {
+                word_space: ts.word_spacing,
+            })?;
+        }
+        if ts.horiz_scaling != 100.0 {
+            handler(Operator::Tz {
+                scale: ts.horiz_scaling,
+            })?;
+        }
+        if ts.leading != 0.0 {
+            handler(Operator::TL { leading: ts.leading })?;
+        }
+        if ts.rise != 0.0 {
+            handler(Operator::Ts { rise: ts.rise })?;
+        }
+        if ts.render_mode != 0 {
+            handler(Operator::Tr { render: ts.render_mode })?;
+        }
+        parse_region_text_only(&data[*start..*end], handler)?;
+        handler(Operator::RestoreState)?;
+    }
+    Ok(())
+}
+
 /// Streaming text-only parser: parse operators and call handler immediately.
 ///
 /// Each operator is passed to `handler` as soon as it's parsed, eliminating the
@@ -1388,68 +1667,7 @@ where
                 return Ok(());
             }
             PrescanResult::RegionsWithCtm { regions, region_states } => {
-                // Inject the correct graphics state before each BT region.
-                // Each region is wrapped in SaveState/RestoreState so state
-                // from one region doesn't leak into the next. ~keep
-                for (i, (start, end)) in regions.iter().enumerate() {
-                    let state = &region_states[i];
-                    let (a, b, c, d, e, f) = state.ctm;
-                    handler(Operator::SaveState)?;
-                    handler(Operator::Cm { a, b, c, d, e, f })?;
-                    // Re-inject inherited fill color: glyph color reads the
-                    // fill state, which the region wrap would otherwise
-                    // reset to black. Space first so components are
-                    // interpreted in the right color space. ~keep
-                    if let Some(ref name) = state.fill_space {
-                        handler(Operator::SetFillColorSpace { name: name.clone() })?;
-                    }
-                    if let Some(ref op) = state.fill_op {
-                        handler(op.clone())?;
-                    }
-                    // Inject font state if the forward scan tracked one.
-                    // This handles BT blocks that inherit Tf from a prior
-                    // scope instead of setting their own. ~keep
-                    if let Some((ref font_name, font_size)) = state.font {
-                        handler(Operator::Tf {
-                            font: font_name.clone(),
-                            size: font_size,
-                        })?;
-                    }
-                    // Re-inject inherited text state the same way. These
-                    // parameters persist across BT/ET, so a region may rely
-                    // on a value set by an earlier region — which the
-                    // SaveState/RestoreState wrap would otherwise reset.
-                    // Only non-default values are injected, keeping the
-                    // operator stream unchanged for the common case. ~keep
-                    let ts = &state.text;
-                    if ts.char_spacing != 0.0 {
-                        handler(Operator::Tc {
-                            char_space: ts.char_spacing,
-                        })?;
-                    }
-                    if ts.word_spacing != 0.0 {
-                        handler(Operator::Tw {
-                            word_space: ts.word_spacing,
-                        })?;
-                    }
-                    if ts.horiz_scaling != 100.0 {
-                        handler(Operator::Tz {
-                            scale: ts.horiz_scaling,
-                        })?;
-                    }
-                    if ts.leading != 0.0 {
-                        handler(Operator::TL { leading: ts.leading })?;
-                    }
-                    if ts.rise != 0.0 {
-                        handler(Operator::Ts { rise: ts.rise })?;
-                    }
-                    if ts.render_mode != 0 {
-                        handler(Operator::Tr { render: ts.render_mode })?;
-                    }
-                    parse_region_text_only(&data[*start..*end], &mut handler)?;
-                    handler(Operator::RestoreState)?;
-                }
-                return Ok(());
+                return run_regions_with_ctm(data, &regions, &region_states, &mut handler);
             }
         }
     }
@@ -1477,8 +1695,8 @@ where
 
         if inside_text {
             // Try fast path first (3-5x faster for common text operators) ~keep
-            match parse_text_operator_fast(input) {
-                Some((rest, op)) => {
+            match parse_inside_text_operator(input) {
+                Ok((rest, op)) => {
                     if matches!(op, Operator::EndText) {
                         inside_text = false;
                     }
@@ -1487,100 +1705,155 @@ where
                     input = rest;
                     consecutive_errors = 0;
                 }
-                _ => match parse_operator_with_operands(input) {
-                    Ok((rest, op)) => {
-                        if matches!(op, Operator::EndText) {
-                            inside_text = false;
-                        }
-                        handler(op)?;
-                        op_count += 1;
-                        input = rest;
-                        consecutive_errors = 0;
+                Err(()) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                        tracing::warn!(
+                            count = MAX_CONSECUTIVE_ERRORS,
+                            bytes = input.len(),
+                            "content stream had too many consecutive parse errors; bailing out"
+                        );
+                        break;
                     }
-                    Err(_) => {
-                        consecutive_errors += 1;
-                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                            tracing::warn!(
-                                count = MAX_CONSECUTIVE_ERRORS,
-                                bytes = input.len(),
-                                "content stream had too many consecutive parse errors; bailing out"
-                            );
-                            break;
-                        }
-                        if input.len() > 1 {
-                            input = &input[1..];
-                        } else {
-                            break;
-                        }
+                    if input.len() > 1 {
+                        input = &input[1..];
+                    } else {
+                        break;
                     }
-                },
+                }
             }
         } else {
-            match scan_graphics_region(input, &mut consecutive_errors) {
-                ScanResult::EndOfData => break,
-                ScanResult::FoundBT { rest } => {
-                    handler(Operator::BeginText)?;
-                    op_count += 1;
-                    input = rest;
-                    inside_text = true;
-                }
-                ScanResult::InlineImage { rest } => match parse_inline_image(rest) {
-                    Ok((rest2, _)) => input = rest2,
-                    Err(_) => input = rest,
-                },
-                ScanResult::NeedFullParse {
-                    operand_start,
-                    after_op,
-                } => match parse_operator_with_operands(operand_start) {
-                    Ok((rest2, op)) => {
-                        handler(op)?;
-                        op_count += 1;
-                        input = rest2;
-                    }
-                    Err(_) => input = after_op,
-                },
-                ScanResult::DeferredThenText {
-                    deferred_start,
-                    trigger_start,
-                } => {
-                    let mut remaining = deferred_start;
-                    while remaining.len() > trigger_start.len() {
-                        match parse_operator_with_operands(remaining) {
-                            Ok((rest2, op)) => {
-                                handler(op)?;
-                                op_count += 1;
-                                remaining = rest2;
-                            }
-                            Err(_) => {
-                                if remaining.len() > 1 {
-                                    remaining = &remaining[1..];
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    input = trigger_start;
-                    consecutive_errors = 0;
-                }
-                ScanResult::SimpleOp { op, rest } => {
-                    handler(op)?;
-                    op_count += 1;
-                    input = rest;
-                }
-                ScanResult::TooManyErrors { remaining } => {
-                    tracing::warn!(
-                        count = MAX_CONSECUTIVE_ERRORS,
-                        bytes = remaining.len(),
-                        "content stream had too many consecutive parse errors; bailing out"
-                    );
-                    break;
-                }
+            let should_continue = handle_graphics_region_step(
+                &mut input,
+                &mut consecutive_errors,
+                &mut op_count,
+                &mut inside_text,
+                &mut handler,
+            )?;
+            if !should_continue {
+                break;
             }
         }
     }
 
     Ok(())
+}
+
+/// Parses one operator inside a `BT`/`ET` text block, trying the fast
+/// text-operator parser first and falling back to the full nom-based parser
+/// so both paths agree on operator semantics. Pure code motion out of the
+/// `inside_text` branch shared by `parse_and_execute_text_only` and
+/// `parse_region_text_only` (both parsers already required the two paths to
+/// produce identical results for text operators). ~keep
+fn parse_inside_text_operator(input: &[u8]) -> std::result::Result<(&[u8], Operator), ()> {
+    if let Some((rest, op)) = parse_text_operator_fast(input) {
+        return Ok((rest, op));
+    }
+    parse_operator_with_operands(input).map_err(|_| ())
+}
+
+/// Replays operators from `deferred_start` up to (but not including)
+/// `trigger_start`, routing each through `emit` and counting them into
+/// `op_count`. Used when the graphics-region scanner defers CTM-affecting
+/// operators (q/cm/Q) ahead of a BT/BI/Do trigger it hasn't consumed yet.
+/// Pure code motion, generalized over the emit callback so both the
+/// streaming (`FnMut(Operator) -> Result<()>`) and marked-content-tracking
+/// callers can share it. ~keep
+fn replay_deferred_operators_with(
+    deferred_start: &[u8],
+    trigger_start: &[u8],
+    op_count: &mut usize,
+    mut emit: impl FnMut(Operator) -> Result<()>,
+) -> Result<()> {
+    let mut remaining = deferred_start;
+    while remaining.len() > trigger_start.len() {
+        match parse_operator_with_operands(remaining) {
+            Ok((rest2, op)) => {
+                emit(op)?;
+                *op_count += 1;
+                remaining = rest2;
+            }
+            Err(_) => {
+                if remaining.len() > 1 {
+                    remaining = &remaining[1..];
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Handles one iteration of `parse_and_execute_text_only`'s outer loop while
+/// outside a `BT`/`ET` text block: dispatches on `scan_graphics_region` and
+/// invokes `handler` for any operator it should emit. Returns `false` when
+/// the caller's loop should stop (end of data or too many consecutive
+/// errors). Pure code motion out of its `else` branch. ~keep
+fn handle_graphics_region_step<F>(
+    input: &mut &[u8],
+    consecutive_errors: &mut usize,
+    op_count: &mut usize,
+    inside_text: &mut bool,
+    handler: &mut F,
+) -> Result<bool>
+where
+    F: FnMut(Operator) -> Result<()>,
+{
+    match scan_graphics_region(input, consecutive_errors) {
+        ScanResult::EndOfData => Ok(false),
+        ScanResult::FoundBT { rest } => {
+            handler(Operator::BeginText)?;
+            *op_count += 1;
+            *input = rest;
+            *inside_text = true;
+            Ok(true)
+        }
+        ScanResult::InlineImage { rest } => {
+            match parse_inline_image(rest) {
+                Ok((rest2, _)) => *input = rest2,
+                Err(_) => *input = rest,
+            }
+            Ok(true)
+        }
+        ScanResult::NeedFullParse {
+            operand_start,
+            after_op,
+        } => {
+            match parse_operator_with_operands(operand_start) {
+                Ok((rest2, op)) => {
+                    handler(op)?;
+                    *op_count += 1;
+                    *input = rest2;
+                }
+                Err(_) => *input = after_op,
+            }
+            Ok(true)
+        }
+        ScanResult::DeferredThenText {
+            deferred_start,
+            trigger_start,
+        } => {
+            replay_deferred_operators_with(deferred_start, trigger_start, op_count, &mut *handler)?;
+            *input = trigger_start;
+            *consecutive_errors = 0;
+            Ok(true)
+        }
+        ScanResult::SimpleOp { op, rest } => {
+            handler(op)?;
+            *op_count += 1;
+            *input = rest;
+            Ok(true)
+        }
+        ScanResult::TooManyErrors { remaining } => {
+            tracing::warn!(
+                count = MAX_CONSECUTIVE_ERRORS,
+                bytes = remaining.len(),
+                "content stream had too many consecutive parse errors; bailing out"
+            );
+            Ok(false)
+        }
+    }
 }
 
 /// Parse a sub-region of a content stream for text operators.
@@ -1634,8 +1907,8 @@ where
         }
 
         if inside_text {
-            match parse_text_operator_fast(input) {
-                Some((rest, op)) => {
+            match parse_inside_text_operator(input) {
+                Ok((rest, op)) => {
                     if matches!(op, Operator::EndText) {
                         inside_text = false;
                     }
@@ -1644,83 +1917,29 @@ where
                     input = rest;
                     consecutive_errors = 0;
                 }
-                _ => match parse_operator_with_operands(input) {
-                    Ok((rest, op)) => {
-                        if matches!(op, Operator::EndText) {
-                            inside_text = false;
-                        }
-                        call(op, handler)?;
-                        op_count += 1;
-                        input = rest;
-                        consecutive_errors = 0;
+                Err(()) => {
+                    consecutive_errors += 1;
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                        break;
                     }
-                    Err(_) => {
-                        consecutive_errors += 1;
-                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                            break;
-                        }
-                        if input.len() > 1 {
-                            input = &input[1..];
-                        } else {
-                            break;
-                        }
+                    if input.len() > 1 {
+                        input = &input[1..];
+                    } else {
+                        break;
                     }
-                },
+                }
             }
         } else {
-            match scan_graphics_region(input, &mut consecutive_errors) {
-                ScanResult::EndOfData => break,
-                ScanResult::FoundBT { rest } => {
-                    call(Operator::BeginText, handler)?;
-                    op_count += 1;
-                    input = rest;
-                    inside_text = true;
-                }
-                ScanResult::InlineImage { rest } => match parse_inline_image(rest) {
-                    Ok((rest2, _)) => input = rest2,
-                    Err(_) => input = rest,
-                },
-                ScanResult::NeedFullParse {
-                    operand_start,
-                    after_op,
-                } => match parse_operator_with_operands(operand_start) {
-                    Ok((rest2, op)) => {
-                        call(op, handler)?;
-                        op_count += 1;
-                        input = rest2;
-                    }
-                    Err(_) => input = after_op,
-                },
-                ScanResult::DeferredThenText {
-                    deferred_start,
-                    trigger_start,
-                } => {
-                    let mut remaining = deferred_start;
-                    while remaining.len() > trigger_start.len() {
-                        match parse_operator_with_operands(remaining) {
-                            Ok((rest2, op)) => {
-                                call(op, handler)?;
-                                op_count += 1;
-                                remaining = rest2;
-                            }
-                            Err(_) => {
-                                if remaining.len() > 1 {
-                                    remaining = &remaining[1..];
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    input = trigger_start;
-                    consecutive_errors = 0;
-                }
-                ScanResult::SimpleOp { op, rest } => {
-                    call(op, handler)?;
-                    op_count += 1;
-                    input = rest;
-                }
-                ScanResult::TooManyErrors { .. } => break,
+            let should_continue = handle_graphics_region_step_tracked(
+                &mut input,
+                &mut consecutive_errors,
+                &mut op_count,
+                &mut inside_text,
+                handler,
+                &mut call,
+            )?;
+            if !should_continue {
+                break;
             }
         }
     }
@@ -1735,6 +1954,107 @@ where
     }
 
     Ok(())
+}
+
+/// Replays operators from `deferred_start` up to (but not including)
+/// `trigger_start`, routing each through `call` (which tracks marked-content
+/// depth) and `handler`. Used when the graphics-region scanner defers
+/// CTM-affecting operators (q/cm/Q) ahead of a BT/BI/Do trigger it hasn't
+/// consumed yet. Pure code motion out of `parse_region_text_only`. ~keep
+fn replay_deferred_operators_tracked<F>(
+    deferred_start: &[u8],
+    trigger_start: &[u8],
+    op_count: &mut usize,
+    handler: &mut F,
+    call: &mut impl FnMut(Operator, &mut F) -> Result<()>,
+) -> Result<()>
+where
+    F: FnMut(Operator) -> Result<()>,
+{
+    let mut remaining = deferred_start;
+    while remaining.len() > trigger_start.len() {
+        match parse_operator_with_operands(remaining) {
+            Ok((rest2, op)) => {
+                call(op, handler)?;
+                *op_count += 1;
+                remaining = rest2;
+            }
+            Err(_) => {
+                if remaining.len() > 1 {
+                    remaining = &remaining[1..];
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Handles one iteration of `parse_region_text_only`'s outer loop while
+/// outside a `BT`/`ET` text block: dispatches on `scan_graphics_region` and
+/// routes any operator it should emit through `call` (which tracks
+/// marked-content depth). Returns `false` when the caller's loop should stop
+/// (end of data or too many consecutive errors). Pure code motion out of its
+/// `else` branch. ~keep
+fn handle_graphics_region_step_tracked<F>(
+    input: &mut &[u8],
+    consecutive_errors: &mut usize,
+    op_count: &mut usize,
+    inside_text: &mut bool,
+    handler: &mut F,
+    call: &mut impl FnMut(Operator, &mut F) -> Result<()>,
+) -> Result<bool>
+where
+    F: FnMut(Operator) -> Result<()>,
+{
+    match scan_graphics_region(input, consecutive_errors) {
+        ScanResult::EndOfData => Ok(false),
+        ScanResult::FoundBT { rest } => {
+            call(Operator::BeginText, handler)?;
+            *op_count += 1;
+            *input = rest;
+            *inside_text = true;
+            Ok(true)
+        }
+        ScanResult::InlineImage { rest } => {
+            match parse_inline_image(rest) {
+                Ok((rest2, _)) => *input = rest2,
+                Err(_) => *input = rest,
+            }
+            Ok(true)
+        }
+        ScanResult::NeedFullParse {
+            operand_start,
+            after_op,
+        } => {
+            match parse_operator_with_operands(operand_start) {
+                Ok((rest2, op)) => {
+                    call(op, handler)?;
+                    *op_count += 1;
+                    *input = rest2;
+                }
+                Err(_) => *input = after_op,
+            }
+            Ok(true)
+        }
+        ScanResult::DeferredThenText {
+            deferred_start,
+            trigger_start,
+        } => {
+            replay_deferred_operators_tracked(deferred_start, trigger_start, op_count, handler, call)?;
+            *input = trigger_start;
+            *consecutive_errors = 0;
+            Ok(true)
+        }
+        ScanResult::SimpleOp { op, rest } => {
+            call(op, handler)?;
+            *op_count += 1;
+            *input = rest;
+            Ok(true)
+        }
+        ScanResult::TooManyErrors { .. } => Ok(false),
+    }
 }
 
 /// Image-only content stream parser: skips BT/ET text blocks entirely.
@@ -1797,22 +2117,7 @@ pub fn parse_content_stream_images_only(data: &[u8]) -> Result<Vec<Operator>> {
                     deferred_start,
                     trigger_start,
                 } => {
-                    let mut remaining = deferred_start;
-                    while remaining.len() > trigger_start.len() {
-                        match parse_operator_with_operands(remaining) {
-                            Ok((rest2, op)) => {
-                                operators.push(op);
-                                remaining = rest2;
-                            }
-                            Err(_) => {
-                                if remaining.len() > 1 {
-                                    remaining = &remaining[1..];
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                    }
+                    replay_deferred_operators(deferred_start, trigger_start, &mut operators);
                     input = trigger_start;
                     consecutive_errors = 0;
                 }
@@ -1841,32 +2146,47 @@ fn scan_to_et(data: &[u8]) -> Option<&[u8]> {
             }
         }
         if data[i] == b'(' {
-            i += 1;
-            let mut depth = 1;
-            while i < data.len() && depth > 0 {
-                match data[i] {
-                    b'(' => depth += 1,
-                    b')' => depth -= 1,
-                    b'\\' => i += 1,
-                    _ => {}
-                }
-                i += 1;
-            }
+            i = skip_literal_string_for_et_scan(data, i);
             continue;
         }
         if data[i] == b'<' && (i + 1 >= data.len() || data[i + 1] != b'<') {
-            i += 1;
-            while i < data.len() && data[i] != b'>' {
-                i += 1;
-            }
-            if i < data.len() {
-                i += 1;
-            }
+            i = skip_hex_string_for_et_scan(data, i);
             continue;
         }
         i += 1;
     }
     None
+}
+
+/// Skips a literal string starting at `(` in `scan_to_et`'s ET search,
+/// honoring nested parens and backslash escapes so a `)` inside a string
+/// doesn't terminate it early. Pure code motion out of `scan_to_et`. ~keep
+fn skip_literal_string_for_et_scan(data: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    let mut depth = 1;
+    while i < data.len() && depth > 0 {
+        match data[i] {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b'\\' => i += 1,
+            _ => {}
+        }
+        i += 1;
+    }
+    i
+}
+
+/// Skips a hex string starting at `<` (not `<<`) in `scan_to_et`'s ET
+/// search. Pure code motion out of `scan_to_et`. ~keep
+fn skip_hex_string_for_et_scan(data: &[u8], start: usize) -> usize {
+    let mut i = start + 1;
+    while i < data.len() && data[i] != b'>' {
+        i += 1;
+    }
+    if i < data.len() {
+        i += 1;
+    }
+    i
 }
 
 /// Parse a single operator with its operands.
@@ -1940,35 +2260,44 @@ fn parse_operator_name(input: &[u8]) -> IResult<&[u8], &str> {
 /// Accepts `SmallVec<[Object; 6]>` to avoid heap allocation for the common case
 /// (most PDF operators have 0-6 operands). The operands are consumed and dropped
 /// after extraction.
-fn build_operator(name: &str, operands: SmallVec<[Object; 6]>) -> Operator {
-    match name {
+/// Builds `Td`/`TD`/`Tm`/`T*` operators. `None` if `name` isn't one of these.
+/// Pure code motion out of `build_operator`'s dispatch match. ~keep
+fn build_text_positioning_operator(name: &str, operands: &[Object]) -> Option<Operator> {
+    Some(match name {
         "Td" => {
-            let tx = get_number(&operands, 0).unwrap_or(0.0);
-            let ty = get_number(&operands, 1).unwrap_or(0.0);
+            let tx = get_number(operands, 0).unwrap_or(0.0);
+            let ty = get_number(operands, 1).unwrap_or(0.0);
             Operator::Td { tx, ty }
         }
         "TD" => {
-            let tx = get_number(&operands, 0).unwrap_or(0.0);
-            let ty = get_number(&operands, 1).unwrap_or(0.0);
+            let tx = get_number(operands, 0).unwrap_or(0.0);
+            let ty = get_number(operands, 1).unwrap_or(0.0);
             Operator::TD { tx, ty }
         }
         "Tm" => {
-            let a = get_number(&operands, 0).unwrap_or(1.0);
-            let b = get_number(&operands, 1).unwrap_or(0.0);
-            let c = get_number(&operands, 2).unwrap_or(0.0);
-            let d = get_number(&operands, 3).unwrap_or(1.0);
-            let e = get_number(&operands, 4).unwrap_or(0.0);
-            let f = get_number(&operands, 5).unwrap_or(0.0);
+            let a = get_number(operands, 0).unwrap_or(1.0);
+            let b = get_number(operands, 1).unwrap_or(0.0);
+            let c = get_number(operands, 2).unwrap_or(0.0);
+            let d = get_number(operands, 3).unwrap_or(1.0);
+            let e = get_number(operands, 4).unwrap_or(0.0);
+            let f = get_number(operands, 5).unwrap_or(0.0);
             Operator::Tm { a, b, c, d, e, f }
         }
         "T*" => Operator::TStar,
+        _ => return None,
+    })
+}
 
+/// Builds `Tj`/`TJ`/`'`/`"` operators. `None` if `name` isn't one of these.
+/// Pure code motion out of `build_operator`'s dispatch match. ~keep
+fn build_text_showing_operator(name: &str, operands: &[Object]) -> Option<Operator> {
+    Some(match name {
         "Tj" => {
-            let text = get_string(&operands, 0).unwrap_or_default();
+            let text = get_string(operands, 0).unwrap_or_default();
             Operator::Tj { text }
         }
         "TJ" => {
-            let elements = if let Some(array) = get_array(&operands, 0) {
+            let elements = if let Some(array) = get_array(operands, 0) {
                 array
                     .iter()
                     .filter_map(|obj| match obj {
@@ -1984,103 +2313,133 @@ fn build_operator(name: &str, operands: SmallVec<[Object; 6]>) -> Operator {
             Operator::TJ { array: elements }
         }
         "'" => {
-            let text = get_string(&operands, 0).unwrap_or_default();
+            let text = get_string(operands, 0).unwrap_or_default();
             Operator::Quote { text }
         }
         "\"" => {
-            let word_space = get_number(&operands, 0).unwrap_or(0.0);
-            let char_space = get_number(&operands, 1).unwrap_or(0.0);
-            let text = get_string(&operands, 2).unwrap_or_default();
+            let word_space = get_number(operands, 0).unwrap_or(0.0);
+            let char_space = get_number(operands, 1).unwrap_or(0.0);
+            let text = get_string(operands, 2).unwrap_or_default();
             Operator::DoubleQuote {
                 word_space,
                 char_space,
                 text,
             }
         }
+        _ => return None,
+    })
+}
 
+/// Builds `Tc`/`Tw`/`Tz`/`TL`/`Tf`/`Tr`/`Ts` operators. `None` if `name`
+/// isn't one of these. Pure code motion out of `build_operator`'s dispatch
+/// match. ~keep
+fn build_text_state_operator(name: &str, operands: &[Object]) -> Option<Operator> {
+    Some(match name {
         "Tc" => {
-            let char_space = get_number(&operands, 0).unwrap_or(0.0);
+            let char_space = get_number(operands, 0).unwrap_or(0.0);
             Operator::Tc { char_space }
         }
         "Tw" => {
-            let word_space = get_number(&operands, 0).unwrap_or(0.0);
+            let word_space = get_number(operands, 0).unwrap_or(0.0);
             Operator::Tw { word_space }
         }
         "Tz" => {
-            let scale = get_number(&operands, 0).unwrap_or(100.0);
+            let scale = get_number(operands, 0).unwrap_or(100.0);
             Operator::Tz { scale }
         }
         "TL" => {
-            let leading = get_number(&operands, 0).unwrap_or(0.0);
+            let leading = get_number(operands, 0).unwrap_or(0.0);
             Operator::TL { leading }
         }
         "Tf" => {
-            let font = get_name(&operands, 0).unwrap_or("").to_string();
-            let size = get_number(&operands, 1).unwrap_or(12.0);
+            let font = get_name(operands, 0).unwrap_or("").to_string();
+            let size = get_number(operands, 1).unwrap_or(12.0);
             Operator::Tf { font, size }
         }
         "Tr" => {
-            let render = get_integer(&operands, 0).unwrap_or(0) as u8;
+            let render = get_integer(operands, 0).unwrap_or(0) as u8;
             Operator::Tr { render }
         }
         "Ts" => {
-            let rise = get_number(&operands, 0).unwrap_or(0.0);
+            let rise = get_number(operands, 0).unwrap_or(0.0);
             Operator::Ts { rise }
         }
+        _ => return None,
+    })
+}
 
+/// Builds `q`/`Q`/`cm` operators. `None` if `name` isn't one of these. Pure
+/// code motion out of `build_operator`'s dispatch match. ~keep
+fn build_state_stack_operator(name: &str, operands: &[Object]) -> Option<Operator> {
+    Some(match name {
         "q" => Operator::SaveState,
         "Q" => Operator::RestoreState,
         "cm" => {
-            let a = get_number(&operands, 0).unwrap_or(1.0);
-            let b = get_number(&operands, 1).unwrap_or(0.0);
-            let c = get_number(&operands, 2).unwrap_or(0.0);
-            let d = get_number(&operands, 3).unwrap_or(1.0);
-            let e = get_number(&operands, 4).unwrap_or(0.0);
-            let f = get_number(&operands, 5).unwrap_or(0.0);
+            let a = get_number(operands, 0).unwrap_or(1.0);
+            let b = get_number(operands, 1).unwrap_or(0.0);
+            let c = get_number(operands, 2).unwrap_or(0.0);
+            let d = get_number(operands, 3).unwrap_or(1.0);
+            let e = get_number(operands, 4).unwrap_or(0.0);
+            let f = get_number(operands, 5).unwrap_or(0.0);
             Operator::Cm { a, b, c, d, e, f }
         }
+        _ => return None,
+    })
+}
 
+/// Builds `rg`/`RG`/`g`/`G`/`k`/`K` operators. `None` if `name` isn't one of
+/// these. Pure code motion out of `build_operator`'s dispatch match. ~keep
+fn build_simple_color_operator(name: &str, operands: &[Object]) -> Option<Operator> {
+    Some(match name {
         "rg" => {
-            let r = get_number(&operands, 0).unwrap_or(0.0);
-            let g = get_number(&operands, 1).unwrap_or(0.0);
-            let b = get_number(&operands, 2).unwrap_or(0.0);
+            let r = get_number(operands, 0).unwrap_or(0.0);
+            let g = get_number(operands, 1).unwrap_or(0.0);
+            let b = get_number(operands, 2).unwrap_or(0.0);
             Operator::SetFillRgb { r, g, b }
         }
         "RG" => {
-            let r = get_number(&operands, 0).unwrap_or(0.0);
-            let g = get_number(&operands, 1).unwrap_or(0.0);
-            let b = get_number(&operands, 2).unwrap_or(0.0);
+            let r = get_number(operands, 0).unwrap_or(0.0);
+            let g = get_number(operands, 1).unwrap_or(0.0);
+            let b = get_number(operands, 2).unwrap_or(0.0);
             Operator::SetStrokeRgb { r, g, b }
         }
         "g" => {
-            let gray = get_number(&operands, 0).unwrap_or(0.0);
+            let gray = get_number(operands, 0).unwrap_or(0.0);
             Operator::SetFillGray { gray }
         }
         "G" => {
-            let gray = get_number(&operands, 0).unwrap_or(0.0);
+            let gray = get_number(operands, 0).unwrap_or(0.0);
             Operator::SetStrokeGray { gray }
         }
         "k" => {
-            let c = get_number(&operands, 0).unwrap_or(0.0);
-            let m = get_number(&operands, 1).unwrap_or(0.0);
-            let y = get_number(&operands, 2).unwrap_or(0.0);
-            let k = get_number(&operands, 3).unwrap_or(0.0);
+            let c = get_number(operands, 0).unwrap_or(0.0);
+            let m = get_number(operands, 1).unwrap_or(0.0);
+            let y = get_number(operands, 2).unwrap_or(0.0);
+            let k = get_number(operands, 3).unwrap_or(0.0);
             Operator::SetFillCmyk { c, m, y, k }
         }
         "K" => {
-            let c = get_number(&operands, 0).unwrap_or(0.0);
-            let m = get_number(&operands, 1).unwrap_or(0.0);
-            let y = get_number(&operands, 2).unwrap_or(0.0);
-            let k = get_number(&operands, 3).unwrap_or(0.0);
+            let c = get_number(operands, 0).unwrap_or(0.0);
+            let m = get_number(operands, 1).unwrap_or(0.0);
+            let y = get_number(operands, 2).unwrap_or(0.0);
+            let k = get_number(operands, 3).unwrap_or(0.0);
             Operator::SetStrokeCmyk { c, m, y, k }
         }
+        _ => return None,
+    })
+}
 
+/// Builds `cs`/`CS`/`sc`/`SC`/`scn`/`SCN` operators. `None` if `name` isn't
+/// one of these. Pure code motion out of `build_operator`'s dispatch
+/// match. ~keep
+fn build_indexed_color_operator(name: &str, operands: &[Object]) -> Option<Operator> {
+    Some(match name {
         "cs" => {
-            let name = get_name(&operands, 0).unwrap_or("DeviceGray").to_string();
+            let name = get_name(operands, 0).unwrap_or("DeviceGray").to_string();
             Operator::SetFillColorSpace { name }
         }
         "CS" => {
-            let name = get_name(&operands, 0).unwrap_or("DeviceGray").to_string();
+            let name = get_name(operands, 0).unwrap_or("DeviceGray").to_string();
             Operator::SetStrokeColorSpace { name }
         }
         "sc" => {
@@ -2150,10 +2509,16 @@ fn build_operator(name: &str, operands: SmallVec<[Object; 6]>) -> Operator {
                 name: name.map(Box::new),
             }
         }
+        _ => return None,
+    })
+}
 
+/// Builds `BT`/`ET`/`Do` operators. `None` if `name` isn't one of these.
+/// Pure code motion out of `build_operator`'s dispatch match. ~keep
+fn build_page_object_operator(name: &str, operands: &[Object]) -> Option<Operator> {
+    Some(match name {
         "BT" => Operator::BeginText,
         "ET" => Operator::EndText,
-
         "Do" => {
             // Per ISO 32000-1:2008 §7.8.2, operands "shall immediately precede"
             // their operator and none "shall be left over" once it executes.
@@ -2161,53 +2526,62 @@ fn build_operator(name: &str, operands: SmallVec<[Object; 6]>) -> Operator {
             // accumulated ahead of it (e.g. a dropped/malformed `cm` before this
             // `Do`), the name is still the one immediately preceding the operator,
             // i.e. the LAST element, not necessarily the first. ~keep
-            let name = get_name(&operands, operands.len().saturating_sub(1))
+            let name = get_name(operands, operands.len().saturating_sub(1))
                 .unwrap_or("")
                 .to_string();
             Operator::Do { name }
         }
+        _ => return None,
+    })
+}
 
+/// Builds path-construction and path-painting operators (`m`,`l`,`c`,`v`,
+/// `y`,`h`,`re`,`S`,`f`,`F`,`f*`,`b`,`b*`,`B`,`B*`,`n`,`W`,`W*`). `None` if
+/// `name` isn't one of these. Pure code motion out of `build_operator`'s
+/// dispatch match. ~keep
+fn build_path_operator(name: &str, operands: &[Object]) -> Option<Operator> {
+    Some(match name {
         "m" => {
-            let x = get_number(&operands, 0).unwrap_or(0.0);
-            let y = get_number(&operands, 1).unwrap_or(0.0);
+            let x = get_number(operands, 0).unwrap_or(0.0);
+            let y = get_number(operands, 1).unwrap_or(0.0);
             Operator::MoveTo { x, y }
         }
         "l" => {
-            let x = get_number(&operands, 0).unwrap_or(0.0);
-            let y = get_number(&operands, 1).unwrap_or(0.0);
+            let x = get_number(operands, 0).unwrap_or(0.0);
+            let y = get_number(operands, 1).unwrap_or(0.0);
             Operator::LineTo { x, y }
         }
         "c" => {
-            let x1 = get_number(&operands, 0).unwrap_or(0.0);
-            let y1 = get_number(&operands, 1).unwrap_or(0.0);
-            let x2 = get_number(&operands, 2).unwrap_or(0.0);
-            let y2 = get_number(&operands, 3).unwrap_or(0.0);
-            let x3 = get_number(&operands, 4).unwrap_or(0.0);
-            let y3 = get_number(&operands, 5).unwrap_or(0.0);
+            let x1 = get_number(operands, 0).unwrap_or(0.0);
+            let y1 = get_number(operands, 1).unwrap_or(0.0);
+            let x2 = get_number(operands, 2).unwrap_or(0.0);
+            let y2 = get_number(operands, 3).unwrap_or(0.0);
+            let x3 = get_number(operands, 4).unwrap_or(0.0);
+            let y3 = get_number(operands, 5).unwrap_or(0.0);
             Operator::CurveTo { x1, y1, x2, y2, x3, y3 }
         }
         "v" => {
             // Bézier curve (first control point = current point) ~keep
-            let x2 = get_number(&operands, 0).unwrap_or(0.0);
-            let y2 = get_number(&operands, 1).unwrap_or(0.0);
-            let x3 = get_number(&operands, 2).unwrap_or(0.0);
-            let y3 = get_number(&operands, 3).unwrap_or(0.0);
+            let x2 = get_number(operands, 0).unwrap_or(0.0);
+            let y2 = get_number(operands, 1).unwrap_or(0.0);
+            let x3 = get_number(operands, 2).unwrap_or(0.0);
+            let y3 = get_number(operands, 3).unwrap_or(0.0);
             Operator::CurveToV { x2, y2, x3, y3 }
         }
         "y" => {
             // Bézier curve (second control point = end point) ~keep
-            let x1 = get_number(&operands, 0).unwrap_or(0.0);
-            let y1 = get_number(&operands, 1).unwrap_or(0.0);
-            let x3 = get_number(&operands, 2).unwrap_or(0.0);
-            let y3 = get_number(&operands, 3).unwrap_or(0.0);
+            let x1 = get_number(operands, 0).unwrap_or(0.0);
+            let y1 = get_number(operands, 1).unwrap_or(0.0);
+            let x3 = get_number(operands, 2).unwrap_or(0.0);
+            let y3 = get_number(operands, 3).unwrap_or(0.0);
             Operator::CurveToY { x1, y1, x3, y3 }
         }
         "h" => Operator::ClosePath,
         "re" => {
-            let x = get_number(&operands, 0).unwrap_or(0.0);
-            let y = get_number(&operands, 1).unwrap_or(0.0);
-            let width = get_number(&operands, 2).unwrap_or(0.0);
-            let height = get_number(&operands, 3).unwrap_or(0.0);
+            let x = get_number(operands, 0).unwrap_or(0.0);
+            let y = get_number(operands, 1).unwrap_or(0.0);
+            let width = get_number(operands, 2).unwrap_or(0.0);
+            let height = get_number(operands, 3).unwrap_or(0.0);
             Operator::Rectangle { x, y, width, height }
         }
         "S" => Operator::Stroke,
@@ -2221,9 +2595,16 @@ fn build_operator(name: &str, operands: SmallVec<[Object; 6]>) -> Operator {
         "n" => Operator::EndPath,
         "W" => Operator::ClipNonZero,
         "W*" => Operator::ClipEvenOdd,
+        _ => return None,
+    })
+}
 
+/// Builds `w`/`d`/`J`/`j`/`M`/`ri`/`i` operators. `None` if `name` isn't one
+/// of these. Pure code motion out of `build_operator`'s dispatch match. ~keep
+fn build_line_style_operator(name: &str, operands: &[Object]) -> Option<Operator> {
+    Some(match name {
         "w" => {
-            let width = get_number(&operands, 0).unwrap_or(1.0);
+            let width = get_number(operands, 0).unwrap_or(1.0);
             Operator::SetLineWidth { width }
         }
         "d" => {
@@ -2240,71 +2621,122 @@ fn build_operator(name: &str, operands: SmallVec<[Object; 6]>) -> Operator {
             } else {
                 Vec::new()
             };
-            let phase = get_number(&operands, 1).unwrap_or(0.0);
+            let phase = get_number(operands, 1).unwrap_or(0.0);
             Operator::SetDash { array, phase }
         }
         "J" => {
             // J operator: integer J
             // 0=butt cap, 1=round cap, 2=projecting square cap ~keep
-            let cap_style = get_integer(&operands, 0).unwrap_or(0) as u8;
+            let cap_style = get_integer(operands, 0).unwrap_or(0) as u8;
             Operator::SetLineCap { cap_style }
         }
         "j" => {
             // j operator: integer j
             // 0=miter join, 1=round join, 2=bevel join ~keep
-            let join_style = get_integer(&operands, 0).unwrap_or(0) as u8;
+            let join_style = get_integer(operands, 0).unwrap_or(0) as u8;
             Operator::SetLineJoin { join_style }
         }
         "M" => {
             // M operator: number M
             // Miter limit (ratio of miter length to line width) ~keep
-            let limit = get_number(&operands, 0).unwrap_or(10.0);
+            let limit = get_number(operands, 0).unwrap_or(10.0);
             Operator::SetMiterLimit { limit }
         }
         "ri" => {
             // ri operator: name ri
             // Rendering intent: /AbsoluteColorimetric, /RelativeColorimetric, /Saturation, or /Perceptual
             // ~keep
-            let intent = get_name(&operands, 0).unwrap_or("RelativeColorimetric").to_string();
+            let intent = get_name(operands, 0).unwrap_or("RelativeColorimetric").to_string();
             Operator::SetRenderingIntent { intent }
         }
         "i" => {
             // i operator: number i
             // Flatness tolerance (0-100) ~keep
-            let tolerance = get_number(&operands, 0).unwrap_or(1.0);
+            let tolerance = get_number(operands, 0).unwrap_or(1.0);
             Operator::SetFlatness { tolerance }
         }
+        _ => return None,
+    })
+}
+
+/// Builds `gs`/`sh` operators. `None` if `name` isn't one of these. Pure
+/// code motion out of `build_operator`'s dispatch match. ~keep
+fn build_ext_state_operator(name: &str, operands: &[Object]) -> Option<Operator> {
+    Some(match name {
         "gs" => {
-            let dict_name = get_name(&operands, 0).unwrap_or("").to_string();
+            let dict_name = get_name(operands, 0).unwrap_or("").to_string();
             Operator::SetExtGState { dict_name }
         }
         "sh" => {
-            let name = get_name(&operands, 0).unwrap_or("").to_string();
+            let name = get_name(operands, 0).unwrap_or("").to_string();
             Operator::PaintShading { name }
         }
+        _ => return None,
+    })
+}
 
-        // Marked content operators (for tagged PDF structure)
-        // PDF Spec: ISO 32000-1:2008, Section 14.6 ~keep
+/// Builds `BMC`/`BDC`/`EMC` marked content operators (for tagged PDF
+/// structure), ISO 32000-1:2008 §14.6. `None` if `name` isn't one of these.
+/// Pure code motion out of `build_operator`'s dispatch match. ~keep
+fn build_marked_content_operator(name: &str, operands: &[Object]) -> Option<Operator> {
+    Some(match name {
         "BMC" => {
-            let tag = get_name(&operands, 0).unwrap_or("").to_string();
+            let tag = get_name(operands, 0).unwrap_or("").to_string();
             Operator::BeginMarkedContent { tag }
         }
         "BDC" => {
             // Begin marked content with properties: tag properties BDC
             // properties can be a dictionary or a name (reference to /Properties resource) ~keep
-            let tag = get_name(&operands, 0).unwrap_or("").to_string();
+            let tag = get_name(operands, 0).unwrap_or("").to_string();
             let properties = Box::new(operands.get(1).cloned().unwrap_or(Object::Null));
             Operator::BeginMarkedContentDict { tag, properties }
         }
         "EMC" => Operator::EndMarkedContent,
+        _ => return None,
+    })
+}
 
-        // Unknown operator — convert SmallVec to Vec for the boxed storage.
-        // This path is rare (only for unrecognized operators), so the
-        // conversion cost is negligible. ~keep
-        _ => Operator::Other {
-            name: name.to_string(),
-            operands: Box::new(operands.into_vec()),
-        },
+fn build_operator(name: &str, operands: SmallVec<[Object; 6]>) -> Operator {
+    if let Some(op) = build_text_positioning_operator(name, &operands) {
+        return op;
+    }
+    if let Some(op) = build_text_showing_operator(name, &operands) {
+        return op;
+    }
+    if let Some(op) = build_text_state_operator(name, &operands) {
+        return op;
+    }
+    if let Some(op) = build_state_stack_operator(name, &operands) {
+        return op;
+    }
+    if let Some(op) = build_simple_color_operator(name, &operands) {
+        return op;
+    }
+    if let Some(op) = build_indexed_color_operator(name, &operands) {
+        return op;
+    }
+    if let Some(op) = build_page_object_operator(name, &operands) {
+        return op;
+    }
+    if let Some(op) = build_path_operator(name, &operands) {
+        return op;
+    }
+    if let Some(op) = build_line_style_operator(name, &operands) {
+        return op;
+    }
+    if let Some(op) = build_ext_state_operator(name, &operands) {
+        return op;
+    }
+    if let Some(op) = build_marked_content_operator(name, &operands) {
+        return op;
+    }
+
+    // Unknown operator — convert SmallVec to Vec for the boxed storage.
+    // This path is rare (only for unrecognized operators), so the
+    // conversion cost is negligible. ~keep
+    Operator::Other {
+        name: name.to_string(),
+        operands: Box::new(operands.into_vec()),
     }
 }
 
@@ -3032,67 +3464,9 @@ fn parse_literal_string_fast(data: &[u8], start: usize) -> Option<(Vec<u8>, usiz
     let mut result = Vec::new();
     while i < data.len() && depth > 0 {
         match data[i] {
-            b'\\' if i + 1 < data.len() => match data[i + 1] {
-                b'n' => {
-                    result.push(b'\n');
-                    i += 2;
-                }
-                b'r' => {
-                    result.push(b'\r');
-                    i += 2;
-                }
-                b't' => {
-                    result.push(b'\t');
-                    i += 2;
-                }
-                b'b' => {
-                    result.push(0x08);
-                    i += 2;
-                }
-                b'f' => {
-                    result.push(0x0C);
-                    i += 2;
-                }
-                b'(' => {
-                    result.push(b'(');
-                    i += 2;
-                }
-                b')' => {
-                    result.push(b')');
-                    i += 2;
-                }
-                b'\\' => {
-                    result.push(b'\\');
-                    i += 2;
-                }
-                b'0'..=b'7' => {
-                    let mut octal: u32 = (data[i + 1] - b'0') as u32;
-                    let mut j = i + 2;
-                    for _ in 0..2 {
-                        if j < data.len() && (b'0'..=b'7').contains(&data[j]) {
-                            octal = octal * 8 + (data[j] - b'0') as u32;
-                            j += 1;
-                        } else {
-                            break;
-                        }
-                    }
-                    result.push((octal & 0xFF) as u8);
-                    i = j;
-                }
-                b'\r' => {
-                    i += 2;
-                    if i < data.len() && data[i] == b'\n' {
-                        i += 1;
-                    }
-                }
-                b'\n' => {
-                    i += 2;
-                }
-                _ => {
-                    result.push(data[i + 1]);
-                    i += 2;
-                }
-            },
+            b'\\' if i + 1 < data.len() => {
+                i = parse_string_escape(data, i, &mut result);
+            }
             b'(' => {
                 depth += 1;
                 result.push(b'(');
@@ -3112,6 +3486,83 @@ fn parse_literal_string_fast(data: &[u8], start: usize) -> Option<(Vec<u8>, usiz
         }
     }
     if depth == 0 { Some((result, i)) } else { None }
+}
+
+/// Parses one backslash escape sequence in a literal string, starting at the
+/// backslash position `i` (with `i + 1 < data.len()` guaranteed by the
+/// caller). Pushes the decoded byte(s) — zero for line-continuation escapes —
+/// into `result` and returns the index just past the escape. Pure code
+/// motion out of `parse_literal_string_fast`'s main scan loop. ~keep
+fn parse_string_escape(data: &[u8], i: usize, result: &mut Vec<u8>) -> usize {
+    match data[i + 1] {
+        b'n' => {
+            result.push(b'\n');
+            i + 2
+        }
+        b'r' => {
+            result.push(b'\r');
+            i + 2
+        }
+        b't' => {
+            result.push(b'\t');
+            i + 2
+        }
+        b'b' => {
+            result.push(0x08);
+            i + 2
+        }
+        b'f' => {
+            result.push(0x0C);
+            i + 2
+        }
+        b'(' => {
+            result.push(b'(');
+            i + 2
+        }
+        b')' => {
+            result.push(b')');
+            i + 2
+        }
+        b'\\' => {
+            result.push(b'\\');
+            i + 2
+        }
+        b'0'..=b'7' => {
+            let (byte, j) = parse_octal_escape(data, i + 1);
+            result.push(byte);
+            j
+        }
+        b'\r' => {
+            let mut i = i + 2;
+            if i < data.len() && data[i] == b'\n' {
+                i += 1;
+            }
+            i
+        }
+        b'\n' => i + 2,
+        _ => {
+            result.push(data[i + 1]);
+            i + 2
+        }
+    }
+}
+
+/// Parses a `\ddd` octal escape (1-3 octal digits) starting at
+/// `first_digit_at` in a literal-string escape sequence, returning the
+/// decoded byte and the index just past the digits consumed. Pure code
+/// motion out of `parse_literal_string_fast`'s escape handling. ~keep
+fn parse_octal_escape(data: &[u8], first_digit_at: usize) -> (u8, usize) {
+    let mut octal: u32 = (data[first_digit_at] - b'0') as u32;
+    let mut j = first_digit_at + 1;
+    for _ in 0..2 {
+        if j < data.len() && (b'0'..=b'7').contains(&data[j]) {
+            octal = octal * 8 + (data[j] - b'0') as u32;
+            j += 1;
+        } else {
+            break;
+        }
+    }
+    ((octal & 0xFF) as u8, j)
 }
 
 /// Parse a hex string `<...>` from bytes. Returns (decoded_bytes, position_after_close_angle).
@@ -3208,6 +3659,395 @@ fn parse_name_fast(data: &[u8], start: usize) -> (String, usize) {
     }
     let name = String::from_utf8_lossy(&data[name_start..i]).to_string();
     (name, i)
+}
+
+/// Builds `Td`/`TD`/`Tm`/`T*` operators for the fast text-operator parser.
+/// `None` if `op_bytes` isn't one of these. Pure code motion out of
+/// `parse_text_operator_fast`'s dispatch match. ~keep
+fn parse_fast_op_positioning(op_bytes: &[u8], operands: &[Option<FastOperand>; 8]) -> Option<Operator> {
+    Some(match op_bytes {
+        b"Td" => {
+            let tx = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            let ty = match &operands[1] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            Operator::Td { tx, ty }
+        }
+        b"TD" => {
+            let tx = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            let ty = match &operands[1] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            Operator::TD { tx, ty }
+        }
+        b"Tm" => {
+            let get_n = |i: usize, def: f32| match &operands[i] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => def,
+            };
+            Operator::Tm {
+                a: get_n(0, 1.0),
+                b: get_n(1, 0.0),
+                c: get_n(2, 0.0),
+                d: get_n(3, 1.0),
+                e: get_n(4, 0.0),
+                f: get_n(5, 0.0),
+            }
+        }
+        b"T*" => Operator::TStar,
+        _ => return None,
+    })
+}
+
+/// Builds `Tj`/`TJ`/`'`/`"` operators for the fast text-operator parser.
+/// `None` if `op_bytes` isn't one of these. Takes `operands` mutably because
+/// the string-bearing operands are moved out via `.take()`, matching the
+/// original inline arms. Pure code motion out of
+/// `parse_text_operator_fast`'s dispatch match. ~keep
+fn parse_fast_op_showing(op_bytes: &[u8], operands: &mut [Option<FastOperand>; 8]) -> Option<Operator> {
+    Some(match op_bytes {
+        b"Tj" => {
+            let text = match operands[0].take() {
+                Some(FastOperand::StringBytes(b)) => b,
+                _ => Vec::new(),
+            };
+            Operator::Tj { text }
+        }
+        b"TJ" => {
+            let array = match operands[0].take() {
+                Some(FastOperand::TextArray(a)) => a,
+                _ => Vec::new(),
+            };
+            Operator::TJ { array }
+        }
+        b"'" => {
+            let text = match operands[0].take() {
+                Some(FastOperand::StringBytes(b)) => b,
+                _ => Vec::new(),
+            };
+            Operator::Quote { text }
+        }
+        b"\"" => {
+            let word_space = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            let char_space = match &operands[1] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            let text = match operands[2].take() {
+                Some(FastOperand::StringBytes(b)) => b,
+                _ => Vec::new(),
+            };
+            Operator::DoubleQuote {
+                word_space,
+                char_space,
+                text,
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// Builds `Tc`/`Tw`/`Tz`/`TL`/`Tr`/`Ts` operators for the fast text-operator
+/// parser. `None` if `op_bytes` isn't one of these. Pure code motion out of
+/// `parse_text_operator_fast`'s dispatch match. ~keep
+fn parse_fast_op_text_state(op_bytes: &[u8], operands: &[Option<FastOperand>; 8]) -> Option<Operator> {
+    Some(match op_bytes {
+        b"Tc" => {
+            let char_space = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            Operator::Tc { char_space }
+        }
+        b"Tw" => {
+            let word_space = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            Operator::Tw { word_space }
+        }
+        b"Tz" => {
+            let scale = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 100.0,
+            };
+            Operator::Tz { scale }
+        }
+        b"TL" => {
+            let leading = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            Operator::TL { leading }
+        }
+        b"Tr" => {
+            let render = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n as u8,
+                _ => 0,
+            };
+            Operator::Tr { render }
+        }
+        b"Ts" => {
+            let rise = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            Operator::Ts { rise }
+        }
+        _ => return None,
+    })
+}
+
+/// Builds `q`/`Q`/`cm` operators for the fast text-operator parser. `None`
+/// if `op_bytes` isn't one of these. Pure code motion out of
+/// `parse_text_operator_fast`'s dispatch match. ~keep
+fn parse_fast_op_state_stack(op_bytes: &[u8], operands: &[Option<FastOperand>; 8]) -> Option<Operator> {
+    Some(match op_bytes {
+        b"q" => Operator::SaveState,
+        b"Q" => Operator::RestoreState,
+        b"cm" => {
+            let get_n = |i: usize, def: f32| match &operands[i] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => def,
+            };
+            Operator::Cm {
+                a: get_n(0, 1.0),
+                b: get_n(1, 0.0),
+                c: get_n(2, 0.0),
+                d: get_n(3, 1.0),
+                e: get_n(4, 0.0),
+                f: get_n(5, 0.0),
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// Builds `rg`/`RG`/`g`/`G`/`k`/`K` operators for the fast text-operator
+/// parser. `None` if `op_bytes` isn't one of these. Pure code motion out of
+/// `parse_text_operator_fast`'s dispatch match. ~keep
+fn parse_fast_op_simple_color(op_bytes: &[u8], operands: &[Option<FastOperand>; 8]) -> Option<Operator> {
+    Some(match op_bytes {
+        b"rg" => {
+            let get_n = |i: usize| match &operands[i] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            Operator::SetFillRgb {
+                r: get_n(0),
+                g: get_n(1),
+                b: get_n(2),
+            }
+        }
+        b"RG" => {
+            let get_n = |i: usize| match &operands[i] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            Operator::SetStrokeRgb {
+                r: get_n(0),
+                g: get_n(1),
+                b: get_n(2),
+            }
+        }
+        b"g" => {
+            let gray = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            Operator::SetFillGray { gray }
+        }
+        b"G" => {
+            let gray = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            Operator::SetStrokeGray { gray }
+        }
+        b"k" => {
+            let get_n = |i: usize| match &operands[i] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            Operator::SetFillCmyk {
+                c: get_n(0),
+                m: get_n(1),
+                y: get_n(2),
+                k: get_n(3),
+            }
+        }
+        b"K" => {
+            let get_n = |i: usize| match &operands[i] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            Operator::SetStrokeCmyk {
+                c: get_n(0),
+                m: get_n(1),
+                y: get_n(2),
+                k: get_n(3),
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// Builds `cs`/`CS`/`sc`/`SC`/`scn`/`SCN` operators for the fast
+/// text-operator parser. `None` if `op_bytes` isn't one of these. Pure code
+/// motion out of `parse_text_operator_fast`'s dispatch match. ~keep
+fn parse_fast_op_indexed_color(
+    op_bytes: &[u8],
+    operands: &[Option<FastOperand>; 8],
+    op_count: usize,
+) -> Option<Operator> {
+    Some(match op_bytes {
+        b"cs" => {
+            let name = match &operands[0] {
+                Some(FastOperand::Name(n)) => n.clone(),
+                _ => "DeviceGray".to_string(),
+            };
+            Operator::SetFillColorSpace { name }
+        }
+        b"CS" => {
+            let name = match &operands[0] {
+                Some(FastOperand::Name(n)) => n.clone(),
+                _ => "DeviceGray".to_string(),
+            };
+            Operator::SetStrokeColorSpace { name }
+        }
+        b"sc" => {
+            let components: Vec<f32> = operands[..op_count]
+                .iter()
+                .filter_map(|o| match o {
+                    Some(FastOperand::Number(n)) => Some(*n),
+                    _ => None,
+                })
+                .collect();
+            Operator::SetFillColor { components }
+        }
+        b"SC" => {
+            let components: Vec<f32> = operands[..op_count]
+                .iter()
+                .filter_map(|o| match o {
+                    Some(FastOperand::Number(n)) => Some(*n),
+                    _ => None,
+                })
+                .collect();
+            Operator::SetStrokeColor { components }
+        }
+        b"scn" => {
+            let name = match &operands[op_count.saturating_sub(1)] {
+                Some(FastOperand::Name(n)) => Some(n.clone()),
+                _ => None,
+            };
+            let components: Vec<f32> = operands[..op_count]
+                .iter()
+                .filter_map(|o| match o {
+                    Some(FastOperand::Number(n)) => Some(*n),
+                    _ => None,
+                })
+                .collect();
+            Operator::SetFillColorN {
+                components,
+                name: name.map(Box::new),
+            }
+        }
+        b"SCN" => {
+            let name = match &operands[op_count.saturating_sub(1)] {
+                Some(FastOperand::Name(n)) => Some(n.clone()),
+                _ => None,
+            };
+            let components: Vec<f32> = operands[..op_count]
+                .iter()
+                .filter_map(|o| match o {
+                    Some(FastOperand::Number(n)) => Some(*n),
+                    _ => None,
+                })
+                .collect();
+            Operator::SetStrokeColorN {
+                components,
+                name: name.map(Box::new),
+            }
+        }
+        _ => return None,
+    })
+}
+
+/// Builds `gs`/`Do` operators for the fast text-operator parser. `None` if
+/// `op_bytes` isn't one of these. Pure code motion out of
+/// `parse_text_operator_fast`'s dispatch match. ~keep
+fn parse_fast_op_ext_state_or_xobject(
+    op_bytes: &[u8],
+    operands: &[Option<FastOperand>; 8],
+    op_count: usize,
+) -> Option<Operator> {
+    Some(match op_bytes {
+        b"gs" => {
+            let dict_name = match &operands[0] {
+                Some(FastOperand::Name(n)) => n.clone(),
+                _ => String::new(),
+            };
+            Operator::SetExtGState { dict_name }
+        }
+        b"Do" => {
+            // See the nom-parser "Do" arm in `build_operator` for why
+            // this reads the last operand, not operands[0]. ~keep
+            let name = match &operands[op_count.saturating_sub(1)] {
+                Some(FastOperand::Name(n)) => n.clone(),
+                _ => String::new(),
+            };
+            Operator::Do { name }
+        }
+        _ => return None,
+    })
+}
+
+/// Builds `w`/`J`/`j`/`i` operators for the fast text-operator parser.
+/// `None` if `op_bytes` isn't one of these. Pure code motion out of
+/// `parse_text_operator_fast`'s dispatch match. ~keep
+fn parse_fast_op_line_style(op_bytes: &[u8], operands: &[Option<FastOperand>; 8]) -> Option<Operator> {
+    Some(match op_bytes {
+        b"w" => {
+            let width = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 1.0,
+            };
+            Operator::SetLineWidth { width }
+        }
+        b"J" => {
+            let cap_style = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n as u8,
+                _ => 0,
+            };
+            Operator::SetLineCap { cap_style }
+        }
+        b"j" => {
+            let join_style = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n as u8,
+                _ => 0,
+            };
+            Operator::SetLineJoin { join_style }
+        }
+        b"i" => {
+            let tolerance = match &operands[0] {
+                Some(FastOperand::Number(n)) => *n,
+                _ => 0.0,
+            };
+            Operator::SetFlatness { tolerance }
+        }
+        _ => return None,
+    })
 }
 
 /// Fast parser for a single operator inside a BT/ET text block.
@@ -3322,313 +4162,16 @@ fn parse_text_operator_fast(input: &[u8]) -> Option<(&[u8], Operator)> {
                         };
                         Operator::Tf { font, size }
                     }
-                    b"Td" => {
-                        let tx = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        let ty = match &operands[1] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        Operator::Td { tx, ty }
+                    b"Td" | b"TD" | b"Tm" | b"T*" => parse_fast_op_positioning(op_bytes, &operands)?,
+                    b"Tj" | b"TJ" | b"'" | b"\"" => parse_fast_op_showing(op_bytes, &mut operands)?,
+                    b"Tc" | b"Tw" | b"Tz" | b"TL" | b"Tr" | b"Ts" => parse_fast_op_text_state(op_bytes, &operands)?,
+                    b"q" | b"Q" | b"cm" => parse_fast_op_state_stack(op_bytes, &operands)?,
+                    b"rg" | b"RG" | b"g" | b"G" | b"k" | b"K" => parse_fast_op_simple_color(op_bytes, &operands)?,
+                    b"cs" | b"CS" | b"sc" | b"SC" | b"scn" | b"SCN" => {
+                        parse_fast_op_indexed_color(op_bytes, &operands, op_count)?
                     }
-                    b"TD" => {
-                        let tx = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        let ty = match &operands[1] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        Operator::TD { tx, ty }
-                    }
-                    b"Tm" => {
-                        let get_n = |i: usize, def: f32| match &operands[i] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => def,
-                        };
-                        Operator::Tm {
-                            a: get_n(0, 1.0),
-                            b: get_n(1, 0.0),
-                            c: get_n(2, 0.0),
-                            d: get_n(3, 1.0),
-                            e: get_n(4, 0.0),
-                            f: get_n(5, 0.0),
-                        }
-                    }
-                    b"T*" => Operator::TStar,
-                    b"Tj" => {
-                        let text = match operands[0].take() {
-                            Some(FastOperand::StringBytes(b)) => b,
-                            _ => Vec::new(),
-                        };
-                        Operator::Tj { text }
-                    }
-                    b"TJ" => {
-                        let array = match operands[0].take() {
-                            Some(FastOperand::TextArray(a)) => a,
-                            _ => Vec::new(),
-                        };
-                        Operator::TJ { array }
-                    }
-                    b"'" => {
-                        let text = match operands[0].take() {
-                            Some(FastOperand::StringBytes(b)) => b,
-                            _ => Vec::new(),
-                        };
-                        Operator::Quote { text }
-                    }
-                    b"\"" => {
-                        let word_space = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        let char_space = match &operands[1] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        let text = match operands[2].take() {
-                            Some(FastOperand::StringBytes(b)) => b,
-                            _ => Vec::new(),
-                        };
-                        Operator::DoubleQuote {
-                            word_space,
-                            char_space,
-                            text,
-                        }
-                    }
-                    b"Tc" => {
-                        let char_space = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        Operator::Tc { char_space }
-                    }
-                    b"Tw" => {
-                        let word_space = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        Operator::Tw { word_space }
-                    }
-                    b"Tz" => {
-                        let scale = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 100.0,
-                        };
-                        Operator::Tz { scale }
-                    }
-                    b"TL" => {
-                        let leading = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        Operator::TL { leading }
-                    }
-                    b"Tr" => {
-                        let render = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n as u8,
-                            _ => 0,
-                        };
-                        Operator::Tr { render }
-                    }
-                    b"Ts" => {
-                        let rise = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        Operator::Ts { rise }
-                    }
-                    b"q" => Operator::SaveState,
-                    b"Q" => Operator::RestoreState,
-                    b"cm" => {
-                        let get_n = |i: usize, def: f32| match &operands[i] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => def,
-                        };
-                        Operator::Cm {
-                            a: get_n(0, 1.0),
-                            b: get_n(1, 0.0),
-                            c: get_n(2, 0.0),
-                            d: get_n(3, 1.0),
-                            e: get_n(4, 0.0),
-                            f: get_n(5, 0.0),
-                        }
-                    }
-                    b"rg" => {
-                        let get_n = |i: usize| match &operands[i] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        Operator::SetFillRgb {
-                            r: get_n(0),
-                            g: get_n(1),
-                            b: get_n(2),
-                        }
-                    }
-                    b"RG" => {
-                        let get_n = |i: usize| match &operands[i] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        Operator::SetStrokeRgb {
-                            r: get_n(0),
-                            g: get_n(1),
-                            b: get_n(2),
-                        }
-                    }
-                    b"g" => {
-                        let gray = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        Operator::SetFillGray { gray }
-                    }
-                    b"G" => {
-                        let gray = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        Operator::SetStrokeGray { gray }
-                    }
-                    b"k" => {
-                        let get_n = |i: usize| match &operands[i] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        Operator::SetFillCmyk {
-                            c: get_n(0),
-                            m: get_n(1),
-                            y: get_n(2),
-                            k: get_n(3),
-                        }
-                    }
-                    b"K" => {
-                        let get_n = |i: usize| match &operands[i] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        Operator::SetStrokeCmyk {
-                            c: get_n(0),
-                            m: get_n(1),
-                            y: get_n(2),
-                            k: get_n(3),
-                        }
-                    }
-                    b"cs" => {
-                        let name = match &operands[0] {
-                            Some(FastOperand::Name(n)) => n.clone(),
-                            _ => "DeviceGray".to_string(),
-                        };
-                        Operator::SetFillColorSpace { name }
-                    }
-                    b"CS" => {
-                        let name = match &operands[0] {
-                            Some(FastOperand::Name(n)) => n.clone(),
-                            _ => "DeviceGray".to_string(),
-                        };
-                        Operator::SetStrokeColorSpace { name }
-                    }
-                    b"sc" => {
-                        let components: Vec<f32> = operands[..op_count]
-                            .iter()
-                            .filter_map(|o| match o {
-                                Some(FastOperand::Number(n)) => Some(*n),
-                                _ => None,
-                            })
-                            .collect();
-                        Operator::SetFillColor { components }
-                    }
-                    b"SC" => {
-                        let components: Vec<f32> = operands[..op_count]
-                            .iter()
-                            .filter_map(|o| match o {
-                                Some(FastOperand::Number(n)) => Some(*n),
-                                _ => None,
-                            })
-                            .collect();
-                        Operator::SetStrokeColor { components }
-                    }
-                    b"scn" => {
-                        let name = match &operands[op_count.saturating_sub(1)] {
-                            Some(FastOperand::Name(n)) => Some(n.clone()),
-                            _ => None,
-                        };
-                        let components: Vec<f32> = operands[..op_count]
-                            .iter()
-                            .filter_map(|o| match o {
-                                Some(FastOperand::Number(n)) => Some(*n),
-                                _ => None,
-                            })
-                            .collect();
-                        Operator::SetFillColorN {
-                            components,
-                            name: name.map(Box::new),
-                        }
-                    }
-                    b"SCN" => {
-                        let name = match &operands[op_count.saturating_sub(1)] {
-                            Some(FastOperand::Name(n)) => Some(n.clone()),
-                            _ => None,
-                        };
-                        let components: Vec<f32> = operands[..op_count]
-                            .iter()
-                            .filter_map(|o| match o {
-                                Some(FastOperand::Number(n)) => Some(*n),
-                                _ => None,
-                            })
-                            .collect();
-                        Operator::SetStrokeColorN {
-                            components,
-                            name: name.map(Box::new),
-                        }
-                    }
-                    b"gs" => {
-                        let dict_name = match &operands[0] {
-                            Some(FastOperand::Name(n)) => n.clone(),
-                            _ => String::new(),
-                        };
-                        Operator::SetExtGState { dict_name }
-                    }
-                    b"Do" => {
-                        // See the nom-parser "Do" arm in `build_operator` for why
-                        // this reads the last operand, not operands[0]. ~keep
-                        let name = match &operands[op_count.saturating_sub(1)] {
-                            Some(FastOperand::Name(n)) => n.clone(),
-                            _ => String::new(),
-                        };
-                        Operator::Do { name }
-                    }
-                    b"w" => {
-                        let width = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 1.0,
-                        };
-                        Operator::SetLineWidth { width }
-                    }
-                    b"J" => {
-                        let cap_style = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n as u8,
-                            _ => 0,
-                        };
-                        Operator::SetLineCap { cap_style }
-                    }
-                    b"j" => {
-                        let join_style = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n as u8,
-                            _ => 0,
-                        };
-                        Operator::SetLineJoin { join_style }
-                    }
-                    b"i" => {
-                        let tolerance = match &operands[0] {
-                            Some(FastOperand::Number(n)) => *n,
-                            _ => 0.0,
-                        };
-                        Operator::SetFlatness { tolerance }
-                    }
+                    b"gs" | b"Do" => parse_fast_op_ext_state_or_xobject(op_bytes, &operands, op_count)?,
+                    b"w" | b"J" | b"j" | b"i" => parse_fast_op_line_style(op_bytes, &operands)?,
                     _ => {
                         return None;
                     }

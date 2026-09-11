@@ -1,14 +1,14 @@
 //! Configuration for keyword extraction.
 
 use super::types::KeywordAlgorithm;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 fn default_max_keywords() -> usize {
     10
 }
 
 /// Inclusive word-count range used to form keyword candidates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct NgramRange {
     /// Minimum number of words in a candidate.
     pub min: usize,
@@ -21,15 +21,6 @@ pub struct NgramRange {
 enum NgramRangeWire {
     Positional((usize, usize)),
     Named { min: usize, max: usize },
-}
-
-impl Serialize for NgramRange {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (self.min, self.max).serialize(serializer)
-    }
 }
 
 impl<'de> Deserialize<'de> for NgramRange {
@@ -65,15 +56,15 @@ impl NgramRange {
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for NgramRange {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        use utoipa::openapi::schema::{ArrayBuilder, ArrayItems, ObjectBuilder, Type};
+        use utoipa::openapi::schema::{ObjectBuilder, Type};
 
         let positive_integer = ObjectBuilder::new().schema_type(Type::Integer).minimum(Some(1)).build();
 
-        ArrayBuilder::new()
-            .items(ArrayItems::False)
-            .prefix_items([positive_integer.clone(), positive_integer])
-            .min_items(Some(2))
-            .max_items(Some(2))
+        ObjectBuilder::new()
+            .property("min", positive_integer.clone())
+            .required("min")
+            .property("max", positive_integer)
+            .required("max")
             .into()
     }
 }
@@ -284,32 +275,38 @@ mod binding_value_serde_tests {
     use serde_json::json;
 
     #[cfg(feature = "api")]
-    fn assert_legacy_array_schema<T: utoipa::PartialSchema>(length: usize) {
+    fn assert_named_object_schema<T: utoipa::PartialSchema>(expected: serde_json::Value) {
         let schema = serde_json::to_value(T::schema()).expect("schema must serialize");
-        assert_eq!(schema["type"], "array");
-        assert_eq!(schema["minItems"], length);
-        assert_eq!(schema["maxItems"], length);
-        assert_eq!(schema["items"], false);
-        assert_eq!(schema["prefixItems"].as_array().map(Vec::len), Some(length));
+        assert_eq!(schema, expected);
     }
 
     #[cfg(feature = "api")]
     #[test]
-    fn should_describe_ngram_range_as_legacy_array_schema() {
-        assert_legacy_array_schema::<NgramRange>(2);
+    fn should_describe_ngram_range_as_named_object_schema() {
+        assert_named_object_schema::<NgramRange>(json!({
+            "type": "object",
+            "required": ["min", "max"],
+            "properties": {
+                "min": {"type": "integer", "minimum": 1},
+                "max": {"type": "integer", "minimum": 1}
+            }
+        }));
     }
 
     #[test]
-    fn should_preserve_legacy_ngram_range_tuple_wire_format() {
+    fn should_serialize_ngram_range_as_named_object() {
         let legacy = json!([1, 3]);
-        let range: NgramRange = serde_json::from_value(legacy.clone()).expect("legacy range must deserialize");
-        let named: NgramRange =
-            serde_json::from_value(json!({"min": 1, "max": 3})).expect("named range must deserialize");
+        let named_json = json!({"min": 1, "max": 3});
+        let range: NgramRange = serde_json::from_value(legacy).expect("legacy range must deserialize");
+        let named: NgramRange = serde_json::from_value(named_json.clone()).expect("named range must deserialize");
 
         assert_eq!(range, NgramRange { min: 1, max: 3 });
         assert_eq!(named, range);
-        assert_eq!(serde_json::to_value(range).expect("range must serialize"), legacy);
-        assert_eq!(serde_json::to_value(named).expect("named range must serialize"), legacy);
+        assert_eq!(serde_json::to_value(range).expect("range must serialize"), named_json);
+        assert_eq!(
+            serde_json::to_value(named).expect("named range must serialize"),
+            named_json
+        );
     }
 
     #[test]
@@ -344,7 +341,7 @@ mod binding_value_serde_tests {
         assert_eq!(config.ngram_range, NgramRange { min: 2, max: 4 });
         assert_eq!(
             serde_json::to_value(config.ngram_range).expect("range must serialize"),
-            json!([2, 4])
+            json!({"min": 2, "max": 4})
         );
     }
 }

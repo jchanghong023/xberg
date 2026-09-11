@@ -22,7 +22,7 @@
 mod helpers;
 use helpers::extract_bytes_document_blocking;
 
-use xberg::ExtractionConfig;
+use xberg::{ExtractionConfig, PdfConfig};
 
 /// Build a minimal single-page PDF whose text is emitted under a vertical
 /// (`Identity-V`) CMap at chained X positions.
@@ -115,7 +115,19 @@ fn make_identity_v_chained_pdf() -> Vec<u8> {
 #[test]
 fn test_identity_v_chained_centers_extracts_text() {
     let pdf = make_identity_v_chained_pdf();
-    let config = ExtractionConfig::default();
+    // The generator lays 96 rows down to y=35 on a 792 pt page, and the default
+    // footer band (`DEFAULT_BOTTOM_MARGIN_FRACTION` = 0.05) cuts at 39.6 pt, so
+    // the lowest row is stripped as furniture and only 238 of 240 glyphs survive.
+    // Opt out of furniture removal so the assertion measures the tategaki sort,
+    // which is what this regression is about, rather than margin geometry. ~keep
+    let config = ExtractionConfig {
+        pdf_options: Some(PdfConfig {
+            top_margin_fraction: Some(0.0),
+            bottom_margin_fraction: Some(0.0),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     let result = extract_bytes_document_blocking(&pdf, "application/pdf", &config)
         .expect("Identity-V chained-centers PDF must extract without error");
 

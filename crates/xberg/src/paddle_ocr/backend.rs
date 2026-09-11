@@ -804,7 +804,7 @@ impl PaddleOcrBackend {
         effective_config: Arc<PaddleOcrConfig>,
         accel: Option<&crate::core::config::acceleration::AccelerationConfig>,
         page_rotation_degrees: u32,
-        security_limits: crate::extractors::security::SecurityLimits,
+        security_limits: &crate::extractors::security::SecurityLimits,
     ) -> Result<PaddlePageOcr> {
         let family = language_to_script_family(language);
         let engine = self
@@ -813,6 +813,7 @@ impl PaddleOcrBackend {
 
         let image_bytes_owned = image_bytes.to_vec();
         let config = effective_config;
+        let security_limits = security_limits.clone();
 
         let (mut text_blocks, processed_width, processed_height) = tokio::task::spawn_blocking(move || {
             catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -936,6 +937,36 @@ impl PaddleOcrBackend {
             .and_then(serde_json::Value::as_u64)
             .map(|degrees| (degrees % 360) as u32)
             .unwrap_or(0)
+    }
+
+    /// Read a per-call `SecurityLimits` override out of `backend_options`, if one is present
+    /// and parses. Returns `None` (not a default) when there is no override, so callers can
+    /// tell "no override" apart from "override says use the default" and fall through to
+    /// [`OcrConfig::security_limits`] instead of masking it. ~keep
+    fn security_limits_override_from_backend_options(
+        config: &OcrConfig,
+    ) -> Option<crate::extractors::security::SecurityLimits> {
+        config
+            .backend_options
+            .as_ref()
+            .and_then(|opts| opts.get("security_limits"))
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    }
+
+    /// Resolve the `SecurityLimits` to apply when decoding an image for this call (GH#1554).
+    ///
+    /// Precedence, highest first:
+    /// 1. An explicit `backend_options["security_limits"]` override for this one call — the
+    ///    per-call extension point `security_limits_override_from_backend_options` reads,
+    ///    documented alongside `page_rotation_degrees` above.
+    /// 2. [`OcrConfig::security_limits`], injected at runtime from the caller's
+    ///    `ExtractionConfig::security_limits` (mirrors `OcrConfig::acceleration`) — this is
+    ///    what makes a configured, possibly higher, limit actually reach this backend.
+    /// 3. `SecurityLimits::default()`, never an unbounded/disabled check.
+    fn resolve_security_limits(config: &OcrConfig) -> crate::extractors::security::SecurityLimits {
+        Self::security_limits_override_from_backend_options(config)
+            .or_else(|| config.security_limits.clone())
+            .unwrap_or_default()
     }
 
     /// Compose the PDF page's `/Rotate` hint (`page_rotation_degrees_from_backend_options`)
@@ -1076,13 +1107,14 @@ impl PaddleOcrBackend {
     /// (`crates/xberg-paddle-ocr/src/inference/ort_backend.rs`) because `ort::Session::run`
     /// requires `&mut self`. Concurrent calls into this function serialize on that mutex —
     /// see `paddle_inference_thread_count` above for why that is handled by widening the
+    /// session's own intra-op thread budget instead.
     fn perform_ocr(
         image_bytes: &[u8],
         ocr_engine: &Arc<PaddleOcrEngine>,
         config: &PaddleOcrConfig,
         security_limits: &crate::extractors::security::SecurityLimits,
     ) -> Result<(Vec<xberg_paddle_ocr::DetailedTextBlock>, u32, u32)> {
-        let img = crate::extraction::image::load_image_for_ocr_with_security_limits(image_bytes, security_limits)
+        let img = crate::extraction::image::load_image_for_ocr(image_bytes, security_limits)
             .map_err(|e| crate::XbergError::Ocr {
                 message: e.to_string(),
                 source: None,
@@ -1321,20 +1353,20 @@ impl OcrBackend for PaddleOcrBackend {
         } else {
             Arc::clone(&self.config)
         };
-        let security_limits = config.security_limits.clone().unwrap_or_default();
+
+        let security_limits = Self::resolve_security_limits(config);
 
         let languages = config.effective_languages();
         let (paddle_lang, language_warnings) = super::select_paddle_language(&languages);
 
         let mut rotation_outcome = None;
         let ocr_image_bytes: Cow<'_, [u8]> = if config.auto_rotate {
-            let decoded_image =
-                crate::extraction::image::load_image_for_ocr_with_security_limits(image_bytes, &security_limits)
-                    .map_err(|error| crate::XbergError::Ocr {
-                        message: format!("Failed to decode PaddleOCR image for orientation detection: {error}"),
-                        source: None,
-                    })?
-                    .to_rgb8();
+            let decoded_image = crate::extraction::image::load_image_for_ocr(image_bytes, &security_limits)
+                .map_err(|error| crate::XbergError::Ocr {
+                    message: format!("Failed to decode PaddleOCR image for orientation detection: {error}"),
+                    source: None,
+                })?
+                .to_rgb8();
             match self.detect_and_rotate(&decoded_image) {
                 Ok(outcome) => {
                     rotation_outcome = Some(outcome);
@@ -1384,7 +1416,7 @@ impl OcrBackend for PaddleOcrBackend {
                 Arc::clone(&effective_config),
                 effective_accel.as_ref(),
                 residual_page_rotation_degrees,
-                security_limits,
+                &security_limits,
             )
             .await?;
         let rotation_outcome =
@@ -2062,6 +2094,108 @@ mod tests {
             PaddleOcrBackend::page_rotation_degrees_from_backend_options(&non_numeric),
             0
         );
+    }
+
+    /// GH#1554: absent or unparseable `backend_options.security_limits` must yield `None`
+    /// (no override), not a default-filled `SecurityLimits` — a default masquerading as "no
+    /// override" would shadow `OcrConfig::security_limits` in `resolve_security_limits`.
+    #[test]
+    fn reads_security_limits_override_from_backend_options() {
+        let with_override = OcrConfig {
+            backend_options: Some(serde_json::json!({"security_limits": {"max_content_size": 200 * 1024 * 1024}})),
+            ..Default::default()
+        };
+        assert_eq!(
+            PaddleOcrBackend::security_limits_override_from_backend_options(&with_override)
+                .expect("a well-formed override must parse")
+                .max_content_size,
+            200 * 1024 * 1024
+        );
+
+        let without_hint = OcrConfig::default();
+        assert!(PaddleOcrBackend::security_limits_override_from_backend_options(&without_hint).is_none());
+
+        let non_object = OcrConfig {
+            backend_options: Some(serde_json::json!({"security_limits": "not an object"})),
+            ..Default::default()
+        };
+        assert!(PaddleOcrBackend::security_limits_override_from_backend_options(&non_object).is_none());
+    }
+
+    /// GH#1554 regression: `resolve_security_limits` must prefer, in order, a per-call
+    /// `backend_options` override, then `OcrConfig::security_limits` (the field
+    /// `image_ocr.rs` populates from the caller's `ExtractionConfig::security_limits`),
+    /// then `SecurityLimits::default()`. Before this fix, `OcrConfig::security_limits` did
+    /// not exist and the backend fell straight to `SecurityLimits::default()` whenever no
+    /// `backend_options` override was set — silently ignoring a caller's configured limit.
+    #[test]
+    fn resolve_security_limits_honors_precedence() {
+        let neither = OcrConfig::default();
+        assert_eq!(
+            PaddleOcrBackend::resolve_security_limits(&neither).max_content_size,
+            crate::extractors::security::SecurityLimits::default().max_content_size
+        );
+
+        let inherited_only = OcrConfig {
+            security_limits: Some(crate::extractors::security::SecurityLimits {
+                max_content_size: 200 * 1024 * 1024,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            PaddleOcrBackend::resolve_security_limits(&inherited_only).max_content_size,
+            200 * 1024 * 1024
+        );
+
+        let override_beats_inherited = OcrConfig {
+            security_limits: Some(crate::extractors::security::SecurityLimits {
+                max_content_size: 200 * 1024 * 1024,
+                ..Default::default()
+            }),
+            backend_options: Some(serde_json::json!({"security_limits": {"max_content_size": 300 * 1024 * 1024}})),
+            ..Default::default()
+        };
+        assert_eq!(
+            PaddleOcrBackend::resolve_security_limits(&override_beats_inherited).max_content_size,
+            300 * 1024 * 1024
+        );
+    }
+
+    /// GH#1554 end-to-end regression: a `security_limits` set on `ExtractionConfig` (mirrored
+    /// onto `OcrConfig::security_limits` by `image_ocr::process_images_with_ocr`, the same
+    /// mechanism `OcrConfig::acceleration` uses) must actually reach PaddleOCR's image decode
+    /// and permit a scan `SecurityLimits::default()` would reject. Uses the same 6100x6100
+    /// solid-color fixture as `extraction::image`'s regression test: it decodes to
+    /// 6100 * 6100 * 3 = 111,630,000 bytes, over the 100 MiB default but under a
+    /// caller-configured 200 MiB limit, while the PNG encoding stays a few hundred bytes.
+    #[test]
+    fn configured_ocr_config_security_limits_permit_scan_default_rejects() {
+        use image::{ImageBuffer, ImageFormat, Rgb, RgbImage};
+        use std::io::Cursor;
+
+        let (width, height) = (6100u32, 6100u32);
+        let img: RgbImage = ImageBuffer::from_pixel(width, height, Rgb([200u8, 100, 50]));
+        let mut bytes: Vec<u8> = Vec::new();
+        img.write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png).unwrap();
+
+        let default_config = OcrConfig::default();
+        let default_limits = PaddleOcrBackend::resolve_security_limits(&default_config);
+        let default_error = crate::extraction::image::load_image_for_ocr(&bytes, &default_limits)
+            .expect_err("a 111,630,000-byte decode must be refused under the 100 MiB default");
+        assert!(matches!(default_error, crate::XbergError::Validation { .. }));
+
+        let configured_config = OcrConfig {
+            security_limits: Some(crate::extractors::security::SecurityLimits {
+                max_content_size: 200 * 1024 * 1024,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let configured_limits = PaddleOcrBackend::resolve_security_limits(&configured_config);
+        let image = crate::extraction::image::load_image_for_ocr(&bytes, &configured_limits)
+            .expect("a caller-configured 200 MiB limit inherited onto OcrConfig must permit the same decode");
+        assert_eq!((image.width(), image.height()), (width, height));
     }
 
     /// The defect this guards: `reorder_blocks_for_page_rotation`'s premise is that its

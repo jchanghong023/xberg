@@ -7,7 +7,7 @@
 
 # txtai-xberg
 
-Feed [Xberg](https://github.com/xberg-io/xberg) document extraction into [txtai](https://github.com/neuml/txtai). `XbergPipeline` is a plain callable that extracts text and metadata from 106 formats — running OCR where needed — and flattens the result into documents ready for `txtai.Embeddings.index`. When you enable Xberg's native chunking, each chunk becomes one embedding-sized segment instead of a single blob.
+Feed [Xberg](https://github.com/xberg-io/xberg) document extraction into [txtai](https://github.com/neuml/txtai). `XbergPipeline` is a plain callable that extracts text and metadata from 107 formats — running OCR where needed — and flattens the result into documents ready for `txtai.Embeddings.index`. When you enable Xberg's native chunking, each chunk becomes one embedding-sized segment instead of a single blob.
 
 ## Install
 

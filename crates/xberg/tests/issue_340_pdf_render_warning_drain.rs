@@ -162,8 +162,11 @@ async fn extract_surfaces_glyph_drop_warning_through_public_api() {
         glyph_drop_warning.message
     );
     assert!(
-        glyph_drop_warning.message.contains("Failed to parse font"),
-        "warning must carry xberg_native_pdf's own diagnosis of the cause, got: {}",
+        glyph_drop_warning
+            .message
+            .contains("rendering text with fallback font data"),
+        "warning must carry xberg_native_pdf's sanitized static message; the actual \
+         diagnosis now lives in structured tracing fields, not the message, got: {}",
         glyph_drop_warning.message
     );
 }

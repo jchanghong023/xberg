@@ -5,10 +5,12 @@ import { XbergEngine } from "@xberg-io/xberg-wasm";
 describe("XbergEngine.ner with injected backend", () => {
   it("returns entities from the injected backend", async () => {
     const injection = {
-      ner: async (_text: string, _categories: string[]) => [
-        { category: "person", text: "Alice", start: 0, end: 5, confidence: 0.95 },
-        { category: "organization", text: "Acme Corp", start: 15, end: 24, confidence: 0.88 },
-      ],
+      ner: {
+        ner: async (_text: string, _categories: string[]) => [
+          { category: "person", text: "Alice", start: 0, end: 5, confidence: 0.95 },
+          { category: "organization", text: "Acme Corp", start: 15, end: 24, confidence: 0.88 },
+        ],
+      },
     };
     const engine = new XbergEngine({}, injection);
 
@@ -22,9 +24,11 @@ describe("XbergEngine.ner with injected backend", () => {
   it("forwards built-in and custom categories as plain strings", async () => {
     let seen: string[] | undefined;
     const injection = {
-      ner: async (_text: string, categories: string[]) => {
-        seen = categories;
-        return [];
+      ner: {
+        ner: async (_text: string, categories: string[]) => {
+          seen = categories;
+          return [];
+        },
       },
     };
     const engine = new XbergEngine({}, injection);

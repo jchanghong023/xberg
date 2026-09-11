@@ -53,8 +53,9 @@
       "field": "results[0].chunks[0].content"
     },
     {
-      "type": "not_empty",
-      "field": "results[0].chunks[0].metadata"
+      "type": "greater_than_or_equal",
+      "field": "results[0].chunks[0].metadata.total_chunks",
+      "value": 1
     }
   ],
   "config": {
