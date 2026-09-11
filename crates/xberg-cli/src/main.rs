@@ -699,11 +699,25 @@ impl From<ContentOutputFormatArg> for ContentOutputFormat {
     }
 }
 
+fn main() -> Result<()> {
+    // `block_on` drives the command future on the calling thread, and a Windows main thread
+    // only gets ~1 MiB of stack — less than the 16 MiB the runtime's worker threads are given
+    // for the crate's recursive parsers, which overflows before any worker is even reached.
+    // Run the CLI on a worker with that same budget so `xberg extract` behaves identically on
+    // Windows and Unix. ~keep
+    std::thread::Builder::new()
+        .name("xberg-main".to_string())
+        .stack_size(commands::extract::RUNTIME_WORKER_STACK_SIZE_BYTES)
+        .spawn(run_cli)?
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
 #[expect(
     clippy::print_stdout,
     reason = "detect/formats/version/api-schema results are the CLI's stdout output contract"
 )]
-fn main() -> Result<()> {
+fn run_cli() -> Result<()> {
     // Captured as early as feasible for the optional per-stage cold-start timing breakdown (see
     // `commands::extract::stage_timing_requested`). Gated on the env var so the timing path is
     // fully zero-cost (no `Instant::now()` call, no state) when stage timing isn't requested. ~keep

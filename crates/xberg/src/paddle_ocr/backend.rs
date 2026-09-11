@@ -111,30 +111,9 @@ fn engine_pool_key(
     format!("{version}/{tier}/{model_key}/{accel_key}/{backend_key}")
 }
 
-/// Intra-op thread count for PaddleOCR's shared inference session.
-///
-/// PaddleOCR keeps one session per model per pool key, and `OrtBackend` guards it with a
-/// `Mutex` because `ort::Session::run` takes `&mut self` (ort 2.0.0-rc.13). Concurrent page
-/// OCR therefore serializes on that mutex, so the session is always exactly one worker and can
-/// safely claim the whole process budget — the same shape `layout/engine.rs::from_config` and
-/// `inference/ort_backend.rs` already use. The previous hardcoded `1` left it single-core.
-///
-/// If layout detection and PaddleOCR are ever made to run concurrently (today PaddleOCR's
-/// per-page `join_set` in `extractors/pdf/ocr.rs` only reaches this session after layout's own
-/// pass), this must go through `resolve_batch_execution_plan` instead, or two full-budget
-/// sessions could oversubscribe the process.
-///
-/// The `tract` backend takes the same `num_thread` parameter but ignores it (`TractBackend::load`).
-fn paddle_inference_thread_count() -> usize {
-    paddle_session_thread_budget(crate::core::config::concurrency::resolve_thread_budget(None))
-}
-
-/// Pure core of [`paddle_inference_thread_count`], split out so the policy is testable
-/// without a live ORT session or host-CPU detection.
-fn paddle_session_thread_budget(total_budget: usize) -> usize {
-    total_budget.max(1)
-}
-
+// The intra-op thread count is no longer a process-wide constant: `paddle_engine_layout`
+// splits the resolved budget across the model's engine slots, so each engine claims only its
+// share and several images can be recognised at once (see `MAX_PADDLE_ENGINE_SLOTS`).
 use crate::ocr_metadata_keys::OCR_ORIENTATION_CONFIDENCE_METADATA_KEY as ORIENTATION_CONFIDENCE_METADATA_KEY;
 const VERTICAL_TEXT_MIN_ASPECT_RATIO: f32 = 1.5;
 const VERTICAL_COLUMN_MIN_OVERLAP_RATIO: f32 = 0.5;
@@ -267,6 +246,101 @@ fn image_metadata(outcome: &RotationOutcome) -> AHashMap<Cow<'static, str>, serd
 ///
 /// The backend is `Send + Sync` and can be used across threads safely via `Arc`.
 /// Per-key initialization cells serialize each cold start. Initialized engines
+/// Upper bound on concurrently loaded PaddleOCR engines per model key.
+///
+/// One engine owns its ORT sessions behind a mutex, so it can only run a single image at a
+/// time regardless of how many intra-op threads it is given — measured on a 32-core host,
+/// raising the intra-op budget from 8 to 32 moved an eight-document OCR batch by ~12%, while
+/// the pipeline was already running up to `budget` images concurrently and serialising them on
+/// that mutex. Splitting the same budget across several engines converts the budget into
+/// actual image-level throughput. Each engine duplicates the model weights and ORT arena, so
+/// the slot count is capped rather than equal to the budget.
+const MAX_PADDLE_ENGINE_SLOTS: usize = 8;
+
+/// Hard ceiling for `XBERG_PADDLE_ENGINE_SLOTS`: every slot loads its own detection and
+/// recognition sessions, so the tuning escape hatch is bounded by memory, not by the policy.
+const MAX_PADDLE_ENGINE_SLOTS_OVERRIDE: usize = 32;
+
+/// `(slots, intra_op_threads)`: how many engines to load per model key and how much of the
+/// process budget each may claim. `slots * intra_op_threads <= budget` always holds.
+///
+/// `XBERG_PADDLE_ENGINE_SLOTS` overrides the slot count for tuning (0 or unparsable = policy).
+fn paddle_engine_layout(total_budget: usize) -> (usize, usize) {
+    let override_slots = std::env::var("XBERG_PADDLE_ENGINE_SLOTS")
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|slots| *slots > 0)
+        .map(|slots| slots.clamp(1, MAX_PADDLE_ENGINE_SLOTS_OVERRIDE));
+    let slots = match override_slots {
+        // The override is already bounded by the memory ceiling above; clamping it to the
+        // policy cap as well silently turned every tuned value above 8 into 8. ~keep
+        Some(slots) => slots,
+        None => total_budget.max(1).clamp(1, MAX_PADDLE_ENGINE_SLOTS),
+    };
+    let intra_op_threads = (total_budget / slots).max(1);
+    (slots, intra_op_threads)
+}
+
+/// Lazily resolved engine layout plus the slot bookkeeping that hands out one engine at a time.
+struct EngineSlots {
+    intra_op_threads: usize,
+    permits: Arc<tokio::sync::Semaphore>,
+    free: Arc<std::sync::Mutex<std::collections::VecDeque<usize>>>,
+}
+
+/// RAII handle for one engine slot; returns the slot to the pool on drop.
+struct EngineSlot {
+    id: usize,
+    free: Arc<std::sync::Mutex<std::collections::VecDeque<usize>>>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl Drop for EngineSlot {
+    fn drop(&mut self) {
+        if let Ok(mut free) = self.free.lock() {
+            free.push_back(self.id);
+        }
+    }
+}
+
+impl EngineSlots {
+    fn from_budget(total_budget: usize) -> Self {
+        let (slots, intra_op_threads) = paddle_engine_layout(total_budget);
+        tracing::debug!(
+            slots,
+            intra_op_threads,
+            total_budget,
+            "PaddleOCR engine pool layout resolved"
+        );
+        Self {
+            intra_op_threads,
+            permits: Arc::new(tokio::sync::Semaphore::new(slots)),
+            free: Arc::new(std::sync::Mutex::new((0..slots).collect())),
+        }
+    }
+
+    async fn acquire(self: &Arc<Self>) -> Result<EngineSlot> {
+        let permit = Arc::clone(&self.permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| crate::XbergError::Plugin {
+                message: "PaddleOCR engine slot pool closed".to_string(),
+                plugin_name: "paddle-ocr".to_string(),
+            })?;
+        let id = self
+            .free
+            .lock()
+            .ok()
+            .and_then(|mut free| free.pop_front())
+            .unwrap_or(0);
+        Ok(EngineSlot {
+            id,
+            free: Arc::clone(&self.free),
+            _permit: permit,
+        })
+    }
+}
+
 /// can run OCR concurrently without holding the pool lock.
 #[cfg_attr(alef, alef(skip))]
 pub struct PaddleOcrBackend {
@@ -282,6 +356,9 @@ pub struct PaddleOcrBackend {
     /// The per-key cell ensures concurrent cold requests initialize each engine only once. ~keep
     /// Paddle inference methods take `&self`, enabling lock-free concurrent page OCR.
     engine_pool: Arc<InitPool<Arc<PaddleOcrEngine>>>,
+    /// Engine layout and slot pool, resolved on first use so it sees the extraction
+    /// path's `ConcurrencyConfig::max_threads` rather than the pre-init automatic limit.
+    engine_slots: once_cell::sync::OnceCell<Arc<EngineSlots>>,
     /// Document orientation detector, lazily initialized.
     doc_ori_detector: once_cell::sync::OnceCell<crate::doc_orientation::DocOrientationDetector>,
     /// Hardware acceleration configuration for ORT sessions (set at construction).
@@ -429,6 +506,7 @@ impl PaddleOcrBackend {
             model_manager: ModelManager::new(cache_dir),
             shared_paths: Arc::new(Mutex::new(AHashMap::new())),
             engine_pool: Arc::new(Mutex::new(AHashMap::new())),
+            engine_slots: once_cell::sync::OnceCell::new(),
             doc_ori_detector: once_cell::sync::OnceCell::new(),
             acceleration: None,
         })
@@ -475,6 +553,14 @@ impl PaddleOcrBackend {
             .cloned()
     }
 
+    /// Resolved engine layout for this process, created on first use.
+    fn engine_slots(&self) -> &Arc<EngineSlots> {
+        self.engine_slots.get_or_init(|| {
+            let budget = crate::core::config::concurrency::active_thread_budget();
+            Arc::new(EngineSlots::from_budget(budget))
+        })
+    }
+
     /// Get or create an OCR engine for the given script family.
     ///
     /// The engine pool is keyed by a composite `"{version}/{tier}/{model_key}/{accel}"` string.
@@ -487,6 +573,8 @@ impl PaddleOcrBackend {
         family: &str,
         config: Arc<PaddleOcrConfig>,
         accel: Option<&crate::core::config::acceleration::AccelerationConfig>,
+        slot: usize,
+        intra_op_threads: usize,
     ) -> Result<Arc<PaddleOcrEngine>> {
         let model_manager = self.model_manager.clone();
         let shared_paths = Arc::clone(&self.shared_paths);
@@ -503,6 +591,8 @@ impl PaddleOcrBackend {
                 &family,
                 &config,
                 accel.as_ref(),
+                slot,
+                intra_op_threads,
             )
         })
         .await
@@ -519,12 +609,19 @@ impl PaddleOcrBackend {
         family: &str,
         config: &PaddleOcrConfig,
         accel: Option<&crate::core::config::acceleration::AccelerationConfig>,
+        slot: usize,
+        intra_op_threads: usize,
     ) -> Result<Arc<PaddleOcrEngine>> {
         let tier = &config.model_tier;
         let version = &config.model_version;
         let backend = Self::effective_backend(config)?;
         let resolved = model_manager.resolve_rec_model_versioned(version, family, tier)?;
-        let pool_key = engine_pool_key(version, tier, &resolved.model_key, accel, backend);
+        // One engine per (model, slot): each loads its own sessions, so they run images in
+        // parallel instead of queueing on a shared mutex. ~keep
+        let pool_key = format!(
+            "{}#slot{slot}",
+            engine_pool_key(version, tier, &resolved.model_key, accel, backend)
+        );
 
         let init_cell = init_cell_for_key(engine_pool, &pool_key).map_err(|error| crate::XbergError::Plugin {
             message: format!("Failed to acquire engine pool lock: {error}"),
@@ -532,7 +629,15 @@ impl PaddleOcrBackend {
         })?;
         let engine = init_cell.get_or_try_init(|| -> Result<Arc<PaddleOcrEngine>> {
             let shared = Self::get_or_init_shared_paths(model_manager, shared_paths, config)?;
-            Self::initialize_engine(family, tier, &resolved, &shared, accel.cloned(), backend)
+            Self::initialize_engine(
+                family,
+                tier,
+                &resolved,
+                &shared,
+                accel.cloned(),
+                backend,
+                intra_op_threads,
+            )
         })?;
 
         Ok(Arc::clone(engine))
@@ -584,6 +689,7 @@ impl PaddleOcrBackend {
         shared: &SharedModelPaths,
         accel: Option<crate::core::config::acceleration::AccelerationConfig>,
         backend: PaddleInferenceBackend,
+        intra_op_threads: usize,
     ) -> Result<Arc<PaddleOcrEngine>> {
         tracing::info!(family, model_key = %resolved.model_key, tier, ?backend, "Initializing PaddleOCR engine");
 
@@ -617,6 +723,7 @@ impl PaddleOcrBackend {
                 rec_model_path,
                 dict_path,
                 accel,
+                intra_op_threads,
             )
             .map_err(|error| crate::XbergError::Ocr {
                 message: format!(
@@ -633,6 +740,7 @@ impl PaddleOcrBackend {
                 rec_model_path,
                 dict_path,
                 accel.as_ref(),
+                intra_op_threads,
             )
             .map_err(|error| crate::XbergError::Ocr {
                 message: format!(
@@ -670,6 +778,7 @@ impl PaddleOcrBackend {
         rec_model_path: &str,
         dict_path: &str,
         accel: Option<crate::core::config::acceleration::AccelerationConfig>,
+        intra_op_threads: usize,
     ) -> std::result::Result<(), xberg_paddle_ocr::OcrError> {
         let _acceleration_guard = PaddleAccelerationGuard::set(accel);
         crate::ort_discovery::ensure_ort_available();
@@ -689,7 +798,7 @@ impl PaddleOcrBackend {
             cls_model_path,
             rec_model_path,
             dict_path,
-            paddle_inference_thread_count(),
+            intra_op_threads,
             builder_fn,
         )
     }
@@ -715,6 +824,7 @@ impl PaddleOcrBackend {
         rec_model_path: &str,
         dict_path: &str,
         accel: Option<&crate::core::config::acceleration::AccelerationConfig>,
+        intra_op_threads: usize,
     ) -> std::result::Result<(), xberg_paddle_ocr::OcrError> {
         if accel.is_some() {
             tracing::debug!(
@@ -733,7 +843,7 @@ impl PaddleOcrBackend {
             cls_model_path,
             rec_model_path,
             dict_path,
-            paddle_inference_thread_count(),
+            intra_op_threads,
         )
     }
 
@@ -807,8 +917,18 @@ impl PaddleOcrBackend {
         security_limits: &crate::extractors::security::SecurityLimits,
     ) -> Result<PaddlePageOcr> {
         let family = language_to_script_family(language);
+        // One engine serves one image at a time (its ORT sessions sit behind a mutex), so a
+        // slot is held for the whole inference, not just for engine lookup. ~keep
+        let slots = self.engine_slots();
+        let slot = slots.acquire().await?;
         let engine = self
-            .get_or_init_engine_for_family(family, Arc::clone(&effective_config), accel)
+            .get_or_init_engine_for_family(
+                family,
+                Arc::clone(&effective_config),
+                accel,
+                slot.id,
+                slots.intra_op_threads,
+            )
             .await?;
 
         let image_bytes_owned = image_bytes.to_vec();
@@ -1105,9 +1225,9 @@ impl PaddleOcrBackend {
     /// `PaddleOcrEngine::detect` takes `&self`, but that does **not** mean pages OCR
     /// concurrently: each underlying `ort::Session` is still wrapped in a `Mutex`
     /// (`crates/xberg-paddle-ocr/src/inference/ort_backend.rs`) because `ort::Session::run`
-    /// requires `&mut self`. Concurrent calls into this function serialize on that mutex —
-    /// see `paddle_inference_thread_count` above for why that is handled by widening the
-    /// session's own intra-op thread budget instead.
+    /// requires `&mut self`. Concurrent calls into one engine serialize on that mutex, which is
+    /// why callers hold a distinct engine slot per in-flight image (see `MAX_PADDLE_ENGINE_SLOTS`)
+    /// instead of sharing one session with a wider intra-op budget.
     fn perform_ocr(
         image_bytes: &[u8],
         ocr_engine: &Arc<PaddleOcrEngine>,
@@ -1759,23 +1879,26 @@ mod tests {
         assert_eq!(stats.max, 0.0);
     }
 
-    /// The session must receive the *entire* resolved process budget, not the hardcoded `1`
-    /// this replaced. `workers * intra_threads <= budget` still holds because the mutex caps
-    /// PaddleOCR to one concurrent worker. Honest caveat: this is a new pure function, so there
-    /// is no unfixed version of it to fail against — the assertion's value is pinning the policy
-    /// so a future clamp back to `1` (or a multi-session pool) is forced to revisit it.
+    /// The per-model budget must be split across engine slots rather than handed whole to a
+    /// single serialised session, and the split must never exceed the budget it was given.
     #[test]
-    fn paddle_session_thread_budget_grants_the_full_resolved_budget() {
-        assert_eq!(paddle_session_thread_budget(1), 1);
-        assert_eq!(paddle_session_thread_budget(4), 4);
-        assert_eq!(paddle_session_thread_budget(8), 8);
+    fn paddle_engine_layout_splits_the_budget_across_slots() {
+        assert_eq!(paddle_engine_layout(1), (1, 1));
+        assert_eq!(paddle_engine_layout(4), (4, 1));
+        assert_eq!(paddle_engine_layout(8), (8, 1));
+        assert_eq!(paddle_engine_layout(32), (8, 4));
+        for budget in [1usize, 2, 4, 8, 12, 16, 32, 64] {
+            let (slots, intra) = paddle_engine_layout(budget);
+            assert!(slots >= 1 && intra >= 1);
+            assert!(slots * intra <= budget.max(1), "budget {budget} -> {slots}x{intra} oversubscribes");
+        }
     }
 
     /// `resolve_thread_budget` never returns `0`, but the pure function must not assume it —
     /// `with_intra_threads(0)` would be a session-construction footgun.
     #[test]
-    fn paddle_session_thread_budget_floors_at_one() {
-        assert_eq!(paddle_session_thread_budget(0), 1);
+    fn paddle_engine_layout_floors_intra_op_threads_at_one() {
+        assert_eq!(paddle_engine_layout(0), (1, 1));
     }
 
     const CONCURRENT_INITIALIZER_COUNT: usize = 8;

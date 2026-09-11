@@ -266,14 +266,24 @@ const V6_UNIFIED_FAMILIES: &[&str] = &["english", "chinese", "latin"];
 /// `small` (9.9MB detection) is the nearest v6 analogue and, unlike `tiny`, keeps the full
 /// 18,708-char CJK+Latin+JA/KO recognition dictionary, so the remap cannot silently narrow which
 /// scripts a caller can read. `server` keeps mapping to `medium`: it is the v5 name for the
-/// high-accuracy tier, so the largest v6 model is what it asks for. Unknown values also resolve
-/// to `medium` rather than guessing. ~keep
+/// high-accuracy tier, so the largest v6 model is what it asks for. Unrecognised values resolve
+/// to `small` — the documented default tier — and warn, rather than silently loading `medium`
+/// (62 MB detector + 76 MB recogniser) off a typo. ~keep
 #[cfg(paddle_ocr)]
 fn effective_v6_tier(tier: &str) -> &str {
     match tier {
         "medium" | "small" | "tiny" => tier,
         "mobile" => "small",
-        _ => "medium",
+        "server" => "medium",
+        other => {
+            tracing::warn!(
+                model_tier = other,
+                fallback = "small",
+                "unrecognised PP-OCRv6 model_tier; valid tiers are \"medium\", \"small\" and \
+                 \"tiny\" (\"mobile\" and \"server\" are the PP-OCRv5 names)"
+            );
+            "small"
+        }
     }
 }
 #[cfg_attr(alef, alef(skip))]
@@ -1179,7 +1189,10 @@ mod tests {
         // recognition dictionary; `tiny` would narrow it to ~zh/en. ~keep
         assert_eq!(effective_v6_tier("mobile"), "small");
         assert_eq!(effective_v6_tier("server"), "medium");
-        assert_eq!(effective_v6_tier("bogus"), "medium");
+        // An unrecognised tier must land on the documented default (`small`), not the heaviest
+        // model: a typo used to download 62 MB det + 76 MB rec before failing or running 10x slow.
+        assert_eq!(effective_v6_tier("bogus"), "small");
+        assert_eq!(effective_v6_tier(""), "small");
     }
 
     #[test]

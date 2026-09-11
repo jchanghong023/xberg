@@ -10,15 +10,16 @@ use std::str::FromStr;
 /// Output format for extraction results.
 ///
 /// Controls the format of the `content` field in `ExtractedDocument`.
-/// When set to `Markdown`, `Djot`, or `Html`, the output uses that format.
-/// `Plain` returns the raw extracted text.
+/// `Markdown` is the default: one document is rendered as one Markdown string.
+/// `Plain` returns the raw extracted text; `Djot`, `Html`, `Json` and `DocTags`
+/// select their respective renderers.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
-    /// Plain text content only (default)
-    #[default]
+    /// Plain text content only.
     Plain,
-    /// Markdown format
+    /// Markdown format (default).
+    #[default]
     Markdown,
     /// Djot markup format
     Djot,
@@ -289,7 +290,7 @@ mod tests {
     #[test]
     fn test_output_format_default() {
         let format = OutputFormat::default();
-        assert_eq!(format, OutputFormat::Plain);
+        assert_eq!(format, OutputFormat::Markdown);
     }
 
     #[test]

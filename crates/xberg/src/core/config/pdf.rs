@@ -193,7 +193,7 @@ pub struct HierarchyConfig {
 impl Default for PdfConfig {
     fn default() -> Self {
         Self {
-            extract_images: false,
+            extract_images: true,
             extract_tables: true,
             passwords: None,
             extract_metadata: true,

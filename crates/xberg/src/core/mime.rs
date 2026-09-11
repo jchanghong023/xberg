@@ -278,6 +278,11 @@ pub(crate) const POWER_POINT_MIME_TYPE: &str =
 pub(crate) const DOCX_MIME_TYPE: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 pub(crate) const LEGACY_WORD_MIME_TYPE: &str = "application/msword";
 pub(crate) const LEGACY_POWERPOINT_MIME_TYPE: &str = "application/vnd.ms-powerpoint";
+pub(crate) const VISIO_MIME_TYPE: &str = "application/vnd.visio";
+/// MIME type of the OPC (ZIP) Visio Drawing package (`.vsdx`/`.vsdm`); the
+/// content type registered in its `[Content_Types].xml` is
+/// `application/vnd.ms-visio.drawing.main+xml`.
+pub(crate) const VISIO_DRAWING_ML_MIME_TYPE: &str = "application/vnd.ms-visio.drawing";
 /// Only reachable from `detect_ole2_package`, which is gated on the feature set that pulls in
 /// the `cfb` crate; without one of those features nothing names this constant and `-D warnings`
 /// rejects it as dead code. Gate must track that function's. ~keep
@@ -458,6 +463,16 @@ static FORMATS: &[FormatEntry] = &[
     FormatEntry {
         extensions: &["doc", "dot"],
         mime_type: "application/msword",
+        aliases: &[],
+    },
+    FormatEntry {
+        extensions: &["vsd"],
+        mime_type: VISIO_MIME_TYPE,
+        aliases: &[],
+    },
+    FormatEntry {
+        extensions: &["vsdx", "vsdm"],
+        mime_type: VISIO_DRAWING_ML_MIME_TYPE,
         aliases: &[],
     },
     FormatEntry {
@@ -1638,6 +1653,15 @@ fn detect_office_format_from_archive<R: Read + Seek>(archive: &mut zip::ZipArchi
     if has(archive, "ppt/presentation.xml") {
         return Some(POWER_POINT_MIME_TYPE);
     }
+    if has(archive, "visio/document.xml") {
+        return Some(VISIO_DRAWING_ML_MIME_TYPE);
+    }
+    // Some producers unwrap a Visio drawing into a flat package (a "VDX"-style
+    // layout) with the parts at the archive root, e.g. an OLE `Package` stream
+    // holding `document.xml` + `pages/page1.xml` with no `[Content_Types].xml`.
+    if has(archive, "document.xml") && archive.file_names().any(|name| name.starts_with("pages/")) {
+        return Some(VISIO_DRAWING_ML_MIME_TYPE);
+    }
     // A Numbers package also carries `Index/Document.iwa`, so the discriminating
     // parts are tested first. Otherwise a spreadsheet is read as a Pages
     // document and yields no sheets at all.
@@ -1742,6 +1766,19 @@ fn ooxml_package_mime(part_name: &str, content_type: &str) -> Option<&'static st
         "/word/document.xml" => wordprocessing_package_mime(content_type),
         "/ppt/presentation.xml" => presentation_package_mime(content_type),
         "/xl/workbook.xml" | "/xl/workbook.bin" => spreadsheet_package_mime(content_type),
+        "/visio/document.xml" => drawing_package_mime(content_type),
+        _ => None,
+    }
+}
+
+/// Map a Visio Drawing package content type to its MIME type.
+#[cfg(feature = "office")]
+fn drawing_package_mime(content_type: &str) -> Option<&'static str> {
+    match content_type {
+        "application/vnd.ms-visio.drawing.main+xml" => Some(VISIO_DRAWING_ML_MIME_TYPE),
+        // Macro-enabled drawings (`.vsdm`) carry the same shape-text parts; route
+        // them through the same reader rather than leaving the package unidentified.
+        "application/vnd.ms-visio.drawing.macroEnabled.main+xml" => Some(VISIO_DRAWING_ML_MIME_TYPE),
         _ => None,
     }
 }

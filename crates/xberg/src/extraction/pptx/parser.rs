@@ -109,11 +109,19 @@ fn parse_group(node: &Node, xml_str: &str) -> Result<Vec<SlideElement>> {
             }
         }
         "graphicFrame" => {
-            if let Some(content) = parse_graphic_frame(node)? {
-                match content {
-                    GraphicFrameContent::Table(table) => elements.push(SlideElement::Table(table, position)),
-                    GraphicFrameContent::Chart(chart) => elements.push(SlideElement::Chart(chart, position)),
-                    GraphicFrameContent::SmartArt(diagram) => elements.push(SlideElement::SmartArt(diagram, position)),
+            match parse_graphic_frame(node)? {
+                Some(GraphicFrameContent::Table(table)) => elements.push(SlideElement::Table(table, position)),
+                Some(GraphicFrameContent::Chart(chart)) => elements.push(SlideElement::Chart(chart, position)),
+                Some(GraphicFrameContent::SmartArt(diagram)) => elements.push(SlideElement::SmartArt(diagram, position)),
+                None => {
+                    // OLE object frames (`…/graphicData` uri `…/ole`) carry their rendered
+                    // preview as a DrawingML blip inside the `mc:Fallback` branch; the
+                    // `mc:Choice` VML branch only names the embedding. Emit that preview so
+                    // the raster (frequently EMF/WMF) is extracted — and, for EMF/WMF,
+                    // rasterized and OCR'd — instead of the whole object vanishing.
+                    if let Some(image_reference) = ole_preview_image(node) {
+                        elements.push(SlideElement::Image(image_reference, position));
+                    }
                 }
             }
         }
@@ -297,6 +305,32 @@ fn parse_graphic_frame(node: &Node) -> Result<Option<GraphicFrameContent>> {
     }
 
     Ok(None)
+}
+
+/// The preview image of an OLE object `p:graphicFrame`, taken from the DrawingML
+/// `a:blip` inside its `mc:Fallback` branch.
+///
+/// PowerPoint represents an embedded OLE object twice: `mc:Choice` is a VML shape
+/// naming the embedding relation (`r:id`), while `mc:Fallback` is a full `p:pic`
+/// whose `a:blip/@r:embed` points at a cached raster/EMF preview of the object.
+/// Only the fallback carries an image, so the blip is looked up across the whole
+/// frame — including `p:oleObj` descendants — rather than at a fixed depth.
+/// Returns `None` when the frame has no picture preview at all.
+fn ole_preview_image(node: &Node) -> Option<ImageReference> {
+    let blip_node = node.descendants().find(|n| {
+        n.is_element()
+            && n.tag_name().name() == "blip"
+            && n.tag_name().namespace() == Some(DRAWINGML_NAMESPACE)
+            && (n.attribute((RELATIONSHIPS_NAMESPACE, "embed")).is_some() || n.attribute("r:embed").is_some())
+    })?;
+    let embed_attr = blip_node
+        .attribute((RELATIONSHIPS_NAMESPACE, "embed"))
+        .or_else(|| blip_node.attribute("r:embed"))?;
+    Some(ImageReference {
+        id: embed_attr.to_string(),
+        target: String::new(),
+        description: None,
+    })
 }
 
 /// Parse the text content of a chart part (e.g. `ppt/charts/chart1.xml`).

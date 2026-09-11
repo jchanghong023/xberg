@@ -16,6 +16,7 @@ members = [
     "crates/xberg-py",
     "crates/xberg-tesseract",
     "crates/xberg-wasm",
+    "crates/xberg-windows-metafile",
     "packages/dart/rust",
     "packages/swift/rust",
     "tools/benchmark-harness",

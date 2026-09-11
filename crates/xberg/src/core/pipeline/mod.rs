@@ -320,7 +320,7 @@ async fn run_captioning_prepass(
 #[cfg_attr(alef, alef(skip))]
 pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) -> Result<ExtractedDocument> {
     doc.ocr_text_only = config.images.as_ref().map(|i| i.ocr_text_only).unwrap_or(false);
-    doc.append_ocr_text = config.images.as_ref().map(|i| i.append_ocr_text).unwrap_or(false);
+    doc.append_ocr_text = config.images.as_ref().map(|i| i.append_ocr_text).unwrap_or(true);
     doc.escape_markdown = config.escape_markdown;
     doc.include_watermarks = config
         .content_filter
@@ -339,7 +339,7 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
     #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
     let image_ocr_enabled = config.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true);
     #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
-    if image_ocr_enabled && config.ocr.is_some() && !doc.images.is_empty() {
+    if image_ocr_enabled && !doc.images.is_empty() {
         let image_positions = image_ocr_positions(&doc);
         // Clone only selected images so skipped entries keep their positions and a
         // batch-level OCR failure cannot discard the original extracted images.
@@ -620,7 +620,7 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
 #[cfg_attr(alef, alef(skip))]
 pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -> Result<ExtractedDocument> {
     doc.ocr_text_only = config.images.as_ref().map(|i| i.ocr_text_only).unwrap_or(false);
-    doc.append_ocr_text = config.images.as_ref().map(|i| i.append_ocr_text).unwrap_or(false);
+    doc.append_ocr_text = config.images.as_ref().map(|i| i.append_ocr_text).unwrap_or(true);
     doc.escape_markdown = config.escape_markdown;
     doc.include_watermarks = config
         .content_filter
@@ -1052,8 +1052,19 @@ fn append_embedded_image_ocr_text(doc: &mut InternalDocument) {
     }
 }
 
+/// Alt text of a markdown image reference (`![alt](url)`), or `None` when `text` is not one.
+///
+/// Extractors that bake references into their text (PPTX) use this to recover the alt text
+/// before turning the reference into a real image element. ~keep
+pub(crate) fn markdown_image_reference_alt(text: &str) -> Option<&str> {
+    let t = text.trim();
+    let rest = t.strip_prefix("![")?;
+    let end = rest.find("](")?;
+    Some(rest[..end].trim())
+}
+
 /// Returns `true` if `text` is exactly a markdown image reference (`![alt](url)`).
-fn is_markdown_image_reference(text: &str) -> bool {
+pub(crate) fn is_markdown_image_reference(text: &str) -> bool {
     let t = text.trim();
     if !t.starts_with("![") {
         return false;

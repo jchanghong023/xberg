@@ -116,7 +116,20 @@ pub(crate) type ExcelReadResult = (ExcelWorkbook, Vec<ProcessingWarning>);
 /// `.xls`/`.xla` OLE2 file misrouted here) — the subsequent calamine open then reports a
 /// format error with clearer context than this pre-check could.
 #[cfg(feature = "excel")]
-fn validate_zip_container<R: Read + Seek>(reader: R, limits: &SecurityLimits) -> Result<()> {
+fn validate_zip_container<R: Read + Seek>(mut reader: R, limits: &SecurityLimits) -> Result<()> {
+    // Decide by ZIP magic, not by `ZipArchive::new`'s outcome: a legacy `.xls`/`.xla`
+    // OLE2 container can embed an OPC package whose end-of-central-directory makes the
+    // archive parse, and the validator then hard-fails reading a bogus entry 0. Only a
+    // real ZIP (local header, empty archive, or ZIP64 EOCD) is validated; anything else
+    // falls through to the format-specific parser, which reports a clearer error.
+    let mut magic = [0u8; 4];
+    if reader.read_exact(&mut magic).is_err() {
+        return Ok(());
+    }
+    if magic != *b"PK\x03\x04" && magic != *b"PK\x05\x06" && magic != *b"PK\x06\x06" {
+        return Ok(());
+    }
+    let _ = reader.seek(std::io::SeekFrom::Start(0));
     let mut archive = match zip::ZipArchive::new(reader) {
         Ok(archive) => archive,
         Err(_) => return Ok(()),

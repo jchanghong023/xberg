@@ -1780,28 +1780,36 @@ impl PdfExtractor {
             crate::plugins::ensure_ocr_backends_initialized();
             let backend = {
                 let registry = crate::plugins::registry::get_ocr_backend_registry();
-                registry.read().get(&ocr_config.backend)?
+                registry.read().get(&ocr_config.backend).ok()
             };
-            let mut ocr_config_with_format = ocr_config.clone();
-            ocr_config_with_format.output_format = Some(config.output_format.clone());
-            for img in imgs.iter_mut() {
-                if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
-                    break;
-                }
-                match backend.process_image(&img.data, &ocr_config_with_format).await {
-                    Ok(mut ocr_result) => {
-                        ocr_config.apply_public_element_policy(&mut ocr_result);
-                        img.ocr_result = Some(Box::new(ocr_result));
+            if let Some(backend) = backend {
+                let mut ocr_config_with_format = ocr_config.clone();
+                ocr_config_with_format.output_format = Some(config.output_format.clone());
+                for img in imgs.iter_mut() {
+                    if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                        break;
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            page = img.page_number,
-                            image_index = img.image_index,
-                            error = %e,
-                            "inline image OCR failed; image returned without OCR result"
-                        );
+                    match backend.process_image(&img.data, &ocr_config_with_format).await {
+                        Ok(mut ocr_result) => {
+                            ocr_config.apply_public_element_policy(&mut ocr_result);
+                            img.ocr_result = Some(Box::new(ocr_result));
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                page = img.page_number,
+                                image_index = img.image_index,
+                                error = %e,
+                                "inline image OCR failed; image returned without OCR result"
+                            );
+                        }
                     }
                 }
+            } else {
+                tracing::warn!(
+                    backend = %ocr_config.backend,
+                    "inline image OCR was requested but no OCR backend is registered; \
+                     images are returned without OCR results"
+                );
             }
         }
 
@@ -2128,23 +2136,46 @@ impl PdfExtractor {
                             layout_warning,
                             layout_glyph_drop_warnings,
                         )) => {
-                            if let Some(warning) = layout_warning {
-                                crate::core::diagnostics::push_warning_deduped(&mut ocr_fallback_warnings, warning);
+                            // A full-document OCR pass that would discard most of the native text is
+                            // rejected in favour of the native text: a PDF that already has a healthy
+                            // text layer must come out unchanged, even when the per-page quality
+                            // heuristic asked for OCR. ~keep
+                            let information_loss =
+                                ocr::destructive_ocr_information_loss(&native_text, &ocr_text, &thresholds);
+                            if !native_text.trim().is_empty() && information_loss.is_some() {
+                                let (native_alnum, ocr_alnum) = information_loss.expect("checked as present");
+                                tracing::warn!(
+                                    native_alnum,
+                                    ocr_alnum,
+                                    "automatic full-document OCR would discard most native text; using native text"
+                                );
+                                ocr_fallback_warnings.push(crate::types::ProcessingWarning {
+                                    source: std::borrow::Cow::Borrowed("ocr"),
+                                    message: std::borrow::Cow::Owned(format!(
+                                        "Automatic OCR retained only {ocr_alnum} of {native_alnum} native \
+                                         alphanumeric characters; returning native PDF text."
+                                    )),
+                                });
+                                (native_text, ExtractionMethod::Native)
+                            } else {
+                                if let Some(warning) = layout_warning {
+                                    crate::core::diagnostics::push_warning_deduped(&mut ocr_fallback_warnings, warning);
+                                }
+                                for warning in layout_glyph_drop_warnings {
+                                    crate::core::diagnostics::push_warning_deduped(&mut ocr_fallback_warnings, warning);
+                                }
+                                ocr_layout_gate_audit = gate_audit;
+                                ocr_tables = ocr_tbls;
+                                ocr_elements = ocr_elems;
+                                ocr_internal_doc = ocr_doc;
+                                ocr_llm_usage = llm_usage;
+                                ocr_page_texts = Some(ocr_pts);
+                                ocr_page_rasters = ocr_rstrs;
+                                ocr_formulas = formulas;
+                                ocr_preprocessing_by_page = preprocessing;
+                                ocr_confidence_by_page = page_ocr_confidence;
+                                (ocr_text, ExtractionMethod::Ocr)
                             }
-                            for warning in layout_glyph_drop_warnings {
-                                crate::core::diagnostics::push_warning_deduped(&mut ocr_fallback_warnings, warning);
-                            }
-                            ocr_layout_gate_audit = gate_audit;
-                            ocr_tables = ocr_tbls;
-                            ocr_elements = ocr_elems;
-                            ocr_internal_doc = ocr_doc;
-                            ocr_llm_usage = llm_usage;
-                            ocr_page_texts = Some(ocr_pts);
-                            ocr_page_rasters = ocr_rstrs;
-                            ocr_formulas = formulas;
-                            ocr_preprocessing_by_page = preprocessing;
-                            ocr_confidence_by_page = page_ocr_confidence;
-                            (ocr_text, ExtractionMethod::Ocr)
                         }
                         Err(e) => {
                             tracing::warn!(
@@ -2540,7 +2571,7 @@ impl PdfExtractor {
 
         if let Some(imgs) = images {
             // The OCR path has its own guarded injection block below (see the `#[cfg(feature = "ocr")]`
-            let inject_placeholders = config.images.as_ref().is_some_and(|c| c.inject_placeholders);
+            let inject_placeholders = config.images.as_ref().map(|c| c.inject_placeholders).unwrap_or(true);
             let document_has_image_elements = doc
                 .elements
                 .iter()
@@ -2591,7 +2622,7 @@ impl PdfExtractor {
         if used_ocr && !doc.images.is_empty() {
             let images_enabled = config.images.as_ref().map(|c| c.extract_images).unwrap_or(false)
                 || config.pdf_options.as_ref().map(|p| p.extract_images).unwrap_or(false);
-            if images_enabled && config.images.as_ref().map(|c| c.inject_placeholders).unwrap_or(false) {
+            if images_enabled && config.images.as_ref().map(|c| c.inject_placeholders).unwrap_or(true) {
                 let referenced_images: std::collections::HashSet<u32> = doc
                     .elements
                     .iter()
@@ -6136,13 +6167,13 @@ mod tests {
         }
     }
 
-    /// Verifies that `inject_placeholders` defaults to false when only
-    /// `pdf_options.extract_images` is set and `config.images` is absent,
-    /// so callers who never touched `config.images` do not get unexpected placeholders.
+    /// Verifies that placeholders are injected by default: `config.images` is absent and
+    /// only `pdf_options.extract_images` is set, yet the markdown still marks every image
+    /// position — an image must never disappear silently from the output.
     #[tokio::test]
     #[cfg(all(feature = "pdf", feature = "ocr"))]
     #[serial]
-    async fn test_inject_placeholders_absent_when_only_pdf_options_set() {
+    async fn test_inject_placeholders_present_by_default_when_only_pdf_options_set() {
         use crate::core::config::{OcrConfig, OutputFormat, pdf::PdfConfig};
 
         let _backend = register_mock_ocr_backend("inject-placeholder-absent-ocr", "mock page text");
@@ -6179,8 +6210,8 @@ mod tests {
 
         let markdown = result.formatted_content.as_deref().unwrap_or(&result.content);
         assert!(
-            !markdown.contains("!["),
-            "Markdown must NOT contain image placeholders when config.images is absent (inject_placeholders defaults to false)"
+            markdown.contains("!["),
+            "Markdown must contain image placeholders by default (inject_placeholders defaults to true)"
         );
     }
 

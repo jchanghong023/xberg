@@ -2480,7 +2480,7 @@ impl<R: Read + Seek> DocxParser<R> {
                             let parsed = super::drawing::parse_vml_pict(reader, budget)?;
                             if mc_fallback_depth == 0
                                 && let Some(drawing) = parsed
-                                && drawing.text_box_content.is_some()
+                                && (drawing.text_box_content.is_some() || drawing.image_ref.is_some())
                             {
                                 let idx = out.drawings.len();
                                 out.drawings.push(drawing);
@@ -2606,6 +2606,25 @@ impl<R: Read + Seek> DocxParser<R> {
                             out.drawings.push(drawing);
                             out.elements.push(DocumentElement::Drawing(idx));
                             page_breaks.text_since_break = true;
+                        }
+                        // VML `<v:imagedata>` pictures (legacy `.doc` conversions, OLE object
+                        // previews under `w:object`). `w:pict` is consumed by
+                        // `parse_vml_pict` above and never reaches this arm; `w:object` is
+                        // not otherwise handled, so its `v:imagedata` arrives here. A
+                        // fallback copy inside `mc:Fallback` is skipped: when the
+                        // `mc:Choice` already carried the same image this would duplicate it.
+                        "v:imagedata" => {
+                            if mc_fallback_depth == 0
+                                && let Some(relationship_id) = super::drawing::vml_image_ref(e)
+                            {
+                                let idx = out.drawings.len();
+                                out.drawings.push(super::drawing::Drawing {
+                                    image_ref: Some(relationship_id),
+                                    ..Default::default()
+                                });
+                                out.elements.push(DocumentElement::Drawing(idx));
+                                page_breaks.text_since_break = true;
+                            }
                         }
                         "w:br" => {
                             apply_break(
@@ -2758,6 +2777,23 @@ impl<R: Read + Seek> DocxParser<R> {
                                         run.text.push_str(&format!("[cmt:{}]", id));
                                     }
                                 }
+                            }
+                        }
+                        // `<v:imagedata …/>` is self-closing in practice; see the matching
+                        // `v:imagedata` arm in the `Event::Start` block for why it carries an
+                        // `mc:Fallback` guard. VML pictures nested in `w:pict` are handled by
+                        // `parse_vml_pict` and never surface here.
+                        "v:imagedata" => {
+                            if mc_fallback_depth == 0
+                                && let Some(relationship_id) = super::drawing::vml_image_ref(e)
+                            {
+                                let idx = out.drawings.len();
+                                out.drawings.push(super::drawing::Drawing {
+                                    image_ref: Some(relationship_id),
+                                    ..Default::default()
+                                });
+                                out.elements.push(DocumentElement::Drawing(idx));
+                                page_breaks.text_since_break = true;
                             }
                         }
                         "w:sectPr" => {

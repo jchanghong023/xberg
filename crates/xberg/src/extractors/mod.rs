@@ -127,6 +127,8 @@ pub mod dbf;
 
 #[cfg(feature = "office")]
 pub mod docx;
+#[cfg(feature = "office")]
+pub mod visio;
 
 #[cfg(feature = "office")]
 pub mod epub;
@@ -245,6 +247,8 @@ pub use doc::DocExtractor;
 
 #[cfg(feature = "office")]
 pub use docx::DocxExtractor;
+#[cfg(feature = "office")]
+pub use visio::VisioExtractor;
 
 #[cfg(feature = "office")]
 pub use epub::EpubExtractor;
@@ -402,6 +406,7 @@ pub(crate) fn register_default_extractors() -> Result<()> {
         registry.register_internal(Arc::new(TypstExtractor::new()))?;
         registry.register_internal(Arc::new(DocExtractor::new()))?;
         registry.register_internal(Arc::new(DocxExtractor::new()))?;
+        registry.register_internal(Arc::new(VisioExtractor::new()))?;
         registry.register_internal(Arc::new(PptExtractor::new()))?;
         registry.register_internal(Arc::new(PptxExtractor::new()))?;
         registry.register_internal(Arc::new(OdtExtractor::new()))?;

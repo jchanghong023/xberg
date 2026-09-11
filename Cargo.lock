@@ -11857,6 +11857,7 @@ dependencies = [
  "xberg-paddle-ocr",
  "xberg-pdfium-render",
  "xberg-tesseract",
+ "xberg-windows-metafile",
  "zeroize",
  "zip 8.6.0",
 ]
@@ -12186,6 +12187,13 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-bindgen-test",
  "xberg",
+]
+
+[[package]]
+name = "xberg-windows-metafile"
+version = "1.1.6"
+dependencies = [
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

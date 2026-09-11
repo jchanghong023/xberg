@@ -1080,13 +1080,21 @@ impl OcrConfig {
         all(feature = "liter-llm", not(target_arch = "wasm32")),
     ))]
     pub(crate) fn effective_tesseract_language(&self) -> Vec<String> {
-        if self.language != [DEFAULT_OCR_LANGUAGE.to_string()] {
-            return self.effective_languages();
-        }
-        match &self.tesseract_config {
-            Some(tess) if !tess.language.is_empty() => tess.language.clone(),
-            _ => self.effective_languages(),
-        }
+        // Callers pass ISO codes (`zh`, `en`, …) but Tesseract loads packs by their own names
+        // (`chi_sim`, `eng`, …); resolve to the pack name here so every consumer — the native
+        // backend, the WASM backend, image extraction and the tessdata downloader — agrees. ~keep
+        let resolved = if self.language != [DEFAULT_OCR_LANGUAGE.to_string()] {
+            self.effective_languages()
+        } else {
+            match &self.tesseract_config {
+                Some(tess) if !tess.language.is_empty() => tess.language.clone(),
+                _ => self.effective_languages(),
+            }
+        };
+        resolved
+            .iter()
+            .map(|code| crate::ocr::tessdata_download::tesseract_language_name(code))
+            .collect()
     }
 
     /// Returns the effective quality thresholds, using configured values or defaults.

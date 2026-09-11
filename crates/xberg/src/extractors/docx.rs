@@ -98,6 +98,25 @@ fn build_internal_document(
     let mut bookmark_elements: AHashMap<String, u32> = AHashMap::new();
     let mut pending_anchor_links: Vec<(u32, String, RelationshipKind)> = Vec::new();
 
+    // `doc.images` is produced by the caller from the same `doc.drawings` list, in order,
+    // emitting one entry per drawing that has an image relationship and none for shape-only
+    // drawings (text boxes, rules). Renderers resolve an `ElementKind::Image` by indexing
+    // `doc.images`, so the element must carry that sequential index — not the raw drawing
+    // index, which is shifted by every skipped shape and would drop or mis-point markers.
+    // The two derivations must agree, so both key on exactly `image_ref.is_some()`. ~keep
+    let mut next_image_index: u32 = 0;
+    let image_indices: Vec<Option<u32>> = doc
+        .drawings
+        .iter()
+        .map(|drawing| {
+            drawing.image_ref.as_ref().map(|_| {
+                let index = next_image_index;
+                next_image_index += 1;
+                index
+            })
+        })
+        .collect();
+
     for element in &doc.elements {
         match element {
             crate::extraction::docx::parser::DocumentElement::Paragraph(idx) => {
@@ -331,13 +350,13 @@ fn build_internal_document(
                     builder.push_paragraph(textbox_text, vec![], Some(current_page), None);
                 }
 
-                if drawing.image_ref.is_none() {
-                    continue;
-                }
-
                 if !inject_placeholders {
                     continue;
                 }
+
+                let Some(image_index) = image_indices.get(*idx).copied().flatten() else {
+                    continue;
+                };
 
                 if current_list_numbering_id.is_some() {
                     builder.end_list();
@@ -365,9 +384,7 @@ fn build_internal_document(
                     _ => None,
                 };
 
-                let kind = ElementKind::Image {
-                    image_index: *idx as u32,
-                };
+                let kind = ElementKind::Image { image_index };
                 let text_val = description.as_deref().unwrap_or("");
                 let elem = InternalElement::text(kind, text_val, 0).with_page(current_page);
                 let elem = if let Some(b) = bbox { elem.with_bbox(b) } else { elem };
@@ -833,7 +850,7 @@ impl InternalDocumentExtractor for DocxExtractor {
     ) -> Result<InternalDocument> {
         tracing::debug!("extract_docx: starting");
 
-        let output_format = if config.images.as_ref().is_some_and(|i| i.extract_images) {
+        let output_format = if config.images.as_ref().map(|i| i.extract_images).unwrap_or(true) {
             crate::core::config::OutputFormat::Markdown
         } else {
             config.output_format.clone()
@@ -1130,6 +1147,16 @@ impl InternalDocumentExtractor for DocxExtractor {
                 (Bytes::new(), format, None, None)
             };
 
+            // A drawing with no relationship is a shape (text box, rule, rectangle), not an
+            // image: it can never yield bytes, and reporting it as an image with an empty
+            // `data` buffer and a placeholder `format` misleads every consumer. `doc.images`
+            // therefore contains exactly the drawings with a relationship, in order — the
+            // same rule `build_internal_document` uses to assign each `ElementKind::Image`
+            // its index, so the two can never disagree. ~keep
+            if drawing.image_ref.is_none() {
+                continue;
+            }
+
             // Taken from the parsed element list, not by searching rendered markdown for a
             // placeholder: `to_markdown` renders every drawing to the same `![alt](image)`
             // target, so the per-image key this used to look for never existed and every image
@@ -1140,10 +1167,13 @@ impl InternalDocumentExtractor for DocxExtractor {
             let (image_kind, kind_confidence) =
                 crate::extraction::image_kind::classify(&data, format.as_ref(), width, height, None, None, false);
 
+            // Sequential over emitted images only: skipping shape-only drawings above must not
+            // leave gaps, and `page_contents[].image_indices` is built by position.
+            let image_index = extracted_images.len() as u32;
             extracted_images.push(ExtractedImage {
                 data,
                 format,
-                image_index: idx as u32,
+                image_index,
                 page_number,
                 width,
                 height,
@@ -4345,6 +4375,97 @@ mod tests {
             page_numbers,
             vec![Some(1), Some(3)],
             "the first drawing sits on page 1 and the second after two page breaks on page 3, got {page_numbers:?}"
+        );
+    }
+
+    /// Regression: an `ElementKind::Image`'s `image_index` indexes `doc.images`, but it was
+    /// assigned the raw *drawing* index. A shape-only drawing (no `a:blip`) produces no image,
+    /// so once shapes were excluded from `doc.images` every later element pointed one slot too
+    /// far — renderers silently dropped the marker or pointed it at the wrong image. A
+    /// two-image document with a shape between the images must therefore number its image
+    /// elements `[0, 1]`, exactly matching the two entries in `doc.images`.
+    #[tokio::test]
+    async fn test_image_elements_index_doc_images_not_drawings() {
+        const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"
+            xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r>
+      <w:drawing><wp:inline>
+        <wp:extent cx="914400" cy="914400"/>
+        <wp:docPr id="1" name="Picture 1" descr="First"/>
+        <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+          <pic:pic><pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill></pic:pic>
+        </a:graphicData></a:graphic>
+      </wp:inline></w:drawing>
+    </w:r></w:p>
+    <w:p><w:r>
+      <w:drawing><wp:inline>
+        <wp:extent cx="914400" cy="457200"/>
+        <wp:docPr id="2" name="Rectangle 1"/>
+        <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+          <wps:wsp><wps:cNvSpPr/></wps:wsp>
+        </a:graphicData></a:graphic>
+      </wp:inline></w:drawing>
+    </w:r></w:p>
+    <w:p><w:r>
+      <w:drawing><wp:inline>
+        <wp:extent cx="914400" cy="914400"/>
+        <wp:docPr id="3" name="Picture 2" descr="Second"/>
+        <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+          <pic:pic><pic:blipFill><a:blip r:embed="rId6"/></pic:blipFill></pic:pic>
+        </a:graphicData></a:graphic>
+      </wp:inline></w:drawing>
+    </w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+        const RELS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/one.png"/>
+  <Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/two.png"/>
+</Relationships>"#;
+
+        let data = build_test_docx_with_files(
+            DOCUMENT_XML,
+            &[
+                ("word/_rels/document.xml.rels", RELS_XML),
+                ("word/media/one.png", "ONEPAYLOAD"),
+                ("word/media/two.png", "TWOPAYLOAD"),
+            ],
+        );
+
+        let extractor = DocxExtractor::new();
+        let internal_doc = extractor
+            .extract_content(
+                &data,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                &image_extraction_config(),
+            )
+            .await
+            .expect("a two-image document with a shape between the images must extract");
+
+        assert_eq!(
+            internal_doc.images.len(),
+            2,
+            "the shape-only drawing must not be reported as an image"
+        );
+        let element_indices: Vec<u32> = internal_doc
+            .elements
+            .iter()
+            .filter_map(|element| match element.kind {
+                crate::types::internal::ElementKind::Image { image_index } => Some(image_index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            element_indices,
+            vec![0, 1],
+            "image elements must index the two-entry `doc.images`, not the three-drawing list"
         );
     }
 

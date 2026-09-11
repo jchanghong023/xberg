@@ -469,12 +469,15 @@ fn parse_vml_textbox(reader: &mut Reader<&[u8]>, budget: &mut SecurityBudget) ->
 }
 
 /// Parse a `<w:pict>` VML fallback wrapper, extracting text-box content from a
-/// nested `<v:textbox><w:txbxContent>` if present (#81, #224).
+/// nested `<v:textbox><w:txbxContent>` if present (#81, #224), and the image
+/// relationship from a nested `<v:imagedata r:id="…"/>` when the pict is a
+/// legacy picture rather than a text box.
 ///
-/// Consumes events through the matching `</w:pict>` end tag regardless of whether a
-/// text box was found, so the caller's own event loop never sees `w:pict`'s inner
+/// Consumes events through the matching `</w:pict>` end tag regardless of what was
+/// found, so the caller's own event loop never sees `w:pict`'s inner
 /// `v:shape`/`w:p`/`w:r`/`w:t` events leak out as if they were ordinary body content.
-/// Returns `Ok(None)` when no text box was found (nothing to attach to the document).
+/// Returns `Ok(None)` when neither a text box nor an image reference was found
+/// (nothing to attach to the document).
 ///
 /// Threads `budget` through every event so nesting and iteration count inside
 /// `w:pict` are measured against the caller's caps instead of passing through
@@ -489,19 +492,32 @@ pub(crate) fn parse_vml_pict(
     let mut buf = Vec::new();
     let mut depth = 1u32;
     let mut text_box_content: Option<String> = None;
+    let mut image_ref: Option<String> = None;
 
     loop {
         budget.step()?;
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
                 budget.enter()?;
-                if e.local_name().as_ref() == "textbox" {
-                    // `parse_vml_textbox` consumes its own end tag and balances
-                    // the `enter()` above internally, so no manual
-                    // `budget.leave()` is needed here. ~keep
-                    text_box_content = parse_vml_textbox(reader, budget)?;
-                } else {
-                    depth += 1;
+                match e.local_name().as_ref() {
+                    "textbox" => {
+                        // `parse_vml_textbox` consumes its own end tag and balances
+                        // the `enter()` above internally, so no manual
+                        // `budget.leave()` is needed here. ~keep
+                        text_box_content = parse_vml_textbox(reader, budget)?;
+                    }
+                    "imagedata" => {
+                        if image_ref.is_none() {
+                            image_ref = get_attr(e, "id");
+                        }
+                        depth += 1;
+                    }
+                    _ => depth += 1,
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                if e.local_name().as_ref() == "imagedata" && image_ref.is_none() {
+                    image_ref = get_attr(e, "id");
                 }
             }
             Ok(Event::End(_)) => {
@@ -517,10 +533,19 @@ pub(crate) fn parse_vml_pict(
         buf.clear();
     }
 
-    Ok(text_box_content.map(|text| Drawing {
-        text_box_content: Some(text),
+    if text_box_content.is_none() && image_ref.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(Drawing {
+        image_ref,
+        text_box_content,
         ..Default::default()
     }))
+}
+
+/// Relationship id targeted by a VML `<v:imagedata r:id="…"/>` element.
+pub(crate) fn vml_image_ref(e: &BytesStart) -> Option<String> {
+    get_attr(e, "id")
 }
 
 #[cfg(test)]

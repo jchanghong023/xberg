@@ -374,9 +374,46 @@ impl PptxExtractor {
 
         if extract_images {
             doc.images = pptx_result.images;
+            promote_baked_image_references(&mut doc);
         }
 
         Ok(doc)
+    }
+}
+
+/// Turn the `![alt](target)` placeholders the PPTX content builder bakes into slide text into
+/// real image elements.
+///
+/// A placeholder left as paragraph text is escaped by the Markdown writer (`\![alt](target)`)
+/// and points at a path inside the package (`../media/image4.png`), so it is neither a live
+/// image reference nor resolvable next to the extracted output. Rendering from an image element
+/// yields the same `![alt](image_N.ext)` form DOCX/PDF already produce, naming the file the
+/// extractor writes. Pairing is positional — the builder emits one placeholder per slide image
+/// in document order and `doc.images` is collected in that same order — and a placeholder with
+/// no matching image (an unreadable image) is left as text rather than dropped. ~keep
+fn promote_baked_image_references(doc: &mut InternalDocument) {
+    use crate::types::internal::ElementKind;
+
+    let mut next_image = 0usize;
+    for elem in doc.elements.iter_mut() {
+        if !matches!(elem.kind, ElementKind::Paragraph) {
+            continue;
+        }
+        let Some(alt) = crate::core::pipeline::markdown_image_reference_alt(&elem.text) else {
+            continue;
+        };
+        if next_image >= doc.images.len() {
+            break;
+        }
+        let description = &mut doc.images[next_image].description;
+        if description.as_deref().map(str::trim).unwrap_or("").is_empty() && !alt.is_empty() {
+            *description = Some(alt.to_string());
+        }
+        elem.kind = ElementKind::Image {
+            image_index: next_image as u32,
+        };
+        elem.text = doc.images[next_image].description.clone().unwrap_or_default();
+        next_image += 1;
     }
 }
 
@@ -570,6 +607,42 @@ impl InternalDocumentExtractor for PptxExtractor {
             &mut budget,
         )?;
         doc.processing_warnings.extend(pptx_warnings);
+
+        // `extract_content` extracts `ppt/embeddings/*` children, but the CLI (and any caller
+        // that hands PPTX extractors a path) goes through `extract_path`, which reads and
+        // parses the archive itself. Without this block, embedded OLE objects — the Visio/
+        // Excel/`.bin` packages the slides carry — silently produce no children on that path.
+        // Only the bytes are needed, so re-read the file here rather than widening the
+        // extraction API; a read failure is reported as a warning, not a hard failure.
+        if config.max_archive_depth > 0 {
+            match std::fs::read(path) {
+                Ok(content) => {
+                    let (children, embed_warnings) =
+                        crate::extraction::ooxml_embedded::extract_ooxml_embedded_objects(
+                            &content,
+                            "ppt/embeddings/",
+                            "pptx",
+                            config,
+                        )
+                        .await;
+                    if !children.is_empty() {
+                        doc.children = Some(children);
+                    }
+                    doc.processing_warnings.extend(embed_warnings);
+                }
+                Err(error) => {
+                    doc.processing_warnings.push(crate::types::ProcessingWarning {
+                        source: Cow::Borrowed("pptx"),
+                        message: Cow::Owned(format!(
+                            "embedded objects were not extracted: could not re-read '{}': {}",
+                            path.display(),
+                            error
+                        )),
+                    });
+                }
+            }
+        }
+
         Ok(doc)
     }
 
