@@ -199,6 +199,9 @@ async fn test_run_pipeline_basic() {
             enabled: false,
             ..Default::default()
         }),
+        // This test is about pipeline ordering, not the renderer: the default Markdown output
+        // would append the renderer's trailing newline to the element text. ~keep
+        output_format: crate::core::config::OutputFormat::Plain,
         ..Default::default()
     };
 

@@ -2420,6 +2420,8 @@ mod tests {
             geojson: Some(crate::core::config::GeoJsonExtractionConfig {
                 include_full_coordinates: true,
             }),
+            // This test pins routing and the plain coordinate rendering, not Markdown escaping.
+            output_format: crate::core::config::OutputFormat::Plain,
             ..Default::default()
         };
 

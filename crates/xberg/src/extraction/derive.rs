@@ -641,6 +641,18 @@ pub fn derive_extraction_result(
         }
     };
 
+    // Every element-driven format renders nothing for a document that only carries
+    // pre-rendered text (a plugin- or scripted-extractor result built from an
+    // `ExtractedDocument` has no element tree). Returning that text beats returning an empty
+    // string: the content was already extracted, only its markup is unknown. ~keep
+    let formatted_content = match formatted_content {
+        Some(rendered) if rendered.trim().is_empty() => match doc.pre_rendered_content.take() {
+            Some(pre_rendered) if !pre_rendered.trim().is_empty() => Some(pre_rendered),
+            _ => Some(rendered),
+        },
+        other => other,
+    };
+
     let raw_pages = doc.prebuilt_pages.take().or_else(|| build_pages(&doc));
     let pages = apply_page_content_format(raw_pages, &doc, &output_format);
     let ocr_elements = doc.prebuilt_ocr_elements.take().or_else(|| build_ocr_elements(&doc));

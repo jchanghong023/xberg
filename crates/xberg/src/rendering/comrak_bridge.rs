@@ -850,39 +850,49 @@ pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Ar
                     }
                 };
 
-                let has_ocr = render_image_ocr
-                    && image
-                        .and_then(|img| img.ocr_result.as_ref())
-                        .is_some_and(|result| !result.content.is_empty());
-
-                if doc.ocr_text_only && has_ocr {
-                    let ocr_result = image.and_then(|img| img.ocr_result.as_ref()).unwrap();
-                    let ocr_para = mk(arena, NodeValue::Paragraph);
-                    ocr_para.append(mk_text(arena, &ocr_result.content));
-                    parent.append(ocr_para);
-                } else {
-                    let para = mk(arena, NodeValue::Paragraph);
-                    let img_node = mk(
-                        arena,
-                        NodeValue::Image(Box::new(NodeLink {
-                            url,
-                            title: String::new(),
-                        })),
-                    );
-                    img_node.append(mk_text(arena, desc));
-                    para.append(img_node);
-                    parent.append(para);
-
-                    if render_image_ocr
-                        && doc.append_ocr_text
-                        && let Some(ocr_result) = image.and_then(|img| img.ocr_result.as_ref())
-                        && !ocr_result.content.is_empty()
-                    {
-                        let ocr_para = mk(arena, NodeValue::Paragraph);
-                        ocr_para.append(mk_text(arena, &ocr_result.content));
-                        parent.append(ocr_para);
+                // Every image leaves a `text` fenced block holding its marker line (which
+                // carries the path) and, when OCR ran, its recognized text laid out as a grid.
+                // Flat OCR text loses where each line sat — a caption in the picture's
+                // top-right corner came back as an arbitrary line of the stream — while a
+                // fence keeps the reconstructed alignment visible in any renderer. ~keep
+                let ocr_result = render_image_ocr
+                    .then_some(image)
+                    .flatten()
+                    .and_then(|img| img.ocr_result.as_ref());
+                let body = ocr_result
+                    .and_then(|result| {
+                        result
+                            .ocr_internal_document
+                            .as_ref()
+                            .and_then(crate::rendering::ocr_layout::layout_ocr_text)
+                            .or_else(|| {
+                                let text = result.content.trim();
+                                (!text.is_empty()).then(|| text.to_string())
+                            })
+                    })
+                    .filter(|_| doc.append_ocr_text);
+                let marker = (!doc.ocr_text_only).then(|| {
+                    if desc.is_empty() {
+                        format!("![]({url})")
+                    } else {
+                        format!("![{desc}]({url})")
                     }
+                });
+
+                // The trailing newline is load-bearing: comrak writes a raw node verbatim and
+                // starts the next block immediately, so a fence that does not end in a line
+                // break swallows the rest of the document into its code block. ~keep
+                let mut block = String::from("```text\n");
+                if let Some(marker) = marker.as_deref() {
+                    block.push_str(marker);
+                    block.push('\n');
                 }
+                if let Some(body) = body.as_deref() {
+                    block.push_str(body);
+                    block.push('\n');
+                }
+                block.push_str("```\n");
+                parent.append(mk(arena, NodeValue::Raw(block)));
             }
 
             ElementKind::FootnoteRef => {

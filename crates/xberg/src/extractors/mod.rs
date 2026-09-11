@@ -613,6 +613,12 @@ mod tests {
             assert!(extractor_names.contains(&"gzip-extractor".to_string()));
         }
 
+        #[cfg(feature = "office")]
+        {
+            expected_count += 1;
+            assert!(extractor_names.contains(&"visio-extractor".to_string()));
+        }
+
         #[cfg(feature = "transcription")]
         {
             expected_count += 1;

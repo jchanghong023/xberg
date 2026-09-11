@@ -6946,7 +6946,8 @@ Name: ___
     #[test]
     fn heuristically_restructured_ocr_pages_is_noop_for_plain_output() {
         let pages = heading_and_list_ocr_pages();
-        let config = ExtractionConfig::default();
+        let mut config = ExtractionConfig::default();
+        config.output_format = crate::core::config::OutputFormat::Plain;
         assert_eq!(config.output_format, crate::core::config::OutputFormat::Plain);
 
         assert!(heuristically_restructured_ocr_pages(&pages, &[1000.0, 1000.0], &[], &config).is_none());

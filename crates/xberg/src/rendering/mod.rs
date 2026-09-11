@@ -8,6 +8,7 @@
 //! - `render_plain` — Plain text (no formatting)
 
 pub(crate) mod common;
+pub(crate) mod ocr_layout;
 mod comrak_bridge;
 mod djot;
 mod doctags;
