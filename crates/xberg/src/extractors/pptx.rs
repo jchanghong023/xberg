@@ -185,10 +185,47 @@ impl PptxExtractor {
                 }
 
                 if trimmed.starts_with('|') {
-                    let cells = Self::parse_markdown_table(trimmed);
+                    // A block that opens with a table row can still carry picture placeholders:
+                    // the content builder appends one for every picture, and a picture that sits
+                    // inside the table's area lands in the same blank-line-separated block.
+                    // Handing those lines to the table parser turned them into cells, where the
+                    // image promotion — which walks paragraphs — never saw them, so the picture
+                    // disappeared from the output. Split them back out and let each keep its
+                    // place around the table.
+                    let lines: Vec<&str> = trimmed.lines().collect();
+                    let first_table = lines.iter().position(|line| line.trim_start().starts_with('|'));
+                    let (leading, rest) = lines.split_at(first_table.unwrap_or(lines.len()));
+                    let (table_lines, trailing): (Vec<&str>, Vec<&str>) =
+                        rest.iter().partition(|line| line.trim_start().starts_with('|'));
+
+                    let push_lines = |builder: &mut InternalDocumentBuilder,
+                                          lines: &[&str],
+                                          budget: &mut SecurityBudget|
+                     -> Result<()> {
+                        for line in lines {
+                            let line = line.trim();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            let (line_text, line_formulas) =
+                                Self::split_line_math(line, &forms, formulas, plain_output);
+                            Self::push_line_formulas(builder, &line_formulas, *slide_num, budget)?;
+                            let text = line_text.trim();
+                            if !text.is_empty() {
+                                budget.account_text(text.len())?;
+                                builder.push_paragraph(text, Vec::new(), Some(*slide_num), None);
+                            }
+                        }
+                        Ok(())
+                    };
+
+                    push_lines(&mut builder, leading, budget)?;
+                    let table_text = table_lines.join("\n");
+                    let cells = Self::parse_markdown_table(&table_text);
                     if !cells.is_empty() {
                         builder.push_table_from_cells(&cells, Some(*slide_num), None);
                     }
+                    push_lines(&mut builder, &trailing, budget)?;
                     continue;
                 }
 
@@ -388,33 +425,105 @@ impl PptxExtractor {
 /// and points at a path inside the package (`../media/image4.png`), so it is neither a live
 /// image reference nor resolvable next to the extracted output. Rendering from an image element
 /// yields the same `![alt](image_N.ext)` form DOCX/PDF already produce, naming the file the
-/// extractor writes. Pairing is positional — the builder emits one placeholder per slide image
-/// in document order and `doc.images` is collected in that same order — and a placeholder with
-/// no matching image (an unreadable image) is left as text rather than dropped. ~keep
+/// extractor writes. Pairing is positional: the builder bakes one placeholder per slide image in
+/// document order and `doc.images` is collected in that same order.
+///
+/// One paragraph can hold more than one placeholder — two pictures side by side on a slide are
+/// written into the same paragraph — and the slide's own text can share it. Promoting one
+/// paragraph as a single image dropped the further references (and the text with them), so this
+/// walks every reference in the paragraph, emits one image element per reference in order, and
+/// keeps the surrounding text as its own paragraph. A placeholder whose image could not be read
+/// is left as text rather than dropped, as before. ~keep
 fn promote_baked_image_references(doc: &mut InternalDocument) {
     use crate::types::internal::ElementKind;
 
     let mut next_image = 0usize;
-    for elem in doc.elements.iter_mut() {
+    let elements = std::mem::take(&mut doc.elements);
+    let mut promoted = Vec::with_capacity(elements.len());
+
+    for elem in elements {
         if !matches!(elem.kind, ElementKind::Paragraph) {
+            promoted.push(elem);
             continue;
         }
-        let Some(alt) = crate::core::pipeline::markdown_image_reference_alt(&elem.text) else {
+        let references = markdown_image_references(&elem.text);
+        if references.is_empty() {
+            promoted.push(elem);
             continue;
-        };
-        if next_image >= doc.images.len() {
-            break;
         }
-        let description = &mut doc.images[next_image].description;
-        if description.as_deref().map(str::trim).unwrap_or("").is_empty() && !alt.is_empty() {
-            *description = Some(alt.to_string());
-        }
-        elem.kind = ElementKind::Image {
-            image_index: next_image as u32,
+
+        let mut cursor = 0usize;
+        let leftover = |text: &str,
+                            cursor: &mut usize,
+                            end: usize,
+                            elem: &crate::types::internal::InternalElement| {
+            let slice = text[*cursor..end].trim();
+            *cursor = end;
+            if slice.is_empty() {
+                None
+            } else {
+                let mut paragraph =
+                    crate::types::internal::InternalElement::text(ElementKind::Paragraph, slice, elem.depth);
+                paragraph.page = elem.page;
+                paragraph.bbox = elem.bbox;
+                paragraph.layer = elem.layer;
+                Some(paragraph)
+            }
         };
-        elem.text = doc.images[next_image].description.clone().unwrap_or_default();
-        next_image += 1;
+
+        for (range, alt) in references {
+            if next_image >= doc.images.len() {
+                break;
+            }
+            if let Some(paragraph) = leftover(&elem.text, &mut cursor, range.start, &elem) {
+                promoted.push(paragraph);
+            }
+            let description = &mut doc.images[next_image].description;
+            if description.as_deref().map(str::trim).unwrap_or("").is_empty() && !alt.is_empty() {
+                *description = Some(alt);
+            }
+            let mut image = elem.clone();
+            image.kind = ElementKind::Image {
+                image_index: next_image as u32,
+            };
+            image.text = doc.images[next_image].description.clone().unwrap_or_default();
+            image.annotations = Vec::new();
+            promoted.push(image);
+            cursor = range.end;
+            next_image += 1;
+        }
+
+        if let Some(paragraph) = leftover(&elem.text, &mut cursor, elem.text.len(), &elem) {
+            promoted.push(paragraph);
+        }
     }
+
+    doc.elements = promoted;
+}
+
+/// Byte ranges and alt texts of every `![alt](target)` reference in `text`.
+///
+/// The pipeline's `is_markdown_image_reference` only answers whether a whole string *is* one
+/// reference, which is all the callers that rewrite pre-rendered text need; this walks the
+/// string, so a paragraph holding several placeholders yields all of them.
+fn markdown_image_references(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
+    let mut found = Vec::new();
+    let mut from = 0usize;
+    while let Some(open) = text[from..].find("![") {
+        let start = from + open;
+        let Some(alt_close) = text[start + 2..].find("](").map(|offset| start + 2 + offset) else {
+            break;
+        };
+        let Some(target_close) = text[alt_close + 2..].find(')').map(|offset| alt_close + 2 + offset) else {
+            break;
+        };
+        found.push((
+            start..target_close + 1,
+            text[start + 2..alt_close].trim().to_string(),
+        ));
+        from = target_close + 1;
+    }
+    found
 }
 
 impl Plugin for PptxExtractor {
@@ -1517,5 +1626,76 @@ mod tests {
             err_msg.contains(&default_limit.to_string()),
             "error should mention the default limit ({default_limit}), got: {err_msg}"
         );
+    }
+
+    /// Regression: two pictures written into one paragraph. Promoting the paragraph as a single
+    /// image dropped the second picture and the slide text that shared the paragraph with it.
+    #[test]
+    fn promotes_every_baked_reference_in_a_paragraph() {
+        use crate::types::ExtractedImage;
+        use crate::types::internal::{ElementKind, InternalElement};
+        use std::borrow::Cow;
+
+        let mut doc = InternalDocument::new("pptx");
+        doc.push_element(InternalElement::text(
+            ElementKind::Paragraph,
+            "![first](../media/image1.png)![second](../media/image2.wmf)尾随文字",
+            0,
+        ));
+        doc.images = vec![
+            ExtractedImage {
+                format: Cow::Borrowed("png"),
+                ..Default::default()
+            },
+            ExtractedImage {
+                format: Cow::Borrowed("wmf"),
+                ..Default::default()
+            },
+        ];
+
+        promote_baked_image_references(&mut doc);
+
+        let kinds: Vec<ElementKind> = doc.elements.iter().map(|elem| elem.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ElementKind::Image { image_index: 0 },
+                ElementKind::Image { image_index: 1 },
+                ElementKind::Paragraph,
+            ],
+            "each reference must become its own image element, in document order"
+        );
+        assert_eq!(doc.elements[0].text, "first", "alt text describes the first image");
+        assert_eq!(doc.elements[1].text, "second", "alt text describes the second image");
+        assert_eq!(
+            doc.elements[2].text, "尾随文字",
+            "text sharing the paragraph with the placeholders must survive"
+        );
+        assert_eq!(doc.images[0].description.as_deref(), Some("first"));
+        assert_eq!(doc.images[1].description.as_deref(), Some("second"));
+    }
+
+    /// A paragraph holding exactly one placeholder keeps producing exactly one image element.
+    #[test]
+    fn promotes_a_lone_baked_reference() {
+        use crate::types::ExtractedImage;
+        use crate::types::internal::{ElementKind, InternalElement};
+        use std::borrow::Cow;
+
+        let mut doc = InternalDocument::new("pptx");
+        doc.push_element(InternalElement::text(
+            ElementKind::Paragraph,
+            "![alt](../media/image7.png)",
+            0,
+        ));
+        doc.images = vec![ExtractedImage {
+            format: Cow::Borrowed("png"),
+            ..Default::default()
+        }];
+
+        promote_baked_image_references(&mut doc);
+
+        assert_eq!(doc.elements.len(), 1, "one placeholder must yield one element");
+        assert_eq!(doc.elements[0].kind, ElementKind::Image { image_index: 0 });
     }
 }

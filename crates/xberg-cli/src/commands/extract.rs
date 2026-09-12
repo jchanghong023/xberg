@@ -836,7 +836,10 @@ mod tests {
             vec![Some(11.0), Some(22.0)]
         );
 
-        let contents: Vec<String> = results.into_iter().map(|result| result.content).collect();
+        let contents: Vec<String> = results
+            .into_iter()
+            .map(|result| result.content.trim().to_string())
+            .collect();
         assert_eq!(contents, vec!["first document", "second document"]);
     }
 

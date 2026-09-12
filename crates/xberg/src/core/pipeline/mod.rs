@@ -1052,18 +1052,6 @@ fn append_embedded_image_ocr_text(doc: &mut InternalDocument) {
     }
 }
 
-/// Alt text of a markdown image reference (`![alt](url)`), or `None` when `text` is not one.
-///
-/// Extractors that bake references into their text (PPTX) use this to recover the alt text
-/// before turning the reference into a real image element. ~keep
-#[cfg(feature = "office")]
-pub(crate) fn markdown_image_reference_alt(text: &str) -> Option<&str> {
-    let t = text.trim();
-    let rest = t.strip_prefix("![")?;
-    let end = rest.find("](")?;
-    Some(rest[..end].trim())
-}
-
 /// Returns `true` if `text` is exactly a markdown image reference (`![alt](url)`).
 pub(crate) fn is_markdown_image_reference(text: &str) -> bool {
     let t = text.trim();

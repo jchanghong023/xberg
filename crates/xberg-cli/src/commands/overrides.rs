@@ -147,7 +147,8 @@ impl ReductionLevelArg {
 #[derive(Debug, Default, clap::Args)]
 pub struct ExtractionOverrides {
     /// Enable or disable OCR. When true, configures an OCR backend
-    /// (default: tesseract). When false, hard-disables OCR and removes its configuration.
+    /// (default: paddle-ocr where it is compiled in, otherwise tesseract).
+    /// When false, hard-disables OCR and removes its configuration.
     #[cfg(feature = "ocr-surface")]
     #[arg(long)]
     pub ocr: Option<bool>,
@@ -1344,7 +1345,7 @@ mod tests {
 
     #[cfg(feature = "ocr-surface")]
     #[test]
-    fn test_ocr_default_language_tesseract() {
+    fn test_ocr_default_backend_and_language() {
         let mut config = ExtractionConfig::default();
         let overrides = ExtractionOverrides {
             ocr: Some(true),
@@ -1352,8 +1353,16 @@ mod tests {
         };
         overrides.apply(&mut config);
         let ocr = config.ocr.unwrap();
-        assert_eq!(ocr.backend, "tesseract");
-        assert_eq!(ocr.language, vec!["eng".to_string()]);
+        let backend = OcrConfig::default().backend;
+        assert_eq!(
+            ocr.backend, backend,
+            "--ocr true must keep the library's compiled-in backend default"
+        );
+        assert_eq!(
+            ocr.language,
+            vec![default_language_for_backend(&backend).to_string()],
+            "the default language must match the backend the default selects"
+        );
     }
 
     #[cfg(feature = "ocr-surface")]
@@ -1481,7 +1490,7 @@ mod tests {
 
     #[cfg(feature = "ocr-surface")]
     #[test]
-    fn test_ocr_language_override_tesseract() {
+    fn test_ocr_language_override_default_backend() {
         let mut config = ExtractionConfig::default();
         let overrides = ExtractionOverrides {
             ocr: Some(true),
@@ -1490,7 +1499,7 @@ mod tests {
         };
         overrides.apply(&mut config);
         let ocr = config.ocr.unwrap();
-        assert_eq!(ocr.backend, "tesseract");
+        assert_eq!(ocr.backend, OcrConfig::default().backend);
         assert_eq!(ocr.language, vec!["fra".to_string()]);
     }
 
@@ -1525,7 +1534,11 @@ mod tests {
         overrides.apply(&mut config);
         let ocr = config.ocr.expect("--ocr-language alone must materialise an OCR config");
         assert_eq!(ocr.language, vec!["deu".to_string()]);
-        assert_eq!(ocr.backend, "tesseract", "backend keeps its compiled-in default");
+        assert_eq!(
+            ocr.backend,
+            OcrConfig::default().backend,
+            "backend keeps its compiled-in default"
+        );
     }
 
     #[cfg(feature = "ocr-surface")]
@@ -2779,7 +2792,7 @@ mod tests {
     }
 
     /// Regression test for contract point 4: enabling layout detection while
-    /// `output_format` stays `Plain` (the default) wastes the layout pass -- the extraction
+    /// `output_format` is `Plain` wastes the layout pass -- the extraction
     /// still pays the model's cost (20s-202s per the WP-E measurements) and `Plain` never
     /// renders the headings/lists/tables it detects. Before this warning was wired in
     /// (i.e. removing the `warn_layout_wastes_plain_output` call from `apply`), `apply_layout`
@@ -2788,7 +2801,10 @@ mod tests {
     #[cfg(feature = "layout-detection")]
     #[test]
     fn test_warns_when_layout_enabled_with_plain_output_format() {
-        let mut config = ExtractionConfig::default();
+        let mut config = ExtractionConfig {
+            output_format: xberg::OutputFormat::Plain,
+            ..ExtractionConfig::default()
+        };
         let overrides = ExtractionOverrides {
             layout: Some(true),
             ..default_overrides()
@@ -2800,7 +2816,7 @@ mod tests {
         assert_eq!(
             config.output_format,
             xberg::OutputFormat::Plain,
-            "Plain must stay the default"
+            "--layout must not rewrite the caller's output format"
         );
         assert!(
             logs.contains("layout detection is enabled but the output format is 'plain'"),
