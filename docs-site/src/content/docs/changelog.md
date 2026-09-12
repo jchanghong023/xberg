@@ -9,10 +9,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.1.6] - 2026-09-10
+## [1.1.6] - 2026-09-12
+
+### Added
+
+- `ServerConfig` gained `job_timeout_secs` (default 600 seconds, override via
+  `XBERG_JOB_TIMEOUT_SECS` or `server.job_timeout_secs`) as the configurable fallback timeout
+  for `POST /extract-async` jobs whose request does not pin down `extraction_timeout_secs`. A
+  per-request `extraction_timeout_secs` still always overrides it, and an explicit
+  `extraction_timeout_secs: null` still falls back to this server cap rather than running
+  unbounded. Previously this fallback was a hardcoded 300 seconds, inconsistent with the 600
+  second default used everywhere else. See the Changed section for the source-compatibility impact.
+
+- A long-running process can now release the embedding and reranker models it no longer
+  uses. `embeddings::evict_model` and `reranking::evict_model` (and the same functions in
+  `sparse_embeddings` and `late_interaction`) drop one model, `clear_engine_cache` drops
+  every model in a cache, and `xberg::clear_engine_caches` drops all of them.
+  `set_engine_cache_limit` bounds the number of resident engines in a cache and drops the
+  least recently used one first. The default stays unbounded, so existing callers see no
+  change (GH#1626).
 
 ### Fixed
 
+- A Type0 (composite) font's content-stream character codes are now translated to CIDs before glyph
+  widths and vertical metrics are looked up, instead of being used as if they already were CIDs.
+  The two coincide only for `Identity-H`/`Identity-V`, which is presumably why this went unnoticed.
+  A PDF using a non-Identity predefined CMap (`UniCNS-UCS2-H`, `UniJIS-UCS2-H`, `UniGB-UCS2-H`,
+  `UniKS-UCS2-H`, or their `-V`/`UTF16` counterparts) or an embedded `/Encoding` CMap stream got a
+  wrong width for nearly every glyph -- some over-advancing by up to 4x through the `/DW` fallback,
+  others under-advancing -- which rendered as stretched or overlapping text and, in extracted text,
+  could split one sentence into a spurious extra paragraph. CIDs now resolve from an embedded
+  `/Encoding` CMap stream's own `begincidrange`/`begincidchar` data when present (including a
+  variable-width codespace), else from the font's `/CIDSystemInfo` character collection for the
+  four Unicode-keyed predefined families above, else via `Identity-H`/`Identity-V` as before.
+  Measured over the 230-document local PDF corpus: 227 byte-identical -- the expected result, since
+  most PDFs use Identity-H -- and 2 changed, both merging text that a stale glyph position had
+  fragmented. Legacy multi-byte predefined CMaps this crate carries no code-to-CID table for
+  (`90ms-RKSJ-H`, `GBK-EUC-H`, `B5-H`, the `UTF8` family, `UniJIS-UCS2-HW-*`, `UniJISPro-*`, and
+  others) are unchanged -- still wrong, not newly broken -- and now log once per font instead of
+  failing silently (GH#1631).
+
+- A reconstructed PDF table cell now reads left to right instead of in the order its words happened
+  to arrive. The reported symptom was a sub/superscript printing after the rest of the cell --
+  `eta_S %` came out as `eta % S`, `Q_HE GJ` as `Q GJ HE` -- because a script is drawn as its own
+  content-stream segment a fraction of a point below the line it annotates, so every reading-order
+  sort upstream placed it after the whole line. The same defect also transposed values between
+  columns when two columns were merged into one cell: on a balance sheet whose header reads
+  `2017 2016`, the row beneath it emitted the 2016 figure first, silently attributing each year's
+  number to the other year. A cell's words are now grouped into visual lines and ordered left to
+  right within each line. Grouping first is load-bearing -- ordering by horizontal position alone
+  interleaves the two halves of a wrapped cell. Each word's own whitespace is also collapsed, so a
+  segment carrying a trailing space no longer stacks it on the separator. Table cells recovered by
+  OCR go through the same ordering (GH#1628).
+
+- Image OCR now honours a PNG's embedded `pHYs` pixel density instead of assuming 72 DPI. A genuine
+  300-DPI PNG submitted with `target_dpi = 300` was resized anyway, because the extractor decoded,
+  resized and re-encoded the image -- discarding the density chunk -- before the OCR backend, and
+  therefore before the existing `ocr.backend_options["source_dpi"]` override, ever saw it. Embedded
+  density is now resolved at the extractor boundary and at the backend from one shared
+  implementation, with the explicit override still taking precedence over it. An image carrying no
+  density metadata still defaults to 72 DPI and still resizes (GH#1630).
+
+- A body paragraph is no longer deleted for repeating text that appears elsewhere on the same page.
+  The second `strip_repeating_text` pass keyed on lowercased paragraph text with no check that a
+  table was involved, so a sentence matching an earlier title -- differing only in case, with no
+  table on the page at all -- was silently removed. The pass now runs only on pages that have a
+  detected table, removes a paragraph only when that table's own cells carry the same text, and
+  compares case-sensitively. Measured over 230 PDFs: 44 documents changed, 3472 words recovered and
+  32 lost, both loss cases inspected and benign (one is a restructure whose total content grew, the
+  other two mojibake tokens) (GH#1623).
+
+- OCR text is no longer discarded when a scanned page region is detected as a table but its cell
+  grid cannot be recognised. `recognize_single_table` returned nothing whenever TATR failed,
+  produced no rows or columns, or the grid failed validation, which threw away every OCR element
+  that had been assigned to that region. A region that cannot be recognised as a table now falls
+  back to emitting its text in reading order, and only when that text is not already carried by
+  one of the page's paragraphs, so nothing is duplicated. Together with the restructuring-heuristic
+  retention guard below, recognised OCR text is no longer silently lost on the layout path
+  (GH#1622).
+
+- `extraction_confidence` no longer reports a failed structured extraction as fully
+  schema-valid. The pipeline passed `SchemaCompliance::AllValid` unconditionally, which is 40% of
+  the combined score under the default weights, so a run whose LLM call failed -- or that was
+  built without the `liter-llm` feature, or ran on wasm -- scored exactly as high as one that
+  validated. A requested `structured_extraction` that leaves no `structured_output` now scores
+  `AllInvalid`. Extractions with no `structured_extraction` configured are unaffected and keep
+  their previous score; `ConfidenceSignals` is unchanged in shape, so no serialized form moves
+  (GH#1624).
+
+- `detect_mime_type_from_bytes` no longer refuses text that is not valid UTF-8. A byte buffer with
+  no filename or declared type -- a Windows-1252 or ISO-8859-1 CSV export, say -- returned
+  `UnsupportedFormat` even though the extractors that would receive it decode legacy encodings
+  through `encoding_rs`. Such content is now reported as `text/plain`, the same answer the UTF-8
+  path already gave for the same document, so the two encodings of one file behave alike. Content
+  holding a NUL byte, or with too few printable bytes to read as prose, is still rejected
+  (GH#1625).
+
+- The Go binding no longer discards the message of every error the native layer reports. Each
+  known error code was mapped to a typed sentinel (`ErrTimeout`, `ErrParsing`, `ErrOcr`, and ~20
+  more) and returned before the message was ever read, so the detail the native layer had
+  already produced -- observed durations, limits, plugin names, counts -- was dropped for all of
+  them; only unrecognised codes kept their text. A timeout surfaced as the sentinel's own
+  placeholder-stripped text, `extraction timed out after ms (limit: ms)`, which reads as a
+  formatting bug but is the whole message the binding ever had, and left callers unable to tell
+  which timeout had fired. The message is now read first and returned alongside the sentinel, so
+  `errors.Is(err, xberg.ErrTimeout)` still matches while `err.Error()` carries the real
+  interpolated text. Go was the only binding affected; C#, Java and Zig already read the message
+  before switching on the code. Regression in 1.1.0, when the typed sentinels were introduced.
+- The Python package's public option classes regained `from_json`. `from xberg import
+  ExtractInput` resolves to a generated dataclass that shadows the native class at the same
+  name, and that dataclass carried none of the native class's methods, so `ExtractInput.from_json(...)`
+  raised `AttributeError` while `xberg._xberg.ExtractInput.from_json(...)` worked -- the same
+  name meaning two different things depending on the import. 134 public classes were affected.
+  The dataclasses now delegate `from_json` to the native class, so both import paths behave the
+  same. Other native-only methods on those classes (`validate`, `is_empty`, the
+  `PaddleOcrConfig.with_*` builders) are still absent from the dataclass twins and are tracked
+  separately.
+- An extraction cancelled by `extraction_timeout_secs` now actually stops its per-page PDF OCR
+  work. The timeout fires `cancel_token.cancel()` at every timeout site, but nothing in the OCR
+  page fan-out read the token, so pages kept being OCR'd after the caller already had its
+  `Timeout` error -- burning CPU and holding OCR concurrency permits, which degrades later
+  extractions in a long-lived process (a server, or anything extracting in a loop). The token is
+  now checked both before spawning a page and inside each spawned task, because the spawn loop
+  finishes almost immediately while tasks queue on the OCR semaphore long after it. A cancelled
+  run also reports `Cancelled` instead of tripping the all-pages-failed guard and reporting a
+  wholesale OCR backend failure.
+- PDF no longer promotes ordinary body text to a heading. Two gates decide headings
+  independently and neither tested the line's shape, so any line past the title-length floor
+  could be promoted. The sentence-boundary check that should have caught this looked for a
+  literal `". "` followed by a capital, but paragraph text joins a block's physical lines with a
+  newline, so every sentence boundary landing at a line end was invisible to the gate while the
+  renderer joined the same lines with a space and displayed it -- the gate and the output
+  disagreed about what the text was. Boundaries are now found across any whitespace, and a line
+  that is mostly bare numerals is treated as a flattened data row rather than a heading. Across
+  490 documents: 484 unchanged, 5 with fewer headings, 0 with more (GH#1599).
+
+- Hardened the document-global heading/list heuristic's safety check on the scanned-PDF
+  layout-markdown path (`use_layout_for_markdown` / layout detection, force-OCR route). That
+  heuristic rebuilds paragraphs from bare line geometry with no knowledge of the ML layout
+  regions the OCR path already classified, and can silently drop a line its own font-clustering
+  pass treats as furniture or noise; the guard against this only checked that the whole
+  document still had one non-empty element, so a single surviving word anywhere passed it even
+  if an entire page's body vanished. The guard is now a per-restructuring canonical-character
+  retention check against the lossless OCR assembly, and falls back to that lossless assembly
+  whenever any content would otherwise be lost. Compares characters rather than word tokens: a
+  restructuring pass legitimately re-wraps text across the line boundaries it reads (measured
+  case: "list of findings" split across a line came back "list offindings", one dropped space),
+  and a word-token comparison read that benign re-wrap as content loss and rejected legitimate
+  heading/list promotion along with it. This closes a real gap in the guard's own logic; it was
+  not reproduced against a specific "entire page lost" report and should not be read as a
+  confirmed fix for one (GH#1622).
+- PDF table/paragraph assembly (`assemble_page_elements_with_tables`) now suppresses a
+  paragraph whose words a positioned table's own grid fully carries, so a recognized table no
+  longer also renders its flattened source text as an ordinary paragraph immediately next to
+  the grid -- observed directly (not inferred) on a scanned-PDF fixture with layout detection
+  enabled, where a table's status-row text appeared once as prose and once as a correctly
+  gridded table. Mirrors the GH#1616 precedent from the other direction: suppression requires
+  the table's own cell/markdown content to actually account for every one of the paragraph's
+  words (an order-insensitive multiset match, since a reconstructed grid can reassemble the
+  same words in a different order than the source paragraph), not geometry alone, so a
+  paragraph carrying text the grid does not represent still survives. Note: this closes the
+  duplication for paragraph/table pairs that share a coordinate space (the native-PDF table
+  path). Investigating this also surfaced a separate, unresolved coordinate-space mismatch
+  between OCR/TATR-recognized table bounding boxes and OCR paragraph bounding boxes on the
+  force-OCR + layout-detection route specifically, which currently prevents this same guard
+  from geometrically matching on that route; fixing that is out of scope here and is not yet
+  done (GH#1622).
 - PDF no longer deletes text a table's bounding box covers but its grid leaves out. Suppression
   of text a table already renders was decided on geometry alone, and a reconstructed grid need
   not span every printed column inside its own bounding box. On a four-column fault-finding grid
@@ -65,6 +227,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   covers the generated API-reference badges but not hand-authored install directives, so they
   had been telling users to install 1.1.3 (GH#1593 covers the same class of staleness in
   `test_apps`, which is still open).
+- `OcrConfig` no longer rejects valid Tesseract language codes such as `fao` (Faroese) with
+  `Invalid language code 'fao'. Use ISO 639-1 or ISO 639-3 codes.`. Config validation checked
+  the language against a general-purpose allowlist that was missing 66 codes Tesseract actually
+  supports, while a separate, Tesseract-specific list already carried them; the two lists had
+  never been reconciled. Config validation itself only started running for configs loaded from
+  files, JSON overrides, or set programmatically in 1.1.0 (previously it ran only in tests), which
+  is when this allowlist gap first became user-visible. Both validators now read from one shared
+  list of Tesseract-supported codes, so this class of divergence cannot recur (GH#1621).
+
+### Changed
+
+- **Breaking (Rust source, Java):** `ServerConfig` adds `job_timeout_secs`. Exhaustive Rust struct
+  literals must set the field or use `..ServerConfig::default()`, and the Java record's canonical
+  constructor gains a sixth component, so `new ServerConfig(host, port, corsOrigins,
+  maxRequestBodyBytes, maxMultipartFieldBytes)` no longer compiles -- use `ServerConfig.builder()`,
+  which is unaffected. Every other binding is source-compatible: the field is last and defaulted in
+  the Python dataclass (`= 600`), the Kotlin data class (`= 600L`) and C# (`{ get; init; } = 600`);
+  a defaulted keyword in Ruby and PHP; an optional pointer with `omitempty` in Go; and an additive
+  `xberg_server_config_job_timeout_secs` getter in the C FFI (gated on `api-types`). Deserializing
+  callers are unaffected everywhere -- the field carries `#[serde(default)]`.
+- Public binding-facing structs in this crate are deliberately **not** `#[non_exhaustive]`: alef
+  generates `impl From<Mirror> for xberg::T` with a struct literal in roughly ten binding crates,
+  and `#[non_exhaustive]` forbids that cross-crate (E0639) -- including the `..Default::default()`
+  spread. `Default` plus `#[serde(default)]` is the forward-compatibility mechanism instead, and a
+  field addition is recorded here as a labelled source break rather than prevented by the type
+  system. `#[non_exhaustive]` is reserved for types excluded from binding generation.
+- Retroactive note for 1.1.4: `Metadata#format` in the Ruby binding changed shape and no
+  changelog entry recorded it at the time. The format-specific payload had been nested under a
+  `_0` key (`format.fetch(:_0).fetch(:title)`); since 1.1.4 the payload's fields sit directly
+  alongside the `format_type` tag (`format.fetch(:title)`). Ruby callers written against the
+  older shape raise `KeyError` on `_0`. The binding has emitted the flat shape since 1.1.4; the
+  generated Ruby e2e specs were still asserting the nested one, which is why this went unnoticed
+  for two releases. Only the Ruby binding is affected. Part of GH#1594, which also tracks the
+  Swift binding still discarding the payload entirely -- that half is not yet fixed.
 
 ## [1.1.5] - 2026-09-10
 

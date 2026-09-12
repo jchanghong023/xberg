@@ -1742,32 +1742,12 @@ const PARAGRAPH_GAP_HEIGHT_FACTOR: f32 = 1.5;
 /// finds is lost.
 const PARAGRAPH_BREAK_LEADING_MULTIPLE: f32 = 1.5;
 const INLINE_STYLE_BASELINE_TOLERANCE: f32 = 0.5;
-/// Largest baseline offset, as a multiple of the larger font size, at which a smaller abutting run
-/// still reads as a sub/superscript of its neighbour rather than as the next wrapped line.
-///
-/// ~keep GH#1617: the five torn pairs on the reproducer sit 0.63--1.07pt off a 11.59pt baseline,
-/// i.e. 0.054--0.092 font-sizes, while a wrapped line is separated by a full leading (>= 1.0). The
-/// 3x margin either side is why this is expressible as a predicate instead of by widening
-/// `INLINE_STYLE_BASELINE_TOLERANCE`, which is read at seven sites here and gates dehyphenation at
-/// `spans_visual_line_break`.
-const SCRIPT_RUN_MAX_BASELINE_FONT_FACTOR: f32 = 0.35;
-/// Largest ratio of the smaller run's font size to the larger one's for the pair to read as a
-/// sub/superscript.
-///
-/// ~keep GH#1617: 0.63--0.73 on the reproducer against 1.00 for every ordinary same-size style-run
-/// boundary, so a same-size boundary cannot reach this predicate at all.
-const SCRIPT_RUN_MAX_FONT_SIZE_RATIO: f32 = 0.85;
-/// Largest forward gap, as a multiple of the larger font size, between a run's end and an abutting
-/// sub/superscript's start.
-///
-/// ~keep GH#1617: `rated` starts at 211.92 where `P` ends at 211.94 -- scripts abut or overlap their
-/// base, so this stays far below `INLINE_STYLE_MAX_FORWARD_GAP_FONT_FACTOR`.
-const SCRIPT_RUN_MAX_FORWARD_GAP_FONT_FACTOR: f32 = 0.25;
 /// How many already-accumulated segments back to look for a sub/superscript's base.
 ///
 /// ~keep GH#1617: two is enough on the reproducer (`dB` then `L`); four covers a row with a couple
 /// more cells to the right of the base without letting the search wander off the current row.
-const SCRIPT_RUN_BASE_LOOKBACK: usize = 4;
+/// GH#1628 reuses this window for the word-level table path, which searches the same segment list.
+pub(crate) const SCRIPT_RUN_BASE_LOOKBACK: usize = 4;
 const INLINE_STYLE_MAX_FORWARD_GAP_FONT_FACTOR: f32 = 1.0;
 const INLINE_FONT_SIZE_MAX_FORWARD_GAP_FONT_FACTOR: f32 = 1.5;
 const INLINE_STYLE_MAX_OVERLAP_FONT_FACTOR: f32 = 0.15;
@@ -2184,15 +2164,13 @@ fn is_inline_style_transition(
 /// gate rejects outright -- it cannot change the outcome of any pair that passes today. ~keep
 fn is_script_run_offset(previous: &SegmentData, next: &SegmentData, baseline_delta: f32, font_size: f32) -> bool {
     let smaller_font_size = previous.font_size.min(next.font_size);
-    baseline_delta > 0.0
-        && baseline_delta <= font_size * SCRIPT_RUN_MAX_BASELINE_FONT_FACTOR
-        && smaller_font_size <= font_size * SCRIPT_RUN_MAX_FONT_SIZE_RATIO
+    crate::script_run::is_script_run_baseline_offset(baseline_delta, font_size, smaller_font_size)
 }
 
 /// Whether `next` reads as a sub/superscript attached to `previous`: same rotation and role,
 /// neither monospace, a materially smaller font raised or lowered by a fraction of it, and a start
 /// inside or abutting `previous`'s advance extent.
-fn is_script_run_of(previous: &SegmentData, next: &SegmentData) -> bool {
+pub(crate) fn is_script_run_of(previous: &SegmentData, next: &SegmentData) -> bool {
     if previous.is_monospace || next.is_monospace || previous.assigned_role != next.assigned_role {
         return false;
     }
@@ -2219,8 +2197,7 @@ fn is_script_run_of(previous: &SegmentData, next: &SegmentData) -> bool {
     let (previous_start, previous_end) = previous.upright_advance_extent();
     let (next_start, _) = next.upright_advance_extent();
     is_script_run_offset(previous, next, baseline_delta, font_size)
-        && next_start >= previous_start
-        && next_start - previous_end <= font_size * SCRIPT_RUN_MAX_FORWARD_GAP_FONT_FACTOR
+        && crate::script_run::is_script_run_forward_gap(previous_start, previous_end, next_start, font_size)
 }
 
 /// Whether `line` reads as the wrapped continuation of the numbered-heading
@@ -3449,7 +3426,7 @@ pub(crate) fn extract_document_structure_from_segments(
         retain_page_furniture_safely(page);
     }
     if strip_repeating_text {
-        deduplicate_paragraphs(&mut all_page_paragraphs);
+        deduplicate_paragraphs(&mut all_page_paragraphs, &extracted_table_bboxes_by_page);
     }
     compact_final_heading_hierarchy(&mut all_page_paragraphs);
     promote_repeated_body_size_bold_headings(&mut all_page_paragraphs, doc_body_font_size);
@@ -5193,7 +5170,12 @@ fn document_content_width(all_pages: &[Vec<PdfParagraph>]) -> f32 {
 }
 
 /// Apply the structure pipeline's cross-page repeating-text policy to pages that
-/// were already classified by another source, such as OCR layout detection. ~keep
+/// were already classified by another source, such as OCR layout detection.
+///
+/// This path has no table data available, so the same-page dedup pass below
+/// never has a table to match against and is a no-op here -- consistent with
+/// GH#1623's fix, which restricts that pass to paragraphs a detected table
+/// actually carries. ~keep
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 pub(crate) fn strip_repeating_text_from_pages(pages: &mut [Vec<PdfParagraph>], page_heights: &[f32]) {
     mark_cross_page_repeating_text(pages, page_heights);
@@ -5201,7 +5183,7 @@ pub(crate) fn strip_repeating_text_from_pages(pages: &mut [Vec<PdfParagraph>], p
     for page in pages.iter_mut() {
         retain_page_furniture_safely(page);
     }
-    deduplicate_paragraphs(pages);
+    deduplicate_paragraphs(pages, &ahash::AHashMap::new());
 }
 
 /// Filter page furniture paragraphs with a safety valve.
@@ -5612,14 +5594,22 @@ fn has_font_size_variation(paragraphs: &[PdfParagraph]) -> bool {
 /// Two-pass approach:
 /// 1. Consecutive duplicates: remove back-to-back identical paragraphs
 ///    (catches bold/shadow rendering artifacts).
-/// 2. Non-consecutive duplicates: remove body-text paragraphs whose
-///    normalized text was already seen on the same page (catches table
-///    content rendered as both table and body text).
+/// 2. Non-consecutive duplicates: remove a body-text paragraph whose text is
+///    also carried by a table detected on the same page (catches table
+///    content rendered as both table and body text). A paragraph that no
+///    detected table's cells carry is never touched by this pass, even if it
+///    repeats another paragraph verbatim -- GH#1623 found a body sentence
+///    deleted for matching an earlier title's words, with no table involved
+///    at all. The comparison also preserves case, so a title-cased heading
+///    cannot match a body fragment that differs only in case. ~keep
 ///
 /// Only deduplicates body text — headings, list items, code blocks,
 /// formulas, and captions are preserved even if duplicated.
-fn deduplicate_paragraphs(all_pages: &mut [Vec<PdfParagraph>]) {
-    for page in all_pages.iter_mut() {
+fn deduplicate_paragraphs(
+    all_pages: &mut [Vec<PdfParagraph>],
+    table_coverage_by_page: &ahash::AHashMap<usize, Vec<TableCoverage>>,
+) {
+    for (page_index, page) in all_pages.iter_mut().enumerate() {
         if page.len() < 2 {
             continue;
         }
@@ -5635,14 +5625,25 @@ fn deduplicate_paragraphs(all_pages: &mut [Vec<PdfParagraph>]) {
             }
         }
 
+        let Some(page_tables) = table_coverage_by_page
+            .get(&page_index)
+            .filter(|tables| !tables.is_empty())
+        else {
+            continue;
+        };
+
         let mut seen = ahash::AHashSet::new();
         let mut to_remove = Vec::new();
         for (idx, para) in page.iter().enumerate() {
             if !is_dedup_candidate(para) {
                 continue;
             }
-            let text = paragraph_text_normalized(para);
+            let text = paragraph_text_whitespace_collapsed(para);
             if text.len() < 15 {
+                continue;
+            }
+            let glyphs = normalize_for_table_coverage(&text);
+            if glyphs.is_empty() || !page_tables.iter().any(|table| table.cell_text.contains(&glyphs)) {
                 continue;
             }
             if !seen.insert((para.layout_region_path, text)) {
@@ -5843,6 +5844,18 @@ fn paragraph_text_normalized(para: &PdfParagraph) -> String {
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase()
+}
+
+/// Case-preserving counterpart to [`paragraph_text_normalized`].
+///
+/// Used by the same-page table-duplicate check so a title-cased heading
+/// cannot match a body sentence fragment that differs only in case
+/// (GH#1623). ~keep
+fn paragraph_text_whitespace_collapsed(para: &PdfParagraph) -> String {
+    paragraph_text_raw(para)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Check if a paragraph is a candidate for non-consecutive deduplication.
@@ -10266,24 +10279,64 @@ where new shares are issued;";
         assert!(!on[1].is_page_furniture);
     }
 
+    /// Builds a single-page table-coverage map whose one table's cell text
+    /// contains `text`, for tests of the table-gated same-page dedup pass.
+    fn table_coverage_with_text(page_index: usize, text: &str) -> ahash::AHashMap<usize, Vec<TableCoverage>> {
+        let mut map = ahash::AHashMap::new();
+        map.insert(
+            page_index,
+            vec![TableCoverage {
+                bbox: crate::types::BoundingBox {
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 1.0,
+                    y1: 1.0,
+                },
+                cell_text: normalize_for_table_coverage(text),
+            }],
+        );
+        map
+    }
+
     #[test]
     fn test_deduplicate_paragraphs_removes_consecutive_duplicates() {
         let p1 = para(vec![line(vec![full_line_seg("Brand loses market share")])]);
         let p2 = para(vec![line(vec![full_line_seg("Brand loses market share")])]);
         let p3 = para(vec![line(vec![full_line_seg("Different content here")])]);
         let mut pages = vec![vec![p1, p2, p3]];
-        deduplicate_paragraphs(&mut pages);
+        deduplicate_paragraphs(&mut pages, &ahash::AHashMap::new());
         assert_eq!(pages[0].len(), 2, "consecutive duplicate should be removed");
     }
 
     #[test]
-    fn test_deduplicate_paragraphs_removes_non_consecutive_body_duplicates() {
+    fn test_deduplicate_paragraphs_removes_non_consecutive_body_duplicates_backed_by_a_table() {
         let p1 = para(vec![line(vec![full_line_seg("Brand loses market share in volume")])]);
         let p2 = para(vec![line(vec![full_line_seg("Some intervening paragraph")])]);
         let p3 = para(vec![line(vec![full_line_seg("Brand loses market share in volume")])]);
         let mut pages = vec![vec![p1, p2, p3]];
-        deduplicate_paragraphs(&mut pages);
-        assert_eq!(pages[0].len(), 2, "non-consecutive body duplicate should be removed");
+        let tables = table_coverage_with_text(0, "Brand loses market share in volume");
+        deduplicate_paragraphs(&mut pages, &tables);
+        assert_eq!(
+            pages[0].len(),
+            2,
+            "a non-consecutive body duplicate that a detected table also carries should be removed"
+        );
+    }
+
+    #[test]
+    fn test_deduplicate_paragraphs_preserves_non_consecutive_body_duplicates_without_a_table() {
+        // GH#1623: the same-page pass must never remove a repeated body
+        // paragraph unless a detected table carries the text too.
+        let p1 = para(vec![line(vec![full_line_seg("Brand loses market share in volume")])]);
+        let p2 = para(vec![line(vec![full_line_seg("Some intervening paragraph")])]);
+        let p3 = para(vec![line(vec![full_line_seg("Brand loses market share in volume")])]);
+        let mut pages = vec![vec![p1, p2, p3]];
+        deduplicate_paragraphs(&mut pages, &ahash::AHashMap::new());
+        assert_eq!(
+            pages[0].len(),
+            3,
+            "a non-consecutive body duplicate with no matching table must be preserved"
+        );
     }
 
     #[test]
@@ -10294,11 +10347,42 @@ where new shares are issued;";
         let mut h2 = para(vec![line(vec![full_line_seg("Brand loses market share in volume")])]);
         h2.heading_level = Some(2);
         let mut pages = vec![vec![h, filler, h2]];
-        deduplicate_paragraphs(&mut pages);
+        let tables = table_coverage_with_text(0, "Brand loses market share in volume");
+        deduplicate_paragraphs(&mut pages, &tables);
         assert_eq!(
             pages[0].len(),
             3,
             "non-consecutive heading duplicates must be preserved"
+        );
+    }
+
+    #[test]
+    fn should_preserve_body_paragraph_matching_earlier_title_in_different_case() {
+        // Regression test for GH#1623: on pdf/pdfa_045.pdf page 1, a bold body
+        // clause repeats the words of an earlier title line in a different
+        // case, with unrelated content between them on the page (so only the
+        // non-consecutive pass, not the consecutive-artifact pass, is in
+        // play). That pass compared lowercased text with no check that
+        // either copy was table content, so the body clause was silently
+        // deleted. Backing the page with a table whose cells carry the same
+        // words proves the fix is the case-sensitive comparison, not merely
+        // the absence of table data.
+        let title = para(vec![line(vec![full_line_seg(
+            "The Penguin History Of Britain The Struggle For Mastery",
+        )])]);
+        let filler = para(vec![line(vec![full_line_seg(
+            "Recognizing the habit ways to get this ebook",
+        )])]);
+        let body = para(vec![line(vec![full_line_seg(
+            "the penguin history of britain the struggle for mastery",
+        )])]);
+        let mut pages = vec![vec![title, filler, body]];
+        let tables = table_coverage_with_text(0, "The Penguin History Of Britain The Struggle For Mastery");
+        deduplicate_paragraphs(&mut pages, &tables);
+        assert_eq!(
+            pages[0].len(),
+            3,
+            "a body paragraph must survive matching an earlier title that differs only in case"
         );
     }
 
@@ -10366,7 +10450,7 @@ where new shares are issued;";
         merge_spatial_footnote_markers(&mut paragraphs);
         retain_page_furniture_safely(&mut paragraphs);
         let mut pages = vec![paragraphs];
-        deduplicate_paragraphs(&mut pages);
+        deduplicate_paragraphs(&mut pages, &ahash::AHashMap::new());
 
         assert_eq!(
             pages[0].iter().map(paragraph_text_raw).collect::<Vec<_>>(),

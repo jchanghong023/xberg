@@ -357,6 +357,9 @@ pub(crate) async fn extract_mixed_ocr_native(
             {
                 let mut join_set = tokio::task::JoinSet::new();
                 for (page_idx, image) in &page_images {
+                    if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                        break;
+                    }
                     let image_arc = Arc::clone(image);
                     let pipeline_clone = pipeline.clone();
                     let config_clone = config.clone();
@@ -393,6 +396,9 @@ pub(crate) async fn extract_mixed_ocr_native(
                     let page_detection: Option<crate::layout::DetectionResult> =
                         detection_for_mixed_route_page(layout_detections_for_mixed.as_deref(), *page_idx).cloned();
                     join_set.spawn(async move {
+                        if config_clone.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                            return (idx, Err(crate::XbergError::Cancelled));
+                        }
                         #[cfg(feature = "layout-detection")]
                         let page_detection_slice = page_detection.as_ref().map(std::slice::from_ref);
                         let result = Box::pin(run_ocr_pipeline_for_page(
@@ -490,6 +496,9 @@ pub(crate) async fn extract_mixed_ocr_native(
             #[cfg(any(not(feature = "tokio-runtime"), target_arch = "wasm32"))]
             {
                 for (page_idx, image) in &page_images {
+                    if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                        break;
+                    }
                     // See the matching comments on the sibling `JoinSet` branch above (#651,
                     // and `points_per_pixel_override` re. `extract_with_ocr_for_page`'s doc
                     // comment).
@@ -659,6 +668,9 @@ pub(crate) async fn extract_mixed_ocr_native(
         {
             let mut join_set = tokio::task::JoinSet::new();
             for (page_idx, data, width, height) in &encoded {
+                if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                    break;
+                }
                 let backend_clone = Arc::clone(backend);
                 let page_rotation_degrees = page_rotations.get(*page_idx).copied().unwrap_or(0);
                 // Derived from the MediaBox-oriented raster, before `upright_raster_for_backend`
@@ -676,7 +688,17 @@ pub(crate) async fn extract_mixed_ocr_native(
                     config.security_limits.as_ref(),
                 )?;
                 let idx = *page_idx;
+                let cancel_token = config.cancel_token.clone();
                 join_set.spawn(async move {
+                    if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                        return (
+                            idx,
+                            correction_degrees,
+                            upright_width,
+                            upright_height,
+                            Err(crate::XbergError::Cancelled),
+                        );
+                    }
                     let result = backend_clone.process_image_owned(upright_data, &config_clone).await;
                     (idx, correction_degrees, upright_width, upright_height, result)
                 });
@@ -767,6 +789,9 @@ pub(crate) async fn extract_mixed_ocr_native(
         #[cfg(any(not(feature = "tokio-runtime"), target_arch = "wasm32"))]
         {
             for (page_idx, data, width, height) in &encoded {
+                if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                    break;
+                }
                 let page_rotation_degrees = page_rotations.get(*page_idx).copied().unwrap_or(0);
                 let source_dpi = rendered_page_source_dpi(&render_doc, *page_idx, *width);
                 let config_for_page =
@@ -1574,6 +1599,17 @@ pub(super) async fn extract_with_ocr_for_page(
             let mut join_set: JoinSet<(usize, u32, u32, u32, crate::Result<crate::types::ExtractedDocument>)> =
                 JoinSet::new();
             for (page_idx, image_data, width, height) in &encoded_batch {
+                let idx = *page_idx;
+                let cancel_token = config.cancel_token.clone();
+                // Every iteration must spawn exactly one task: the drain loop below and the
+                // `for offset in 0..batch_count` pass after it both index `batch_ocr_results`
+                // by position and `.expect()` a `Some` at every offset (#1620-style
+                // invariant), so a cancelled page still needs an entry -- it just skips the
+                // real OCR work to get it. ~keep
+                if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                    join_set.spawn(async move { (idx, 0, 0, 0, Err(crate::XbergError::Cancelled)) });
+                    continue;
+                }
                 let backend_clone = std::sync::Arc::clone(&backend);
                 #[cfg(feature = "pdf")]
                 let page_rotation_degrees = if page_rotation_override != 0 {
@@ -1616,8 +1652,16 @@ pub(super) async fn extract_with_ocr_for_page(
                 #[cfg(not(feature = "pdf"))]
                 let (upright_data, upright_width, upright_height, correction_degrees) =
                     (Arc::clone(image_data), *width, *height, 0u32);
-                let idx = *page_idx;
                 join_set.spawn(async move {
+                    if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                        return (
+                            idx,
+                            correction_degrees,
+                            upright_width,
+                            upright_height,
+                            Err(crate::XbergError::Cancelled),
+                        );
+                    }
                     let result = backend_clone.process_image_owned(upright_data, &config_clone).await;
                     (idx, correction_degrees, upright_width, upright_height, result)
                 });
@@ -1680,9 +1724,16 @@ pub(super) async fn extract_with_ocr_for_page(
                 #[cfg(not(feature = "pdf"))]
                 let (upright_data, upright_width, upright_height, correction_degrees) =
                     (Arc::clone(image_data), *width, *height, 0u32);
-                let ocr_result = backend
-                    .process_image(upright_data.as_slice(), config_for_page.as_ref())
-                    .await;
+                // A cancelled page still needs a `batch_ocr_results` entry -- see the ~keep
+                // comment on the sibling `JoinSet` branch above -- so this skips the backend
+                // call rather than breaking the loop.
+                let ocr_result = if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                    Err(crate::XbergError::Cancelled)
+                } else {
+                    backend
+                        .process_image(upright_data.as_slice(), config_for_page.as_ref())
+                        .await
+                };
                 batch_upright_correction[page_idx - batch_start] = (correction_degrees, upright_width, upright_height);
                 match ocr_result {
                     Ok(document) => batch_ocr_results[page_idx - batch_start] = Some(document),
@@ -1958,17 +2009,17 @@ pub(super) async fn extract_with_ocr_for_page(
                                 source: None,
                             })?
                         };
-                        crate::ocr::layout_assembly::recognize_page_tables(
+                        crate::ocr::layout_assembly::recognize_page_tables_with_fallback(
                             &rgb,
                             scaled_det,
                             &render_ocr_elements,
                             model,
                         )
                     }
-                    _ => Vec::new(),
+                    _ => crate::ocr::layout_assembly::RecognizedTablesOutcome::default(),
                 };
 
-                for rt in &recognized_tables {
+                for rt in &recognized_tables.tables {
                     if !rt.markdown.is_empty() {
                         // The id is this table's 1-based position in `collected_tables`;
                         // pages are processed strictly in increasing `page_idx` order
@@ -2004,6 +2055,10 @@ pub(super) async fn extract_with_ocr_for_page(
                         ocr_scaled_detection.as_ref(),
                         points_per_pixel,
                         page_rotation_degrees,
+                    );
+                    append_unrecognized_table_fallback_paragraphs(
+                        &mut paragraphs,
+                        &recognized_tables.unrecognized_table_text,
                     );
                     apply_ocr_layout_content_filter(&mut paragraphs, config);
                     #[cfg(feature = "pdf")]
@@ -2178,6 +2233,13 @@ pub(super) async fn extract_with_ocr_for_page(
     #[cfg(feature = "layout-detection")]
     if let Some(model) = tatr_model.take() {
         crate::layout::return_tatr(model);
+    }
+
+    // A cancelled run fails every page by design, which the #1444 guard below would report as
+    // a wholesale backend failure. Surface the cancellation itself so a caller can tell a
+    // cancelled extraction apart from a genuinely broken OCR backend. ~keep
+    if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+        return Err(crate::XbergError::Cancelled);
     }
 
     // Degrading a per-page failure to a warning must not turn a wholesale OCR failure into a
@@ -3441,6 +3503,59 @@ pub(super) fn discard_rejected_ocr_page_payloads(
             .page
             .is_none_or(|page_number| !ocr_page_is_rejected(page_number, rejected_pages, page_index_offset))
     });
+}
+/// Default font size for a synthetic fallback paragraph: matches
+/// `pdf::structure::adapters::DEFAULT_OCR_FONT_SIZE_PT`, the value the rest of the OCR paragraph
+/// pipeline uses when no real font-size evidence is available.
+#[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
+const FALLBACK_TABLE_TEXT_FONT_SIZE_PT: f32 = 12.0;
+
+/// Append reading-order text from `Table` regions TATR could not structurally reconstruct (an
+/// invalid or degenerate cell grid, see [`crate::ocr::layout_assembly::TableRegionOutcome`]) as
+/// ordinary paragraphs, so OCR text is never silently discarded when table recognition fails
+/// (xberg-io/xberg#1622).
+///
+/// Skips any fallback text already present verbatim in one of the page's existing paragraphs:
+/// `assemble_ocr_page_paragraphs`'s own `Table`-tagged paragraph is built from a separate OCR
+/// representation (the hOCR-derived `InternalDocument`) and, in the common case, already carries
+/// the same text as the `OcrElement` list this fallback is drawn from. The check guards only the
+/// case where the two representations diverge, avoiding a duplicate paragraph in the ordinary
+/// case. ~keep
+#[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
+pub(super) fn append_unrecognized_table_fallback_paragraphs(
+    paragraphs: &mut Vec<crate::pdf::structure::types::PdfParagraph>,
+    fallback_texts: &[String],
+) {
+    if fallback_texts.is_empty() {
+        return;
+    }
+    let existing_text = paragraphs
+        .iter()
+        .map(|paragraph| paragraph.text.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for text in fallback_texts {
+        let trimmed = text.trim();
+        if trimmed.is_empty() || existing_text.contains(trimmed) {
+            continue;
+        }
+        paragraphs.push(crate::pdf::structure::types::PdfParagraph {
+            text: trimmed.to_string(),
+            lines: Vec::new(),
+            dominant_font_size: FALLBACK_TABLE_TEXT_FONT_SIZE_PT,
+            heading_level: None,
+            is_bold: false,
+            is_list_item: false,
+            is_code_block: false,
+            is_formula: false,
+            is_page_furniture: false,
+            layout_class: None,
+            layout_region_path: None,
+            caption_for: None,
+            block_bbox: None,
+            word_count: crate::pdf::structure::types::PdfParagraph::compute_word_count(trimmed, &[]),
+        });
+    }
 }
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 pub(super) fn retain_ocr_formulas_for_accepted_pages(

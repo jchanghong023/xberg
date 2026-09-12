@@ -3871,6 +3871,13 @@ class ContentFilterConfig {
   /// of pages is classified as furniture and stripped.  Disable this if brand
   /// names or repeated headings are being incorrectly removed by the heuristic.
   ///
+  /// This flag also gates a same-page rule: a body paragraph is removed when
+  /// its text is also carried by a table detected on the same page (catches
+  /// table content that PDF extraction renders both as a table and as body
+  /// text). The comparison preserves case and never touches headings, list
+  /// items, code blocks, formulas, or captions, so it cannot delete a body
+  /// sentence merely for repeating an earlier heading's words (GH#1623).
+  ///
   /// Note: when a layout-detection model is active, the model may independently
   /// classify page-header / page-footer / footnote regions as furniture on a
   /// per-page basis. To preserve those regions, set `include_headers = true`,
@@ -16835,6 +16842,7 @@ class SecurityLimits {
 /// - `cors_origins`: empty vector (allows all origins)
 /// - `max_request_body_bytes`: 104_857_600 (100 MB)
 /// - `max_multipart_field_bytes`: 104_857_600 (100 MB)
+/// - `job_timeout_secs`: 600 (10 minutes)
 class ServerConfig {
   /// Server host address (e.g., "127.0.0.1", "0.0.0.0")
   final String host;
@@ -16855,12 +16863,22 @@ class ServerConfig {
   /// Maximum size of multipart fields in bytes (default: 100 MB)
   final PlatformInt64 maxMultipartFieldBytes;
 
+  /// Fallback timeout, in seconds, for `POST /extract-async` jobs whose request does not
+  /// pin down `extraction_timeout_secs` (default: 600, 10 minutes).
+  ///
+  /// A per-request `extraction_timeout_secs: Some(n)` always overrides this value. An
+  /// explicit `extraction_timeout_secs: null` deliberately does NOT mean "run unbounded" —
+  /// it still falls back to this server-configured cap, because an unbounded job on a
+  /// shared server is a denial-of-service risk.
+  final PlatformInt64 jobTimeoutSecs;
+
   const ServerConfig({
     required this.host,
     required this.port,
     required this.corsOrigins,
     required this.maxRequestBodyBytes,
     required this.maxMultipartFieldBytes,
+    required this.jobTimeoutSecs,
   });
 
   @override
@@ -16869,7 +16887,8 @@ class ServerConfig {
       port.hashCode ^
       corsOrigins.hashCode ^
       maxRequestBodyBytes.hashCode ^
-      maxMultipartFieldBytes.hashCode;
+      maxMultipartFieldBytes.hashCode ^
+      jobTimeoutSecs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -16880,7 +16899,8 @@ class ServerConfig {
           port == other.port &&
           corsOrigins == other.corsOrigins &&
           maxRequestBodyBytes == other.maxRequestBodyBytes &&
-          maxMultipartFieldBytes == other.maxMultipartFieldBytes;
+          maxMultipartFieldBytes == other.maxMultipartFieldBytes &&
+          jobTimeoutSecs == other.jobTimeoutSecs;
 }
 
 /// A URL entry from a sitemap.

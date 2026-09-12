@@ -8392,4 +8392,272 @@ Name: ___
              does not -- this is the root cause of GH#1584's 'vlm fallback does not trigger'"
         );
     }
+
+    /// A minimal `OcrBackend` that counts how many times `process_image` actually ran,
+    /// shared by the cancellation tests below. Does not implement `process_document`, so
+    /// a non-empty `images` slice always drives the per-page batch loop in
+    /// `extract_with_ocr_for_page` (the fan-out under test) rather than the document-level
+    /// branch exercised by `test_process_document_propagation` above.
+    #[cfg(feature = "ocr")]
+    struct CountingOcrBackend {
+        calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[cfg(feature = "ocr")]
+    #[async_trait::async_trait]
+    impl crate::plugins::OcrBackend for CountingOcrBackend {
+        fn backend_type(&self) -> crate::plugins::OcrBackendType {
+            crate::plugins::OcrBackendType::Custom
+        }
+        fn supports_language(&self, _: &str) -> bool {
+            true
+        }
+        async fn process_image(
+            &self,
+            _: &[u8],
+            _: &crate::core::config::OcrConfig,
+        ) -> crate::Result<crate::types::ExtractedDocument> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(crate::types::ExtractedDocument::default())
+        }
+    }
+
+    #[cfg(feature = "ocr")]
+    impl crate::plugins::Plugin for CountingOcrBackend {
+        fn name(&self) -> &str {
+            "cancel-counting-backend"
+        }
+        fn version(&self) -> String {
+            "1.0.0".to_string()
+        }
+        fn initialize(&self) -> crate::Result<()> {
+            Ok(())
+        }
+        fn shutdown(&self) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// GH: `extraction_timeout_secs` firing calls `config.cancel_token.cancel()`, but the
+    /// PDF OCR page fan-out in `pipeline.rs` never checked it, so already-spawned per-page
+    /// OCR work kept running after the caller had already received a `Timeout` error --
+    /// burning CPU and holding the shared Tesseract concurrency permits, degrading
+    /// unrelated concurrent extractions. This test proves a *pre-cancelled* token makes the
+    /// fan-out skip every page's backend call rather than merely being present alongside
+    /// them: `calls` asserts the exact count 0, not just "less than 3".
+    #[cfg(feature = "ocr")]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn extract_with_ocr_skips_backend_calls_when_cancel_token_is_already_cancelled() {
+        use crate::cancellation::CancellationToken;
+        use crate::core::config::OcrConfig;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let backend = Arc::new(CountingOcrBackend { calls: calls.clone() });
+        crate::plugins::register_ocr_backend(backend).unwrap();
+
+        let token = CancellationToken::new();
+        token.cancel();
+
+        let config = ExtractionConfig {
+            ocr: Some(OcrConfig {
+                backend: "cancel-counting-backend".to_string(),
+                ..Default::default()
+            }),
+            cancel_token: Some(token),
+            ..Default::default()
+        };
+
+        let images = [
+            image::DynamicImage::new_rgb8(4, 4),
+            image::DynamicImage::new_rgb8(4, 4),
+            image::DynamicImage::new_rgb8(4, 4),
+        ];
+
+        let result = extract_with_ocr(
+            None,
+            Some(&images),
+            #[cfg(feature = "layout-detection")]
+            None,
+            &config,
+            None,
+        )
+        .await;
+
+        crate::plugins::unregister_ocr_backend("cancel-counting-backend").unwrap();
+
+        assert!(
+            matches!(result, Err(crate::XbergError::Cancelled)),
+            "a cancelled fan-out must report the cancellation itself, not a wholesale OCR \
+             backend failure: {result:?}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "process_image must never run once cancel_token.is_cancelled() is already true"
+        );
+    }
+
+    /// Companion negative control for the test above: same three-page batch, same backend,
+    /// but no cancellation requested. Proves the new cancellation checks are a true no-op
+    /// on the normal path -- every page still reaches the backend exactly once, not "at
+    /// least one" or "some".
+    #[cfg(feature = "ocr")]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn extract_with_ocr_calls_backend_for_every_page_when_not_cancelled() {
+        use crate::core::config::OcrConfig;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let backend = Arc::new(CountingOcrBackend { calls: calls.clone() });
+        crate::plugins::register_ocr_backend(backend).unwrap();
+
+        let config = ExtractionConfig {
+            ocr: Some(OcrConfig {
+                backend: "cancel-counting-backend".to_string(),
+                ..Default::default()
+            }),
+            cancel_token: None,
+            ..Default::default()
+        };
+
+        let images = [
+            image::DynamicImage::new_rgb8(4, 4),
+            image::DynamicImage::new_rgb8(4, 4),
+            image::DynamicImage::new_rgb8(4, 4),
+        ];
+
+        let result = extract_with_ocr(
+            None,
+            Some(&images),
+            #[cfg(feature = "layout-detection")]
+            None,
+            &config,
+            None,
+        )
+        .await;
+
+        crate::plugins::unregister_ocr_backend("cancel-counting-backend").unwrap();
+
+        assert!(result.is_ok(), "unexpected error: {result:?}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "every one of the 3 pages must reach process_image when cancel_token is None"
+        );
+    }
+
+    /// Regression lock for the ground truth this fix relies on: a `Table`-classified paragraph
+    /// with no corresponding successfully recognized table already survives
+    /// `assemble_internal_document` untouched today (verified directly against
+    /// `crate::pdf::structure::assemble_internal_document` while investigating #1622). This is
+    /// why `append_unrecognized_table_fallback_paragraphs` below only needs to guard the
+    /// divergent case where the OCR element list and the hOCR-derived paragraph disagree,
+    /// rather than always injecting a fallback paragraph. ~keep
+    #[cfg(all(feature = "ocr", feature = "layout-detection"))]
+    #[test]
+    fn table_classified_paragraph_with_no_recognized_table_survives_assembly() {
+        use crate::pdf::structure::assemble_internal_document;
+        use crate::pdf::structure::types::{LayoutHintClass, PdfParagraph};
+
+        let paragraph = PdfParagraph {
+            text: "42 43 44 orphaned table text".to_string(),
+            lines: Vec::new(),
+            dominant_font_size: 12.0,
+            heading_level: None,
+            is_bold: false,
+            is_list_item: false,
+            is_code_block: false,
+            is_formula: false,
+            is_page_furniture: false,
+            layout_class: Some(LayoutHintClass::Table),
+            layout_region_path: None,
+            caption_for: None,
+            block_bbox: Some((0.0, 700.0, 200.0, 720.0)),
+            word_count: 5,
+        };
+
+        let doc = assemble_internal_document(vec![vec![paragraph]], &[], None, &[], &Default::default());
+
+        assert_eq!(doc.elements.len(), 1);
+        assert_eq!(doc.elements[0].text, "42 43 44 orphaned table text");
+    }
+
+    #[cfg(all(feature = "ocr", feature = "layout-detection"))]
+    #[test]
+    fn append_unrecognized_table_fallback_paragraphs_adds_missing_fallback_text() {
+        use crate::pdf::structure::types::PdfParagraph;
+
+        fn paragraph(text: &str) -> PdfParagraph {
+            PdfParagraph {
+                text: text.to_string(),
+                lines: Vec::new(),
+                dominant_font_size: 12.0,
+                heading_level: None,
+                is_bold: false,
+                is_list_item: false,
+                is_code_block: false,
+                is_formula: false,
+                is_page_furniture: false,
+                layout_class: None,
+                layout_region_path: None,
+                caption_for: None,
+                block_bbox: None,
+                word_count: text.split_whitespace().count(),
+            }
+        }
+
+        let mut paragraphs = vec![paragraph("an unrelated body paragraph")];
+        append_unrecognized_table_fallback_paragraphs(&mut paragraphs, &["recovered orphaned table text".to_string()]);
+
+        assert_eq!(
+            paragraphs.len(),
+            2,
+            "the fallback text must be appended as its own paragraph"
+        );
+        assert_eq!(paragraphs[1].text, "recovered orphaned table text");
+        assert_eq!(
+            paragraphs[1].layout_class, None,
+            "a fallback paragraph must render as ordinary text, not be re-tagged as a Table region"
+        );
+    }
+
+    #[cfg(all(feature = "ocr", feature = "layout-detection"))]
+    #[test]
+    fn append_unrecognized_table_fallback_paragraphs_skips_text_already_present() {
+        use crate::pdf::structure::types::PdfParagraph;
+
+        let existing = PdfParagraph {
+            text: "duplicate content already carried by an existing paragraph".to_string(),
+            lines: Vec::new(),
+            dominant_font_size: 12.0,
+            heading_level: None,
+            is_bold: false,
+            is_list_item: false,
+            is_code_block: false,
+            is_formula: false,
+            is_page_furniture: false,
+            layout_class: None,
+            layout_region_path: None,
+            caption_for: None,
+            block_bbox: None,
+            word_count: 7,
+        };
+
+        let mut paragraphs = vec![existing];
+        append_unrecognized_table_fallback_paragraphs(
+            &mut paragraphs,
+            &["duplicate content already carried by an existing paragraph".to_string()],
+        );
+
+        assert_eq!(
+            paragraphs.len(),
+            1,
+            "text already present verbatim must not be duplicated as a second paragraph"
+        );
+    }
 }
