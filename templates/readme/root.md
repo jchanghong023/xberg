@@ -371,7 +371,7 @@ Common use cases — see [Quick start guide](https://docs.xberg.io/getting-start
 <details>
 <summary><strong>Full feature list</strong></summary>
 
-### Supported File Formats (110 formats · 146 file extensions · 56 MIME aliases)
+### Supported File Formats (110 formats · 146 file extensions · 58 MIME aliases)
 
 110 formats across 140 unique file extensions, with 56 compatibility MIME aliases, intelligent format detection, and comprehensive metadata extraction.
 

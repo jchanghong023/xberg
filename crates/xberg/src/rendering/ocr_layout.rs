@@ -112,7 +112,7 @@ pub(crate) fn layout_boxes(mut items: Vec<(f64, f64, f64, String)>) -> Option<St
     items.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     let mut bands: Vec<(f64, f64)> = Vec::new();
     let mut row_of_item: Vec<usize> = Vec::with_capacity(items.len());
-    for (left, top, height, _text) in items.iter() {
+    for (_left, top, height, _text) in items.iter() {
         let item_top = *top;
         let item_height = height.max(1.0);
         let item_bottom = item_top + item_height;

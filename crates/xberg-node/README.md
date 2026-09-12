@@ -317,7 +317,7 @@ This binding uses NAPI-RS to provide native Node.js bindings with:
 
 ## Features
 
-### Supported File Formats (110 · 146 · 56 MIME aliases)
+### Supported File Formats (110 · 146 · 58 MIME aliases)
 
 110 across 140 unique file extensions, with 56 compatibility MIME aliases, intelligent format detection, and comprehensive metadata extraction.
 
