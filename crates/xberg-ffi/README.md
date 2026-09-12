@@ -91,7 +91,7 @@
   </a>
 </div>
 
-Extract text, tables, images, metadata, and code intelligence from 109 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. C/C++ FFI bindings providing a stable ABI for native integration, shared library distribution, and cross-language interop.
+Extract text, tables, images, metadata, and code intelligence from 110 and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. C/C++ FFI bindings providing a stable ABI for native integration, shared library distribution, and cross-language interop.
 
 ## What This Package Provides
 
@@ -331,9 +331,9 @@ int main(void) {
 
 ## Features
 
-### Supported File Formats (109 formats · 144 file extensions · 56 MIME aliases)
+### Supported File Formats (110 · 146 · 56 MIME aliases)
 
-109 formats across 140 unique file extensions, with 56 compatibility MIME aliases, intelligent format detection, and comprehensive metadata extraction.
+110 across 140 unique file extensions, with 56 compatibility MIME aliases, intelligent format detection, and comprehensive metadata extraction.
 
 #### Office Documents
 
@@ -558,7 +558,7 @@ Contributions are welcome! See [Contributing Guide](https://github.com/xberg-io/
 
 ## Part of Xberg.io
 
-- [Xberg](https://github.com/xberg-io/xberg) — the open-source content-intelligence engine: text, tables, and metadata from 109 formats (144 file extensions), with OCR, transcription, and code intelligence. MIT.
+- [Xberg](https://github.com/xberg-io/xberg) — the open-source content-intelligence engine: text, tables, and metadata from 110 (146), with OCR, transcription, and code intelligence. MIT.
 - [Xberg Pro](https://xberg.io) — a complete self-hosted content-intelligence backend in a single container. Commercial.
 - [Xberg Enterprise](https://xberg.io) — the distributed, governed content-intelligence platform, scaled on Kubernetes with team governance and support. Commercial.
 - [crawlberg](https://github.com/xberg-io/crawlberg) — web crawling and scraping with HTML→Markdown and headless-Chrome fallback.

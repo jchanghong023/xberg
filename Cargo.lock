@@ -11822,6 +11822,7 @@ dependencies = [
  "uuid",
  "v_htmlescape",
  "whatlang",
+ "windows",
  "wiremock",
  "xberg-candle-ocr",
  "xberg-gliner",

@@ -316,10 +316,16 @@ fn extract_ole_embedded_object(data: &[u8], source_name: &str, max_bytes: u64) -
 
     // Some producers omit the conventional root stream name and only leave a
     // `\x01CompObj` class descriptor. Use that descriptor to classify the
-    // complete CFB, so the native extractor still receives the container.
+    // complete CFB, so the native extractor still receives the container. The
+    // descriptor names the *editing application*, not the container layout: one
+    // such object claimed Visio while carrying no `VisioDocument` stream, and
+    // handing it to the Visio reader only produced a dead-end warning. Trust the
+    // descriptor only when the native stream it implies is really there;
+    // otherwise the signature scan below still gets the actual streams.
     let compobj_names = ["\x01CompObj", "/\x01CompObj", "CompObj"];
     if let Some(compobj) = read_ole_stream(&mut compound_file, &stream_paths, &compobj_names, max_bytes)
         && let Some(mime) = classify_ole_program(&compobj)
+        && native_stream_present(&compound_file, &stream_paths, mime)
     {
         return Some((data.to_vec(), mime.to_string()));
     }
@@ -357,9 +363,39 @@ fn extract_ole_embedded_object(data: &[u8], source_name: &str, max_bytes: u64) -
     None
 }
 
+/// Whether the legacy root stream a legacy MIME type implies actually exists.
+///
+/// A native Office container is identified by its root stream (`VisioDocument`,
+/// `WordDocument`, …); a class descriptor alone does not make the container
+/// readable by the matching extractor.
 #[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
-fn collect_ole_stream_paths<F: Read + std::io::Seek>(compound_file: &cfb::CompoundFile<F>) -> Vec<std::path::PathBuf> {
-    compound_file
+fn native_stream_present<F: Read + std::io::Seek>(
+    compound_file: &cfb::CompoundFile<F>,
+    stream_paths: &[std::path::PathBuf],
+    mime: &str,
+) -> bool {
+    match mime {
+        crate::core::mime::VISIO_MIME_TYPE => {
+            has_ole_stream(compound_file, stream_paths, &["VisioDocument", "/VisioDocument"])
+        }
+        crate::core::mime::LEGACY_WORD_MIME_TYPE => {
+            has_ole_stream(compound_file, stream_paths, &["WordDocument", "/WordDocument"])
+        }
+        crate::core::mime::LEGACY_POWERPOINT_MIME_TYPE => has_ole_stream(
+            compound_file,
+            stream_paths,
+            &["PowerPoint Document", "/PowerPoint Document"],
+        ),
+        "application/vnd.ms-excel" => {
+            has_ole_stream(compound_file, stream_paths, &["Workbook", "/Workbook"])
+                || has_ole_stream(compound_file, stream_paths, &["Book", "/Book"])
+        }
+        _ => true,
+    }
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn collect_ole_stream_paths<F: Read + std::io::Seek>(compound_file: &cfb::CompoundFile<F>) -> Vec<std::path::PathBuf> {    compound_file
         .walk()
         .filter(|entry| entry.is_stream())
         .take(256)
@@ -512,7 +548,10 @@ fn identify_ole_container_mime(data: &[u8], max_bytes: u64) -> Option<&'static s
     let compobj_names = ["\x01CompObj", "/\x01CompObj", "CompObj"];
     let mut compound_file = compound_file;
     let compobj = read_ole_stream(&mut compound_file, &stream_paths, &compobj_names, max_bytes)?;
-    classify_ole_program(&compobj)
+    let mime = classify_ole_program(&compobj)?;
+    // Same guard as the container-level CompObj branch: a descriptor naming an
+    // application whose native root stream is absent must not label the CFB.
+    native_stream_present(&compound_file, &stream_paths, mime).then_some(mime)
 }
 
 #[cfg(any(feature = "office", feature = "hwp", feature = "email"))]

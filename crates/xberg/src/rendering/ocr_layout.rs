@@ -101,14 +101,41 @@ pub(crate) fn layout_boxes(mut items: Vec<(f64, f64, f64, String)>) -> Option<St
     // and occupies two columns, so the same divisor places both scripts correctly.
     let column_px = (line_height / 2.0).max(1.0);
     let min_left = items.iter().map(|item| item.0).fold(f64::INFINITY, f64::min);
-    let min_top = items.iter().map(|item| item.1).fold(f64::INFINITY, f64::min);
+
+    // Rows come from clustering lines into vertical bands whose spans overlap,
+    // not from dividing a top offset by the median height: OCR line boxes vary
+    // in height (tall glyph runs, sub/superscripts), and rounding a mixed-height
+    // page onto a fixed grid parked lines from the same visual row on different
+    // rows — a table cell drifted off its label. Bands extend to absorb every
+    // line that overlaps them by at least half the smaller span, so two boxes on
+    // one visual row share a row even when their heights differ.
+    items.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let mut bands: Vec<(f64, f64)> = Vec::new();
+    let mut row_of_item: Vec<usize> = Vec::with_capacity(items.len());
+    for (left, top, height, _text) in items.iter() {
+        let item_top = *top;
+        let item_height = height.max(1.0);
+        let item_bottom = item_top + item_height;
+        if let Some((band_top, band_bottom)) = bands.last_mut() {
+            let overlap = item_bottom.min(*band_bottom) - item_top.max(*band_top);
+            let smaller = item_height.min(*band_bottom - *band_top);
+            if overlap > 0.0 && overlap / smaller.max(1.0) >= 0.5 {
+                *band_top = band_top.min(item_top);
+                *band_bottom = band_bottom.max(item_bottom);
+                row_of_item.push(bands.len() - 1);
+                continue;
+            }
+        }
+        bands.push((item_top, item_bottom));
+        row_of_item.push(bands.len() - 1);
+    }
 
     // (row, column, text, width) ordered top-to-bottom then left-to-right, which is also the
     // order collisions are resolved in.
     let mut placed: Vec<(usize, usize, String, usize)> = items
         .drain(..)
-        .map(|(left, top, _height, text)| {
-            let row = ((top - min_top) / line_height).round().max(0.0) as usize;
+        .zip(row_of_item.drain(..))
+        .map(|((left, _top, _height, text), row)| {
             let column = ((left - min_left) / column_px).round().max(0.0) as usize;
             let width = display_width(&text);
             (row, column, text, width)
@@ -308,5 +335,34 @@ mod tests {
         let block = layout_boxes(vec![element(&long, 0.0, 0.0, 4000.0, 20.0)]).expect("layout");
 
         assert_eq!(display_width(block.lines().next().unwrap()), MAX_COLS);
+    }
+
+    /// Two boxes on the same visual row whose heights differ (a tall glyph run
+    /// next to a normal line) must share one grid row. Rounding a top offset
+    /// onto a median-height grid parked such pairs on different rows, which is
+    /// how table cells drifted off their labels.
+    #[test]
+    fn mixed_height_boxes_on_one_visual_row_share_a_row() {
+        let tall = element("RATIO", 0.0, 30.0, 120.0, 40.0);
+        let short = element("0.58 s/图", 200.0, 60.0, 120.0, 12.0);
+        let heading = element("TITLE", 0.0, 0.0, 120.0, 12.0);
+        let block = layout_boxes(vec![heading, tall, short]).expect("layout");
+
+        let lines: Vec<&str> = block.lines().collect();
+        assert_eq!(
+            lines.len(),
+            2,
+            "the title must get its own row and the mixed-height pair must share one; got {block:?}"
+        );
+        let ratio_row = lines.iter().position(|line| line.contains("RATIO")).expect("RATIO");
+        let value_row = lines.iter().position(|line| line.contains("0.58")).expect("0.58");
+        assert_eq!(
+            ratio_row, value_row,
+            "RATIO and its value must sit on the same row: {block:?}"
+        );
+        assert!(
+            lines[value_row].contains("RATIO") && lines[value_row].contains("0.58"),
+            "both fragments must be on the shared row: {block:?}"
+        );
     }
 }

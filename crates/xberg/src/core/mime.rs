@@ -895,6 +895,14 @@ static FORMATS: &[FormatEntry] = &[
         mime_type: "video/mpeg",
         aliases: &[],
     },
+    // Windows Media. symphonia cannot demux ASF, so the transcription extractor
+    // decodes the audio track through Media Foundation instead
+    // (crates/xberg/src/transcription/container.rs).
+    FormatEntry {
+        extensions: &["wmv", "asf"],
+        mime_type: "video/x-ms-wmv",
+        aliases: &["video/x-ms-asf", "application/vnd.ms-asf"],
+    },
     FormatEntry {
         extensions: &[],
         mime_type: "text/x-source-code",

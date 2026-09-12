@@ -65,7 +65,7 @@ _DocSource = tuple[ExtractedDocument, _Source]
 
 
 class XbergReader(BasePydanticReader):
-    """Reader for 109 document formats powered by xberg's Rust extraction engine.
+    """Reader for 110 document formats powered by xberg's Rust extraction engine.
 
     Supports file paths, raw bytes, batch input, per-page splitting, and true
     async via xberg's native async ``extract`` / ``extract_batch`` functions.

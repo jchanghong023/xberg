@@ -1,13 +1,13 @@
 <!--
 AI-RULEZ :: GENERATED FILE — DO NOT EDIT
-Content-Hash: blake3:31f300c009dd17019c05ba3a3121a85ad067722be301770325cde778930e1bd6
-Source-Hash: blake3:d7eb3a97aadbf7bd85fa7e5fec8da7f3edaf6de73ecf475b7539d549bc8504aa
+Content-Hash: blake3:55a2ff6b2f946924bf5cba5ce4d8cabf33f044cb39502ee0d702be52f39e5859
+Source-Hash: blake3:3247949a089ee3c52bc58fc1c821484cf0c0674ff31a41aab6a9f806e9c98f16
 Schema-Version: v1
 -->
 
 # Supported Formats Reference
 
-Xberg supports 109 formats across 140 unique file extensions and accepts 53 compatibility MIME aliases. The tables below summarize the current extension families; `xberg formats` and the [generated format reference](https://docs.xberg.io/reference/formats/) are authoritative for individual MIME mappings and feature-gated availability.
+Xberg supports 110 formats across 140 unique file extensions and accepts 53 compatibility MIME aliases. The tables below summarize the current extension families; `xberg formats` and the [generated format reference](https://docs.xberg.io/reference/formats/) are authoritative for individual MIME mappings and feature-gated availability.
 
 ## Office Documents
 

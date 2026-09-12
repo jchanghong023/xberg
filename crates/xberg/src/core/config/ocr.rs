@@ -2106,7 +2106,7 @@ mod tests {
     fn test_ocr_config_deserialization_missing_optional_fields() {
         let json = r#"{}"#;
         let config: OcrConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.backend, "tesseract");
+        assert_eq!(config.backend, expected_default_backend());
         assert_eq!(config.language, vec!["eng".to_string()]);
         assert!(config.pipeline.is_none());
         assert!(config.quality_thresholds.is_none());
@@ -2393,24 +2393,12 @@ mod tests {
             backend_options: Some(serde_json::json!({"mode": "fast"})),
             ..Default::default()
         };
-        let pipeline = config
-            .effective_pipeline()
-            .expect("paddle-ocr feature must produce a pipeline");
-        assert_eq!(pipeline.stages.len(), 2);
-
-        let primary = &pipeline.stages[0];
-        assert_eq!(primary.backend, "tesseract");
-        let opts = primary
-            .backend_options
-            .as_ref()
-            .expect("primary stage must carry backend_options");
-        assert_eq!(opts["mode"], "fast");
-
-        let fallback = &pipeline.stages[1];
-        assert_eq!(fallback.backend, "paddleocr");
+        // The classical auto-fallback was removed: the default backend is already the
+        // strongest classical engine compiled in, so a defaulted config runs single-backend
+        // and never synthesises a pipeline — not even with backend_options set.
         assert!(
-            fallback.backend_options.is_none(),
-            "paddleocr stage must not inherit backend_options"
+            config.effective_pipeline().is_none(),
+            "a defaulted config must not gain a synthesised pipeline"
         );
     }
 

@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "High-performance document intelligence library for Rust. Extract text, metadata, and structured data from PDFs, Office documents, images, and 109 formats and 371 programming languages via tree-sitter code intelligence with async/sync APIs."
+description = "High-performance document intelligence library for Rust. Extract text, metadata, and structured data from PDFs, Office documents, images, and 110 formats and 371 programming languages via tree-sitter code intelligence with async/sync APIs."
 license.workspace = true
 repository = "https://github.com/xberg-io/xberg"
 homepage = "https://xberg.io"
@@ -450,6 +450,10 @@ transcription = [
     "dep:symphonia",
     "dep:lofty",
     "dep:tokenizers",
+    # Windows Media (ASF/WMV) containers are decoded through Media Foundation.
+    # Declared only in the Windows target block below, so this is a no-op on
+    # other targets, exactly like `dep:fs2` above.
+    "dep:windows",
     "ort-bundled",
     "tokio-runtime",
 ]
@@ -1557,6 +1561,14 @@ xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.1.6", optional =
 # Windows GDI/GDI+ rasterization of EMF/WMF metafiles so OCR can run on Office vector
 # images (Visio OLE previews, legacy VML shapes). Windows-only: the crate is `#![cfg(windows)]`.
 xberg-windows-metafile = { path = "../xberg-windows-metafile", version = "1.1.6" }
+# Media Foundation decodes the audio track of Windows Media (ASF/WMV) inputs, which
+# symphonia cannot demux. The high-level `windows` crate is already in the tree at this
+# version, so this adds an edge, not a second copy. See src/transcription/wmf.rs.
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
 
 # tokio OS features (every native target, including Android and Windows): `process`, `fs`, and
 # `rt-multi-thread` all fail to compile on wasm32 — tokio's own wasm32 gate only allows

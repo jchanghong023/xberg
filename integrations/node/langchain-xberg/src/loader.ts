@@ -22,7 +22,7 @@ export interface XbergLoaderOptions {
 }
 
 /**
- * Load documents using Xberg, supporting 109 file formats with true async extraction.
+ * Load documents using Xberg, supporting 110 file formats with true async extraction.
  *
  * By default each source becomes one Document. Enable `chunking` on the
  * `ExtractionConfig` to emit one Document per chunk, or `pages` for one Document

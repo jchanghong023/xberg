@@ -26,10 +26,41 @@ pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Resu
     let mut compound_file = cfb::CompoundFile::open(Cursor::new(content))
         .map_err(|error| XbergError::parsing(format!("Failed to open VSD as OLE container: {error}")))?;
 
-    let stream = compound_file
-        .open_stream("/VisioDocument")
-        .or_else(|_| compound_file.open_stream("VisioDocument"))
-        .map_err(|error| XbergError::parsing(format!("Failed to open VisioDocument stream: {error}")))?;
+    // Embedded wrappers (an OLE object inside another compound file) can carry the
+    // VisioDocument stream inside a substorage rather than at the root, while the
+    // classification side recognises it at any depth — so the reader has to search
+    // the tree too, or such containers are misrouted here and fail on the root name.
+    let candidates: Vec<std::path::PathBuf> = {
+        let mut found = vec![std::path::PathBuf::from("/VisioDocument")];
+        for entry in compound_file.walk() {
+            if !entry.is_stream() {
+                continue;
+            }
+            let path = entry.path();
+            if path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.eq_ignore_ascii_case("VisioDocument"))
+            {
+                found.push(path.to_path_buf());
+            }
+        }
+        found
+    };
+    let mut stream = None;
+    let mut open_error = None;
+    for path in candidates {
+        match compound_file.open_stream(&path) {
+            Ok(opened) => {
+                stream = Some(opened);
+                break;
+            }
+            Err(error) => open_error = Some(error),
+        }
+    }
+    let stream = stream.ok_or_else(|| {
+        XbergError::parsing(format!(
+            "Failed to open VisioDocument stream: {}",
+            open_error.map(|error| error.to_string()).unwrap_or_else(|| "no such stream".to_string())
+        ))
+    })?;
 
     let read_limit = max_stream_size.saturating_add(1) as u64;
     let mut document_stream = Vec::with_capacity(content.len().min(max_stream_size));

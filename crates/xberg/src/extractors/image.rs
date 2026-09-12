@@ -2744,7 +2744,10 @@ mod tests {
     #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
     #[test]
     fn should_apply_vertical_block_psm_to_default_vertical_tesseract_config() {
+        // The default backend is PaddleOCR wherever it is compiled in; this test pins
+        // Tesseract PSM materialization, so it names Tesseract explicitly.
         let mut ocr_config = crate::core::config::OcrConfig {
+            backend: "tesseract".to_string(),
             language: vec!["jpn_vert".to_string()],
             ..Default::default()
         };
@@ -2762,6 +2765,7 @@ mod tests {
     #[test]
     fn should_apply_default_whole_image_psm_to_horizontal_tesseract_config() {
         let mut ocr_config = crate::core::config::OcrConfig {
+            backend: "tesseract".to_string(),
             language: vec!["eng".to_string()],
             ..Default::default()
         };
@@ -2805,10 +2809,12 @@ mod tests {
     #[test]
     fn should_apply_same_default_psm_whether_or_not_tesseract_config_struct_is_present() {
         let mut without_struct = crate::core::config::OcrConfig {
+            backend: "tesseract".to_string(),
             language: vec!["eng".to_string()],
             ..Default::default()
         };
         let mut with_default_struct = crate::core::config::OcrConfig {
+            backend: "tesseract".to_string(),
             language: vec!["eng".to_string()],
             tesseract_config: Some(crate::types::TesseractConfig::default()),
             ..Default::default()
@@ -2961,7 +2967,12 @@ mod tests {
 
         #[test]
         fn should_retry_implicit_horizontal_tesseract_when_words_are_sparse() {
-            let config = crate::core::config::OcrConfig::default();
+            // The sparse retry is a Tesseract-only fallback; the compiled-in default
+            // backend may be PaddleOCR, so the subject backend is named explicitly.
+            let config = crate::core::config::OcrConfig {
+                backend: "tesseract".to_string(),
+                ..Default::default()
+            };
             let confidences = vec![0.10; SPARSE_IMAGE_OCR_WORD_LIMIT];
             let result = result_with_word_confidences(&confidences);
 
@@ -3017,6 +3028,7 @@ mod tests {
         #[test]
         fn should_retry_sparse_image_ocr_when_tesseract_config_present_but_psm_unset() {
             let config = crate::core::config::OcrConfig {
+                backend: "tesseract".to_string(),
                 tesseract_config: Some(crate::types::TesseractConfig {
                     enable_table_detection: false,
                     ..Default::default()
@@ -3091,7 +3103,10 @@ mod tests {
         /// though `crate::ocr::types::TesseractConfig::default()` already has `true`.
         #[test]
         fn should_apply_public_ngram_default_to_whole_image_tesseract_config() {
-            let mut whole_image_config = crate::core::config::OcrConfig::default();
+            let mut whole_image_config = crate::core::config::OcrConfig {
+                backend: "tesseract".to_string(),
+                ..Default::default()
+            };
             apply_default_whole_image_tesseract_psm(&mut whole_image_config);
 
             let tesseract_config = whole_image_config
@@ -3442,7 +3457,12 @@ mod tests {
     #[test]
     fn should_disable_redundant_tesseract_analysis_for_region_ocr() {
         let extraction_config = ExtractionConfig::default();
-        let ocr_config = crate::core::config::OcrConfig::default();
+        // Region OCR materializes Tesseract configuration only for the Tesseract
+        // backend; the compiled-in default may be PaddleOCR, so name it explicitly.
+        let ocr_config = crate::core::config::OcrConfig {
+            backend: "tesseract".to_string(),
+            ..Default::default()
+        };
 
         let (_, region_config) = configured_region_ocr(&extraction_config, &ocr_config).unwrap();
         let tesseract_config = region_config

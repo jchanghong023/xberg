@@ -5,6 +5,8 @@
 //! and the automatic routing that happens when an audio/video MIME type is
 //! presented to the extractor registry.
 
+#[cfg(feature = "transcription")]
+pub mod container;
 pub mod decode;
 #[cfg(feature = "transcription")]
 pub mod engine;
@@ -12,3 +14,5 @@ pub mod engine;
 pub mod model;
 #[cfg(feature = "transcription")]
 pub mod tags;
+#[cfg(feature = "transcription")]
+pub mod wmf;

@@ -12,6 +12,7 @@ use crate::pdf::structure::constants::{COALESCE_THRESHOLD, MAX_GLYPH_JITTER_PT, 
 use crate::pdf::text::{contains_html_markup, fix_pdf_control_chars};
 use crate::types::{PageBoundary, PageContent};
 use std::borrow::Cow;
+use std::collections::HashMap;
 use xberg_native_pdf::document::ReadingOrder;
 
 /// Result type for PDF text extraction with optional page tracking.
@@ -188,18 +189,13 @@ fn extract_text_fast_path(doc: &mut NativeDocument, margins: PageMarginFractions
     let mut total_sample_size = 0usize;
     let mut sample_count = 0;
 
+    let mut page_texts: Vec<String> = Vec::with_capacity(page_count);
+
     for page_idx in 0..page_count {
         let page_text = extract_page_text_column_aware(&mut doc.doc, page_idx, &excluded_layers, margins)?;
+        page_texts.push(apply_text_cleanup(&page_text).into_owned());
 
         let page_size = page_text.len();
-
-        if page_idx > 0 {
-            content.push_str("\n\n");
-        }
-
-        let cleaned = apply_text_cleanup(&page_text);
-        content.push_str(&cleaned);
-
         if page_idx < 5 {
             total_sample_size += page_size;
             sample_count += 1;
@@ -210,6 +206,15 @@ fn extract_text_fast_path(doc: &mut NativeDocument, margins: PageMarginFractions
             let estimated_remaining = avg_page_size * (page_count - 5);
             content.reserve(estimated_remaining + (estimated_remaining / 10));
         }
+    }
+
+    strip_repeated_edge_furniture(&mut page_texts);
+
+    for (page_idx, cleaned) in page_texts.iter().enumerate() {
+        if page_idx > 0 {
+            content.push_str("\n\n");
+        }
+        content.push_str(cleaned);
     }
 
     Ok((content, None, None))
@@ -244,9 +249,9 @@ fn extract_text_with_tracking(
     let mut total_sample_size = 0usize;
     let mut sample_count = 0;
 
-    for page_idx in 0..page_count {
-        let page_number = page_idx + 1;
+    let mut page_texts: Vec<String> = Vec::with_capacity(page_count);
 
+    for page_idx in 0..page_count {
         let page_text = extract_page_text_column_aware(&mut doc.doc, page_idx, &excluded_layers, margins)?;
 
         let page_size = page_text.len();
@@ -256,6 +261,21 @@ fn extract_text_with_tracking(
             sample_count += 1;
         }
 
+        page_texts.push(apply_text_cleanup(&page_text).into_owned());
+
+        if page_idx == 4 && page_count > 5 && sample_count > 0 {
+            let avg_page_size = total_sample_size / sample_count;
+            let estimated_remaining = avg_page_size * (page_count - 5);
+            let separator_overhead = (page_count - 5) * 3;
+            content.reserve(estimated_remaining + separator_overhead + (estimated_remaining / 10));
+        }
+    }
+
+    strip_repeated_edge_furniture(&mut page_texts);
+
+    for (page_idx, cleaned) in page_texts.iter().enumerate() {
+        let page_number = page_idx + 1;
+
         if config.insert_page_markers {
             let marker = config.marker_format.replace("{page_num}", &page_number.to_string());
             content.push_str(&marker);
@@ -263,10 +283,8 @@ fn extract_text_with_tracking(
             content.push_str("\n\n");
         }
 
-        let cleaned = apply_text_cleanup(&page_text);
-
         let byte_start = content.len();
-        content.push_str(&cleaned);
+        content.push_str(cleaned);
         let byte_end = content.len();
 
         boundaries.push(PageBoundary {
@@ -276,10 +294,10 @@ fn extract_text_with_tracking(
         });
 
         if let Some(ref mut pages) = page_contents {
-            let is_blank = Some(crate::extraction::blank_detection::is_page_text_blank(&cleaned));
+            let is_blank = Some(crate::extraction::blank_detection::is_page_text_blank(cleaned));
             pages.push(PageContent {
                 page_number: page_number as u32,
-                content: cleaned.into_owned(),
+                content: cleaned.clone(),
                 tables: Vec::new(),
                 image_indices: Vec::new(),
                 image_preprocessing: None,
@@ -292,16 +310,174 @@ fn extract_text_with_tracking(
                 ocr_confidence: None,
             });
         }
-
-        if page_idx == 4 && page_count > 5 && sample_count > 0 {
-            let avg_page_size = total_sample_size / sample_count;
-            let estimated_remaining = avg_page_size * (page_count - 5);
-            let separator_overhead = (page_count - 5) * 3;
-            content.reserve(estimated_remaining + separator_overhead + (estimated_remaining / 10));
-        }
     }
 
     Ok((content, Some(boundaries), page_contents))
+}
+
+/// Edge-zone size for furniture detection: a page's first/last `EDGE_LINES`
+/// non-empty lines are the zones where running headers and footers live.
+const EDGE_LINES: usize = 3;
+
+/// A furniture line must be at least this many characters: page numbers, dates
+/// and other short markers repeat on every page but are content-adjacent, so
+/// they are left alone.
+pub(crate) const FURNITURE_MIN_LINE_CHARS: usize = 12;
+
+/// A line is furniture when it appears as an edge line on at least this share
+/// of pages (and on at least [`FURNITURE_MIN_PAGES`] pages) — or on a dense
+/// consecutive run of at least [`FURNITURE_MIN_CONSECUTIVE_PAGES`] pages, which
+/// is how a chapter's running header shows up in a book whose chapters are
+/// short relative to the whole document.
+const FURNITURE_MIN_PAGE_FRACTION: f64 = 0.25;
+const FURNITURE_MIN_PAGES: usize = 3;
+const FURNITURE_MIN_CONSECUTIVE_PAGES: usize = 8;
+
+/// Pages with fewer non-empty lines than this are never furniture candidates:
+/// below `2 * EDGE_LINES + 1` the top and bottom zones overlap and every line
+/// would look like an edge line, so a short page carries no trustworthy
+/// "middle" to protect and passes through untouched.
+const FURNITURE_MIN_PAGE_LINES: usize = 2 * EDGE_LINES + 1;
+
+/// Drop lines that repeat across many pages' top/bottom edges (running headers
+/// and footers) from every page.
+///
+/// A manual whose footer note repeats on hundreds of pages otherwise survives
+/// every per-page filter (the default margins are 0.0, so no band is cut) and
+/// lands once per page in the output. A line only becomes furniture by sitting
+/// in a page's edge zones on a quarter of the pages — a bar no body sentence
+/// meets — but removal is then global: column-aware reading order frequently
+/// parks a running footer mid-page, so confining removal to the edges leaves
+/// most copies behind.
+///
+/// Docs with fewer than four pages carry too little evidence to judge a line
+/// furniture, so they pass through unchanged.
+/// Furniture strings for pages given as per-page line lists.
+///
+/// Same thresholds as [`strip_repeated_edge_furniture`], exposed so the
+/// structured-PDF path (whose document is built from spans, not page text) can
+/// detect furniture over its own page-grouped paragraphs.
+pub(crate) fn furniture_from_page_lines(pages: &[Vec<String>]) -> std::collections::HashSet<String> {
+    if pages.len() < FURNITURE_MIN_PAGES {
+        return Default::default();
+    }
+
+    // Count on how many DISTINCT pages each trimmed edge line appears, and the
+    // longest run of CONSECUTIVE pages carrying it. Chapter running headers sit
+    // on a dense consecutive run that can stay far below the whole-document
+    // page share, so either signal is enough.
+    let mut page_counts: HashMap<String, usize> = HashMap::new();
+    let mut streaks: HashMap<&str, (usize, usize)> = HashMap::new();
+    for (page_index, lines) in pages.iter().enumerate() {
+        let non_empty: Vec<usize> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| !line.trim().is_empty())
+            .map(|(index, _)| index)
+            .collect();
+        if non_empty.len() < FURNITURE_MIN_PAGE_LINES {
+            continue;
+        }
+        let mut edge_line_positions = std::collections::HashSet::new();
+        for position in non_empty.iter().take(EDGE_LINES) {
+            edge_line_positions.insert(*position);
+        }
+        for position in non_empty.iter().rev().take(EDGE_LINES) {
+            edge_line_positions.insert(*position);
+        }
+        let mut seen_on_this_page = std::collections::HashSet::new();
+        for position in edge_line_positions {
+            let line = lines[position].trim();
+            if line.chars().count() < FURNITURE_MIN_LINE_CHARS {
+                continue;
+            }
+            if seen_on_this_page.insert(line) {
+                *page_counts.entry(line.to_string()).or_insert(0) += 1;
+            }
+            let streak = match streaks.get(line) {
+                // Continues the run only when this is the immediately previous page.
+                Some(&(last_index, run)) if last_index + 1 == page_index => run + 1,
+                _ => 1,
+            };
+            streaks.insert(line, (page_index, streak));
+        }
+    }
+
+    let minimum_pages = ((pages.len() as f64) * FURNITURE_MIN_PAGE_FRACTION).ceil() as usize;
+    let minimum_pages = minimum_pages.max(FURNITURE_MIN_PAGES);
+    let candidates = page_counts.len();
+    let furniture: std::collections::HashSet<String> = page_counts
+        .into_iter()
+        .filter(|(line, count)| {
+            *count >= minimum_pages
+                || streaks
+                    .get(line.as_str())
+                    .is_some_and(|&(_, run)| run >= FURNITURE_MIN_CONSECUTIVE_PAGES)
+        })
+        .map(|(line, _)| line)
+        .collect();
+    tracing::debug!(
+        pages = pages.len(),
+        minimum_pages,
+        consecutive_pages = FURNITURE_MIN_CONSECUTIVE_PAGES,
+        candidates,
+        furniture = furniture.len(),
+        "strip_repeated_edge_furniture pass"
+    );
+    furniture
+}
+
+/// Drop lines that repeat across many pages' top/bottom edges (running headers
+/// and footers) from every page.
+///
+/// A manual whose footer note repeats on hundreds of pages otherwise survives
+/// every per-page filter (the default margins are 0.0, so no band is cut) and
+/// lands once per page in the output. A line only becomes furniture by sitting
+/// in a page's edge zones on a quarter of the pages — a bar no body sentence
+/// meets — but removal is then global: column-aware reading order frequently
+/// parks a running footer mid-page, so confining removal to the edges leaves
+/// most copies behind.
+///
+/// Docs with fewer than four pages carry too little evidence to judge a line
+/// furniture, so they pass through unchanged.
+pub(crate) fn strip_repeated_edge_furniture(pages: &mut [String]) {
+    let as_lines: Vec<Vec<String>> = pages
+        .iter()
+        .map(|page| page.lines().map(str::to_string).collect())
+        .collect();
+    let furniture = furniture_from_page_lines(&as_lines);
+    if furniture.is_empty() {
+        return;
+    }
+
+    for page in pages.iter_mut() {
+        let lines: Vec<&str> = page.lines().collect();
+        let mut kept = String::with_capacity(page.len());
+        let mut last_pushed_was_line = false;
+        for line in lines.iter() {
+            let trimmed = line.trim();
+            // Candidacy required the line to sit in a page's edge zone on many
+            // pages; removal is global, because once that bar is met the exact
+            // string is page furniture wherever it appears — column-aware
+            // reading order frequently parks a footer mid-page.
+            // A wrapped variant of a furniture line (the note breaks at a
+            // different word on some pages) is a strict substring of the
+            // registered string, so substring matching catches it; a distinct
+            // body sentence never is.
+            let is_furniture = !trimmed.is_empty()
+                && trimmed.chars().count() >= FURNITURE_MIN_LINE_CHARS
+                && furniture.iter().any(|line| line.contains(trimmed));
+            if is_furniture {
+                continue;
+            }
+            if last_pushed_was_line {
+                kept.push('\n');
+            }
+            kept.push_str(line);
+            last_pushed_was_line = true;
+        }
+        *page = kept;
+    }
 }
 
 /// Collect Widget annotation field values for the given page, sorted top-to-bottom.
@@ -1851,6 +2027,116 @@ mod tests {
     use super::*;
     use xberg_native_pdf::geometry::Rect;
     use xberg_native_pdf::layout::TextSpan;
+
+    /// A footer note repeated in the edge zone of most pages is furniture: it
+    /// disappears from every page, while body lines survive untouched.
+    #[test]
+    fn repeated_edge_footer_is_stripped_from_every_page() {
+        let footer = "December 2017 Note - Viewing PDF files within a web browser causes some links not to function.";
+        let mut pages: Vec<String> = (0..8)
+            .map(|page| {
+                // A realistic page: enough non-empty lines that the top/bottom
+                // furniture zones don't cover the whole page.
+                let body: Vec<String> = (0..8).map(|line| format!("body {page}.{line}")).collect();
+                format!("{}\n\n{footer}\n", body.join("\n"))
+            })
+            .collect();
+        strip_repeated_edge_furniture(&mut pages);
+
+        for (page, text) in pages.iter().enumerate() {
+            assert!(!text.contains(footer), "page {page} still carries the footer: {text:?}");
+            assert!(
+                text.contains(&format!("body {page}.0")),
+                "page {page} lost body text: {text:?}"
+            );
+        }
+    }
+
+    /// The same line repeated mid-page (not in the edge zone) is body content:
+    /// the pass must not touch it even when it appears on every page.
+    #[test]
+    fn a_repeated_line_outside_the_edge_zones_is_kept() {
+        let body = "This recurring sentence is part of the document body text, not furniture.";
+        let mut pages: Vec<String> = (0..8)
+            .map(|page| format!("heading {page}\nintro {page}\n{body}\nclosing {page}\n"))
+            .collect();
+        strip_repeated_edge_furniture(&mut pages);
+
+        for (page, text) in pages.iter().enumerate() {
+            assert!(text.contains(body), "page {page} lost repeated body text: {text:?}");
+        }
+    }
+
+    /// Short repeated edge lines (page numbers, dates) are content-adjacent and
+    /// stay, and docs with too few pages to judge pass through unchanged.
+    #[test]
+    fn short_edge_lines_and_small_documents_are_left_alone() {
+        let mut numbered: Vec<String> = (0..8)
+            .map(|page| format!("page body {page}\n\n{page}\n"))
+            .collect();
+        strip_repeated_edge_furniture(&mut numbered);
+        assert!(
+            numbered.iter().enumerate().all(|(page, text)| text.contains(&page.to_string())),
+            "page numbers must survive: {numbered:?}"
+        );
+
+        let mut tiny: Vec<String> = (0..3)
+            .map(|page| {
+                format!(
+                    "A repeated long footer line that would be furniture on a longer document.\nbody {page}\n"
+                )
+            })
+            .collect();
+        let before = tiny.clone();
+        strip_repeated_edge_furniture(&mut tiny);
+        assert_eq!(tiny, before, "a three-page document must pass through unchanged");
+    }
+
+    /// A chapter running header sits on a dense consecutive run of pages that
+    /// can stay far below the whole-document page share: twelve consecutive
+    /// pages of a sixty-page document is 20%, below the 25% share bar, but the
+    /// run itself is decisive. The same header scattered on fewer consecutive
+    /// pages than the run minimum stays.
+    #[test]
+    fn a_consecutive_header_run_is_furniture_even_below_the_page_share() {
+        let chapter_header = "Create Tessent Simulation Models Using LibComp";
+        let scattered = "A header line that reappears here and there across the manual";
+        let mut pages: Vec<String> = (0..60)
+            .map(|page| {
+                let mut edge = String::new();
+                if (12..24).contains(&page) {
+                    edge.push_str(chapter_header);
+                    edge.push('\n');
+                }
+                if page % 7 == 0 {
+                    edge.push_str(scattered);
+                    edge.push('\n');
+                }
+                let body: Vec<String> = (0..8).map(|line| format!("body {page}.{line}")).collect();
+                format!("{edge}{}\n", body.join("\n"))
+            })
+            .collect();
+        strip_repeated_edge_furniture(&mut pages);
+
+        for (page, text) in pages.iter().enumerate() {
+            if (12..24).contains(&page) {
+                assert!(
+                    !text.contains(chapter_header),
+                    "page {page} kept the consecutive chapter header: {text:?}"
+                );
+            } else {
+                assert!(
+                    !text.contains(chapter_header) || page < 12,
+                    "header leaked outside its chapter: page {page}"
+                );
+            }
+        }
+        // The scattered header never reaches eight consecutive pages: kept.
+        assert!(
+            pages.iter().any(|text| text.contains(scattered)),
+            "a header without a consecutive run must survive"
+        );
+    }
 
     fn span(text: &str, x: f32, y: f32, height: f32, font_size: f32) -> TextSpan {
         span_with_width(text, x, y, font_size * 0.6, height, font_size)

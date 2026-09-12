@@ -412,10 +412,75 @@ impl PptxExtractor {
         if extract_images {
             doc.images = pptx_result.images;
             promote_baked_image_references(&mut doc);
+            strip_repeated_decoration_images(&mut doc);
         }
 
         Ok(doc)
     }
+}
+
+/// Drop watermark/logo images that repeat across many slides.
+///
+/// Corporate decks stamp the same logo onto a large share of slides; each copy
+/// becomes its own image element and its own (often OCR-empty) fence in the
+/// output, burying the slide content under repeated decoration. An image whose
+/// exact bytes appear on at least a quarter of the slides — and on at least
+/// three — is decoration and its element is removed; unique diagrams and
+/// screenshots never meet that bar. Only the referencing elements are dropped:
+/// the image data itself stays in `doc.images`, so downstream consumers that
+/// read the image list directly are unaffected.
+fn strip_repeated_decoration_images(doc: &mut InternalDocument) {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let slide_count = doc.elements.iter().filter_map(|element| element.page).max().unwrap_or(0);
+    if slide_count < 3 {
+        return;
+    }
+    let minimum_slides = (((slide_count as f64) * 0.25).ceil() as u32).max(3);
+
+    // Slides referencing each image index.
+    let mut slides_per_image: ahash::AHashMap<u32, std::collections::BTreeSet<u32>> = ahash::AHashMap::new();
+    for element in doc.elements.iter() {
+        if let crate::types::internal::ElementKind::Image { image_index } = element.kind
+            && let Some(page) = element.page
+        {
+            slides_per_image.entry(image_index).or_default().insert(page);
+        }
+    }
+
+    // Slides covered per content hash (several indexes can share one logo's bytes).
+    let mut slides_per_hash: ahash::AHashMap<u64, std::collections::BTreeSet<u32>> = ahash::AHashMap::new();
+    for (image_index, image) in doc.images.iter().enumerate() {
+        let Some(referencing) = slides_per_image.get(&(image_index as u32)) else {
+            continue;
+        };
+        let mut hasher = DefaultHasher::new();
+        image.data.hash(&mut hasher);
+        let hash = hasher.finish();
+        slides_per_hash.entry(hash).or_default().extend(referencing.iter().copied());
+    }
+    let decoration_hashes: std::collections::HashSet<u64> = slides_per_hash
+        .into_iter()
+        .filter(|(_, slides)| slides.len() as u32 >= minimum_slides)
+        .map(|(hash, _)| hash)
+        .collect();
+    if decoration_hashes.is_empty() {
+        return;
+    }
+
+    let is_decoration = |image_index: u32| -> bool {
+        doc.images
+            .get(image_index as usize)
+            .is_some_and(|image| {
+                let mut hasher = DefaultHasher::new();
+                image.data.hash(&mut hasher);
+                decoration_hashes.contains(&hasher.finish())
+            })
+    };
+    doc.elements.retain(|element| {
+        !matches!(element.kind, crate::types::internal::ElementKind::Image { image_index } if is_decoration(image_index))
+    });
 }
 
 /// Turn the `![alt](target)` placeholders the PPTX content builder bakes into slide text into
@@ -1667,6 +1732,74 @@ mod tests {
         assert!(
             err_msg.contains(&default_limit.to_string()),
             "error should mention the default limit ({default_limit}), got: {err_msg}"
+        );
+    }
+
+    /// A logo stamped byte-identical onto a quarter of the slides is
+    /// decoration: every element referencing it is removed, while a unique
+    /// diagram and a logo that only repeats on too few slides survive.
+    #[test]
+    fn repeated_watermark_logos_are_dropped_across_slides() {
+        use crate::types::ExtractedImage;
+        use crate::types::internal::{ElementKind, InternalElement};
+        use std::borrow::Cow;
+
+        let logo = bytes::Bytes::from_static(b"LOGO-BYTES");
+        let diagram = bytes::Bytes::from_static(b"DIAGRAM-BYTES");
+        let rare = bytes::Bytes::from_static(b"RARE-LOGO-BYTES");
+        let mut doc = InternalDocument::new("pptx");
+        for slide in 1u32..=4u32 {
+            let logo_index = doc.images.len() as u32;
+            doc.images.push(ExtractedImage {
+                data: logo.clone(),
+                format: Cow::Borrowed("png"),
+                image_index: logo_index,
+                ..Default::default()
+            });
+            doc.push_element(
+                InternalElement::text(
+                    ElementKind::Image { image_index: logo_index },
+                    "BD21298_",
+                    0,
+                )
+                .with_page(slide),
+            );
+        }
+        let diagram_index = doc.images.len() as u32;
+        doc.images.push(ExtractedImage {
+            data: diagram,
+            format: Cow::Borrowed("png"),
+            image_index: diagram_index,
+            ..Default::default()
+        });
+        doc.push_element(
+            InternalElement::text(ElementKind::Image { image_index: diagram_index }, "chart", 0).with_page(2),
+        );
+        let rare_index = doc.images.len() as u32;
+        for slide in 1u32..=2u32 {
+            doc.images.push(ExtractedImage {
+                data: rare.clone(),
+                format: Cow::Borrowed("png"),
+                image_index: rare_index,
+                ..Default::default()
+            });
+            doc.push_element(
+                InternalElement::text(ElementKind::Image { image_index: rare_index }, "rare", 0)
+                    .with_page(slide),
+            );
+        }
+
+        strip_repeated_decoration_images(&mut doc);
+
+        let kinds: Vec<ElementKind> = doc.elements.iter().map(|element| element.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ElementKind::Image { image_index: 4 },
+                ElementKind::Image { image_index: 5 },
+                ElementKind::Image { image_index: 5 },
+            ],
+            "the unique diagram and the rarely repeated logo must survive; got: {kinds:?}"
         );
     }
 

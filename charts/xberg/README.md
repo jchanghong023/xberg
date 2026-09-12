@@ -2,7 +2,7 @@
 
 Deploy the [Xberg](https://github.com/xberg-io/xberg) document-intelligence server
 (HTTP API + MCP) on Kubernetes. Extract text, tables, metadata, and structured data
-from PDFs, Office documents, images, and 109 formats, with optional OCR.
+from PDFs, Office documents, images, and 110 formats, with optional OCR.
 
 The chart is published as an OCI artifact to GHCR.
 

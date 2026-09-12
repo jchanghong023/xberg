@@ -1828,6 +1828,9 @@ async fn test_nfc_normalization_decomposes_to_composed() {
 async fn test_nfc_normalization_idempotent_on_ascii() {
     let doc = make_doc("Hello, world! 123", "text/plain");
     let config = ExtractionConfig {
+        // The subject is NFC normalization, not Markdown rendering; keep the
+        // content comparison in plain text.
+        output_format: OutputFormat::Plain,
         postprocessor: Some(crate::core::config::PostProcessorConfig {
             enabled: false,
             ..Default::default()
@@ -1847,6 +1850,9 @@ async fn test_nfc_normalization_applies_to_page_content() {
     doc.mime_type = "text/plain".to_string();
     doc.push_element(InternalElement::text(ElementKind::Paragraph, "re\u{0301}sume\u{0301}", 0).with_page(1));
     let config = ExtractionConfig {
+        // Plain rendering keeps the page-content comparison exact; Markdown is the
+        // library default and would append a trailing newline.
+        output_format: OutputFormat::Plain,
         postprocessor: Some(crate::core::config::PostProcessorConfig {
             enabled: false,
             ..Default::default()
@@ -2514,7 +2520,10 @@ mod document_counts {
         );
         super::rewrite_content_image_extensions(
             &mut content,
-            &[("emf".to_string(), "png".to_string())],
+            &[
+                (0, "emf".to_string(), "png".to_string()),
+                (12, "emf".to_string(), "png".to_string()),
+            ],
         );
         assert!(
             content.contains("![](image_0.png)"),
@@ -2530,5 +2539,44 @@ mod document_counts {
         );
         assert!(!content.contains(".emf"), "no emf refs left; got: {content}");
         assert!(content.contains("Atpg 后仿真历险记"), "Chinese text preserved");
+    }
+
+    /// Only the reference of an image that actually changed format may be rewritten.
+    /// A sibling image of the same old format whose re-encode failed keeps the old
+    /// extension on disk, so a pattern-global rewrite would point its URL at a file
+    /// that does not exist.
+    #[test]
+    fn rewrite_content_image_extensions_leaves_failed_siblings_alone() {
+        let mut content = String::from(
+            "```text\n![](image_0.emf)\n```\n中间文字\n\n```text\n![](image_7.emf)\n```\n",
+        );
+        // Image 0 re-encoded to PNG; image 7 failed and stays `.emf` on disk.
+        super::rewrite_content_image_extensions(
+            &mut content,
+            &[(0, "emf".to_string(), "png".to_string())],
+        );
+        assert!(
+            content.contains("![](image_0.png)"),
+            "the renamed image's URL must follow the new file; got: {content}"
+        );
+        assert!(
+            content.contains("![](image_7.emf)"),
+            "the failed image still exists as .emf, so its URL must stay; got: {content}"
+        );
+    }
+
+    /// An index that was never renamed keeps its extension even when the old format
+    /// matches — the digits are the lookup key, not the suffix.
+    #[test]
+    fn rewrite_content_image_extensions_requires_the_recorded_index() {
+        let mut content = String::from("正文 image_5.emf 结尾\n```text\n![](image_9.emf)\n```\n");
+        super::rewrite_content_image_extensions(
+            &mut content,
+            &[(3, "emf".to_string(), "png".to_string())],
+        );
+        assert!(
+            content.contains("image_5.emf") && content.contains("image_9.emf"),
+            "unrenamed indices must keep their extension; got: {content}"
+        );
     }
 }

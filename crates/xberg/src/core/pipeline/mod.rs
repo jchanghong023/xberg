@@ -441,24 +441,30 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
     let mut result =
         crate::extraction::derive::derive_extraction_result(doc, include_structure, config.output_format.clone());
     result.internal_document = doc_for_elements;
-    captioning_carry_over.apply(&mut result);
 
     // #286: record the text the preserved element tree stands for, so the divergence check
     // below can tell whether post-processing has since made the tree a stale second copy of
     // the document text. See `discard_diverged_internal_document`.
     let internal_document_source_content = result.internal_document.is_some().then(|| result.content.clone());
 
-    #[cfg(feature = "html")]
-    if let Some(html) = styled_html_prerender {
-        result.formatted_content = Some(html);
-    }
-
     // #331: same idea for the rendered output format, which `apply_output_format` swaps into
-    // `content` at the very end. See `discard_diverged_formatted_content`.
+    // `content` at the very end. See `discard_diverged_formatted_content`. Snapshotted before
+    // the captioning carry-over applies: the carry-over is itself a content rewrite by a
+    // processor, so the rendering made from the pre-rewrite text is stale the moment the
+    // rewrite lands and must be discarded like any other post-processing divergence — under
+    // the Markdown default it would otherwise overwrite the authored content at the final
+    // swap.
     let formatted_content_source = result
         .formatted_content
         .as_ref()
         .map(|formatted| (result.content.clone(), formatted.clone()));
+
+    captioning_carry_over.apply(&mut result);
+
+    #[cfg(feature = "html")]
+    if let Some(html) = styled_html_prerender {
+        result.formatted_content = Some(html);
+    }
 
     #[cfg(feature = "image-encode")]
     if let Some(ref image_cfg) = config.images {
@@ -862,9 +868,11 @@ fn apply_output_format_pass_with_security_limits(
     // Track format renames so pre-rendered Markdown image URLs (already baked into
     // `content` with the source extension, e.g. `image_0.emf`) can be rewritten after
     // EMF/WMF → PNG re-encode. Without this, files on disk are PNG while the Markdown
-    // still points at `.emf`.
-    let mut format_renames: Vec<(String, String)> = Vec::new();
-    for image in result.images.iter_mut().flatten() {
+    // still points at `.emf`. Each entry carries the image's position in `result.images`
+    // — the same number the renderers bake into `image_N.ext` — so a sibling image whose
+    // re-encode failed (still on disk under the old extension) keeps its reference.
+    let mut format_renames: Vec<(u32, String, String)> = Vec::new();
+    for (position, image) in result.images.iter_mut().flatten().enumerate() {
         let previous_format = image.format.to_string();
         match re_encode(
             image,
@@ -877,7 +885,7 @@ fn apply_output_format_pass_with_security_limits(
             Ok(true) => {
                 let next_format = image.format.to_string();
                 if !previous_format.eq_ignore_ascii_case(&next_format) {
-                    format_renames.push((previous_format, next_format));
+                    format_renames.push((position as u32, previous_format, next_format));
                 }
             }
             Ok(false) => {}
@@ -907,40 +915,54 @@ fn apply_output_format_pass_with_security_limits(
 
 /// Replace `image_N.oldext` URLs in pre-rendered content after a re-encode rename.
 ///
+/// `format_renames` entries are `(image position, old format, new format)`; only the
+/// reference of an image that actually changed format is rewritten. A sibling image
+/// whose re-encode failed keeps its old extension on disk, so its reference must keep
+/// it too.
+///
 /// Walks on UTF-8 char boundaries via `find`; never indexes the string by raw byte
 /// offset (Chinese content makes unaligned slices panic).
-fn rewrite_content_image_extensions(content: &mut String, format_renames: &[(String, String)]) {
+fn rewrite_content_image_extensions(content: &mut String, format_renames: &[(u32, String, String)]) {
     if format_renames.is_empty() || content.is_empty() {
         return;
     }
-    for (old_format, new_format) in format_renames {
-        let old_suffix = format!(".{}", old_format);
-        let new_suffix = format!(".{}", new_format);
-        if old_suffix == new_suffix {
-            continue;
-        }
-        let mut result = String::with_capacity(content.len());
-        let mut rest = content.as_str();
-        while let Some(pos) = rest.find("image_") {
-            result.push_str(&rest[..pos]);
-            let after_prefix = &rest[pos + "image_".len()..];
-            let digit_len = after_prefix.bytes().take_while(u8::is_ascii_digit).count();
-            let after_digits = &after_prefix[digit_len..];
-            if digit_len > 0 && after_digits.starts_with(&old_suffix) {
+    let mut result = String::with_capacity(content.len());
+    let mut rest = content.as_str();
+    while let Some(pos) = rest.find("image_") {
+        result.push_str(&rest[..pos]);
+        let after_prefix = &rest[pos + "image_".len()..];
+        let digit_len = after_prefix.bytes().take_while(u8::is_ascii_digit).count();
+        let after_digits = &after_prefix[digit_len..];
+        // The renderers bake `image_<position>.<format>` from the image's position in
+        // `doc.images`, so the digits are the lookup key the rename was recorded under.
+        let replacement = if digit_len > 0 {
+            let index = after_prefix[..digit_len].parse::<u32>().ok();
+            index.and_then(|index| {
+                format_renames.iter().find(|(renamed, old_format, _)| {
+                    *renamed == index && after_digits.starts_with(&format!(".{old_format}"))
+                })
+            })
+        } else {
+            None
+        };
+        match replacement {
+            Some((_, old_format, new_format)) => {
                 result.push_str("image_");
                 result.push_str(&after_prefix[..digit_len]);
-                result.push_str(&new_suffix);
-                rest = &after_digits[old_suffix.len()..];
-            } else {
+                result.push('.');
+                result.push_str(new_format);
+                rest = &after_digits[old_format.len() + 1..];
+            }
+            None => {
                 // Keep the literal `image_` + digits; continue after the prefix we already consumed.
                 result.push_str("image_");
                 result.push_str(&after_prefix[..digit_len]);
                 rest = after_digits;
             }
         }
-        result.push_str(rest);
-        *content = result;
     }
+    result.push_str(rest);
+    *content = result;
 }
 
 /// Populate `ExtractedImage::data_base64` when the caller opts in via

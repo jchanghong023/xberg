@@ -617,17 +617,25 @@ fn process_sparse_sheet_from_cells(
 
     for &row in rows.iter().skip(1).take(display_rows - 1) {
         let mut row_cells_vec = Vec::with_capacity(display_cols);
-        markdown.push_str("| ");
-        for (i, &col) in cols.iter().take(display_cols).enumerate() {
-            if i > 0 {
-                markdown.push_str(" | ");
-            }
+        for &col in cols.iter().take(display_cols) {
             let cell_str = cell_map
                 .get(&(row, col))
                 .map(|d| format_cell_to_string(d))
                 .unwrap_or_default();
-            escape_markdown_into(&mut markdown, &cell_str);
             row_cells_vec.push(cell_str);
+        }
+        // Same used-range-filler rule as the dense path: a row whose rendered
+        // columns are all empty (its one cell sits beyond the display cap) is
+        // dropped instead of emitting an empty Markdown row.
+        if row_cells_vec.iter().all(|cell| cell.trim().is_empty()) {
+            continue;
+        }
+        markdown.push_str("| ");
+        for (i, cell_str) in row_cells_vec.iter().enumerate() {
+            if i > 0 {
+                markdown.push_str(" | ");
+            }
+            escape_markdown_into(&mut markdown, cell_str);
         }
         markdown.push_str(" |\n");
         table_cells.push(row_cells_vec);
@@ -860,19 +868,22 @@ fn generate_markdown_and_cells(
 
     for row in rows.iter().skip(1) {
         let mut row_cells = Vec::with_capacity(header_len);
-        markdown.push_str("| ");
         for i in 0..header_len {
+            let cell_str = row.get(i).map(format_cell_to_string).unwrap_or_default();
+            row_cells.push(cell_str);
+        }
+        // A row that is empty in every rendered column is used-range filler, not
+        // content: in a Markdown table it can only come out as `|  |  |` noise, so
+        // it is dropped rather than padding the sheet with blank rows. ~keep
+        if row_cells.iter().all(|cell| cell.trim().is_empty()) {
+            continue;
+        }
+        markdown.push_str("| ");
+        for (i, cell_str) in row_cells.iter().enumerate() {
             if i > 0 {
                 markdown.push_str(" | ");
             }
-            let cell_str = if let Some(cell) = row.get(i) {
-                let cell_str = format_cell_to_string(cell);
-                escape_markdown_into(&mut markdown, &cell_str);
-                cell_str
-            } else {
-                String::new()
-            };
-            row_cells.push(cell_str);
+            escape_markdown_into(&mut markdown, cell_str);
         }
         markdown.push_str(" |\n");
         cells.push(row_cells);
@@ -1788,7 +1799,9 @@ mod tests {
 
         assert!(markdown.contains("X"));
         assert!(markdown.contains("Z"));
-        assert_eq!(cells.len(), 3);
+        // Row 2 of the range carries no cells at all, so it is dropped as
+        // used-range filler instead of padding the grid to 3 rows.
+        assert_eq!(cells.len(), 2);
     }
 
     #[test]
@@ -1839,6 +1852,38 @@ mod tests {
         assert!(lines[2].starts_with("| "));
         assert!(lines[3].contains("---"));
         assert!(lines[4].starts_with("| "));
+    }
+
+    /// A source row that is empty in every rendered column is used-range filler:
+    /// it must be dropped from both the Markdown and `table_cells` rather than
+    /// padding the sheet with `|  |  |` noise rows.
+    #[test]
+    fn test_empty_used_range_rows_are_dropped() {
+        let mut range: Range<Data> = Range::new((0, 0), (4, 1));
+        range.set_value((0, 0), Data::String("H1".to_owned()));
+        range.set_value((0, 1), Data::String("H2".to_owned()));
+        range.set_value((1, 0), Data::String("A".to_owned()));
+        range.set_value((1, 1), Data::String("B".to_owned()));
+        // Row 2 entirely empty; row 3 carries data; row 4 whitespace-only.
+        range.set_value((3, 0), Data::String("C".to_owned()));
+        range.set_value((3, 1), Data::String("D".to_owned()));
+        range.set_value((4, 0), Data::String("   ".to_owned()));
+
+        let mut warnings = Vec::new();
+        let (markdown, cells) = generate_markdown_and_cells("Test", &range, 100, &mut warnings);
+
+        assert!(
+            !markdown.lines().any(|line| line.trim() == "|  |  |"),
+            "no all-empty row may be emitted; got: {markdown}"
+        );
+        assert!(markdown.contains("| A | B |"), "data row must survive: {markdown}");
+        assert!(markdown.contains("| C | D |"), "data row must survive: {markdown}");
+        assert_eq!(
+            cells.iter().filter(|row| row.iter().all(|cell| cell.trim().is_empty())).count(),
+            0,
+            "cells grid must not carry empty rows: {cells:?}"
+        );
+        assert_eq!(cells.len(), 3, "header plus two data rows: {cells:?}");
     }
 
     #[test]

@@ -413,6 +413,54 @@ fn structured_native_token_coverage(document: &InternalDocument, native_text: &s
     Some(matched as f64 / native_token_count as f64)
 }
 
+/// Drop running header/footer paragraphs from a structured native document.
+///
+/// The structured document is built straight from the PDF's spans, so the
+/// cross-page furniture pass that cleans the flat page text never touches it:
+/// a manual whose footer note repeats on hundreds of pages kept one footer
+/// paragraph per page in the rendered Markdown even after the flat path was
+/// cleaned. Paragraphs are grouped by their page attribute, the same edge-zone
+/// thresholds decide which strings are furniture, and only plain paragraphs are
+/// removed — headings and lists stay even if their text collides.
+fn strip_furniture_from_structured_document(document: &mut InternalDocument) {
+    use crate::types::internal::{ElementKind, InternalElement};
+
+    // Group paragraph texts by page, preserving first-seen order.
+    let mut page_order: Vec<u32> = Vec::new();
+    let mut pages: ahash::AHashMap<u32, Vec<String>> = ahash::AHashMap::new();
+    for element in document.elements.iter() {
+        if !matches!(element.kind, ElementKind::Paragraph) {
+            continue;
+        }
+        let page = element.page.unwrap_or(0);
+        if !pages.contains_key(&page) {
+            page_order.push(page);
+        }
+        pages.entry(page).or_default().push(element.text.clone());
+    }
+    let page_line_lists: Vec<Vec<String>> = page_order
+        .iter()
+        .filter_map(|page| pages.get(page).cloned())
+        .collect();
+    let furniture = crate::pdf::native::text::furniture_from_page_lines(&page_line_lists);
+    if furniture.is_empty() {
+        return;
+    }
+
+    document.elements.retain(|element: &InternalElement| {
+        if !matches!(element.kind, ElementKind::Paragraph) {
+            return true;
+        }
+        let trimmed = element.text.trim();
+        if trimmed.chars().count() < crate::pdf::native::text::FURNITURE_MIN_LINE_CHARS {
+            return true;
+        }
+        // Substring matching absorbs wrapped variants of the same footer, the
+        // same way the flat-text pass does.
+        !furniture.iter().any(|line| line.contains(trimmed))
+    });
+}
+
 fn select_native_pdf_document(
     text: &str,
     mime_type: &str,
@@ -426,6 +474,7 @@ fn select_native_pdf_document(
 
     let coverage = structured_native_token_coverage(&document, text);
     if coverage.is_none_or(|coverage| coverage >= MIN_STRUCTURED_NATIVE_TOKEN_COVERAGE) {
+        strip_furniture_from_structured_document(&mut document);
         return (document, true);
     }
 

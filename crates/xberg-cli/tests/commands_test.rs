@@ -479,8 +479,10 @@ fn batch_json_should_preserve_successes_and_report_every_extraction_error() {
         stderr.contains("input 1"),
         "stderr must attribute the first failed input index"
     );
+    // `write_batch_errors` renders the source with `{:?}`, so on Windows the path's
+    // backslashes come out escaped; match that rendering.
     assert!(
-        stderr.contains(invalid_one.to_str().unwrap()),
+        stderr.contains(&format!("{:?}", invalid_one.to_str().unwrap())),
         "stderr must attribute the first failed source"
     );
     assert!(
@@ -488,7 +490,7 @@ fn batch_json_should_preserve_successes_and_report_every_extraction_error() {
         "stderr must attribute the second failed input index"
     );
     assert!(
-        stderr.contains(invalid_two.to_str().unwrap()),
+        stderr.contains(&format!("{:?}", invalid_two.to_str().unwrap())),
         "stderr must attribute the second failed source"
     );
 }
@@ -529,8 +531,10 @@ fn batch_text_should_preserve_successes_and_report_every_extraction_error() {
         stderr.contains("input 1"),
         "stderr must attribute the first failed input index"
     );
+    // `write_batch_errors` renders the source with `{:?}`, so on Windows the path's
+    // backslashes come out escaped; match that rendering.
     assert!(
-        stderr.contains(invalid_one.to_str().unwrap()),
+        stderr.contains(&format!("{:?}", invalid_one.to_str().unwrap())),
         "stderr must attribute the first failed source"
     );
     assert!(
@@ -538,7 +542,7 @@ fn batch_text_should_preserve_successes_and_report_every_extraction_error() {
         "stderr must attribute the second failed input index"
     );
     assert!(
-        stderr.contains(invalid_two.to_str().unwrap()),
+        stderr.contains(&format!("{:?}", invalid_two.to_str().unwrap())),
         "stderr must attribute the second failed source"
     );
 }
@@ -578,8 +582,10 @@ fn batch_toon_should_preserve_successes_and_report_every_extraction_error() {
             "partial batch TOON must contain {expected:?}; got {stdout:?}"
         );
     }
+    // TOON serializes the source as a JSON string, so on Windows the path's
+    // backslashes come out escaped; match that rendering.
     assert!(
-        stdout.contains(invalid.to_str().unwrap()),
+        stdout.contains(&serde_json::to_string(invalid.to_str().unwrap()).unwrap()),
         "TOON error must retain source attribution"
     );
 }

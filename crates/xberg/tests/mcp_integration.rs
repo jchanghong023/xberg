@@ -120,8 +120,8 @@ fn test_config_merge_in_mcp_context() {
     assert_eq!(default_config.force_ocr, false, "Default force_ocr should be false");
     assert_eq!(
         default_config.output_format,
-        xberg::core::config::OutputFormat::Plain,
-        "Default output format should be Plain"
+        xberg::core::config::OutputFormat::Markdown,
+        "Default output format is Markdown"
     );
 
     let request_config_json = json!({
@@ -138,8 +138,8 @@ fn test_config_merge_in_mcp_context() {
     );
     assert_eq!(
         request_config.output_format,
-        xberg::core::config::OutputFormat::Plain,
-        "Unspecified output_format should default to Plain"
+        xberg::core::config::OutputFormat::Markdown,
+        "Unspecified output_format should default to Markdown"
     );
 
     let multi_override_json = json!({
@@ -444,7 +444,7 @@ fn test_mcp_minimal_config() {
     };
 
     assert_eq!(config.use_cache, true);
-    assert_eq!(config.output_format, xberg::core::config::OutputFormat::Plain);
+    assert_eq!(config.output_format, xberg::core::config::OutputFormat::Markdown);
 }
 
 /// Test MCP config with all output formats

@@ -750,7 +750,7 @@ async fn url_markdown_page_runs_through_pipeline_and_preserves_source_mime() {
     .unwrap();
 
     assert_eq!(result.mime_type, "text/html");
-    assert_eq!(result.metadata.output_format.as_deref(), Some("plain"));
+    assert_eq!(result.metadata.output_format.as_deref(), Some("markdown"));
     assert_eq!(result.uris.as_ref().map(Vec::len), Some(1));
 }
 

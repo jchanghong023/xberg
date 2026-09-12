@@ -868,7 +868,15 @@ pub(crate) fn build_comrak_ast<'a>(
                     }
                 };
 
-                if image_block_style == ImageBlockStyle::Node {
+                // A `Raw` node is written verbatim: inside a list item or block quote the
+                // fence's lines come out flush-left, which ends the container and breaks
+                // the list/quote structure around the image. Those contexts keep a real
+                // image node — comrak formats it correctly there — exactly like the
+                // non-Markdown writers below.
+                let in_block_container = container_stack
+                    .iter()
+                    .any(|entry| matches!(entry.kind, ContainerKind::List | ContainerKind::BlockQuote));
+                if image_block_style == ImageBlockStyle::Node || in_block_container {
                     // HTML and the other comrak writers keep the image as an image: a `Raw`
                     // fence is Markdown and would be written verbatim into their output.
                     let has_ocr = render_image_ocr
@@ -1622,6 +1630,68 @@ mod tests {
         let out = render(&doc);
         assert!(out.contains("```text"), "got: {out:?}");
         assert!(out.contains("![](image_0.png)"), "got: {out:?}");
+    }
+
+    /// An image inside a list item must stay a real image node: a `Raw` fence is written
+    /// verbatim without the item's indentation, which would end the list and break the
+    /// structure around the picture.
+    #[test]
+    fn test_image_inside_a_list_stays_an_image_node() {
+        let mut b = InternalDocumentBuilder::new("test");
+        b.push_list(false);
+        b.push_paragraph("before the picture", vec![], None, None);
+        b.push_element(crate::types::internal::InternalElement::text(
+            ElementKind::Image { image_index: 0 },
+            "",
+            0,
+        ));
+        b.push_paragraph("after the picture", vec![], None, None);
+        b.end_list();
+        let mut doc = b.build();
+        doc.images.push(doc_image());
+
+        let out = render(&doc);
+        assert!(!out.contains("```text"), "a fence must not appear inside a list: {out:?}");
+        assert!(out.contains("![](image_0.png)"), "the image must stay a live reference: {out:?}");
+        assert!(
+            out.contains("before the picture") && out.contains("after the picture"),
+            "the surrounding item text must survive: {out:?}"
+        );
+        assert!(out.matches('-').count() >= 1, "the list marker must survive: {out:?}");
+    }
+
+    /// Same guarantee inside a block quote: verbatim fence lines would carry no `> `
+    /// prefix and silently leave the quote.
+    #[test]
+    fn test_image_inside_a_block_quote_stays_an_image_node() {
+        let mut b = InternalDocumentBuilder::new("test");
+        b.push_quote_start();
+        b.push_paragraph("quoted text", vec![], None, None);
+        b.push_element(crate::types::internal::InternalElement::text(
+            ElementKind::Image { image_index: 0 },
+            "",
+            0,
+        ));
+        b.push_quote_end();
+        let mut doc = b.build();
+        doc.images.push(doc_image());
+
+        let out = render(&doc);
+        assert!(!out.contains("```text"), "a fence must not appear inside a quote: {out:?}");
+        assert!(out.contains("![](image_0.png)"), "got: {out:?}");
+        for line in out.lines().filter(|line| !line.trim().is_empty()) {
+            assert!(line.starts_with("> "), "every line must stay inside the quote: {line:?}");
+        }
+    }
+
+    /// The image payload shared by the container tests above.
+    fn doc_image() -> crate::types::ExtractedImage {
+        crate::types::ExtractedImage {
+            data: bytes::Bytes::from_static(b"\x89PNG"),
+            format: std::borrow::Cow::Borrowed("png"),
+            image_index: 0,
+            ..Default::default()
+        }
     }
 
     #[test]
