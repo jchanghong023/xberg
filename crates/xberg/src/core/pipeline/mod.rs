@@ -834,15 +834,28 @@ fn apply_output_format_pass_with_security_limits(
     let target = config.output_format;
     let default_security_limits = crate::extractors::security::SecurityLimits::default();
     let security_limits = security_limits.unwrap_or(&default_security_limits);
+    // Track format renames so pre-rendered Markdown image URLs (already baked into
+    // `content` with the source extension, e.g. `image_0.emf`) can be rewritten after
+    // EMF/WMF → PNG re-encode. Without this, files on disk are PNG while the Markdown
+    // still points at `.emf`.
+    let mut format_renames: Vec<(String, String)> = Vec::new();
     for image in result.images.iter_mut().flatten() {
+        let previous_format = image.format.to_string();
         match re_encode(
             image,
             target,
             security_limits,
+            config,
             #[cfg(feature = "svg")]
             &config.svg,
         ) {
-            Ok(_) => {}
+            Ok(true) => {
+                let next_format = image.format.to_string();
+                if !previous_format.eq_ignore_ascii_case(&next_format) {
+                    format_renames.push((previous_format, next_format));
+                }
+            }
+            Ok(false) => {}
             Err(warning) => {
                 result.processing_warnings.push(crate::types::ProcessingWarning {
                     source: std::borrow::Cow::Borrowed("image_encoder"),
@@ -850,6 +863,50 @@ fn apply_output_format_pass_with_security_limits(
                 });
             }
         }
+    }
+    rewrite_content_image_extensions(&mut result.content, &format_renames);
+    // `apply_output_format` later swaps `formatted_content` into `content`. Rewrite
+    // that pre-render too, or Markdown still points at `.emf` after EMF→PNG re-encode.
+    if let Some(formatted) = result.formatted_content.as_mut() {
+        rewrite_content_image_extensions(formatted, &format_renames);
+    }
+}
+
+/// Replace `image_N.oldext` URLs in pre-rendered content after a re-encode rename.
+///
+/// Walks on UTF-8 char boundaries via `find`; never indexes the string by raw byte
+/// offset (Chinese content makes unaligned slices panic).
+fn rewrite_content_image_extensions(content: &mut String, format_renames: &[(String, String)]) {
+    if format_renames.is_empty() || content.is_empty() {
+        return;
+    }
+    for (old_format, new_format) in format_renames {
+        let old_suffix = format!(".{}", old_format);
+        let new_suffix = format!(".{}", new_format);
+        if old_suffix == new_suffix {
+            continue;
+        }
+        let mut result = String::with_capacity(content.len());
+        let mut rest = content.as_str();
+        while let Some(pos) = rest.find("image_") {
+            result.push_str(&rest[..pos]);
+            let after_prefix = &rest[pos + "image_".len()..];
+            let digit_len = after_prefix.bytes().take_while(u8::is_ascii_digit).count();
+            let after_digits = &after_prefix[digit_len..];
+            if digit_len > 0 && after_digits.starts_with(&old_suffix) {
+                result.push_str("image_");
+                result.push_str(&after_prefix[..digit_len]);
+                result.push_str(&new_suffix);
+                rest = &after_digits[old_suffix.len()..];
+            } else {
+                // Keep the literal `image_` + digits; continue after the prefix we already consumed.
+                result.push_str("image_");
+                result.push_str(&after_prefix[..digit_len]);
+                rest = after_digits;
+            }
+        }
+        result.push_str(rest);
+        *content = result;
     }
 }
 

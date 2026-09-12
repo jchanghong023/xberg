@@ -110,6 +110,8 @@ pub mod ooxml_embedded;
 #[cfg(feature = "office")]
 pub mod image_format;
 
+pub mod markdown_utils;
+
 #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
 pub mod image_ocr;
 

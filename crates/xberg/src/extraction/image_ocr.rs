@@ -32,7 +32,7 @@ use crate::types::{ExtractedDocument, ExtractedImage};
 /// Why a Windows metafile could not be prepared for OCR, tagged with the pipeline stage so
 /// the resulting warning says whether detection, dimension bounding, or rasterization failed.
 #[derive(Debug)]
-struct ImageOcrPreprocessError {
+pub(crate) struct ImageOcrPreprocessError {
     stage: &'static str,
     reason: String,
 }
@@ -43,6 +43,12 @@ impl ImageOcrPreprocessError {
             stage,
             reason: reason.into(),
         }
+    }
+}
+
+impl std::fmt::Display for ImageOcrPreprocessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.stage, self.reason)
     }
 }
 
@@ -246,6 +252,69 @@ fn prepare_image_for_ocr<'a>(
             ));
         }
         Ok(Cow::Owned(png))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (width, height);
+        Err(ImageOcrPreprocessError::new(
+            "rasterize_decode",
+            "Windows metafile rasterization is unavailable on this platform",
+        ))
+    }
+}
+
+/// Rasterize an EMF/WMF image to a [`image::DynamicImage`] for consumers other than OCR
+/// (e.g. the `images.output_format` re-encode pass). Non-metafile inputs are an error.
+pub(crate) fn rasterize_metafile_to_dynamic_image(
+    image: &ExtractedImage,
+    image_config: &crate::core::config::ImageExtractionConfig,
+    security_limits: &crate::extractors::security::SecurityLimits,
+) -> Result<image::DynamicImage, ImageOcrPreprocessError> {
+    let detected = crate::extraction::image_format::detect_image_format(&image.data);
+    if !matches!(detected.as_ref(), "emf" | "wmf") {
+        return Err(ImageOcrPreprocessError::new(
+            "format_detect",
+            "input is not a Windows metafile",
+        ));
+    }
+
+    let (width, height) = bounded_metafile_dimensions(image, image_config, security_limits)?;
+
+    #[cfg(windows)]
+    {
+        use xberg_windows_metafile::{MetafileKind, rasterize};
+
+        let kind = match detected.as_ref() {
+            "emf" => MetafileKind::Emf,
+            "wmf" if image.data.starts_with(&[0xD7, 0xCD, 0xC6, 0x9A]) => MetafileKind::PlaceableWmf,
+            "wmf" => MetafileKind::StandardWmf,
+            _ => unreachable!("metafile format checked above"),
+        };
+        let raster = rasterize(&image.data, kind, width, height)
+            .map_err(|error| ImageOcrPreprocessError::new("rasterize_decode", error.to_string()))?;
+        let expected = usize::try_from(raster.width)
+            .ok()
+            .and_then(|w| usize::try_from(raster.height).ok().and_then(|h| w.checked_mul(h)))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "RGBA result size overflow"))?;
+        if raster.rgba.len() != expected {
+            return Err(ImageOcrPreprocessError::new(
+                "rasterize_decode",
+                "rasterizer returned an invalid RGBA length",
+            ));
+        }
+        let rgba_bytes = u64::try_from(expected).unwrap_or(u64::MAX);
+        let content_limit = u64::try_from(security_limits.max_content_size).unwrap_or(u64::MAX);
+        if rgba_bytes > content_limit {
+            return Err(ImageOcrPreprocessError::new(
+                "rasterize_decode",
+                "metafile raster exceeds configured content limit",
+            ));
+        }
+        let rgba_img = image::RgbaImage::from_raw(raster.width, raster.height, raster.rgba)
+            .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "RGBA buffer size mismatch"))?;
+        Ok(image::DynamicImage::ImageRgba8(rgba_img))
     }
 
     #[cfg(not(windows))]

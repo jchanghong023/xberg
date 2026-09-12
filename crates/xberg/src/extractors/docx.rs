@@ -58,11 +58,12 @@ const TOC_ENTRY_ATTRIBUTE: &str = "toc_entry";
 /// cannot disagree about what a given image is called.
 fn drawing_alt_text(drawing: &crate::extraction::docx::drawing::Drawing) -> Option<String> {
     let properties = drawing.doc_properties.as_ref()?;
-    properties
+    let raw = properties
         .description
         .clone()
         .filter(|description| !description.is_empty())
-        .or_else(|| properties.name.clone().filter(|name| !name.is_empty()))
+        .or_else(|| properties.name.clone().filter(|name| !name.is_empty()));
+    crate::extraction::markdown_utils::sanitize_image_alt_text(raw)
 }
 
 /// Build an `InternalDocument` from parsed DOCX data.

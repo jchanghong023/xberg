@@ -2372,4 +2372,31 @@ mod document_counts {
         populate_document_counts(&mut result);
         assert_eq!(result.counts.pages, 2);
     }
+
+    /// After EMF→PNG re-encode, pre-rendered Markdown URLs must be rewritten.
+    /// Must not panic on multi-byte (Chinese) content — only touch `image_N.ext`.
+    #[test]
+    fn rewrite_content_image_extensions_updates_urls_without_utf8_panic() {
+        let mut content = String::from(
+            "Atpg 后仿真历险记\n\n```text\n![](image_0.emf)\n```\n见 image_12.emf 与 image_3.png\n",
+        );
+        super::rewrite_content_image_extensions(
+            &mut content,
+            &[("emf".to_string(), "png".to_string())],
+        );
+        assert!(
+            content.contains("![](image_0.png)"),
+            "emf URL must become png; got: {content}"
+        );
+        assert!(
+            content.contains("image_12.png"),
+            "emf URL mid-text must become png; got: {content}"
+        );
+        assert!(
+            content.contains("image_3.png"),
+            "already-png URL must stay; got: {content}"
+        );
+        assert!(!content.contains(".emf"), "no emf refs left; got: {content}");
+        assert!(content.contains("Atpg 后仿真历险记"), "Chinese text preserved");
+    }
 }

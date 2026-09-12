@@ -876,10 +876,14 @@ pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Ar
                 // — `images.ocr_text_only` / `images.append_ocr_text` still govern the other
                 // renderers and the pipeline's substitution into pre-rendered text, but they no
                 // longer strip this block down to nothing. ~keep
-                let marker = if desc.is_empty() {
-                    format!("![]({url})")
-                } else {
-                    format!("![{desc}]({url})")
+                let marker = {
+                    let desc = crate::extraction::markdown_utils::sanitize_image_alt_text(Some(desc.to_string()))
+                        .unwrap_or_default();
+                    if desc.is_empty() {
+                        format!("![]({url})")
+                    } else {
+                        format!("![{desc}]({url})")
+                    }
                 };
                 let body = ocr_text;
 
