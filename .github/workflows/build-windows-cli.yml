@@ -130,15 +130,56 @@ jobs:
         run: |
           set -euo pipefail
           ASSET="xberg-cli-${TARGET}.zip"
-          gh release create "$RELEASE_TAG" \
-            "$ASSET#Xberg Windows CLI (${TARGET})" \
-            --repo "$GITHUB_REPOSITORY" \
-            --target "$GITHUB_SHA" \
-            --title "$RELEASE_TAG" \
-            --latest \
-            --notes "Automated Windows CLI release.
+          NOTES=$(cat <<'EOF'
+          ## 这是什么
+
+          **fork 仓库** [`jchanghong023/xberg`](https://github.com/jchanghong023/xberg) 的 Windows CLI 发布包。
+          基于上游 Xberg **1.1.6**，额外修了文档抽取里 Office 矢量图 / Markdown 预览相关的问题。
+
+          **下载后解压即可用**：`xberg.exe` + ONNX Runtime DLL。把解压目录加入 `PATH`，或直接运行 `xberg.exe`。
+
+          ```powershell
+          xberg.exe extract document.docx --content-format markdown --format text \
+            --extract-images true --output-dir .\imgs \
+            --config-json '{\"images\":{\"output_format\":{\"type\":\"png\"}}}'
+          ```
+
+          ## 相对上游的改动（本 fork）
+
+          | 改动 | 说明 |
+          |------|------|
+          | **EMF/WMF → PNG** | Windows 下用 GDI 把 Office 里的 EMF/WMF 光栅化成 PNG，Markdown 预览器可直接显示 |
+          | **图片 URL 同步** | re-encode 后重写 `content` 与 `formatted_content` 里的 `image_N.emf` → `.png`（含中文内容，UTF-8 安全） |
+          | **alt 路径清洗** | 去掉 `C:\Users\...` 这类文件系统路径型 alt 文本，避免泄露本机路径 |
+          | **Markdown 图文块** | 图片路径与 OCR 文字保持在同一 fenced block（便于检索与阅读） |
+          | **PaddleOCR 默认** | OCR 默认后端改为 PaddleOCR（中文课件/扫描页更友好） |
+
+          对应提交：
+          - `feat(images): rasterize EMF/WMF to PNG and sanitize path-like alt text`
+          - `feat(ocr,markdown): default to PaddleOCR, and keep every image's path and text in one block`
+          - `fix(markdown): keep image OCR text when ocr_text_only is on`
+          - `feat(markdown): keep image OCR text and its path in one position-preserving fence`
+
+          ## 构建信息
 
           **Version:** ${RELEASE_VERSION}
           **Commit:** ${GITHUB_SHA}
           **Release time:** ${RELEASE_TIME}
-          **Workflow run:** https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          **Target:** ${TARGET}
+          **Workflow run:** https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+
+          ## 注意
+
+          - 与上游 [xberg-io/xberg](https://github.com/xberg-io/xberg) 无关的第三方 fork；上游更新请自行 merge。
+          - 首次 OCR / layout 可能下载模型（PaddleOCR / RT-DETR），需外网。
+          - 本包来自自动化流水线，未做人工全量回归；破坏性整理/清理不在本 CLI 默认路径中。
+          EOF
+          )
+
+          gh release create "$RELEASE_TAG" \
+            "$ASSET#Xberg Windows CLI (${TARGET})" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_TAG (fork: EMF→PNG + Markdown 图文)" \
+            --latest \
+            --notes "$NOTES"
