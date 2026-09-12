@@ -788,14 +788,12 @@ impl WhisperEngine {
             generated.push(next_token);
 
             // Split the with-past outputs exactly like step 0 splits the step-0
-            // outputs. `decoder_with_past` also returns the cross-attention
-            // (encoder) caches; folding those into `decoder_kvs` made the next
-            // iteration push the same input name twice -- once from
-            // `decoder_kvs`, once from `encoder_kvs` -- and the session then
-            // bound the wrong cache, which surfaced as a Reshape failure inside
-            // `layers.0.self_attn` once a 30-second chunk generated a long
-            // enough sequence (observed on a 17-minute lecture video, whose
-            // English-hinted transcript of Chinese speech runs long).
+            // outputs, so the loop never pushes the same input name twice (the
+            // cross-attention caches appear under both `decoder_kvs` and
+            // `encoder_kvs` otherwise) and never re-clones the constant encoder
+            // caches on every step. Note this is hygiene, not the fix for the
+            // long-generation abort: the cap below is what prevents that, and
+            // bisecting showed the split alone leaves the Reshape error in place.
             let mut new_decoder_kvs: Vec<(String, Value)> = Vec::new();
             let mut new_encoder_kvs: Vec<(String, Value)> = Vec::new();
             for (name, val) in step_outputs {
