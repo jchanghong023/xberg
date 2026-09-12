@@ -76,8 +76,8 @@ const FORMATS_TABLE_FOOTER: &str = "\n];";
 /// trips it.
 const MIN_ENTRIES_WITH_EXTENSIONS: usize = 80;
 
-const EXPECTED_FORMAT_COUNT: usize = 107;
-const EXPECTED_EXTENSION_COUNT: usize = 141;
+const EXPECTED_FORMAT_COUNT: usize = 109;
+const EXPECTED_EXTENSION_COUNT: usize = 144;
 const EXPECTED_ALIAS_COUNT: usize = 56;
 
 const MIME_ONLY_FORMATS: &[&str] = &[

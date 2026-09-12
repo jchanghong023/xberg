@@ -425,8 +425,14 @@ impl PptxExtractor {
 /// and points at a path inside the package (`../media/image4.png`), so it is neither a live
 /// image reference nor resolvable next to the extracted output. Rendering from an image element
 /// yields the same `![alt](image_N.ext)` form DOCX/PDF already produce, naming the file the
-/// extractor writes. Pairing is positional: the builder bakes one placeholder per slide image in
-/// document order and `doc.images` is collected in that same order.
+/// extractor writes.
+///
+/// Each placeholder carries the package target it was baked from, and every extracted image
+/// records that target as its `source_path`, so the two are matched by identity. A positional
+/// pairing cannot work: the builder emits placeholders in slide geometry order (`y`, then `x`)
+/// while `doc.images` follows slide XML order, and an image whose bytes could not be read is
+/// skipped when the images are collected — either one shifts every later placeholder onto the
+/// wrong picture and alt text.
 ///
 /// One paragraph can hold more than one placeholder — two pictures side by side on a slide are
 /// written into the same paragraph — and the slide's own text can share it. Promoting one
@@ -437,7 +443,7 @@ impl PptxExtractor {
 fn promote_baked_image_references(doc: &mut InternalDocument) {
     use crate::types::internal::ElementKind;
 
-    let mut next_image = 0usize;
+    let mut used = vec![false; doc.images.len()];
     let elements = std::mem::take(&mut doc.elements);
     let mut promoted = Vec::with_capacity(elements.len());
 
@@ -471,26 +477,28 @@ fn promote_baked_image_references(doc: &mut InternalDocument) {
             }
         };
 
-        for (range, alt) in references {
-            if next_image >= doc.images.len() {
-                break;
-            }
+        for (range, alt, target) in references {
+            let Some(image_index) = take_image_for_target(&doc.images, &used, &target) else {
+                // No extracted image for this placeholder (its bytes were unreadable, or it is
+                // the slide's own text that happens to look like a reference): leave it as text.
+                continue;
+            };
             if let Some(paragraph) = leftover(&elem.text, &mut cursor, range.start, &elem) {
                 promoted.push(paragraph);
             }
-            let description = &mut doc.images[next_image].description;
+            let description = &mut doc.images[image_index].description;
             if description.as_deref().map(str::trim).unwrap_or("").is_empty() && !alt.is_empty() {
                 *description = Some(alt);
             }
             let mut image = elem.clone();
             image.kind = ElementKind::Image {
-                image_index: next_image as u32,
+                image_index: image_index as u32,
             };
-            image.text = doc.images[next_image].description.clone().unwrap_or_default();
+            image.text = doc.images[image_index].description.clone().unwrap_or_default();
             image.annotations = Vec::new();
             promoted.push(image);
             cursor = range.end;
-            next_image += 1;
+            used[image_index] = true;
         }
 
         if let Some(paragraph) = leftover(&elem.text, &mut cursor, elem.text.len(), &elem) {
@@ -506,7 +514,7 @@ fn promote_baked_image_references(doc: &mut InternalDocument) {
 /// The pipeline's `is_markdown_image_reference` only answers whether a whole string *is* one
 /// reference, which is all the callers that rewrite pre-rendered text need; this walks the
 /// string, so a paragraph holding several placeholders yields all of them.
-fn markdown_image_references(text: &str) -> Vec<(std::ops::Range<usize>, String)> {
+fn markdown_image_references(text: &str) -> Vec<(std::ops::Range<usize>, String, String)> {
     let mut found = Vec::new();
     let mut from = 0usize;
     while let Some(open) = text[from..].find("![") {
@@ -520,10 +528,44 @@ fn markdown_image_references(text: &str) -> Vec<(std::ops::Range<usize>, String)
         found.push((
             start..target_close + 1,
             text[start + 2..alt_close].trim().to_string(),
+            text[alt_close + 2..target_close].trim().to_string(),
         ));
         from = target_close + 1;
     }
     found
+}
+
+/// Index of the extracted image a placeholder refers to.
+///
+/// The placeholder was baked from the slide's rel target and the image records that same target
+/// as its `source_path`, so the match is by identity: positional pairing cannot survive the two
+/// orders differing (placeholders follow slide geometry, images follow slide XML) or an unreadable
+/// image being skipped.
+///
+/// A placeholder whose baked target is empty — the slide referenced an image whose rel could not
+/// be resolved — carries no identity to match on, so it keeps the previous positional behaviour.
+/// A placeholder that names a target no image claims is the slide's own text (or an image whose
+/// bytes could not be read) and stays text rather than taking a neighbour's picture.
+fn take_image_for_target(
+    images: &[crate::types::ExtractedImage],
+    used: &[bool],
+    target: &str,
+) -> Option<usize> {
+    let unused = |index: usize| !used.get(index).copied().unwrap_or(true);
+
+    images
+        .iter()
+        .enumerate()
+        .find(|(index, image)| {
+            unused(*index) && image.source_path.as_deref().is_some_and(|path| path.trim() == target)
+        })
+        .map(|(index, _)| index)
+        .or_else(|| {
+            if !target.is_empty() {
+                return None;
+            }
+            images.iter().enumerate().find(|(index, _)| unused(*index)).map(|(index, _)| index)
+        })
 }
 
 impl Plugin for PptxExtractor {
@@ -1645,10 +1687,12 @@ mod tests {
         doc.images = vec![
             ExtractedImage {
                 format: Cow::Borrowed("png"),
+                source_path: Some("../media/image1.png".to_string()),
                 ..Default::default()
             },
             ExtractedImage {
                 format: Cow::Borrowed("wmf"),
+                source_path: Some("../media/image2.wmf".to_string()),
                 ..Default::default()
             },
         ];
@@ -1690,6 +1734,7 @@ mod tests {
         ));
         doc.images = vec![ExtractedImage {
             format: Cow::Borrowed("png"),
+            source_path: Some("../media/image7.png".to_string()),
             ..Default::default()
         }];
 

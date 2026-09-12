@@ -72,8 +72,26 @@ pub(crate) fn layout_ocr_text(document: &InternalDocument) -> Option<String> {
 /// Rows are driven by each line's vertical position over the median line height, columns by
 /// its left edge over half the median line height (one display column), so both axes keep the
 /// source picture's proportions. A line that would land on top of another is pushed down one
-/// row rather than overwriting it.
+/// row rather than overwriting it. A `text` holding several lines — hOCR paragraphs carry
+/// their lines joined by `\n` — is laid out line by line; counting the whole block as one row's
+/// width exceeded the column cap and dropped the text entirely.
 pub(crate) fn layout_boxes(mut items: Vec<(f64, f64, f64, String)>) -> Option<String> {
+    items = items
+        .drain(..)
+        .flat_map(|(left, top, height, text)| {
+            // The lines are owned so the returned iterator does not borrow `text`.
+            let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+            let line_count = lines.len().max(1) as f64;
+            let line_height = height / line_count;
+            lines
+                .into_iter()
+                .enumerate()
+                .filter(|(_, line)| !line.trim().is_empty())
+                .map(move |(index, line)| (left, top + index as f64 * line_height, line_height, line))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+
     if items.is_empty() {
         return None;
     }
@@ -100,10 +118,23 @@ pub(crate) fn layout_boxes(mut items: Vec<(f64, f64, f64, String)>) -> Option<St
 
     let mut grid: Vec<Vec<char>> = Vec::new();
     let mut occupied_rows = 0usize;
-    for (row, column, text, width) in placed {
+    for (row, mut column, text, width) in placed {
         if occupied_rows >= MAX_ROWS {
             break;
         }
+        // Keep the line inside the grid: a line that would run past the last column is
+        // truncated there (and one starting past it is re-based to column 0) so its text stays
+        // in the block. Dropping it — the previous behaviour — silently lost OCR text from the
+        // markdown while `content` still carried it.
+        column = column.min(MAX_COLS.saturating_sub(1));
+        let mut clipped = truncate_to_columns(&text, width, MAX_COLS - column);
+        if clipped.0.is_empty() {
+            // A single wide glyph cannot fit into the one column left; start the line over at
+            // the grid's first column rather than losing it.
+            column = 0;
+            clipped = truncate_to_columns(&text, width, MAX_COLS);
+        }
+        let (text, width) = clipped;
         let mut row_index = row;
         loop {
             if row_index >= MAX_ROWS {
@@ -169,6 +200,25 @@ pub(crate) fn layout_boxes(mut items: Vec<(f64, f64, f64, String)>) -> Option<St
     Some(block)
 }
 
+/// Truncate `text` to at most `available` display columns, returning the kept text and its
+/// width. A wide glyph that would straddle the limit is left out rather than split.
+fn truncate_to_columns(text: &str, width: usize, available: usize) -> (String, usize) {
+    if width <= available {
+        return (text.to_string(), width);
+    }
+    let mut kept = String::new();
+    let mut used = 0usize;
+    for character in text.chars() {
+        let span = char_columns(character);
+        if used + span > available {
+            break;
+        }
+        kept.push(character);
+        used += span;
+    }
+    (kept, used)
+}
+
 /// Median of a non-empty sample; `None` when empty.
 fn median(values: impl Iterator<Item = f64>) -> Option<f64> {
     let mut sample: Vec<f64> = values.collect();
@@ -228,5 +278,35 @@ mod tests {
         assert_eq!(char_columns('中'), 2);
         assert_eq!(char_columns('a'), 1);
         assert_eq!(display_width("中abc"), 5);
+    }
+
+    /// A multi-line element (an hOCR paragraph carries its lines joined by `\n`) is placed line
+    /// by line and kept whole: counted as one row, its total width exceeded the column cap and
+    /// every line past it was dropped, so the block silently lost recognized text.
+    #[test]
+    fn keeps_every_line_of_a_multi_line_paragraph() {
+        let lines: Vec<&str> = (0..8).map(|_| "recognized paragraph line with sixty characters xxxxxxxx").collect();
+        let paragraph = lines.join("\n");
+        assert!(display_width(&paragraph) > MAX_COLS, "the paragraph must exceed the column cap");
+
+        let elements = vec![element(&paragraph, 0.0, 0.0, 800.0, 96.0)];
+        let block = layout_boxes(elements).expect("layout");
+
+        for (index, line) in lines.iter().enumerate() {
+            assert!(
+                block.contains(&line[..40]),
+                "line {index} of the paragraph must survive: {block:?}"
+            );
+        }
+        assert_eq!(block.lines().count(), lines.len(), "one row per line: {block:?}");
+    }
+
+    /// A single line wider than the cap is truncated, not dropped.
+    #[test]
+    fn truncates_a_line_wider_than_the_column_cap() {
+        let long = "a".repeat(MAX_COLS * 2);
+        let block = layout_boxes(vec![element(&long, 0.0, 0.0, 4000.0, 20.0)]).expect("layout");
+
+        assert_eq!(display_width(block.lines().next().unwrap()), MAX_COLS);
     }
 }

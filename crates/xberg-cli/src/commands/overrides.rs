@@ -936,6 +936,9 @@ impl ExtractionOverrides {
             self.output_format
         });
 
+        // Only an explicit flag writes here. The CLI's plain default is pinned when the base
+        // configuration is built (`commands::config::load_config`), so a value merged from a
+        // config file or `--config-json` is not overwritten by the default.
         if let Some(content_fmt) = final_format {
             config.output_format = content_fmt.into();
         }
@@ -2789,6 +2792,35 @@ mod tests {
         let logs =
             String::from_utf8(buffer.lock().expect("log buffer poisoned").clone()).expect("log output must be UTF-8");
         (value, logs)
+    }
+
+    /// The CLI's plain default is pinned when the base configuration is built, not here: a value
+    /// merged from a config file or `--config-json` must survive `apply` untouched, and only an
+    /// explicit flag may overwrite it.
+    #[test]
+    fn test_output_format_only_an_explicit_flag_is_written() {
+        let mut config = ExtractionConfig {
+            output_format: xberg::OutputFormat::Markdown,
+            ..ExtractionConfig::default()
+        };
+        let overrides = default_overrides();
+        let (_, _) = capture_logs(|| overrides.apply(&mut config));
+        assert_eq!(
+            config.output_format,
+            xberg::OutputFormat::Markdown,
+            "no format flag must leave the merged value alone"
+        );
+
+        let overrides = ExtractionOverrides {
+            content_format: Some(ContentOutputFormatArg::Plain),
+            ..default_overrides()
+        };
+        let (_, _) = capture_logs(|| overrides.apply(&mut config));
+        assert_eq!(
+            config.output_format,
+            xberg::OutputFormat::Plain,
+            "--content-format plain must win over the merged value"
+        );
     }
 
     /// Regression test for contract point 4: enabling layout detection while

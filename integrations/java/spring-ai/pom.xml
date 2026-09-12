@@ -12,7 +12,7 @@
   <packaging>jar</packaging>
 
   <name>Xberg Spring AI Document Reader</name>
-  <description>Spring AI DocumentReader that extracts text, tables, and metadata from 107 document formats
+  <description>Spring AI DocumentReader that extracts text, tables, and metadata from 109 document formats
         (with optional OCR) using the Xberg engine, mapping chunks, elements, or pages to Spring AI documents.</description>
   <url>https://github.com/xberg-io/xberg/tree/main/integrations/java/spring-ai</url>
 

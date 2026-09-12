@@ -581,12 +581,30 @@ enum ContainerKind {
     Group,
 }
 
+/// How an `ElementKind::Image` becomes comrak nodes.
+///
+/// Markdown renders each image as a `text` fenced block carrying its path and OCR grid. That
+/// block is Markdown syntax, and comrak writes a `Raw` node verbatim into every output format,
+/// so the other comrak-backed writers must keep a real image node instead of inheriting it —
+/// HTML previously emitted `<img>` and cannot render a fence at all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImageBlockStyle {
+    /// Markdown: one `text` fence per image (marker line plus OCR text).
+    Fence,
+    /// HTML and any other comrak writer: a paragraph holding the image node.
+    Node,
+}
+
 /// Build a comrak AST from an `InternalDocument`.
 ///
 /// The returned node is a `Document` root whose children mirror the document
 /// body content.  Footnotes are appended after body elements.  Non-body
 /// elements (headers, footers) are excluded.
-pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Arena<'a>) -> &'a AstNode<'a> {
+pub(crate) fn build_comrak_ast<'a>(
+    doc: &InternalDocument,
+    arena: &'a comrak::Arena<'a>,
+    image_block_style: ImageBlockStyle,
+) -> &'a AstNode<'a> {
     let root = mk(arena, NodeValue::Document);
     let footnotes = FootnoteCollector::new(doc);
     let mut state = RenderState::default();
@@ -842,13 +860,47 @@ pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Ar
                     Some(img) => {
                         if !img.data.is_empty() {
                             format!("image_{}.{}", image_index, img.format)
-                        } else if let Some(ref path) = img.source_path {
+                        } else if let Some(path) = &img.source_path {
                             path.clone()
                         } else {
                             format!("image_{}.bin", image_index)
                         }
                     }
                 };
+
+                if image_block_style == ImageBlockStyle::Node {
+                    // HTML and the other comrak writers keep the image as an image: a `Raw`
+                    // fence is Markdown and would be written verbatim into their output.
+                    let has_ocr = render_image_ocr
+                        && image
+                            .and_then(|img| img.ocr_result.as_ref())
+                            .is_some_and(|result| !result.content.is_empty());
+
+                    if doc.ocr_text_only && has_ocr {
+                        let ocr_result = image.and_then(|img| img.ocr_result.as_ref()).unwrap();
+                        let ocr_para = mk(arena, NodeValue::Paragraph);
+                        ocr_para.append(mk_text(arena, &ocr_result.content));
+                        parent.append(ocr_para);
+                    } else {
+                        let para = mk(arena, NodeValue::Paragraph);
+                        let img_node =
+                            mk(arena, NodeValue::Image(Box::new(NodeLink { url, title: String::new() })));
+                        img_node.append(mk_text(arena, desc));
+                        para.append(img_node);
+                        parent.append(para);
+
+                        if render_image_ocr
+                            && doc.append_ocr_text
+                            && let Some(ocr_result) = image.and_then(|img| img.ocr_result.as_ref())
+                            && !ocr_result.content.is_empty()
+                        {
+                            let ocr_para = mk(arena, NodeValue::Paragraph);
+                            ocr_para.append(mk_text(arena, &ocr_result.content));
+                            parent.append(ocr_para);
+                        }
+                    }
+                    continue;
+                }
 
                 // Every image leaves a `text` fenced block holding its marker line (which
                 // carries the path) and, when OCR ran, its recognized text laid out as a grid.
@@ -1202,7 +1254,7 @@ mod tests {
     /// Helper: build AST from doc and render to CommonMark string.
     fn render(doc: &InternalDocument) -> String {
         let arena = comrak::Arena::new();
-        let root = build_comrak_ast(doc, &arena);
+        let root = build_comrak_ast(doc, &arena, ImageBlockStyle::Fence);
         let mut output = String::new();
         format_commonmark(root, &Options::default(), &mut output).unwrap();
         output

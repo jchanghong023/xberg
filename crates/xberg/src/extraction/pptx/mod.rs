@@ -330,6 +330,14 @@ fn extract_pptx_from_container<R: std::io::Read + std::io::Seek>(
 
                 let (image_kind, kind_confidence) =
                     crate::extraction::image_kind::classify(data, format.as_ref(), width, height, None, None, false);
+                // The slide's rels name the part this picture came from; the markdown builder
+                // bakes that same target into the placeholder, which is how the placeholder is
+                // matched back to its image.
+                let source_path = slide
+                    .images
+                    .iter()
+                    .find(|rel| rel.id == img_ref.id)
+                    .map(|rel| rel.target.clone());
 
                 extracted_images.push(ExtractedImage {
                     data: Bytes::from(data.clone()),
@@ -344,7 +352,7 @@ fn extract_pptx_from_container<R: std::io::Read + std::io::Seek>(
                     description,
                     ocr_result: None,
                     bounding_box: bbox,
-                    source_path: None,
+                    source_path,
                     image_kind: Some(image_kind),
                     kind_confidence: Some(kind_confidence),
                     cluster_id: None,

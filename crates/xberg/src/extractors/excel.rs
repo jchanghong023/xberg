@@ -210,6 +210,23 @@ impl ExcelExtractor {
         let mut pages: Vec<PageContent> = Vec::with_capacity(workbook.sheets.len());
         let hidden_sheets = Self::hidden_sheet_names(workbook);
 
+        // Resolve each picture's sheet by name. The drawing parts name the sheet that holds
+        // them, while this loop only sees the sheets that actually loaded, so a positional
+        // match would move every picture of a skipped sheet (a chartsheet part, an unreadable
+        // worksheet) onto the next one.
+        let page_by_sheet_name: AHashMap<&str, u32> = workbook
+            .sheets
+            .iter()
+            .enumerate()
+            .map(|(index, sheet)| (sheet.name.as_str(), (index + 1) as u32))
+            .collect();
+        for picture in pictures.iter_mut() {
+            if picture.sheet_index.is_none() {
+                picture.sheet_index =
+                    picture.sheet_name.as_deref().and_then(|name| page_by_sheet_name.get(name).copied());
+            }
+        }
+
         // Placed pictures are consumed sheet by sheet from the back of this
         // vector, so sorting ascending and popping yields sheet order and, within
         // a sheet, row-major reading order. A picture with no known sheet sorts

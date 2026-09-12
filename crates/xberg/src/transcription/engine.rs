@@ -57,6 +57,10 @@ const WHISPER_N_FFT: usize = 400;
 const WHISPER_HOP_LENGTH: usize = 160;
 /// Maximum number of output tokens produced per chunk (Whisper canonical).
 const WHISPER_MAX_TOKENS: usize = 448;
+/// RMS below which a chunk counts as silence (1e-4 ≈ -80 dBFS; speech sits two
+/// orders of magnitude above it). Silence drives Whisper into a repetition loop,
+/// so a chunk without signal is skipped instead of hallucinated.
+const SILENCE_RMS_THRESHOLD: f32 = 1e-4;
 /// Milliseconds represented by one increment of a Whisper timestamp token ID.
 ///
 /// Whisper's timestamp vocabulary is a contiguous run of IDs starting at
@@ -248,6 +252,15 @@ pub fn parse_timestamped_segments(token_ids: &[u32], timestamp_begin_id: u32) ->
     }
 
     segments
+}
+
+/// Root-mean-square level of a PCM chunk, used to recognise silence before the
+/// chunk is handed to the model.
+fn chunk_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
 }
 
 /// Build an ONNX Runtime session from a model file path.
@@ -471,6 +484,13 @@ impl WhisperEngine {
         timestamps: bool,
         chunk_duration_ms: u32,
     ) -> Result<Vec<(u32, u32, String)>, TranscriptionError> {
+        // A chunk carrying no signal -- the padded tail of a recording, a pause --
+        // sends Whisper into a repetition loop that runs to the token cap and
+        // returns a wall of hallucinated text. Skipping it loses nothing.
+        if chunk.is_empty() || chunk_rms(chunk) < SILENCE_RMS_THRESHOLD {
+            return Ok(Vec::new());
+        }
+
         let padded = if chunk.len() == WHISPER_CHUNK_SAMPLES {
             chunk.to_vec()
         } else {
@@ -713,7 +733,17 @@ impl WhisperEngine {
 
         let dwp_wants_enc_hs = dwp_input_names.iter().any(|n| n.contains("encoder_hidden_states"));
 
-        for _ in 1..WHISPER_MAX_TOKENS {
+        // A chunk that never emits `<|endoftext|>` (near-silence, or a language
+        // hint that does not match the audio) runs until this cap. The cap must
+        // respect the model's positional capacity: Whisper accepts
+        // WHISPER_MAX_TOKENS positions *including* the prompt, and the export
+        // rejects a call whose incoming cache already holds that many — one
+        // step past it fails inside the graph with a Reshape error rather than
+        // returning. 30 s of Chinese speech transcribed under an English hint
+        // was enough to reach it and abort the whole extraction.
+        let max_iterations = WHISPER_MAX_TOKENS.saturating_sub(prompt_len);
+
+        for _ in 1..=max_iterations {
             let last_token = *generated.last().expect("generated is non-empty; qed");
 
             let last_id_arr = Array2::from_shape_vec((1, 1), vec![last_token as i64])
@@ -757,17 +787,34 @@ impl WhisperEngine {
             }
             generated.push(next_token);
 
-            let new_decoder_kvs: Vec<(String, Value)> = step_outputs
-                .into_iter()
-                .filter(|(name, _)| *name != dwp_logits_output_name)
-                .map(|(name, val)| {
-                    let input_name = name.replacen("present", "past_key_values", 1);
-                    (input_name, val)
-                })
-                .collect();
+            // Split the with-past outputs exactly like step 0 splits the step-0
+            // outputs. `decoder_with_past` also returns the cross-attention
+            // (encoder) caches; folding those into `decoder_kvs` made the next
+            // iteration push the same input name twice -- once from
+            // `decoder_kvs`, once from `encoder_kvs` -- and the session then
+            // bound the wrong cache, which surfaced as a Reshape failure inside
+            // `layers.0.self_attn` once a 30-second chunk generated a long
+            // enough sequence (observed on a 17-minute lecture video, whose
+            // English-hinted transcript of Chinese speech runs long).
+            let mut new_decoder_kvs: Vec<(String, Value)> = Vec::new();
+            let mut new_encoder_kvs: Vec<(String, Value)> = Vec::new();
+            for (name, val) in step_outputs {
+                if name == dwp_logits_output_name {
+                    continue;
+                }
+                let input_name = name.replacen("present", "past_key_values", 1);
+                if input_name.contains(".encoder.") {
+                    new_encoder_kvs.push((input_name, val));
+                } else {
+                    new_decoder_kvs.push((input_name, val));
+                }
+            }
 
             if !new_decoder_kvs.is_empty() {
                 decoder_kvs = new_decoder_kvs;
+            }
+            if !new_encoder_kvs.is_empty() {
+                encoder_kvs = new_encoder_kvs;
             }
         }
 

@@ -14,7 +14,7 @@
 //!
 //! Nothing here is fatal. A missing, malformed, oversized or empty part is
 //! skipped and logged; a picture the package never anchors to a sheet is still
-//! returned with `sheet_index: None` rather than dropped, so the OCR pass sees
+//! returned without a sheet rather than dropped, so the OCR pass sees
 //! every picture the archive holds.
 
 use std::borrow::Cow;
@@ -42,8 +42,15 @@ pub(crate) struct XlsxPicture {
     pub(crate) format: Cow<'static, str>,
     /// The archive-relative part name, e.g. `xl/media/image4.emf`.
     pub(crate) source_path: String,
-    /// 1-based index of the sheet the picture is anchored to, matching the
-    /// workbook's sheet order. `None` when no drawing part names one.
+    /// Name of the sheet the picture is anchored to, as written in
+    /// `xl/workbook.xml`. The extractor resolves it to a 1-based page number
+    /// against the sheets it actually read; resolving by position here would
+    /// shift every later sheet's pictures onto the wrong page once any sheet is
+    /// skipped (a chartsheet part, for example, is not a worksheet).
+    pub(crate) sheet_name: Option<String>,
+    /// 1-based index of the sheet the picture is anchored to, resolved from
+    /// `sheet_name` by the extractor's workbook pass. `None` while unresolved or
+    /// when no drawing part names a sheet.
     pub(crate) sheet_index: Option<u32>,
     /// Zero-based `(row, col)` of the anchor's top-left cell, when the drawing
     /// part records one.
@@ -53,9 +60,9 @@ pub(crate) struct XlsxPicture {
 }
 
 /// Where a picture sits in the workbook: which sheet, and where on it.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Placement {
-    sheet_index: u32,
+    sheet_name: String,
     cell: Option<(u32, u32)>,
 }
 
@@ -146,15 +153,16 @@ fn read_archive<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, limits: &Secur
         total_bytes += data.len();
 
         let (placement, description) = match placements.get(&name) {
-            Some((placement, description)) => (Some(*placement), description.clone()),
+            Some((placement, description)) => (Some(placement.clone()), description.clone()),
             None => (None, None),
         };
         pictures.push(XlsxPicture {
             format: detect_format(&data, &name),
             data,
             source_path: name,
-            sheet_index: placement.map(|placement| placement.sheet_index),
-            anchor: placement.and_then(|placement| placement.cell),
+            sheet_name: placement.as_ref().map(|placement| placement.sheet_name.clone()),
+            sheet_index: None,
+            anchor: placement.as_ref().and_then(|placement| placement.cell),
             description: description.filter(|text| !text.trim().is_empty()),
         });
     }
@@ -241,14 +249,14 @@ fn collect_placements<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Place
     };
     let workbook_rels = parse_rels(&workbook_rels_xml);
 
-    for (index, rel_id) in sheet_relationship_ids(&workbook_xml).into_iter().enumerate() {
+    for (sheet_name, rel_id) in sheet_relationship_ids(&workbook_xml) {
         let Some(rel) = workbook_rels.get(&rel_id) else {
             continue;
         };
         let Some(worksheet) = resolve_relative("xl", &rel.target) else {
             continue;
         };
-        collect_sheet_placements(archive, &worksheet, (index + 1) as u32, &mut placements);
+        collect_sheet_placements(archive, &worksheet, &sheet_name, &mut placements);
     }
     placements
 }
@@ -258,7 +266,7 @@ fn collect_placements<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Place
 fn collect_sheet_placements<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     worksheet: &str,
-    sheet_index: u32,
+    sheet_name: &str,
     placements: &mut Placements,
 ) {
     let Some(rels_path) = rels_path_for(worksheet) else {
@@ -308,9 +316,9 @@ fn collect_sheet_placements<R: Read + Seek>(
             continue;
         };
         if is_vml {
-            collect_vml_placements(&xml, parent_dir(&part), sheet_index, &part_rels, placements);
+            collect_vml_placements(&xml, parent_dir(&part), sheet_name, &part_rels, placements);
         } else {
-            collect_drawing_placements(&xml, parent_dir(&part), sheet_index, &part_rels, placements);
+            collect_drawing_placements(&xml, parent_dir(&part), sheet_name, &part_rels, placements);
         }
     }
 }
@@ -322,7 +330,7 @@ fn collect_sheet_placements<R: Read + Seek>(
 fn collect_drawing_placements(
     xml: &[u8],
     directory: &str,
-    sheet_index: u32,
+    sheet_name: &str,
     rels: &HashMap<String, Rel>,
     placements: &mut Placements,
 ) {
@@ -366,7 +374,13 @@ fn collect_drawing_placements(
             .map(str::to_string);
         placements
             .entry(media)
-            .or_insert((Placement { sheet_index, cell }, description));
+            .or_insert((
+                Placement {
+                    sheet_name: sheet_name.to_string(),
+                    cell,
+                },
+                description,
+            ));
     }
 }
 
@@ -376,7 +390,7 @@ fn collect_drawing_placements(
 fn collect_vml_placements(
     xml: &[u8],
     directory: &str,
-    sheet_index: u32,
+    sheet_name: &str,
     rels: &HashMap<String, Rel>,
     placements: &mut Placements,
 ) {
@@ -415,7 +429,13 @@ fn collect_vml_placements(
         let description = shape.attribute("alt").map(str::to_string);
         placements
             .entry(media)
-            .or_insert((Placement { sheet_index, cell }, description));
+            .or_insert((
+                Placement {
+                    sheet_name: sheet_name.to_string(),
+                    cell,
+                },
+                description,
+            ));
     }
 }
 
@@ -449,10 +469,10 @@ fn vml_cell(text: &str) -> Option<(u32, u32)> {
     Some((row, col))
 }
 
-/// The `r:id` of every `<sheet>` in `xl/workbook.xml`, in the workbook's own
-/// sheet order — the order calamine reports sheets in, and the order
-/// `sheet_index` is 1-based against.
-fn sheet_relationship_ids(workbook_xml: &[u8]) -> Vec<String> {
+/// The `(name, r:id)` of every `<sheet>` in `xl/workbook.xml`, in the workbook's
+/// own sheet order. Pictures are keyed by name: the extractor only sees the
+/// sheets it could read, so a positional index cannot survive a skipped sheet.
+fn sheet_relationship_ids(workbook_xml: &[u8]) -> Vec<(String, String)> {
     let Some(text) = xml_text(workbook_xml) else {
         return Vec::new();
     };
@@ -462,8 +482,11 @@ fn sheet_relationship_ids(workbook_xml: &[u8]) -> Vec<String> {
     document
         .descendants()
         .filter(|node| node.is_element() && node.tag_name().name() == "sheet")
-        .filter_map(|sheet| attribute(&sheet, RELATIONSHIPS_NS, "id"))
-        .map(str::to_string)
+        .filter_map(|sheet| {
+            let id = attribute(&sheet, RELATIONSHIPS_NS, "id")?;
+            let name = sheet.attribute("name").unwrap_or_default();
+            Some((name.to_string(), id.to_string()))
+        })
         .collect()
 }
 

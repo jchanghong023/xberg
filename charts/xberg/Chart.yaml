@@ -3,7 +3,7 @@ name: xberg
 description: >-
   A Helm chart for Xberg — polyglot document intelligence framework with
   a Rust core. Extract text, metadata, images, and structured information from
-  PDFs, Office documents, images, and 107 formats.
+  PDFs, Office documents, images, and 109 formats.
 type: application
 version: 1.1.6
 appVersion: "1.1.6"

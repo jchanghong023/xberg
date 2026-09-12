@@ -895,6 +895,14 @@ fn apply_output_format_pass_with_security_limits(
     if let Some(formatted) = result.formatted_content.as_mut() {
         rewrite_content_image_extensions(formatted, &format_renames);
     }
+    // Per-page content is rendered from the element tree before this pass runs and
+    // `apply_output_format` never touches it, so a page would keep pointing at the
+    // pre-encode extension while `content` and the files on disk use the new one.
+    if let Some(pages) = result.pages.as_mut() {
+        for page in pages.iter_mut() {
+            rewrite_content_image_extensions(&mut page.content, &format_renames);
+        }
+    }
 }
 
 /// Replace `image_N.oldext` URLs in pre-rendered content after a re-encode rename.

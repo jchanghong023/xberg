@@ -5,7 +5,7 @@ requires = ["hatchling"]
 [project]
 name = "llama-index-readers-xberg"
 version = "1.1.6"
-description = "LlamaIndex reader for 107 document formats powered by xberg's Rust extraction engine"
+description = "LlamaIndex reader for 109 document formats powered by xberg's Rust extraction engine"
 readme = "README.md"
 keywords = ["ai", "document-extraction", "xberg", "llamaindex", "llm", "ocr", "pdf", "rag", "text-extraction"]
 license = "MIT"

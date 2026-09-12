@@ -5487,7 +5487,7 @@ name = "Rust"
 package_name = "xberg"
 badge_url = "https://img.shields.io/crates/v/xberg?label=Rust&color=007ec6"
 docs_url = "https://xberg.io/"
-description = "High-performance document intelligence library for Rust. Extract text, tables, metadata, and code intelligence from 107 file formats and 371 programming languages."
+description = "High-performance document intelligence library for Rust. Extract text, tables, metadata, and code intelligence from 109 file formats and 371 programming languages."
 package_manager = ["cargo"]
 features = { ocr = true, async = true, plugin_system = true, embeddings = true, code_intelligence = true }
 ocr_backends = ["tesseract", "paddleocr", "sceptre"]
@@ -5500,7 +5500,7 @@ name = "Python"
 package_name = "xberg"
 badge_url = "https://img.shields.io/pypi/v/xberg?label=Python&color=007ec6"
 docs_url = "https://xberg.io/"
-description = "Extract text, tables, images, metadata, and code intelligence from 107 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Native Python bindings with async/await support, multiple OCR backends (Tesseract, PaddleOCR, Sceptre), and extensible plugin system."
+description = "Extract text, tables, images, metadata, and code intelligence from 109 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Native Python bindings with async/await support, multiple OCR backends (Tesseract, PaddleOCR, Sceptre), and extensible plugin system."
 package_manager = ["pip"]
 features = { ocr = true, async = true, plugin_system = true, embeddings = true, code_intelligence = true }
 ocr_backends = ["tesseract", "paddleocr", "sceptre"]
@@ -5514,7 +5514,7 @@ name = "TypeScript (Node.js)"
 package_name = "@xberg-io/xberg"
 badge_url = "https://img.shields.io/npm/v/@xberg-io/xberg?label=TypeScript&color=007ec6"
 docs_url = "https://xberg.io/"
-description = "Extract text, tables, images, metadata, and code intelligence from 107 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Native NAPI-RS bindings for Node.js with superior performance, async/await support, and TypeScript type definitions."
+description = "Extract text, tables, images, metadata, and code intelligence from 109 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Native NAPI-RS bindings for Node.js with superior performance, async/await support, and TypeScript type definitions."
 package_manager = ["pnpm"]
 features = { ocr = true, async = true, plugin_system = true, embeddings = true, config_discovery = true, code_intelligence = true }
 ocr_backends = ["tesseract", "paddleocr", "sceptre"]
@@ -5528,7 +5528,7 @@ name = "Go"
 package_name = "github.com/xberg-io/xberg/packages/go"
 badge_url = "https://img.shields.io/github/v/tag/xberg-io/xberg?label=Go&color=007ec6"
 docs_url = "https://xberg.io/"
-description = "Extract text, tables, images, metadata, and code intelligence from 107 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Go bindings with context-aware async support, idiomatic Go API, and CGO-based native performance."
+description = "Extract text, tables, images, metadata, and code intelligence from 109 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Go bindings with context-aware async support, idiomatic Go API, and CGO-based native performance."
 package_manager = ["go get"]
 features = { ocr = true, async = true, plugin_system = true, embeddings = true, code_intelligence = true }
 ocr_backends = ["tesseract", "paddleocr", "sceptre"]
@@ -5541,7 +5541,7 @@ name = "Java"
 package_name = "io.xberg:xberg"
 badge_url = "https://img.shields.io/maven-central/v/io.xberg/xberg?label=Java&color=007ec6"
 docs_url = "https://xberg.io/"
-description = "Extract text, tables, images, metadata, and code intelligence from 107 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Java bindings with type-safe API, Foreign Function & Memory API integration, and native performance."
+description = "Extract text, tables, images, metadata, and code intelligence from 109 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Java bindings with type-safe API, Foreign Function & Memory API integration, and native performance."
 package_manager = ["maven", "gradle"]
 features = { ocr = true, async = true, plugin_system = true, embeddings = true, code_intelligence = true }
 ocr_backends = ["tesseract", "paddleocr", "sceptre"]
@@ -5554,7 +5554,7 @@ name = "PHP"
 package_name = "xberg-io/xberg"
 badge_url = "https://img.shields.io/packagist/v/xberg-io/xberg?label=PHP&color=007ec6"
 docs_url = "https://xberg.io/"
-description = "Extract text, tables, images, metadata, and code intelligence from 107 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. PHP bindings with modern PHP 8.2+ support and type-safe API."
+description = "Extract text, tables, images, metadata, and code intelligence from 109 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. PHP bindings with modern PHP 8.2+ support and type-safe API."
 package_manager = ["composer"]
 features = { ocr = true, async = false, plugin_system = true, embeddings = true, code_intelligence = true }
 ocr_backends = ["tesseract", "paddleocr", "sceptre"]
@@ -5567,7 +5567,7 @@ name = "Ruby"
 package_name = "xberg"
 badge_url = "https://img.shields.io/gem/v/xberg?label=Ruby&color=007ec6"
 docs_url = "https://xberg.io/"
-description = "Extract text, tables, images, metadata, and code intelligence from 107 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Ruby bindings with idiomatic Ruby API and native performance."
+description = "Extract text, tables, images, metadata, and code intelligence from 109 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Ruby bindings with idiomatic Ruby API and native performance."
 package_manager = ["rubygems", "bundler"]
 features = { ocr = true, async = true, plugin_system = true, embeddings = true, code_intelligence = true }
 ocr_backends = ["tesseract", "paddleocr", "sceptre"]
@@ -5580,7 +5580,7 @@ name = "C#"
 package_name = "XbergIo.Xberg"
 badge_url = "https://img.shields.io/nuget/v/XbergIo.Xberg?label=C%23&color=007ec6"
 docs_url = "https://xberg.io/"
-description = "Extract text, tables, images, metadata, and code intelligence from 107 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. .NET bindings with full type safety, async/await support, and .NET 10.0+ compatibility."
+description = "Extract text, tables, images, metadata, and code intelligence from 109 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. .NET bindings with full type safety, async/await support, and .NET 10.0+ compatibility."
 package_manager = ["nuget"]
 features = { ocr = true, async = true, plugin_system = true, embeddings = true, code_intelligence = true }
 ocr_backends = ["tesseract", "paddleocr", "sceptre"]
@@ -5593,7 +5593,7 @@ name = "Elixir"
 package_name = "xberg"
 badge_url = "https://img.shields.io/hexpm/v/xberg?label=Elixir&color=007ec6"
 docs_url = "https://xberg.io/"
-description = "Extract text, tables, images, metadata, and code intelligence from 107 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Elixir bindings with native BEAM concurrency, OTP integration, and idiomatic Elixir API."
+description = "Extract text, tables, images, metadata, and code intelligence from 109 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Elixir bindings with native BEAM concurrency, OTP integration, and idiomatic Elixir API."
 package_manager = ["mix"]
 features = { ocr = true, async = true, plugin_system = true, embeddings = true, code_intelligence = true }
 ocr_backends = ["tesseract", "paddleocr", "sceptre"]
@@ -5607,7 +5607,7 @@ name = "WebAssembly"
 package_name = "@xberg-io/xberg-wasm"
 badge_url = "https://img.shields.io/npm/v/@xberg-io/xberg-wasm?label=WASM&color=007ec6"
 docs_url = "https://xberg.io/"
-description = "Extract text, tables, images, and metadata from 107 file formats including PDF, Office documents, and images. WebAssembly bindings for browsers, Deno, and Cloudflare Workers with a single-threaded synchronous core and an async JavaScript surface."
+description = "Extract text, tables, images, and metadata from 109 file formats including PDF, Office documents, and images. WebAssembly bindings for browsers, Deno, and Cloudflare Workers with a single-threaded synchronous core and an async JavaScript surface."
 package_manager = ["pnpm"]
 features = { ocr = true, async = true, plugin_system = true, embeddings = false, code_intelligence = false }
 ocr_backends = ["tesseract-wasm", "sceptre (opt-in worker API)"]
@@ -5621,7 +5621,7 @@ name = "FFI (C/C++)"
 package_name = "xberg-ffi"
 badge_url = "https://img.shields.io/badge/C%2FC%2B%2B-xberg--ffi-007ec6"
 docs_url = "https://xberg.io/"
-description = "Extract text, tables, images, metadata, and code intelligence from 107 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. C/C++ FFI bindings providing a stable ABI for native integration, shared library distribution, and cross-language interop."
+description = "Extract text, tables, images, metadata, and code intelligence from 109 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. C/C++ FFI bindings providing a stable ABI for native integration, shared library distribution, and cross-language interop."
 package_manager = ["cargo"]
 # `async = false`: the C ABI is synchronous, so the template's async section ("full
 # async/await support") would be untrue here, and there is deliberately no
@@ -5649,7 +5649,7 @@ name = "Kotlin (Android)"
 package_name = "io.xberg:xberg-android"
 badge_url = "https://img.shields.io/badge/Android-xberg-3DDC84"
 docs_url = "https://xberg.io/"
-description = "Extract text, tables, images, metadata, and code intelligence from 107 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Android library (AAR) with bundled jniLibs/arm64-v8a and jniLibs/x86_64 — Gradle automatically picks up the native cdylib for emulator and device builds. Server-side Kotlin/JVM consumers can use the Java binding directly via standard Kotlin/Java interop."
+description = "Extract text, tables, images, metadata, and code intelligence from 109 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Android library (AAR) with bundled jniLibs/arm64-v8a and jniLibs/x86_64 — Gradle automatically picks up the native cdylib for emulator and device builds. Server-side Kotlin/JVM consumers can use the Java binding directly via standard Kotlin/Java interop."
 package_manager = ["gradle", "maven"]
 features = { ocr = true, async = true, plugin_system = true, embeddings = true, code_intelligence = true }
 ocr_backends = ["tesseract", "sceptre-tract"]
@@ -5662,7 +5662,7 @@ name = "Swift"
 package_name = "Xberg"
 badge_url = "https://img.shields.io/badge/Swift-xberg-007ec6"
 docs_url = "https://xberg.io/"
-description = "Extract text, tables, images, metadata, and code intelligence from 107 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Swift bindings via swift-bridge for macOS and iOS, with native Swift types and async/await support."
+description = "Extract text, tables, images, metadata, and code intelligence from 109 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Swift bindings via swift-bridge for macOS and iOS, with native Swift types and async/await support."
 package_manager = ["spm"]
 features = { ocr = true, async = true, plugin_system = true, embeddings = true, code_intelligence = true }
 ocr_backends = ["tesseract", "paddleocr", "sceptre"]
@@ -5675,7 +5675,7 @@ name = "Dart / Flutter"
 package_name = "xberg"
 badge_url = "https://img.shields.io/badge/Dart-xberg-007ec6"
 docs_url = "https://xberg.io/"
-description = "Extract text, tables, images, metadata, and code intelligence from 107 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Dart bindings via flutter_rust_bridge for both Flutter apps and pure-Dart server contexts, with isolate-safe Future/Stream APIs."
+description = "Extract text, tables, images, metadata, and code intelligence from 109 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Dart bindings via flutter_rust_bridge for both Flutter apps and pure-Dart server contexts, with isolate-safe Future/Stream APIs."
 package_manager = ["pub"]
 features = { ocr = true, async = true, plugin_system = true, embeddings = true, code_intelligence = true }
 ocr_backends = ["tesseract", "paddleocr", "sceptre"]
@@ -5688,7 +5688,7 @@ name = "Zig"
 package_name = "xberg"
 badge_url = "https://img.shields.io/badge/Zig-xberg-007ec6"
 docs_url = "https://xberg.io/"
-description = "Extract text, tables, images, metadata, and code intelligence from 107 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Zig bindings consuming the C FFI surface via @cImport, idiomatic error sets, optional types, and slice-based memory management."
+description = "Extract text, tables, images, metadata, and code intelligence from 109 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Zig bindings consuming the C FFI surface via @cImport, idiomatic error sets, optional types, and slice-based memory management."
 package_manager = ["zig"]
 features = { ocr = true, async = false, plugin_system = true, embeddings = true, code_intelligence = true }
 ocr_backends = ["tesseract", "paddleocr", "sceptre"]

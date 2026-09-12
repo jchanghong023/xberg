@@ -17,6 +17,7 @@
 !crates/xberg-candle-ocr/
 !crates/xberg-pdfium-render/
 !crates/xberg-native-pdf/
+!crates/xberg-windows-metafile/
 !crates/xberg-ffi/
 !crates/xberg-libheif/
 !crates/xberg-libwpd/

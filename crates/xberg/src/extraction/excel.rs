@@ -119,18 +119,15 @@ pub(crate) type ExcelReadResult = (ExcelWorkbook, Vec<ProcessingWarning>);
 /// format error with clearer context than this pre-check could.
 #[cfg(feature = "excel")]
 fn validate_zip_container<R: Read + Seek>(mut reader: R, limits: &SecurityLimits) -> Result<()> {
-    // Decide by ZIP magic, not by `ZipArchive::new`'s outcome: a legacy `.xls`/`.xla`
-    // OLE2 container can embed an OPC package whose end-of-central-directory makes the
-    // archive parse, and the validator then hard-fails reading a bogus entry 0. Only a
-    // real ZIP (local header, empty archive, or ZIP64 EOCD) is validated; anything else
-    // falls through to the format-specific parser, which reports a clearer error.
+    // The first four bytes decide only whether an unreadable archive is reported as "not a
+    // ZIP" or as a broken one: a real ZIP may carry prepended data (the specification allows
+    // it, and the reader locates the central directory from the EOCD), so the archive is
+    // *always* parsed and validated, and only an entry header that cannot be read at all —
+    // what a legacy `.xls`/`.xla` OLE2 container produces, since it can hold a stray central
+    // directory without any local header — falls through to the format-specific parser.
     let mut magic = [0u8; 4];
-    if reader.read_exact(&mut magic).is_err() {
-        return Ok(());
-    }
-    if magic != *b"PK\x03\x04" && magic != *b"PK\x05\x06" && magic != *b"PK\x06\x06" {
-        return Ok(());
-    }
+    let has_zip_magic = reader.read_exact(&mut magic).is_ok()
+        && (magic == *b"PK\x03\x04" || magic == *b"PK\x05\x06" || magic == *b"PK\x06\x06");
     let _ = reader.seek(std::io::SeekFrom::Start(0));
     let mut archive = match zip::ZipArchive::new(reader) {
         Ok(archive) => archive,
@@ -144,8 +141,11 @@ fn validate_zip_container<R: Read + Seek>(mut reader: R, limits: &SecurityLimits
             limits.max_files_in_archive
         )));
     }
-    crate::extractors::security::ZipBombValidator::new(limits.clone()).validate(&mut archive)?;
-    Ok(())
+    match crate::extractors::security::ZipBombValidator::new(limits.clone()).validate(&mut archive) {
+        Ok(()) => Ok(()),
+        Err(crate::extractors::security::SecurityError::UnreadableEntry { .. }) if !has_zip_magic => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(crate) fn read_excel_file(file_path: &str, limits: &SecurityLimits) -> Result<ExcelReadResult> {
