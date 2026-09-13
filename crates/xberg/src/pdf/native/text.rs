@@ -344,16 +344,7 @@ pub(crate) fn furniture_min_consecutive_pages() -> usize {
 /// "middle" to protect and passes through untouched.
 const FURNITURE_MIN_PAGE_LINES: usize = 2 * EDGE_LINES + 1;
 
-/// Minimum non-empty lines a page needs before its edge zones are trusted
-/// (below this the top/bottom zones overlap). Shared with the structured pass.
-pub(crate) fn furniture_min_page_lines() -> usize {
-    FURNITURE_MIN_PAGE_LINES
-}
-
 /// Page-count floor shared with the structured-PDF furniture pass.
-///
-/// Distinct from [`furniture_min_page_lines`], which is a *per-page line count*: using that
-/// value as a page count silently disables a pass for every document shorter than it.
 pub(crate) fn furniture_min_pages() -> usize {
     FURNITURE_MIN_PAGES
 }

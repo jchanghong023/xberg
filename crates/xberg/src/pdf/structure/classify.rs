@@ -1874,7 +1874,7 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
         // margin-confined, mirroring the native pass's exact-match removal),
         // and the first-seen page needs a font-size comparison across its
         // duplicates before anything is marked.
-        let mut matching: Vec<(usize, String)> = page
+        let matching: Vec<(usize, String)> = page
             .iter()
             .enumerate()
             .filter(|(_, para)| !para.is_page_furniture)
