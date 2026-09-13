@@ -152,22 +152,31 @@ impl PptxExtractor {
         let forms = Self::math_forms(formulas);
 
         for (slide_num, content) in slide_contents {
-            let mut in_notes = false;
-
             for block in content.split("\n\n") {
                 budget.step()?;
-                let trimmed = block.trim();
+                let mut trimmed = block.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
 
-                if trimmed.starts_with("### Notes:") || trimmed == "Notes:" {
+                // The notes marker is written directly above the notes text, so the two
+                // share a blank-line-separated block (`### Notes:\n<text>`) whenever the
+                // note has no blank line of its own. Dropping the whole block therefore
+                // dropped the note's first paragraph — every note for a one-paragraph
+                // note, since that paragraph is the block. Strip the marker and keep
+                // whatever follows it. What follows is the note's content, so it never
+                // counts as the slide's title: a note opening with `# ` is prose, and
+                // taking it as a heading folded the whole note into one element.
+                let mut in_notes = false;
+                if let Some(rest) = Self::strip_notes_marker(trimmed) {
+                    trimmed = rest.trim();
                     in_notes = true;
-                    continue;
+                    if trimmed.is_empty() {
+                        continue;
+                    }
                 }
 
-                if let Some(title_text) = trimmed.strip_prefix("# ") {
-                    in_notes = false;
+                if !in_notes && let Some(title_text) = trimmed.strip_prefix("# ") {
                     saw_title = true;
                     let (title_text, title_formulas) =
                         Self::split_line_math(title_text, &forms, formulas, plain_output);
@@ -178,10 +187,6 @@ impl PptxExtractor {
                         builder.push_heading(2, title, Some(*slide_num), None);
                     }
                     continue;
-                }
-
-                if in_notes {
-                    in_notes = false;
                 }
 
                 if trimmed.starts_with('|') {
@@ -229,47 +234,71 @@ impl PptxExtractor {
                     continue;
                 }
 
-                let mut in_list: Option<bool> = None;
+                // One entry per open list, outermost first: the deck's own outline is
+                // expressed as indentation in the Markdown (`add_list_item` indents two
+                // spaces per level), and the renderer only indents nested lists. Keeping
+                // the items in a single flat list lost every level.
+                let mut open_lists: Vec<bool> = Vec::new();
 
                 for line in trimmed.lines() {
-                    let (line_text, line_formulas) = Self::split_line_math(line, &forms, formulas, plain_output);
-                    let lt = line_text.trim();
-                    if lt.is_empty() && line_formulas.is_empty() {
-                        if in_list.is_some() {
-                            builder.end_list();
-                            in_list = None;
-                        }
-                        continue;
-                    }
-
-                    let list_match = if let Some(item_text) = lt.strip_prefix("- ") {
+                    // Marker and indentation are read off the raw line: split_line_math
+                    // collapses whitespace, which would flatten a nested item whose text
+                    // carries a formula back to depth 0.
+                    let depth =
+                        (line.len() - line.trim_start().len()) / crate::extraction::pptx::LIST_INDENT.len();
+                    let raw = line.trim_start();
+                    let list_match = if let Some(item_text) = raw.strip_prefix("- ") {
                         Some((false, item_text))
                     } else {
-                        Self::strip_ordered_prefix(lt).map(|item_text| (true, item_text))
+                        Self::strip_ordered_prefix(raw).map(|item_text| (true, item_text))
                     };
 
                     if let Some((ordered, item_text)) = list_match {
-                        match in_list {
-                            Some(prev_ordered) if prev_ordered != ordered => {
-                                builder.end_list();
-                                builder.push_list(ordered);
-                                in_list = Some(ordered);
-                            }
-                            None => {
-                                builder.push_list(ordered);
-                                in_list = Some(ordered);
-                            }
-                            _ => {}
+                        // The item's text is what follows the marker; its math is split
+                        // out of that, so an item that is only a formula keeps its place
+                        // in the list instead of falling out of it.
+                        let (item_text, item_formulas) =
+                            Self::split_line_math(item_text, &forms, formulas, plain_output);
+                        let item_text = item_text.trim();
+                        if item_text.is_empty() && item_formulas.is_empty() {
+                            continue;
+                        }
+                        while open_lists.len() > depth + 1 {
+                            builder.end_list();
+                            open_lists.pop();
+                        }
+                        while open_lists.len() < depth + 1 {
+                            builder.push_list(ordered);
+                            open_lists.push(ordered);
+                        }
+                        if let Some(innermost) = open_lists.last_mut()
+                            && *innermost != ordered
+                        {
+                            // A numbered run inside a bulleted one: a Markdown list holds one
+                            // kind, so the innermost list is closed and reopened.
+                            builder.end_list();
+                            builder.push_list(ordered);
+                            *innermost = ordered;
                         }
                         // A list item's math becomes its own element ahead of the
                         // item, the order DOCX uses for math runs in a paragraph.
-                        Self::push_line_formulas(&mut builder, &line_formulas, *slide_num, budget)?;
-                        budget.account_text(item_text.len())?;
-                        builder.push_list_item(item_text, ordered, vec![], Some(*slide_num), None);
+                        Self::push_line_formulas(&mut builder, &item_formulas, *slide_num, budget)?;
+                        if !item_text.is_empty() {
+                            budget.account_text(item_text.len())?;
+                            builder.push_list_item(item_text, ordered, vec![], Some(*slide_num), None);
+                        }
                     } else {
-                        if in_list.is_some() {
+                        let (line_text, line_formulas) =
+                            Self::split_line_math(line, &forms, formulas, plain_output);
+                        let lt = line_text.trim();
+                        if lt.is_empty() && line_formulas.is_empty() {
+                            while open_lists.pop().is_some() {
+                                builder.end_list();
+                            }
+                            continue;
+                        }
+                        while open_lists.pop().is_some() {
                             builder.end_list();
-                            in_list = None;
                         }
                         Self::push_line_formulas(&mut builder, &line_formulas, *slide_num, budget)?;
                         if !lt.is_empty() {
@@ -279,7 +308,7 @@ impl PptxExtractor {
                     }
                 }
 
-                if in_list.is_some() {
+                while open_lists.pop().is_some() {
                     builder.end_list();
                 }
             }
@@ -294,27 +323,72 @@ impl PptxExtractor {
         Ok(builder.build())
     }
 
+    /// Strip a speaker-notes marker off a content block, returning the text after it.
+    ///
+    /// The content builder writes the marker immediately above the notes (see
+    /// `ContentBuilder::add_notes`), so the marker only ever opens a block or shares
+    /// one with the note's first paragraph. A paragraph that merely starts with
+    /// "Notes:" as prose does not have the line break the marker has, and is left
+    /// alone.
+    fn strip_notes_marker(block: &str) -> Option<&str> {
+        const MARKERS: [&str; 2] = ["### Notes:", "Notes:"];
+        MARKERS.iter().find_map(|marker| {
+            let rest = block.strip_prefix(marker)?;
+            (rest.is_empty() || rest.starts_with('\n')).then_some(rest)
+        })
+    }
+
     /// Parse a markdown table block into a 2D cell grid.
+    ///
+    /// Cells are written with `|` escaped as `\|` and line breaks as `<br>`
+    /// (see `ContentBuilder::add_table`), so the split skips `\|` and restores
+    /// it to `|`. A row counts as the column separator only when every cell it
+    /// carries is dashes, optionally with alignment colons — a substring test
+    /// would also drop data rows that merely contain `---`.
     fn parse_markdown_table(table_text: &str) -> Vec<Vec<String>> {
         let mut cells = Vec::new();
         for line in table_text.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
+            let stripped = line.trim().trim_matches('|');
+            if stripped.is_empty() {
                 continue;
             }
-            if trimmed.contains("---") {
+            let row: Vec<String> = Self::split_table_row(stripped);
+            if row.iter().all(|cell| Self::is_separator_cell(cell)) {
                 continue;
             }
-            let row: Vec<String> = trimmed
-                .trim_matches('|')
-                .split('|')
-                .map(|cell| cell.trim().to_string())
-                .collect();
-            if !row.is_empty() {
-                cells.push(row);
-            }
+            cells.push(row);
         }
         cells
+    }
+
+    /// Split one table row's text (outer pipes already trimmed) on unescaped
+    /// `|`, restoring each `\|` to a literal `|`. A `\` that is not followed by
+    /// a pipe stays in the cell, so an escaped `\|` round-trips as `\\|`.
+    fn split_table_row(row: &str) -> Vec<String> {
+        let mut cells = Vec::new();
+        let mut cell = String::new();
+        let mut chars = row.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\\' if chars.peek() == Some(&'|') => {
+                    chars.next();
+                    cell.push('|');
+                }
+                '|' => {
+                    cells.push(cell.trim().to_string());
+                    cell = String::new();
+                }
+                _ => cell.push(ch),
+            }
+        }
+        cells.push(cell.trim().to_string());
+        cells
+    }
+
+    /// Whether one cell is a GFM column separator (`---`, `:---:`, ...).
+    fn is_separator_cell(cell: &str) -> bool {
+        let body = cell.trim().trim_matches(':');
+        !body.is_empty() && body.chars().all(|ch| ch == '-')
     }
 }
 
@@ -1204,6 +1278,91 @@ mod tests {
             .map(|e| e.text.as_str())
             .collect();
         assert_eq!(headings, vec!["Growth is"], "the heading keeps its words");
+    }
+
+    /// A nested item whose text carries a formula keeps its level — the depth is
+    /// read off the raw line, because split_line_math collapses whitespace — and
+    /// an item that is only a formula stays inside the list instead of falling
+    /// out of it with a stray `-` paragraph.
+    #[test]
+    fn test_build_internal_document_keeps_nested_and_pure_math_list_items_in_place() {
+        use crate::types::internal::ElementKind;
+
+        let content = "- outer\n  - inner $x^{2}$\n  - $y$\n";
+        let formulas = vec![("x^{2}".to_string(), false), ("y".to_string(), false)];
+        let mut budget = SecurityBudget::with_defaults();
+        let doc = PptxExtractor::build_internal_document(&[(1, content.to_string())], 1, &formulas, false, &mut budget)
+            .unwrap();
+
+        let items: Vec<&str> = doc
+            .elements
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::ListItem { .. }))
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(items, vec!["outer", "inner"], "the pure-formula item leaves no empty item");
+
+        let math: Vec<&str> = doc
+            .elements
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::Formula))
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(math, vec!["x^{2}", "y"], "each item's formula is emitted");
+
+        let list_starts = doc
+            .elements
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::ListStart { .. }))
+            .count();
+        assert_eq!(list_starts, 2, "the nested item's list is a list inside the outer one");
+
+        assert!(
+            !doc.elements.iter().any(|e| e.kind == ElementKind::Paragraph && e.text.trim() == "-"),
+            "the formula's list marker must not fall out as a stray paragraph"
+        );
+    }
+
+    /// A note whose first line starts with `# ` is note text, not the slide's
+    /// title: the title branch is skipped for a marker-stripped notes block.
+    #[test]
+    fn test_build_internal_document_keeps_note_starting_with_hash_out_of_the_outline() {
+        use crate::types::internal::ElementKind;
+
+        let content = "# Real Title\n\n### Notes:\n# not a title\nsecond note line\n";
+        let mut budget = SecurityBudget::with_defaults();
+        let doc = PptxExtractor::build_internal_document(&[(1, content.to_string())], 1, &[], false, &mut budget)
+            .unwrap();
+
+        let headings: Vec<&str> = doc
+            .elements
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::Heading { .. }))
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(headings, vec!["Real Title"], "the note's `#` line must not become a heading");
+
+        let note_kept = doc
+            .elements
+            .iter()
+            .any(|e| e.kind == ElementKind::Paragraph && e.text.contains("# not a title"));
+        assert!(note_kept, "the note's first paragraph must survive as body text");
+    }
+
+    /// An escaped `\|` round-trips as a literal pipe inside its cell, a
+    /// separator row is skipped, and a data cell that merely contains `---` is
+    /// kept (the old substring test dropped its whole row).
+    #[test]
+    fn test_parse_markdown_table_keeps_escaped_pipes_and_only_drops_separator_rows() {
+        let cells = PptxExtractor::parse_markdown_table("| A | B |\n| --- | --- |\n| a\\|b | x---y |\n");
+        assert_eq!(
+            cells,
+            vec![vec!["A".to_string(), "B".to_string()], vec!["a|b".to_string(), "x---y".to_string()]],
+            "the escaped pipe stays in its cell and the --- cell stays a cell"
+        );
+
+        let aligned = PptxExtractor::parse_markdown_table("| H |\n| :---: |\n| v |\n");
+        assert_eq!(aligned, vec![vec!["H".to_string()], vec!["v".to_string()]], "alignment colons still mark a separator");
     }
 
     #[test]

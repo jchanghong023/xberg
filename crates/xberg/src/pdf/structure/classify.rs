@@ -1734,12 +1734,19 @@ fn looks_like_standalone_heading_text(text: &str) -> bool {
     false
 }
 
-/// Detect paragraphs in page margins that repeat across pages.
+/// Detect paragraphs that repeat across pages (running headers, footers,
+/// metadata stamps, watermarks).
 ///
-/// Only considers paragraphs whose bounding box falls in the page margins
-/// (top 10%, bottom 10%, or narrow left/right strips). If the same text
-/// appears in the margins on >50% of pages, it's furniture (running headers,
-/// footers, metadata stamps, watermarks).
+/// Candidacy still requires the text to sit in the page margins (top 10%,
+/// bottom 10%, or narrow left/right strips — via the paragraph's bounding box)
+/// on either a majority of pages or a long run of consecutive pages (chapter
+/// running headers repeat only inside their own section, which can stay far
+/// below the majority bar). Once confirmed, removal is global: column-aware
+/// reading order frequently parks a copy mid-page, and a page whose paragraphs
+/// carry no bounding box would otherwise keep its copy forever. The first page
+/// carrying the text keeps its largest-font occurrence — the genuine chapter
+/// opening or section sidehead that shares its page with the smaller running
+/// header.
 ///
 /// `page_heights` provides the height of each page for margin calculation.
 pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>], page_heights: &[f32]) {
@@ -1752,6 +1759,11 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
     let mut text_page_count: ahash::AHashMap<String, usize> = ahash::AHashMap::new();
     let mut alphanum_to_exact: ahash::AHashMap<String, ahash::AHashSet<String>> = ahash::AHashMap::new();
     let mut first_seen_page: ahash::AHashMap<String, usize> = ahash::AHashMap::new();
+    // Longest run of CONSECUTIVE pages carrying the text in a margin. Chapter
+    // running headers repeat only inside their own section, which can stay far
+    // below the whole-document page share; the dense consecutive run is the
+    // signal that catches them (same rationale as the native PDF pass).
+    let mut margin_streaks: ahash::AHashMap<String, (usize, usize)> = ahash::AHashMap::new();
 
     for (page_idx, page) in all_pages.iter().enumerate() {
         let page_h = page_heights.get(page_idx).copied().unwrap_or(792.0);
@@ -1790,9 +1802,15 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
             if seen.insert(alphanum_key.clone()) {
                 let count = text_page_count.entry(alphanum_key.clone()).or_insert(0);
                 if *count == 0 {
-                    first_seen_page.insert(alphanum_key, page_idx);
+                    first_seen_page.insert(alphanum_key.clone(), page_idx);
                 }
                 *count += 1;
+                let streak = match margin_streaks.get(&alphanum_key) {
+                    // Continues the run only when this is the immediately previous page.
+                    Some(&(last_index, run)) if last_index + 1 == page_idx => run + 1,
+                    _ => 1,
+                };
+                margin_streaks.insert(alphanum_key.clone(), (page_idx, streak));
             }
         }
     }
@@ -1801,7 +1819,10 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
 
     let mut repeating: ahash::AHashSet<String> = ahash::AHashSet::new();
     for (alphanum_key, count) in &text_page_count {
-        if *count > threshold
+        let on_a_consecutive_run = margin_streaks
+            .get(alphanum_key)
+            .is_some_and(|&(_, run)| run >= crate::pdf::native::text::FURNITURE_MIN_CONSECUTIVE_PAGES);
+        if (*count > threshold || on_a_consecutive_run)
             && let Some(variants) = alphanum_to_exact.get(alphanum_key)
         {
             for v in variants {
@@ -1818,39 +1839,96 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
         repeating_count = repeating.len(),
         threshold,
         total_pages = all_pages.len(),
+        repeating_sample = %repeating
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" | "),
         "cross-page margin repeating text detected"
     );
 
-    for (page_idx, page) in all_pages.iter_mut().enumerate() {
-        let page_h = page_heights.get(page_idx).copied().unwrap_or(792.0);
-        let top_margin_y = page_h * (1.0 - margin_frac);
-        let bottom_margin_y = page_h * margin_frac;
+    // A running header often shares its paragraph with the page folio
+    // ("RAM and ROM 220"), so its text no longer equals the registered
+    // furniture string. Tolerate exactly one trailing standalone number of at
+    // most four digits — folio range — before giving up on the match. "December
+    // 2017" itself always matches verbatim (the fallback is only consulted
+    // when the plain form missed), so real year-bearing prose is not stripped.
+    let matches_furniture = |normalized: &str| -> bool {
+        if repeating.contains(normalized) {
+            return true;
+        }
+        match normalized.rfind(char::is_whitespace) {
+            Some(boundary) => {
+                let tail = &normalized[boundary + 1..];
+                tail.len() <= 4
+                    && tail.chars().all(|c| c.is_ascii_digit())
+                    && repeating.contains(normalized[..boundary].trim_end())
+            }
+            None => false,
+        }
+    };
 
-        for para in page.iter_mut() {
-            if para.is_page_furniture {
-                continue;
-            }
-            let in_margin = para
-                .block_bbox
-                .is_some_and(|(_, bottom, _, top)| top > top_margin_y || bottom < bottom_margin_y);
-            if !in_margin {
-                continue;
-            }
-            let text = paragraph_plain_text(para);
-            let normalized = text.trim().to_lowercase();
-            if repeating.contains(&normalized) {
-                let alphanum_key: String = normalized.chars().filter(|c| c.is_alphanumeric()).collect();
-                if first_seen_page.get(&alphanum_key).copied() == Some(page_idx) {
-                    continue;
+    for (page_idx, page) in all_pages.iter_mut().enumerate() {
+        // Collect matching paragraphs first: removal is global (not
+        // margin-confined, mirroring the native pass's exact-match removal),
+        // and the first-seen page needs a font-size comparison across its
+        // duplicates before anything is marked.
+        let mut matching: Vec<(usize, String)> = page
+            .iter()
+            .enumerate()
+            .filter(|(_, para)| !para.is_page_furniture)
+            .map(|(index, para)| (index, paragraph_plain_text(para)))
+            .filter(|(_, text)| matches_furniture(text.trim().to_lowercase().as_str()))
+            .collect();
+        if matching.is_empty() {
+            continue;
+        }
+
+        // On the page where the text first appears, the genuine title (chapter
+        // opening, section sidehead) shares the page with smaller-font running
+        // headers carrying the same words. Keep only the largest-font
+        // occurrence; every same-text duplicate is furniture. The same largest
+        // stays on any page whose non-furniture paragraphs would ALL be marked:
+        // marking the last body paragraph of a sparse page would trip
+        // `retain_page_furniture_safely`'s everything-is-furniture valve, which
+        // restores the very footers this pass removed.
+        let on_first_seen_page = matching.iter().any(|(_, text)| {
+            let alphanum_key: String = text
+                .trim()
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect();
+            first_seen_page.get(&alphanum_key).copied() == Some(page_idx)
+        });
+        let unmarked_total = page.iter().filter(|para| !para.is_page_furniture).count();
+        let marks_everything = matching.len() == unmarked_total;
+        let keep_index = if on_first_seen_page || marks_everything {
+            let mut best = (f32::NEG_INFINITY, 0usize);
+            for &(index, _) in &matching {
+                let size = page[index].dominant_font_size;
+                if size > best.0 {
+                    best = (size, index);
                 }
-                tracing::trace!(
-                    text = %normalized.chars().take(60).collect::<String>(),
-                    was_heading = ?para.heading_level,
-                    "marking margin text as furniture"
-                );
-                para.is_page_furniture = true;
-                para.heading_level = None;
             }
+            Some(best.1)
+        } else {
+            None
+        };
+
+        for &(index, _) in &matching {
+            if Some(index) == keep_index {
+                continue;
+            }
+            let para = &mut page[index];
+            tracing::trace!(
+                text = %paragraph_plain_text(para).chars().take(60).collect::<String>(),
+                was_heading = ?para.heading_level,
+                "marking repeating text as furniture"
+            );
+            para.is_page_furniture = true;
+            para.heading_level = None;
         }
     }
 }

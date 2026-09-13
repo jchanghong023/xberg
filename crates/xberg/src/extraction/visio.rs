@@ -89,6 +89,16 @@ pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Resu
         )));
     }
 
+    // A v11+ document stores shape text as UTF-16; anything older stores the ANSI
+    // codepage the file was written in, which the OLE property set declares.
+    let ansi_encoding = if version >= 11 {
+        encoding_rs::WINDOWS_1252
+    } else {
+        summary_information_codepage(&mut compound_file)
+            .map(crate::text::windows_codepage::encoding_for_windows_codepage)
+            .unwrap_or(encoding_rs::WINDOWS_1252)
+    };
+
     let root_pointer = parse_pointer(&document_stream, VISIO_DOCUMENT_OFFSET, version)
         .ok_or_else(|| XbergError::parsing("VisioDocument stream has an invalid trailer pointer"))?;
     if root_pointer.kind != 20 {
@@ -101,6 +111,7 @@ pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Resu
     let mut parser = VisioParser {
         document: &document_stream,
         version,
+        ansi_encoding,
         max_stream_size,
         remaining_stream_bytes: max_stream_size,
         stream_budget_exhausted: false,
@@ -199,6 +210,8 @@ pub(crate) fn extract_visio_package_text(content: &[u8], max_stream_size: usize)
 struct VisioParser<'a> {
     document: &'a [u8],
     version: u16,
+    /// Encoding of the pre-v11 8-bit text chunks, resolved once from the OLE property set.
+    ansi_encoding: &'static encoding_rs::Encoding,
     max_stream_size: usize,
     /// Decompressed stream bytes the parse may still materialize, shared by every stream read.
     ///
@@ -422,8 +435,16 @@ impl<'a> VisioParser<'a> {
 
             if chunk_type == 14 && body_end >= body_start + 8 {
                 let text_start = body_start + 8;
-                let text = decode_visio_text(&contents[text_start..body_end], self.version >= 11);
-                if !text.is_empty() && text != "\n" {
+                let text = decode_visio_text(&contents[text_start..body_end], self.version >= 11, self.ansi_encoding);
+                // The pointer walk reaches some byte ranges twice — the same offset and
+                // length carry two pointer formats, and both are chunk-bearing — which
+                // emitted every shape text twice: a 24-label drawing produced 182 text
+                // entries, each label in an adjacent run of exactly two. An adjacent
+                // repeat is that artifact, so it is dropped here. The cost is a shape
+                // whose label also appears on a shape stored immediately after it, whose
+                // runs merge into one entry.
+                let repeated = self.text.last().map(String::as_str) == Some(text.as_str());
+                if !text.is_empty() && text != "\n" && !repeated {
                     self.text.push(text);
                     if self.text.len() >= MAX_TEXT_CHUNKS {
                         break;
@@ -556,7 +577,7 @@ fn has_chunk_separator(chunk_type: u32, unknown2: u16, unknown3: u8, version: u1
     has_trailer
 }
 
-fn decode_visio_text(data: &[u8], utf16: bool) -> String {
+fn decode_visio_text(data: &[u8], utf16: bool, ansi_encoding: &'static encoding_rs::Encoding) -> String {
     if utf16 {
         let mut units = Vec::with_capacity(data.len() / 2);
         for pair in data.chunks_exact(2) {
@@ -568,9 +589,63 @@ fn decode_visio_text(data: &[u8], utf16: bool) -> String {
         }
         String::from_utf16_lossy(&units)
     } else {
-        let (decoded, _, _) = encoding_rs::WINDOWS_1252.decode(data);
+        let (decoded, _, _) = ansi_encoding.decode(data);
         decoded.trim_end_matches('\0').to_string()
     }
+}
+
+/// `PIDSI_CODEPAGE`: the codepage of the property set's 8-bit strings (MS-OLEPS).
+const PIDSI_CODEPAGE: u32 = 1;
+
+/// `VT_I2`, the value type `PIDSI_CODEPAGE` is declared with.
+const VT_I2: u32 = 2;
+/// `VT_UI2`, which some writers use for the same property.
+const VT_UI2: u32 = 18;
+
+/// The ANSI codepage a legacy Visio document declares in its OLE
+/// `\x05SummaryInformation` property set.
+///
+/// Pre-v11 Visio stores shape text as bytes in the codepage of the machine that
+/// wrote the file, and the property set's `PIDSI_CODEPAGE` is where that is
+/// recorded — the same field Office's own streams use (MS-OLEPS). Decoding those
+/// bytes as Windows-1252 turned every label of a Simplified-Chinese drawing into
+/// mojibake (`不推荐` → `²»ÍÆ¼ö`): the bytes are GBK, and a codepage of 936 says so.
+///
+/// Returns `None` when the stream is missing, unreadable, or carries no codepage;
+/// the caller then keeps Windows-1252.
+fn summary_information_codepage<R: Read + std::io::Seek>(compound_file: &mut cfb::CompoundFile<R>) -> Option<u32> {
+    /// A property set is a few hundred bytes of header and directory; the strings
+    /// (which this only walks past) are what grow. Bound the read so a container
+    /// that declares a huge stream cannot turn this metadata probe into a second
+    /// copy of the file.
+    const MAX_PROPERTY_SET_BYTES: u64 = 64 * 1024;
+
+    let stream = compound_file.open_stream("/\u{5}SummaryInformation").ok()?;
+    let mut data = Vec::with_capacity(1024);
+    stream.take(MAX_PROPERTY_SET_BYTES).read_to_end(&mut data).ok()?;
+
+    // Header: byte order (2) + version (2) + OS (4) + CLSID (16) + count (4); then one
+    // FMTID (16) + offset (4) per set.
+    let set_count = read_u32(&data, 24)?;
+    if set_count == 0 {
+        return None;
+    }
+    let set_offset = read_u32(&data, 28 + 16)? as usize;
+    let property_count = read_u32(&data, set_offset.checked_add(4)?)? as usize;
+
+    for index in 0..property_count {
+        let entry_offset = set_offset.checked_add(8)?.checked_add(index.checked_mul(8)?)?;
+        let property_id = read_u32(&data, entry_offset)?;
+        if property_id != PIDSI_CODEPAGE {
+            continue;
+        }
+        let value_offset = set_offset.checked_add(read_u32(&data, entry_offset + 4)? as usize)?;
+        if !matches!(read_u32(&data, value_offset), Some(VT_I2 | VT_UI2)) {
+            return None;
+        }
+        return read_u16(&data, value_offset + 4).map(u32::from);
+    }
+    None
 }
 
 fn decode_visio_lzw(data: &[u8], max_size: usize) -> Result<Vec<u8>> {

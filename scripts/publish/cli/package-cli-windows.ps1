@@ -193,6 +193,14 @@ function Start-CpuMonitor([int]$IntervalSec, [string]$CsvPath) {
   # queue written by Write-Phase, so the CSV has exactly one writer. Returns the
   # job; Stop-CpuMonitor takes it down.
   $script:CpuMarkers = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+  # The CSV lands under target\, which does not exist yet on a cold checkout or
+  # a CI run whose cache restore missed: Set-Content would not create the
+  # directory, and with $ErrorActionPreference = "Stop" the whole package run
+  # would die here, before cargo even starts.
+  $csvDir = Split-Path -Parent $CsvPath
+  if ($csvDir -and -not (Test-Path -LiteralPath $csvDir)) {
+    New-Item -ItemType Directory -Path $csvDir -Force | Out-Null
+  }
   Set-Content -LiteralPath $CsvPath -Value "kind,time,phase,load_pct,rustc_n,cargo_n,sevenzip_n,pwsh_n"
   $queue = $script:CpuMarkers
   return Start-ThreadJob -ArgumentList $IntervalSec, $CsvPath, $queue -ScriptBlock {
@@ -458,8 +466,9 @@ function Get-TranscriptionModelEntries([string]$ModelsRoot) {
 }
 
 # Shared download worker. A ThreadJob cannot dot-source this script or call its
-# functions, so the install body lives here once and is invoked from both the
-# synchronous Install-Models path and the race-the-build job.
+# functions, so the install body lives here once; the pipeline drives it with
+# Start-ModelDownloadJob + Complete-ModelInstall directly. (The synchronous
+# Install-Models wrapper below is kept as a utility but has no call site.)
 function Start-ModelDownloadJob([object[]]$Plan, [int]$Throttle, [string]$LocalCache) {
   return Start-ThreadJob -ArgumentList $Plan, $Throttle, $LocalCache -ScriptBlock {
     param([object[]]$Plan, [int]$Throttle, [string]$LocalCache)
@@ -797,6 +806,11 @@ try {
   $stageTasks = @("ort-dlls", "licenses", "launcher")
   $stageResults = @($stageTasks) | ForEach-Object -Parallel {
     $ProgressPreference = "SilentlyContinue"
+    # A parallel block runs in a fresh runspace: the caller's
+    # $ErrorActionPreference = "Stop" does not carry over, and without it a
+    # failed Copy-Item (missing LICENSE, locked target) is a non-terminating
+    # error that never reaches the catch below and the task reports Ok.
+    $ErrorActionPreference = "Stop"
     $task = $_
     try {
       $detail = switch ($task) {

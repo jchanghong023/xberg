@@ -12,10 +12,12 @@
 #      loader before a single instruction of the module runs, so an unshipped
 #      import here is fatal at `import xberg` / DllMain, not a runtime error
 #      you can catch.
-#   2. PRESENCE: $RequiredDll (default onnxruntime.dll) exists somewhere under
-#      the extracted artifact tree, because moving off the pyke static-link
-#      strategy (which baked ORT in) onto system dynamic linking makes that a
-#      real runtime dependency that must be vendored.
+#   2. PRESENCE: $RequiredDll (default onnxruntime.dll) is shipped in the same
+#      directory as each matched native file, because moving off the pyke
+#      static-link strategy (which baked ORT in) onto system dynamic linking
+#      makes that a real runtime dependency that must be vendored. (The check
+#      is per-directory, not a tree-wide search: the loader resolves an import
+#      next to the importing module first, so that is where the DLL must be.)
 #   3. CLOSURE (opt-in): every DLL imported by every shipped .exe/.dll is either
 #      shipped in the artifact or present in %SystemRoot%\System32. Self-contained
 #      bundles (e.g. the Windows CLI zip) use this to prove they load on a host
@@ -143,8 +145,11 @@ try {
   }
 
   if ($failures.Count -gt 0) {
-    foreach ($f in $failures) { Write-Error $f }
-    exit 1
+    # Write-Error throws under $ErrorActionPreference = "Stop", so raising the
+    # failures inside the loop would report the first one and drop the rest;
+    # print every failure first, then throw once with the count.
+    foreach ($f in $failures) { Write-Log "FAIL: $f" }
+    throw "$($failures.Count) DLL closure check failure(s) (artifact: '$Artifact')"
   }
   Write-Log "artifact passes the Windows DLL closure gate"
   exit 0

@@ -24,7 +24,7 @@ fn clamp_declared_size(declared: u64, cap: u64) -> u64 {
     declared.min(cap)
 }
 
-/// Append non-empty embedded-object text into the parent document body.
+/// Append non-empty embedded-object content into the parent document body.
 ///
 /// `extract_ooxml_embedded_objects` only attaches children on
 /// [`crate::types::internal::InternalDocument::children`]. Markdown/`content`
@@ -32,6 +32,14 @@ fn clamp_declared_size(declared: u64, cap: u64) -> u64 {
 /// (and any other embedded document with text) was searchable in JSON children
 /// but invisible in the Markdown the CLI writes. Email already merges
 /// attachment text into the body the same way; this mirrors that for OOXML.
+///
+/// Each child contributes a plain-text caption and its own Markdown as a raw
+/// block, with `](image_N.ext)` references renumbered onto the parent's image
+/// table (see [`renumber_embedded_image_refs`]). A raw block — rather than
+/// heading + paragraph — keeps the child's own structure: a paragraph element
+/// flattens every line break into one line and escapes the child's Markdown
+/// markers, which turned an embedded spreadsheet's tables into a single
+/// 78k-character paragraph of `\#`-escaped text.
 ///
 /// Children stay on `children` for structured consumers. Graphical OLE
 /// payloads that never identified as a document never become children and are
@@ -42,57 +50,106 @@ pub(crate) fn append_embedded_object_text(document: &mut crate::types::internal:
     let Some(children) = document.children.as_ref() else {
         return;
     };
-    // Collect first: pushing elements needs a mutable borrow of `document`
-    // while children still borrow it immutably.
-    let merged: Vec<(String, String)> = children
-        .iter()
-        .filter_map(|child| {
-            let content = child.result.content.trim();
-            if content.is_empty() {
-                return None;
-            }
-            let title = child
-                .path
-                .rsplit(['/', '\\'])
-                .next()
-                .filter(|name| !name.is_empty())
-                .unwrap_or(child.path.as_str())
-                .to_string();
-            // Nested extractors emit image Markdown that points at files only
-            // they exported. Those assets are not in the parent's image set, so
-            // leaving the refs in the body produces broken links and inflates
-            // the parent's image-ref count.
-            Some((title, strip_markdown_image_refs(content)))
-        })
-        .filter(|(_, content)| !content.trim().is_empty())
-        .collect();
+    // Collect first: pushing elements (and images) needs a mutable borrow of
+    // `document` while children still borrow it immutably.
+    let mut staged_images = Vec::new();
+    let mut merged: Vec<(String, String)> = Vec::new();
+    // Next free slot in the parent's image table. Advanced by one past the
+    // highest child index rather than by the child's image count, so a child
+    // whose indices are not dense cannot collide with the next child's range.
+    let mut next_image_base = document.images.len() as u32;
+    for child in children {
+        let content = child.result.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        let title = child
+            .path
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(child.path.as_str())
+            .to_string();
+        // `images` is optional on an extraction result: a caller that asked for no
+        // image data (or an extractor that produces none) leaves it empty, and the
+        // body's references then simply keep their alt text.
+        let child_images: &[crate::types::ExtractedImage] =
+            child.result.images.as_deref().unwrap_or_default();
+        let span = child_images
+            .iter()
+            .map(|image| image.image_index)
+            .max()
+            .map_or(0, |highest| highest.saturating_add(1));
+        let body = renumber_embedded_image_refs(content, next_image_base, child_images);
+        if body.trim().is_empty() {
+            // Nothing of the child's body survives (e.g. it was only image
+            // references whose alt text was empty): advancing the base and
+            // staging the images would export files the body never refers to.
+            // The images stay on the child for structured consumers.
+            continue;
+        }
+        for image in child_images {
+            let mut image = image.clone();
+            image.image_index = next_image_base.saturating_add(image.image_index);
+            staged_images.push(image);
+        }
+        next_image_base = next_image_base.saturating_add(span);
+        merged.push((title, body));
+    }
+    document.images.extend(staged_images);
     for (title, content) in merged {
-        let heading = InternalElement::text(ElementKind::Heading { level: 2 }, title, 0);
-        document.push_element(heading);
-        let paragraph = InternalElement::text(ElementKind::Paragraph, content, 0);
-        document.push_element(paragraph);
+        if content.trim().is_empty() {
+            continue;
+        }
+        // A filename is not a section of the host document: emit it as a plain
+        // caption so the host's outline keeps only real headings, and keep the
+        // child body as a raw block so its own Markdown (headings, tables,
+        // lists, code) survives verbatim instead of being escaped into one
+        // flattened paragraph.
+        let caption = InternalElement::text(ElementKind::Paragraph, format!("Embedded object: {title}"), 0);
+        document.push_element(caption);
+        let raw = InternalElement::text(ElementKind::RawBlock, format!("\n{content}\n"), 0);
+        document.push_element(raw);
     }
 }
 
-/// Remove `![alt](target)` image references, keeping the alt text when present.
+/// Copy a nested document's Markdown into the parent body, moving its
+/// `](image_N.ext)` references onto the parent's image table.
 ///
-/// Embedded-object children carry their own image assets under their own
-/// export path; those files are not copied into the parent document's image
-/// directory, so the references would dangle in the merged body.
-fn strip_markdown_image_refs(text: &str) -> String {
+/// A child extractor names its images by its own `ExtractedImage::image_index`
+/// and exports them beside itself; the parent only ever writes *its* image
+/// table, so a reference left as-is would resolve to an unrelated picture of
+/// the same number (or to nothing at all). `base` is the parent slot the
+/// child's image 0 was moved to. A reference with no matching child image is
+/// dropped, keeping its alt text — the same rule the export path applies to
+/// assets it cannot carry over.
+fn renumber_embedded_image_refs(text: &str, base: u32, images: &[crate::types::ExtractedImage]) -> String {
     let mut out = String::with_capacity(text.len());
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'!' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-            // Find the closing `](...)` for this image. Alt may contain
-            // escaped brackets; a simple scan is enough for extractor output.
-            if let Some((alt, after_alt)) = find_markdown_link_parts(&text[i..]) {
-                if !alt.is_empty() {
+            if let Some((alt, target, after)) = find_markdown_image_parts(&text[i..]) {
+                if target.starts_with("data:") {
+                    // Self-contained payload: nothing to renumber, and dropping
+                    // it would discard the only copy of the picture.
+                    out.push_str(&text[i..i + after]);
+                } else if let Some((index, suffix)) = parse_image_ref(target)
+                    && images.iter().any(|image| image.image_index == index)
+                {
+                    out.push_str("![");
+                    out.push_str(alt);
+                    out.push_str("](image_");
+                    out.push_str(&base.saturating_add(index).to_string());
+                    out.push_str(suffix);
+                    out.push(')');
+                } else if !alt.is_empty() {
+                    // Not one of this child's exported images: keep the alt text
+                    // rather than emit a reference that would resolve to an
+                    // unrelated picture of the same number in the parent.
                     out.push_str(alt);
                 }
-                // `after_alt` is relative to `&text[i..]`.
-                i += after_alt;
+                i += after;
                 continue;
             }
         }
@@ -103,19 +160,53 @@ fn strip_markdown_image_refs(text: &str) -> String {
     out
 }
 
-/// Given a slice starting at `![`, return `(alt, end_index)` when it is a
+/// Split an `image_N.ext` reference target into its index and its `.ext` suffix.
+fn parse_image_ref(target: &str) -> Option<(u32, &str)> {
+    let rest = target.strip_prefix("image_")?;
+    let digits_len = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits_len == 0 || !rest[digits_len..].starts_with('.') {
+        return None;
+    }
+    let index = rest[..digits_len].parse().ok()?;
+    Some((index, &rest[digits_len..]))
+}
+
+/// Given a slice starting at `![`, return `(alt, target, end_index)` for a
 /// well-formed image reference. `end_index` is relative to `s`.
-fn find_markdown_link_parts(s: &str) -> Option<(&str, usize)> {
+///
+/// The scan skips backslash-escaped characters: the CommonMark writer escapes a
+/// literal `]` in alt text and a literal `)` in a target as `\]`/`\)`, and
+/// stopping at those folded an escaped reference's parse and left the child's
+/// numbering in the parent's body.
+fn find_markdown_image_parts(s: &str) -> Option<(&str, &str, usize)> {
     debug_assert!(s.starts_with("!["));
     let rest = &s[2..];
-    let close_bracket = rest.find(']')?;
+    let close_bracket = find_unescaped(rest, b']')?;
     let alt = &rest[..close_bracket];
     let after = &rest[close_bracket + 1..];
     if !after.starts_with('(') {
         return None;
     }
-    let close_paren = after.find(')')?;
-    Some((alt, 2 + close_bracket + 1 + close_paren + 1))
+    let close_paren = find_unescaped(after, b')')?;
+    Some((alt, &after[1..close_paren], 2 + close_bracket + 1 + close_paren + 1))
+}
+
+/// Index of the first unescaped `needle` byte in `s`. A `\` escapes the character
+/// after it, which is how the CommonMark writer emits a literal bracket.
+fn find_unescaped(s: &str, needle: u8) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == needle {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
 }
 
 fn utf8_char_len(first: u8) -> usize {
@@ -872,35 +963,45 @@ mod tests {
             .map(|element| element.text.as_str())
             .collect();
         assert!(
-            texts.iter().any(|text| *text == "oleObject15.bin"),
-            "expected filename heading, got {texts:?}"
-        );
-        assert!(
             texts.iter().any(|text| text.contains("SCAN设计流程介绍")),
             "expected child body in elements, got {texts:?}"
         );
+        // The child's own Markdown has to survive verbatim: as a paragraph, its line
+        // breaks collapse into one line and its markers get escaped.
         assert!(
             doc.elements
                 .iter()
-                .any(|element| matches!(element.kind, ElementKind::Heading { level: 2 })),
-            "expected an H2 for the embedded object"
+                .any(|element| matches!(element.kind, ElementKind::RawBlock) && element.text.contains("拟制")),
+            "expected the child body as a raw block, got {texts:?}"
+        );
+        // A filename is not a heading of the host document.
+        assert!(
+            !doc.elements
+                .iter()
+                .any(|element| matches!(element.kind, ElementKind::Heading { .. })),
+            "expected no heading for the embedded object, got {texts:?}"
         );
     }
 
-    /// Nested image Markdown must be stripped so the parent document does not
-    /// reference assets that were never exported beside it.
+    /// A child's images are renumbered into the parent's image table, and a
+    /// reference with no matching child image keeps only its alt text.
     #[test]
-    fn strip_markdown_image_refs_keeps_alt_text() {
-        let input = "前言\n![流程图](image_3.png)\n后记 ![x](a/b.png) 结束";
-        let stripped = strip_markdown_image_refs(input);
-        assert!(!stripped.contains("image_3.png"), "got {stripped}");
-        assert!(!stripped.contains("a/b.png"), "got {stripped}");
-        assert!(stripped.contains("流程图"), "alt should remain, got {stripped}");
-        assert!(stripped.contains("前言"), "got {stripped}");
-        assert!(stripped.contains("后记"), "got {stripped}");
+    fn renumber_embedded_image_refs_moves_refs_onto_the_parent_table() {
+        let image = |index: u32| crate::types::ExtractedImage {
+            image_index: index,
+            ..Default::default()
+        };
+        let images = vec![image(0), image(1)];
+        let input = "前言\n![流程图](image_1.png)\n后记 ![x](image_7.png) 结束";
+        let rewritten = renumber_embedded_image_refs(input, 4, &images);
+        assert!(rewritten.contains("![流程图](image_5.png)"), "got {rewritten}");
+        // Index 7 is not one of the child's images: the alt text stays, the
+        // reference (which would resolve to an unrelated picture) does not.
+        assert!(!rewritten.contains("image_7.png"), "got {rewritten}");
+        assert!(rewritten.contains("后记 x 结束"), "got {rewritten}");
     }
 
-    /// Blank child payloads must not inject empty headings/paragraphs.
+    /// Blank child payloads must not inject empty captions/raw blocks.
     #[test]
     fn append_embedded_object_text_skips_blank_children() {
         use crate::types::internal::InternalDocument;

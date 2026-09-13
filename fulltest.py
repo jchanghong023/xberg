@@ -4,13 +4,15 @@
 
 目标：不靠人工读正文，也能判断「转换是否可接受」。
 
-三层检查（每层都独立出码）：
+四层检查（每层都独立出码）：
   1. 进程/结构 —— CLI 退出码、空结果、乱码/控制字符/格式泄漏、Markdown 围栏与表格列、
      图片引用可解析性、落盘图片文件合法性（大小 + magic bytes）
   2. 源文对齐   —— 基准去页眉页脚后 bigram 召回 + 数字/标识边界匹配 + 正文字符量比值 +
      分页/分片内容覆盖（源页有字而 MD 几乎对不上 → FAIL）
   3. 交叉核对   —— 源页数 vs 引擎 counts vs `## Page N`；源文件媒体清单 vs 引擎图片数 vs
      磁盘落盘 vs MD 引用（四方对账）；音视频文件体积 vs 转写文本量
+  4. 深检       —— Markdown 语义噪声、内嵌对象与子文档保真、PPTX 标题/备注、xlsx 图形文本、
+     PDF 书签与表格数、OCR 通道、逐文件金标准断言（_expectations.json）
 
 用法:
     python fulltest.py [--cli PATH] [--src DIR] [--out DIR] [--timeout SECS]
@@ -30,6 +32,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from collections import Counter
 from pathlib import Path
 
@@ -1471,13 +1474,35 @@ def _judge_pdf_structure(src_file: Path, md_text: str, m, issues, exp):
             pass
 
 
+GOLDEN_CJK_TOKEN_MAX_GAP = 6  # CJK token 相邻字符间允许的交错字符数（图形框/OCR 版面交错）
+
+
+def _golden_token_hit(token: str, md_nos: str) -> bool:
+    """金标准 token 命中判定：空白归一后整串命中；中文 token 再容忍版面交错。
+
+    图形/OCR 的保版面输出会把不同文本框交错进同一行（已知不自动判定形态③
+    「中文词内部被插空」的交错变体），token 字符齐全且有序却不再连续。对含
+    中文的 token 允许相邻字符之间夹最多 GOLDEN_CJK_TOKEN_MAX_GAP 个其他字符
+    （须全部按序出现，窗口有界，不会把「宏连接」误配成无关文本）；拉丁
+    token（标识符/短语）仍要求整串连续，避免子串虚高。
+    """
+    t = _norm_ws(token)
+    if t in md_nos:
+        return True
+    if len(t) < 2 or not re.search(r"[\u4e00-\u9fff]", t):
+        return False
+    gap = ".{0,%d}" % GOLDEN_CJK_TOKEN_MAX_GAP
+    pat = re.compile(gap.join(re.escape(ch) for ch in t))
+    return bool(pat.search(md_nos))
+
+
 def _judge_expectations(md_text: str, m, issues, exp):
     """按逐文件金标准断言：必需文本 / 禁止形态 / 顺序 / 数量指标。"""
     if not exp:
         return
     md_nos = _norm_ws(md_text)
     req = exp.get("required_tokens") or []
-    missing = [str(t) for t in req if _norm_ws(str(t)) not in md_nos]
+    missing = [str(t) for t in req if not _golden_token_hit(str(t), md_nos)]
     if missing:
         issues.append(make_issue(
             "GOLDEN_TOKEN_MISSING",
@@ -1943,7 +1968,8 @@ def _encode_markdown_dir(name: str) -> str:
     """
     table = {" ": "%20", "(": "%28", ")": "%29", "<": "%3C", ">": "%3E",
              '"': "%22", "`": "%60", "%": "%25"}
-    return "".join(table.get(ch, ch) for ch in name if not ch.iscontrol())
+    return "".join(table.get(ch, ch) for ch in name
+                   if unicodedata.category(ch) != "Cc")
 
 
 def save_markdown(out_dir: Path, stem: str, md_text: str, img_dirname: str):
@@ -1975,8 +2001,10 @@ def convert_one(cli: Path, src_file: Path, out_dir: Path, timeout: int, env: dic
         if transcription and "unknown field `transcription`" in err_text:
             notes.append("当前 CLI 未启用 transcription feature，音视频必须用本地编译的全功能版测试："
                          "cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,layout-detection,api")
-        first_err = next((l for l in err_text.splitlines()
-                          if re.search(r"ERROR|Error|error \[", l)), err_text.splitlines()[:1])
+        err_lines = err_text.splitlines()
+        first_err = next((l for l in err_lines
+                          if re.search(r"ERROR|Error|error \[", l)),
+                         err_lines[0] if err_lines else "(无错误输出)")
         return ("", {"warnings": [f"退出码 {rc}: {first_err}"], "counts": {},
                      "languages": [], "notes": notes},
                 elapsed, rc, cli)
@@ -2113,11 +2141,14 @@ def preflight(cli: Path, env: dict, files: list):
     if av_files:
         print(f"[preflight] 检测到 {len(av_files)} 个音视频文件，探测 transcription feature "
               f"({av_files[0].name}) ...", flush=True)
-        probe = subprocess.run(
-            [str(cli), "extract", str(av_files[0]),
-             "--no-config-discovery", "--format", "json",
-             "--config-json", json.dumps({"transcription": {**TRANSCRIPTION_CFG, "max_bytes": 1}})],
-            capture_output=True, env=env, timeout=120)
+        try:
+            probe = subprocess.run(
+                [str(cli), "extract", str(av_files[0]),
+                 "--no-config-discovery", "--format", "json",
+                 "--config-json", json.dumps({"transcription": {**TRANSCRIPTION_CFG, "max_bytes": 1}})],
+                capture_output=True, env=env, timeout=120)
+        except (subprocess.TimeoutExpired, OSError) as e:
+            sys.exit(f"transcription feature 探测失败: {e}")
         if "unknown field `transcription`" in probe.stderr.decode("utf-8", errors="replace"):
             sys.exit("当前 CLI 未启用 transcription feature，无法按约定用本地编译版测试音视频。\n"
                      "请先执行: cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,layout-detection,api\n"

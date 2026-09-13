@@ -2,7 +2,7 @@
 
 use crate::Result;
 use crate::core::config::ExtractionConfig;
-use crate::extraction::excel::images::XlsxPicture;
+use crate::extraction::excel::images::{XlsxPicture, XlsxShapeText};
 use crate::extractors::security::SecurityBudget;
 use crate::plugins::{InternalDocumentExtractor, Plugin};
 use crate::types::internal::InternalDocument;
@@ -205,6 +205,7 @@ impl ExcelExtractor {
     fn build_internal_document(
         workbook: &crate::types::ExcelWorkbook,
         mut pictures: Vec<XlsxPicture>,
+        mut shapes: Vec<XlsxShapeText>,
     ) -> InternalDocument {
         let mut builder = InternalDocumentBuilder::new("excel");
         let mut pages: Vec<PageContent> = Vec::with_capacity(workbook.sheets.len());
@@ -233,6 +234,18 @@ impl ExcelExtractor {
         // last and is emitted after every sheet.
         pictures.sort_by_key(|picture| (picture.sheet_index.unwrap_or(u32::MAX), picture.anchor));
         pictures.reverse();
+
+        // Placed shapes are consumed exactly like the pictures above: sorted
+        // ascending, then popped from the back, so each sheet gets its own shapes
+        // in row-major reading order and an unplaced shape sorts last.
+        shapes.sort_by_key(|shape| {
+            let page = page_by_sheet_name
+                .get(shape.sheet_name.as_str())
+                .copied()
+                .unwrap_or(u32::MAX);
+            (page, shape.anchor)
+        });
+        shapes.reverse();
 
         // `doc.images` is only ever filled by `push_image`, so this counter is the
         // position of the next image *and* the index its element must carry — the
@@ -327,11 +340,23 @@ impl ExcelExtractor {
                 ));
             }
             pages[page_index].image_indices = sheet_image_indices;
+            // A sheet's floating shapes are content too — a workflow diagram drawn in
+            // Excel lives entirely in them. The sheet is one table element, so a shape
+            // has no cell-level element to sit inside and follows the sheet it is
+            // anchored to, in reading order.
+            let sheet_shape_count = Self::push_sheet_shapes(
+                &mut builder,
+                &mut shapes,
+                &page_by_sheet_name,
+                page_number,
+            );
             // A sheet with no cells is blank only while nothing is anchored to it: a picture
-            // the page carries is content, and every other extractor clears `is_blank` when it
-            // attaches one. Leaving `Some(true)` here made consumers that test the flag drop a
-            // page whose only content is a screenshot.
-            if !pages[page_index].image_indices.is_empty() && pages[page_index].is_blank == Some(true) {
+            // or a diagram the page carries is content, and every other extractor clears
+            // `is_blank` when it attaches one. Leaving `Some(true)` here made consumers that
+            // test the flag drop a page whose only content is a screenshot.
+            if (!pages[page_index].image_indices.is_empty() || sheet_shape_count > 0)
+                && pages[page_index].is_blank == Some(true)
+            {
                 pages[page_index].is_blank = Some(false);
             }
         }
@@ -339,10 +364,46 @@ impl ExcelExtractor {
         for picture in pictures {
             Self::push_picture(&mut builder, picture, None, &mut next_image_index);
         }
+        Self::push_sheet_shapes(&mut builder, &mut shapes, &page_by_sheet_name, 0);
 
         let mut doc = builder.build();
         doc.prebuilt_pages = Some(pages);
         doc
+    }
+
+    /// Push the shapes anchored to `page_number` as paragraph elements, and
+    /// return how many were pushed.
+    ///
+    /// `shapes` is sorted ascending and consumed from the back (see the call
+    /// site). Doing the same for `page_number` zero pushes every shape whose
+    /// drawing part never named a sheet, at the end of the document.
+    ///
+    /// The two sentinels only cooperate because page numbers are one-based
+    /// (`sheet_index + 1` at the call site): the sort keys an unknown sheet as
+    /// `u32::MAX` so the per-page walk never touches it, while the match treats
+    /// an unknown sheet as `0` so the final `page_number == 0` drain collects
+    /// exactly those. A zero-based page numbering would make both paths fight
+    /// over the first sheet's shapes — keep the pages one-based.
+    fn push_sheet_shapes(
+        builder: &mut InternalDocumentBuilder,
+        shapes: &mut Vec<XlsxShapeText>,
+        page_by_sheet_name: &AHashMap<&str, u32>,
+        page_number: u32,
+    ) -> usize {
+        let mut pushed = 0;
+        while shapes.last().is_some_and(|shape| {
+            page_by_sheet_name
+                .get(shape.sheet_name.as_str())
+                .copied()
+                .unwrap_or(0)
+                == page_number
+        }) {
+            let shape = shapes.pop().expect("the last shape was just inspected");
+            let page = (page_number > 0).then_some(page_number);
+            builder.push_paragraph(&shape.text, Vec::new(), page, None);
+            pushed += 1;
+        }
+        pushed
     }
 
     /// Push one picture as an `ElementKind::Image` element and return its index
@@ -403,8 +464,9 @@ impl ExcelExtractor {
     fn workbook_to_internal_document(
         workbook: &crate::types::ExcelWorkbook,
         pictures: Vec<XlsxPicture>,
+        shapes: Vec<XlsxShapeText>,
     ) -> InternalDocument {
-        let mut doc = Self::build_internal_document(workbook, pictures);
+        let mut doc = Self::build_internal_document(workbook, pictures, shapes);
 
         let sheet_names: Vec<String> = workbook.sheets.iter().map(|s| s.name.clone()).collect();
         let sheet_count = workbook.sheets.len() as u32;
@@ -496,8 +558,12 @@ impl InternalDocumentExtractor for ExcelExtractor {
 
         let security_limits = config.security_limits.clone().unwrap_or_default();
         let want_pictures = config.needs_image_data() && is_ooxml_zip_mime(mime_type);
+        // Shape text is body content, not image data, so the drawing walk runs for every
+        // ZIP-backed workbook; `want_pictures` only decides whether the media bytes are
+        // loaded along with it.
+        let want_drawings = is_ooxml_zip_mime(mime_type);
 
-        let (read_result, pictures) = {
+        let (read_result, pictures, shapes) = {
             #[cfg(feature = "tokio-runtime")]
             {
                 if crate::core::batch_mode::is_batch_mode() {
@@ -515,30 +581,35 @@ impl InternalDocumentExtractor for ExcelExtractor {
                             &extension_owned,
                             &limits_owned,
                         )?;
-                        // The pictures live in the same ZIP the workbook was read from, and
+                        // The drawings live in the same ZIP the workbook was read from, and
                         // parsing them is the same blocking IO + XML work, so they are read
                         // inside this task rather than on the async runtime.
-                        let pictures = if want_pictures {
-                            crate::extraction::excel::images::read_xlsx_pictures_from_bytes(
+                        let (pictures, shapes) = if want_drawings {
+                            crate::extraction::excel::images::read_xlsx_drawings_from_bytes(
                                 &content_owned,
                                 &limits_owned,
+                                want_pictures,
                             )
                         } else {
-                            Vec::new()
+                            (Vec::new(), Vec::new())
                         };
-                        Ok::<_, crate::error::XbergError>((result, pictures))
+                        Ok::<_, crate::error::XbergError>((result, pictures, shapes))
                     })
                     .await
                     .map_err(|e| crate::error::XbergError::parsing(format!("Excel extraction task failed: {}", e)))??;
-                    (read.0, read.1)
+                    (read.0, read.1, read.2)
                 } else {
                     let read = crate::extraction::excel::read_excel_bytes(content, extension, &security_limits)?;
-                    let pictures = if want_pictures {
-                        crate::extraction::excel::images::read_xlsx_pictures_from_bytes(content, &security_limits)
+                    let (pictures, shapes) = if want_drawings {
+                        crate::extraction::excel::images::read_xlsx_drawings_from_bytes(
+                            content,
+                            &security_limits,
+                            want_pictures,
+                        )
                     } else {
-                        Vec::new()
+                        (Vec::new(), Vec::new())
                     };
-                    (read, pictures)
+                    (read, pictures, shapes)
                 }
             }
             #[cfg(not(feature = "tokio-runtime"))]
@@ -547,19 +618,30 @@ impl InternalDocumentExtractor for ExcelExtractor {
                     return Err(crate::error::XbergError::Cancelled);
                 }
                 let read = crate::extraction::excel::read_excel_bytes(content, extension, &security_limits)?;
-                let pictures = if want_pictures {
-                    crate::extraction::excel::images::read_xlsx_pictures_from_bytes(content, &security_limits)
+                let (pictures, shapes) = if want_drawings {
+                    crate::extraction::excel::images::read_xlsx_drawings_from_bytes(
+                        content,
+                        &security_limits,
+                        want_pictures,
+                    )
                 } else {
-                    Vec::new()
+                    (Vec::new(), Vec::new())
                 };
-                (read, pictures)
+                (read, pictures, shapes)
             }
         };
         let (workbook, read_warnings) = read_result;
 
         let mut budget = SecurityBudget::from_config(config);
         validate_workbook_budget(&workbook, &mut budget)?;
-        let mut doc = Self::workbook_to_internal_document(&workbook, pictures);
+        // Floating shape text is body content the drawing walk surfaced, so it is
+        // charged against the same budget the cell text answers to; without this
+        // a workbook whose content lives in shapes carries an unbounded amount of
+        // text past the limits every other path enforces here.
+        for shape in &shapes {
+            budget.account_text(shape.text.len())?;
+        }
+        let mut doc = Self::workbook_to_internal_document(&workbook, pictures, shapes);
         doc.processing_warnings.extend(read_warnings);
         doc.mime_type = mime_type.to_string();
 
@@ -598,12 +680,16 @@ impl InternalDocumentExtractor for ExcelExtractor {
 
         let security_limits = config.security_limits.clone().unwrap_or_default();
         let (workbook, read_warnings) = crate::extraction::excel::read_excel_file(path_str, &security_limits)?;
-        let pictures = if config.needs_image_data() && is_ooxml_zip_mime(mime_type) {
-            crate::extraction::excel::images::read_xlsx_pictures_from_file(path, &security_limits)
+        let (pictures, shapes) = if is_ooxml_zip_mime(mime_type) {
+            crate::extraction::excel::images::read_xlsx_drawings_from_file(
+                path,
+                &security_limits,
+                config.needs_image_data(),
+            )
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
-        let mut doc = Self::workbook_to_internal_document(&workbook, pictures);
+        let mut doc = Self::workbook_to_internal_document(&workbook, pictures, shapes);
         doc.processing_warnings.extend(read_warnings);
         doc.mime_type = mime_type.to_string();
 
@@ -717,7 +803,7 @@ mod tests {
     #[test]
     fn test_prebuilt_pages_always_some() {
         let workbook = make_workbook(vec![]);
-        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new());
+        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new(), Vec::new());
         assert!(doc.prebuilt_pages.is_some());
         assert_eq!(doc.prebuilt_pages.unwrap().len(), 0);
     }
@@ -729,7 +815,7 @@ mod tests {
             vec!["A".to_string(), "1".to_string()],
         ];
         let workbook = make_workbook(vec![make_sheet("Sheet1", Some(cells))]);
-        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new());
+        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new(), Vec::new());
 
         let pages = doc.prebuilt_pages.as_ref().unwrap();
         assert_eq!(pages.len(), 1);
@@ -748,7 +834,7 @@ mod tests {
             vec!["r1".to_string(), "r2".to_string()],
         ];
         let workbook = make_workbook(vec![make_sheet("Data", Some(cells))]);
-        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new());
+        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new(), Vec::new());
 
         let pages = doc.prebuilt_pages.as_ref().unwrap();
         assert_eq!(pages.len(), 1);
@@ -770,7 +856,7 @@ mod tests {
             make_sheet("Second", Some(sheet2_cells)),
             make_sheet("Third", Some(sheet3_cells)),
         ]);
-        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new());
+        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new(), Vec::new());
 
         let pages = doc.prebuilt_pages.as_ref().unwrap();
         assert_eq!(pages.len(), 3);
@@ -814,7 +900,7 @@ mod tests {
             make_sheet("Beta", Some(sheet2_cells)),
             make_sheet("Gamma", Some(sheet3_cells)),
         ]);
-        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new());
+        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new(), Vec::new());
 
         assert_eq!(
             doc.tables.len(),
@@ -840,7 +926,7 @@ mod tests {
             make_sheet("Empty", None),
             make_sheet("Third", Some(sheet3_cells)),
         ]);
-        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new());
+        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new(), Vec::new());
 
         let pages = doc.prebuilt_pages.as_ref().unwrap();
         assert_eq!(pages.len(), 3);
@@ -869,7 +955,7 @@ mod tests {
             make_sheet("HasData", Some(vec![vec!["x".to_string()]])),
             make_sheet("EmptyCells", Some(vec![])),
         ]);
-        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new());
+        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new(), Vec::new());
 
         let pages = doc.prebuilt_pages.as_ref().unwrap();
         assert_eq!(pages.len(), 2);
@@ -886,7 +972,7 @@ mod tests {
             make_sheet("A", Some(vec![vec!["a".to_string()]])),
             make_sheet("M", Some(vec![vec!["m".to_string()]])),
         ]);
-        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new());
+        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new(), Vec::new());
 
         let pages = doc.prebuilt_pages.as_ref().unwrap();
         assert_eq!(pages[0].sheet_name.as_deref(), Some("Z"));
@@ -991,7 +1077,7 @@ mod tests {
                 vec!["normal".to_string()],
             ]),
         )]);
-        let doc = ExcelExtractor::workbook_to_internal_document(&workbook, Vec::new());
+        let doc = ExcelExtractor::workbook_to_internal_document(&workbook, Vec::new(), Vec::new());
         let dde_warnings: Vec<_> = doc
             .processing_warnings
             .iter()
@@ -1008,7 +1094,7 @@ mod tests {
             vec!["100".to_string(), "80".to_string()],
         ];
         let workbook = make_workbook(vec![make_sheet("## Profit (2025) [Q1]", Some(cells))]);
-        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new());
+        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new(), Vec::new());
 
         let pages = doc.prebuilt_pages.as_ref().unwrap();
         assert_eq!(pages.len(), 1);
@@ -1043,7 +1129,7 @@ mod tests {
             .metadata
             .insert("hidden_sheets".to_string(), "Hidden".to_string());
 
-        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new());
+        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new(), Vec::new());
         let pages = doc.prebuilt_pages.as_ref().unwrap();
 
         assert!(pages[0].content.starts_with("## Visible\n"), "{:?}", pages[0].content);
@@ -1058,7 +1144,7 @@ mod tests {
     #[test]
     fn should_treat_no_sheets_as_hidden_when_metadata_key_is_absent() {
         let workbook = make_workbook(vec![make_sheet("Sheet1", Some(vec![vec!["A".to_string()]]))]);
-        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new());
+        let doc = ExcelExtractor::build_internal_document(&workbook, Vec::new(), Vec::new());
         let pages = doc.prebuilt_pages.as_ref().unwrap();
         assert!(pages[0].content.starts_with("## Sheet1\n"), "{:?}", pages[0].content);
     }

@@ -16,8 +16,8 @@ use crate::types::document_structure::{AnnotationKind, ContentLayer, TextAnnotat
 use crate::types::internal::{ElementKind, InternalDocument, InternalElement, list_item_source_label_from_attributes};
 
 use super::common::{
-    FootnoteCollector, NestingKind, RenderState, handle_container_end, is_body_element, is_container_end,
-    parse_metadata_entries,
+    CELL_LINE_BREAK, FootnoteCollector, NestingKind, RenderState, handle_container_end, is_body_element,
+    is_container_end, parse_metadata_entries,
 };
 
 /// Minimum valid ATX heading depth (CommonMark `#`).
@@ -418,9 +418,14 @@ fn append_annotated_span<'a>(
             parent.append(sup);
         }
         AnnotationKind::Highlight => {
-            let hl = mk(arena, NodeValue::Highlight);
-            build_inlines(arena, hl, trimmed, inner_for_node);
-            parent.append(hl);
+            // CommonMark has no highlight syntax: comrak's `==…==` is an extension its
+            // own writer emits, and renderers that do not implement it show the
+            // delimiters as literal text. `<mark>` is inline HTML, which CommonMark
+            // allows and every renderer passes through, so the highlight survives
+            // without the extension-only syntax.
+            parent.append(mk(arena, NodeValue::HtmlInline("<mark>".to_string())));
+            build_inlines(arena, parent, trimmed, inner_for_node);
+            parent.append(mk(arena, NodeValue::HtmlInline("</mark>".to_string())));
         }
         AnnotationKind::Link { url, title } => {
             let link = mk(
@@ -457,6 +462,8 @@ fn build_table<'a>(arena: &'a comrak::Arena<'a>, cells: &[Vec<String>], has_head
     if num_cols == 0 {
         return None;
     }
+    // A banner row is not a header: see [`first_row_labels_columns`].
+    let has_header = has_header && first_row_labels_columns(cells, num_cols);
     let synthetic_header_rows = usize::from(!has_header);
 
     let table_node = mk(
@@ -484,9 +491,7 @@ fn build_table<'a>(arena: &'a comrak::Arena<'a>, cells: &[Vec<String>], has_head
         for col in 0..num_cols {
             let cell_node = mk(arena, NodeValue::TableCell);
             let content = row.get(col).map(|s| s.as_str()).unwrap_or("");
-            if !content.is_empty() {
-                cell_node.append(mk_text(arena, content));
-            }
+            append_cell_content(arena, cell_node, content);
             row_node.append(cell_node);
         }
 
@@ -494,6 +499,49 @@ fn build_table<'a>(arena: &'a comrak::Arena<'a>, cells: &[Vec<String>], has_head
     }
 
     Some(table_node)
+}
+
+/// Whether a table's first row can serve as its Markdown header row.
+///
+/// A header labels columns, so it fills at least two of them. A banner — the
+/// "总体策略说明：…" note a spreadsheet puts above its data, or the single cell of a
+/// one-column sheet — fills one, and the extractor hands it over as row 0 with the
+/// other cells empty. Promoting it to the header row put a 300-character note into
+/// the header of the rendered table; leaving it as data keeps the banner in the
+/// table where it belongs.
+fn first_row_labels_columns(cells: &[Vec<String>], num_cols: usize) -> bool {
+    num_cols >= 2
+        && cells
+            .first()
+            .is_some_and(|row| row.iter().filter(|cell| !cell.trim().is_empty()).count() >= 2)
+}
+
+/// Append a cell's content, keeping the source's own line breaks as `<br>`.
+///
+/// Mirrors [`super::common::push_escaped_cell`] (xberg-io/xberg#163): a raw
+/// newline cannot appear inside a GFM row, but dropping the break instead
+/// folded a spreadsheet cell's four lines into one run-on line. An `HtmlInline`
+/// node is required because a `Text` node's `<`/`>` would be escaped into
+/// `\<br\>` by the CommonMark writer.
+fn append_cell_content<'a>(arena: &'a comrak::Arena<'a>, cell: &'a AstNode<'a>, content: &str) {
+    let mut lines: Vec<&str> = content
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    while lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            cell.append(mk(arena, NodeValue::HtmlInline(CELL_LINE_BREAK.to_string())));
+        }
+        if !line.is_empty() {
+            cell.append(mk_text(arena, line));
+        }
+    }
 }
 
 /// Bullet glyphs that OCR/plain-text extraction commonly reads as unordered

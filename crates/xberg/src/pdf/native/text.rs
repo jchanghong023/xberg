@@ -331,7 +331,7 @@ pub(crate) const FURNITURE_MIN_LINE_CHARS: usize = 12;
 /// short relative to the whole document.
 const FURNITURE_MIN_PAGE_FRACTION: f64 = 0.25;
 const FURNITURE_MIN_PAGES: usize = 3;
-const FURNITURE_MIN_CONSECUTIVE_PAGES: usize = 8;
+pub(crate) const FURNITURE_MIN_CONSECUTIVE_PAGES: usize = 8;
 
 /// Consecutive-page bar shared with the structured-PDF furniture pass.
 pub(crate) fn furniture_min_consecutive_pages() -> usize {
@@ -410,15 +410,21 @@ pub(crate) fn furniture_from_page_lines(pages: &[Vec<String>]) -> std::collectio
             if line.chars().count() < FURNITURE_MIN_LINE_CHARS {
                 continue;
             }
+            // The streak update sits inside the insert branch: a running header
+            // that also sits in the footer zone (a book's title in both edge
+            // bands) would otherwise be processed twice for the same page, and
+            // the second pass finds last_index == page_index, fails the
+            // immediately-previous-page check, and resets the run to 1 —
+            // discarding the streak the page was about to complete.
             if seen_on_this_page.insert(line) {
                 *page_counts.entry(line.to_string()).or_insert(0) += 1;
+                let streak = match streaks.get(line) {
+                    // Continues the run only when this is the immediately previous page.
+                    Some(&(last_index, run)) if last_index + 1 == page_index => run + 1,
+                    _ => 1,
+                };
+                streaks.insert(line, (page_index, streak));
             }
-            let streak = match streaks.get(line) {
-                // Continues the run only when this is the immediately previous page.
-                Some(&(last_index, run)) if last_index + 1 == page_index => run + 1,
-                _ => 1,
-            };
-            streaks.insert(line, (page_index, streak));
         }
     }
 

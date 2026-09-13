@@ -66,6 +66,22 @@ struct Placement {
     cell: Option<(u32, u32)>,
 }
 
+/// One floating text shape (`xdr:sp` with a `xdr:txBody`) from a drawing part.
+///
+/// A workbook's drawings carry text as well as pictures: the labels of a flow
+/// chart drawn in Excel, the callouts and titles of a dashboard sheet. calamine
+/// models cells and formulas only, so without this a sheet whose content is a
+/// diagram extracted as an empty table.
+pub(crate) struct XlsxShapeText {
+    /// The shape's paragraphs, joined with a single space.
+    pub(crate) text: String,
+    /// Name of the sheet whose drawing part holds the shape, as written in
+    /// `xl/workbook.xml`.
+    pub(crate) sheet_name: String,
+    /// Zero-based `(row, col)` of the shape's anchor, for reading order.
+    pub(crate) anchor: Option<(u32, u32)>,
+}
+
 /// Pictures plus the alt text of the anchor they were first seen under, keyed by
 /// media part name.
 type Placements = HashMap<String, (Placement, Option<String>)>;
@@ -76,40 +92,48 @@ struct Rel {
     kind: String,
 }
 
-/// Read every `xl/media/*` picture from an in-memory spreadsheet package.
+/// Read every `xl/media/*` picture, and every floating shape's text, from an
+/// in-memory spreadsheet package.
 ///
 /// A blob that is not a readable ZIP (a legacy `.xls`, an ODS, a corrupt file)
 /// yields no pictures; the caller has already reported the format's real
-/// problem, so this stays a debug log rather than a second error.
-pub(crate) fn read_xlsx_pictures_from_bytes(data: &[u8], limits: &SecurityLimits) -> Vec<XlsxPicture> {
+/// problem, so this stays a debug log rather than a second error. Shape text is
+/// read from the same drawing parts either way — `include_pictures` only skips
+/// loading the media bytes for callers that have no use for them.
+pub(crate) fn read_xlsx_drawings_from_bytes(
+    data: &[u8],
+    limits: &SecurityLimits,
+    include_pictures: bool,
+) -> (Vec<XlsxPicture>, Vec<XlsxShapeText>) {
     match zip::ZipArchive::new(std::io::Cursor::new(data)) {
-        Ok(mut archive) => read_archive(&mut archive, limits),
+        Ok(mut archive) => read_archive(&mut archive, limits, include_pictures),
         Err(e) => {
             tracing::debug!(error = %e, "spreadsheet is not a readable ZIP; no pictures read");
-            Vec::new()
+            (Vec::new(), Vec::new())
         }
     }
 }
 
 /// Read every `xl/media/*` picture from a spreadsheet file on disk.
 ///
-/// Same semantics as [`read_xlsx_pictures_from_bytes`].
-pub(crate) fn read_xlsx_pictures_from_file(
+/// Same semantics as [`read_xlsx_drawings_from_bytes`].
+pub(crate) fn read_xlsx_drawings_from_file(
     path: &std::path::Path,
     limits: &SecurityLimits,
-) -> Vec<XlsxPicture> {
+    include_pictures: bool,
+) -> (Vec<XlsxPicture>, Vec<XlsxShapeText>) {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(e) => {
             tracing::debug!(path = %path.display(), error = %e, "spreadsheet file could not be opened; no pictures read");
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         }
     };
     match zip::ZipArchive::new(file) {
-        Ok(mut archive) => read_archive(&mut archive, limits),
+        Ok(mut archive) => read_archive(&mut archive, limits, include_pictures),
         Err(e) => {
-            tracing::debug!(path = %path.display(), error = %e, "spreadsheet is not a readable ZIP; no pictures read");
-            Vec::new()
+            tracing::debug!(path = %path.display(), error = %e, "spreadsheet file is not a readable ZIP; no pictures read");
+            (Vec::new(), Vec::new())
         }
     }
 }
@@ -119,7 +143,11 @@ pub(crate) fn read_xlsx_pictures_from_file(
 /// The media parts come first and independently of the drawing walk: a picture
 /// whose anchor cannot be resolved is still returned, so a package that trips
 /// the anchor parser never silently loses its pictures.
-fn read_archive<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, limits: &SecurityLimits) -> Vec<XlsxPicture> {
+fn read_archive<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    limits: &SecurityLimits,
+    include_pictures: bool,
+) -> (Vec<XlsxPicture>, Vec<XlsxShapeText>) {
     let mut names: Vec<String> = archive
         .file_names()
         .filter(|name| name.starts_with(MEDIA_PREFIX))
@@ -128,7 +156,10 @@ fn read_archive<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, limits: &Secur
     names.sort_unstable();
     names.dedup();
 
-    let placements = collect_placements(archive);
+    let (placements, shapes) = collect_drawing_data(archive);
+    if !include_pictures {
+        return (Vec::new(), shapes);
+    }
 
     let mut pictures = Vec::with_capacity(names.len());
     let mut total_bytes: usize = 0;
@@ -166,7 +197,7 @@ fn read_archive<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, limits: &Secur
             description: description.filter(|text| !text.trim().is_empty()),
         });
     }
-    pictures
+    (pictures, shapes)
 }
 
 /// Detect the picture's format from its magic bytes, falling back to the part's
@@ -235,17 +266,22 @@ fn read_member<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str, lim
 }
 
 /// Walk the workbook's sheet list and every drawing part each sheet references,
-/// recording where each media part is anchored. First placement wins, and the
-/// walk is sheet-ordered then part-name-ordered, so the result is deterministic.
-fn collect_placements<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Placements {
+/// recording where each media part is anchored and the text of every floating
+/// shape. First placement wins, and the walk is sheet-ordered then
+/// part-name-ordered, so the result is deterministic.
+fn collect_drawing_data<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+) -> (Placements, Vec<XlsxShapeText>) {
     let mut placements = Placements::new();
+    let mut shapes = Vec::new();
+    let mut visited_parts = std::collections::HashSet::new();
     let Some(workbook_xml) = read_member(archive, "xl/workbook.xml", super::MAX_EXCEL_ZIP_MEMBER_SIZE) else {
-        return placements;
+        return (placements, shapes);
     };
     let Some(workbook_rels_xml) =
         read_member(archive, "xl/_rels/workbook.xml.rels", super::MAX_EXCEL_ZIP_MEMBER_SIZE)
     else {
-        return placements;
+        return (placements, shapes);
     };
     let workbook_rels = parse_rels(&workbook_rels_xml);
 
@@ -256,18 +292,32 @@ fn collect_placements<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> Place
         let Some(worksheet) = resolve_relative("xl", &rel.target) else {
             continue;
         };
-        collect_sheet_placements(archive, &worksheet, &sheet_name, &mut placements);
+        collect_sheet_placements(
+            archive,
+            &worksheet,
+            &sheet_name,
+            &mut placements,
+            &mut shapes,
+            &mut visited_parts,
+        );
     }
-    placements
+    (placements, shapes)
 }
 
 /// Collect the placements of every drawing/vmlDrawing part one worksheet
-/// references.
+/// references, and the text of every shape those drawing parts carry.
+///
+/// `visited_parts` carries the DrawingML parts earlier sheets already consumed:
+/// a hand-built package can hang one drawing part on two worksheets, and a
+/// second walk would re-collect its shape text verbatim under the other sheet's
+/// name, where the placements' first-wins rule cannot help.
 fn collect_sheet_placements<R: Read + Seek>(
     archive: &mut zip::ZipArchive<R>,
     worksheet: &str,
     sheet_name: &str,
     placements: &mut Placements,
+    shapes: &mut Vec<XlsxShapeText>,
+    visited_parts: &mut std::collections::HashSet<String>,
 ) {
     let Some(rels_path) = rels_path_for(worksheet) else {
         return;
@@ -317,8 +367,11 @@ fn collect_sheet_placements<R: Read + Seek>(
         };
         if is_vml {
             collect_vml_placements(&xml, parent_dir(&part), sheet_name, &part_rels, placements);
-        } else {
-            collect_drawing_placements(&xml, parent_dir(&part), sheet_name, &part_rels, placements);
+        } else if visited_parts.insert(part.clone()) {
+            // First sheet to reference this drawing part owns its walk: the
+            // placements it records are deduped first-wins anyway, and this is
+            // what keeps a shared part's shape text from appearing twice.
+            collect_drawing_placements(&xml, parent_dir(&part), sheet_name, &part_rels, placements, shapes);
         }
     }
 }
@@ -326,13 +379,16 @@ fn collect_sheet_placements<R: Read + Seek>(
 /// Record the placement of every `a:blip` in one DrawingML drawing part. The
 /// enclosing cell anchor (`xdr:twoCellAnchor`/`oneCellAnchor`) carries the
 /// `from` cell; a group's blips inherit the group anchor, which is the cell the
-/// group starts at.
+/// group starts at. The text of every `xdr:sp` in the same part is collected
+/// alongside, since a shape is anchored the same way and both are read from the
+/// one parse.
 fn collect_drawing_placements(
     xml: &[u8],
     directory: &str,
     sheet_name: &str,
     rels: &HashMap<String, Rel>,
     placements: &mut Placements,
+    shapes: &mut Vec<XlsxShapeText>,
 ) {
     let Some(text) = xml_text(xml) else {
         return;
@@ -382,6 +438,79 @@ fn collect_drawing_placements(
                 description,
             ));
     }
+
+    for shape in document
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "sp")
+    {
+        let Some(text) = shape_text(shape) else {
+            continue;
+        };
+        let anchor = shape.ancestors().find(|node| {
+            node.is_element()
+                && matches!(
+                    node.tag_name().name(),
+                    "twoCellAnchor" | "oneCellAnchor" | "absoluteAnchor"
+                )
+        });
+        shapes.push(XlsxShapeText {
+            text,
+            sheet_name: sheet_name.to_string(),
+            anchor: anchor.and_then(from_cell),
+        });
+    }
+}
+
+/// The text of one DrawingML shape, or `None` when it carries none.
+///
+/// A `xdr:txBody` holds paragraphs (`a:p`) of runs (`a:t`); runs of the same
+/// paragraph are contiguous text, so they are concatenated without a separator
+/// while paragraphs are joined by a space.
+///
+/// `<`, `>` and `&` are entity-encoded: a flowchart's text boxes hold connector
+/// glyphs and comparison text, and a bare `<` in Markdown starts an HTML tag
+/// (CommonMark only recovers it when the tag is unterminated), so `&lt;` is both
+/// what the drawing means and what survives rendering.
+fn shape_text(shape: roxmltree::Node<'_, '_>) -> Option<String> {
+    let body = shape
+        .children()
+        .find(|node| node.is_element() && node.tag_name().name() == "txBody")?;
+    let mut paragraphs: Vec<String> = Vec::new();
+    for paragraph in body
+        .descendants()
+        .filter(|node| node.is_element() && node.tag_name().name() == "p")
+    {
+        let line: String = paragraph
+            .descendants()
+            .filter(|node| node.is_element() && node.tag_name().name() == "t")
+            .filter_map(|run| run.text())
+            .collect();
+        let line = line.trim();
+        if !line.is_empty() {
+            paragraphs.push(line.to_string());
+        }
+    }
+    if paragraphs.is_empty() {
+        return None;
+    }
+    Some(entity_encode_markup(&paragraphs.join(" ")))
+}
+
+/// Entity-encode the three characters that would otherwise be read as markup.
+fn entity_encode_markup(text: &str) -> String {
+    if !text.contains(['<', '>', '&']) {
+        return text.to_string();
+    }
+    let mut encoded = String::with_capacity(text.len());
+    for character in text.chars() {
+        match character {
+            '<' => encoded.push_str("&lt;"),
+            '>' => encoded.push_str("&gt;"),
+            '&' => encoded.push_str("&amp;"),
+            other => encoded.push(other),
+        }
+    }
+    encoded
 }
 
 /// Record the placement of every legacy VML picture shape (`v:shape` holding a
@@ -623,5 +752,42 @@ mod tests {
         // `LEFT COLUMN, LEFT OFFSET, TOP ROW, TOP OFFSET, ...` from the VML spec.
         assert_eq!(vml_cell("7, 326, 2, 10, 8, 129, 3, 237"), Some((2, 7)));
         assert_eq!(vml_cell("not an anchor"), None);
+    }
+
+    #[test]
+    fn should_read_shape_text_with_runs_joined_and_paragraphs_spaced() {
+        let xml = "<xdr:wsDr xmlns:xdr=\"urn:x\" xmlns:a=\"urn:a\"><xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:row>2</xdr:row></xdr:from><xdr:sp><xdr:txBody><a:p><a:r><a:t>自动</a:t></a:r><a:r><a:t>编译链接</a:t></a:r></a:p><a:p><a:r><a:t>源码</a:t></a:r></a:p></xdr:txBody></xdr:sp></xdr:twoCellAnchor></xdr:wsDr>";
+        let mut placements = Placements::new();
+        let mut shapes = Vec::new();
+        collect_drawing_placements(
+            xml.as_bytes(),
+            "xl/drawings",
+            "流程图",
+            &HashMap::new(),
+            &mut placements,
+            &mut shapes,
+        );
+        assert!(placements.is_empty(), "the part holds no picture relationship");
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].text, "自动编译链接 源码");
+        assert_eq!(shapes[0].sheet_name, "流程图");
+        assert_eq!(shapes[0].anchor, Some((2, 1)));
+    }
+
+    #[test]
+    fn should_entity_encode_shape_text_that_is_only_punctuation() {
+        let xml = "<xdr:wsDr xmlns:xdr=\"urn:x\" xmlns:a=\"urn:a\"><xdr:sp><xdr:txBody><a:p><a:r><a:t>&gt;</a:t></a:r></a:p></xdr:txBody></xdr:sp></xdr:wsDr>";
+        let mut placements = Placements::new();
+        let mut shapes = Vec::new();
+        collect_drawing_placements(
+            xml.as_bytes(),
+            "xl/drawings",
+            "Sheet1",
+            &HashMap::new(),
+            &mut placements,
+            &mut shapes,
+        );
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].text, "&gt;", "a connector glyph must not become a raw `>`");
     }
 }

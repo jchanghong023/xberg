@@ -336,7 +336,7 @@ fn push_table_row(out: &mut String, row: &[String], num_cols: usize) {
 
 /// Stand-in for a line break inside a table cell. A raw newline ends the table
 /// row, splitting one cell's content across two rows (xberg-io/xberg#163).
-const CELL_LINE_BREAK: &str = "<br>";
+pub(crate) const CELL_LINE_BREAK: &str = "<br>";
 
 /// Push `content` into `out`, escaping every character that would let a cell
 /// break out of its row. Avoids allocation when there is nothing to escape (the

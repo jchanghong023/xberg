@@ -32,7 +32,7 @@ pub(super) const MIN_LIGATURE_WITNESS_WORD_LEN: usize = 2;
 /// Some PDF fonts have broken ToUnicode CMaps that map ligature glyphs to
 /// ASCII characters. This function detects and repairs these patterns:
 ///
-/// **f-ligatures**: `!` → fi/ff, `"` → ffi, `#` → fi/fl
+/// **f-ligatures**: `!` → fi/ff, `"` → ffi
 /// **t-ligature**: `*` → tt
 ///
 /// All patterns are contextual: the corrupt character must appear between
@@ -101,14 +101,13 @@ pub(super) fn repair_contextual_ligatures(text: &str) -> Cow<'_, str> {
                 result.push_str("ffi");
                 repaired = true;
             }
-            '#' if prev_is_alpha && next_is_alpha => {
-                result.push_str("fi");
-                repaired = true;
-            }
-            '#' if prev_is_space_or_start && next_is_lower => {
-                result.push_str("fi");
-                repaired = true;
-            }
+            // Issue #1556-style removal (see the ':'/'M' note below): the '#'→"fi"/"fl"
+            // arms were dropped because '#' is an ordinary character in the documents
+            // this runs on. A Tessent ATPG manual's `#include`/`#faults`/
+            // `#clock_sequential_patterns` came out as `fiinclude`/`fifaults`/
+            // `ficlock_sequential_patterns` — the arm cannot tell a broken-CMap ligature
+            // from a C preprocessor directive, a Verilog delay, or a sheet reference,
+            // and the word-initial arm fired on every one of them. ~keep
             '!' if prev_is_space_or_start && next_is_lower => {
                 result.push_str("fi");
                 repaired = true;
@@ -816,8 +815,15 @@ mod tests {
 
     #[test]
     fn test_repair_contextual_ligatures_word_start() {
-        assert_eq!(repair_contextual_ligatures("#nancial"), "financial");
         assert_eq!(repair_contextual_ligatures("!nally"), "finally");
+    }
+
+    /// A `#` only ever introduced a false repair on this corpus's documents
+    /// (`#faults` -> `fifaults`), so it must pass through untouched.
+    #[test]
+    fn test_repair_contextual_ligatures_leaves_hash_alone() {
+        assert_eq!(repair_contextual_ligatures("#nancial"), "#nancial");
+        assert_eq!(repair_contextual_ligatures("#clock_sequential_patterns"), "#clock_sequential_patterns");
     }
 
     #[test]
@@ -828,10 +834,7 @@ mod tests {
 
     #[test]
     fn test_repair_contextual_ligatures_multiple() {
-        assert_eq!(
-            repair_contextual_ligatures("ef!cient and #nancial"),
-            "efficient and financial"
-        );
+        assert_eq!(repair_contextual_ligatures("ef!cient and #nancial"), "efficient and #nancial");
     }
 
     #[test]

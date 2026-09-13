@@ -51,6 +51,12 @@ pub(crate) fn ocr_duplicate_indices(texts: &[&str], ocr_contents: &[&str]) -> Ve
         let mut next = 0usize;
         let mut run: Vec<usize> = Vec::new();
         for (index, text) in texts.iter().enumerate() {
+            // An element another OCR content already eliminated is the inlined
+            // copy of that image, not document text: it must neither extend nor
+            // end this content's run.
+            if repeats[index] {
+                continue;
+            }
             let mut consumed = 0usize;
             let mut complete = true;
             for line in text.split('\n').map(str::trim).filter(|line| !line.is_empty()) {
@@ -76,7 +82,12 @@ pub(crate) fn ocr_duplicate_indices(texts: &[&str], ocr_contents: &[&str]) -> Ve
                     for index in run.drain(..) {
                         repeats[index] = true;
                     }
-                    next = 0;
+                    // The pipeline inlines each image's recognized text once, so
+                    // the first full line-for-line reproduction is that inlined
+                    // copy. Stopping here keeps a body paragraph the document
+                    // itself repeats later — a title above a logo image's text,
+                    // a repeated warning — from being deleted with it.
+                    break;
                 }
                 continue;
             }
