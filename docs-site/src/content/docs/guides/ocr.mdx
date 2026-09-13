@@ -72,7 +72,7 @@ The Candle backends (GLM-OCR, TrOCR, DeepSeek-OCR, PaddleOCR-VL) ship compiled i
 
 | Backend | Strengths | Trade-offs | Choose it when |
 | --- | --- | --- | --- |
-| **Tesseract** | Broad language and platform support; low runtime overhead; hierarchical hOCR output | Requires a system package and separately installed language data; less reliable on scene text and difficult scans | You need the default backend, WebAssembly support, or a small deployment footprint |
+| **Tesseract** | Broad language and platform support; low runtime overhead; hierarchical hOCR output | Requires a system package and separately installed language data; less reliable on scene text and difficult scans | You need the Tesseract fallback (builds without `paddle-ocr`), WebAssembly support, or a small deployment footprint |
 | **PaddleOCR** | Strong recognition quality; mobile and server model tiers; GPU support; strong CJK coverage | Larger model downloads; server models can be slow and memory-intensive on CPU | Recognition quality is the priority, especially for CJK documents, and you can budget for the model/runtime cost |
 | **Sceptre** | CRAFT detection and CRNN recognition; eight EasyOCR Gen2 language groups | CPU-only; tract mobile builds and opt-in worker-hosted WASM have larger artifacts | You need EasyOCR Gen2 recognition without a Python runtime |
 
@@ -1256,8 +1256,8 @@ Set `pipeline` (`OcrPipelineConfig`) to try several backends in priority order (
 
 When `pipeline` is set, the top-level `backend`, `vlm_fallback`, and `backend_options` are ignored — configure each stage directly instead.
 
-:::note[Automatic paddle-ocr pipeline]
-When the `paddle-ocr` feature is compiled in and `backend` is the default (`tesseract`), xberg auto-constructs a `[tesseract @ 100, paddleocr @ 50]` pipeline. An explicitly chosen non-default backend is honored as-is with no silent fallback.
+:::note[No automatic classical fallback]
+The default `backend` is already the strongest classical engine compiled in (`paddle-ocr` where the `paddle-ocr` feature is on, `tesseract` otherwise), so xberg does not mix classical backends on its own — a `[tesseract, paddleocr]` chain requires an explicit `pipeline`. Only `vlm_fallback` synthesises stages: the configured backend at priority 100, then `vlm` at 50 for `OnLowQuality`.
 :::
 
 <Tabs syncKey="lang">

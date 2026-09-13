@@ -40,7 +40,7 @@ cargo install xberg-cli --features mcp
 
 The Python (`xberg`) and Node (`@xberg-io/xberg`) packages are language SDKs/bindings, not the CLI. The prebuilt CLI binaries (brew, GitHub release) include the MCP server; a source build enables it with `--features mcp` (`mcp` is not in the CLI's default feature set).
 
-OCR ships with Tesseract by default. Install language packs for non-English documents:
+PaddleOCR is the default OCR backend; Tesseract is the fallback wherever PaddleOCR is not compiled in. Install Tesseract language packs for non-English documents:
 
 ```bash
 brew install tesseract-lang        # macOS

@@ -35,7 +35,7 @@ Point Xberg at anything — a PDF, a spreadsheet, a scanned image, an audio file
 |---|---|
 | **110 document formats** | PDFs, Office, images, HTML, email, e-books, scientific publications, and structured data across 146 file extensions, with intelligent MIME detection and bounded extraction controls. |
 | **URLs & the web** | Point Xberg at an `http(s)` URL — it fetches and extracts a single document, or crawls and follows links (Auto / Document / Crawl modes via the [crawlberg](https://github.com/xberg-io/crawlberg) engine). *Requires the `url-ingestion` feature.* |
-| **Audio & video transcription** | Speech-to-text from MP3, M4A, WAV, WebM, and MP4 tracks via Whisper ONNX (tiny → large-v3). *Requires the `transcription` feature.* |
+| **Audio & video transcription** | Speech-to-text from MP3, M4A, WAV, WebM, MP4, and Windows Media (WMV/ASF) tracks via Whisper ONNX (tiny → large-v3). *Requires the `transcription` feature.* |
 | **Archives, traversed** | List and **recursively** extract nested `.zip`, `.tar`, `.gz`, `.7z` — documents inside documents — guarded by zip-bomb, compression-ratio, and nesting-depth limits. |
 | **OCR on demand** | Tesseract, PaddleOCR, Candle, or VLM backends — fallback chains, confidence scores, language auto-detection, extensible via plugins. |
 | **Layout & tables** | ML layout models (PP-DocLayout-V3, RT-DETR) and table structure (TATR, SLANet) reconstruct reading order and cell grids for clean Markdown. |
@@ -373,7 +373,7 @@ Common use cases — see [Quick start guide](https://docs.xberg.io/getting-start
 
 ### Supported File Formats (110 formats · 146 file extensions · 58 MIME aliases)
 
-110 formats across 140 unique file extensions, with 56 compatibility MIME aliases, intelligent format detection, and comprehensive metadata extraction.
+110 formats across 146 unique file extensions, with 58 compatibility MIME aliases, intelligent format detection, and comprehensive metadata extraction.
 
 #### Office Documents
 
@@ -404,6 +404,7 @@ Common use cases — see [Quick start guide](https://docs.xberg.io/getting-start
 | **MP4 audio track** | `.mp4`, `.mpg4`, `.mp4v`, `.m4v` | Audio-track transcription only |
 | **MPEG audio track** | `.mpeg`, `.mpg`, `.mpe`, `.m1v`, `.m2v` | Audio-track transcription only |
 | **WebM audio track** | `.webm` | Audio-track transcription only |
+| **Windows Media audio track** | `.wmv`, `.asf` | Audio-track transcription only (Windows Media Foundation, or `ffmpeg` where the codecs are absent) |
 
 #### Web & Data
 

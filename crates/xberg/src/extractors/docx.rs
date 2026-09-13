@@ -1338,6 +1338,7 @@ impl InternalDocumentExtractor for DocxExtractor {
             .await;
             if !children.is_empty() {
                 internal_doc.children = Some(children);
+                crate::extraction::ooxml_embedded::append_embedded_object_text(&mut internal_doc);
             }
             internal_doc.processing_warnings.extend(embed_warnings);
         }

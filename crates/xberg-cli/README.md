@@ -16,7 +16,7 @@ Command-line interface for the Xberg document intelligence library.
 
 This crate provides a production-ready CLI tool for document extraction, MIME type detection, batch processing, embeddings, chunking, and cache management. It exposes the core extraction capabilities of the Xberg Rust library through an easy-to-use command-line interface.
 
-The CLI supports 110 across 146 including PDF, DOCX, PPTX, XLSX, images, HTML, and more, with optional OCR support for scanned documents.
+The CLI supports 110 file formats across 146 file extensions including PDF, DOCX, PPTX, XLSX, images, HTML, and more, with optional OCR support for scanned documents.
 
 ## Architecture
 

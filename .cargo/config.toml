@@ -4,7 +4,11 @@
 
 [build]
 incremental = true
-jobs = 4
+# Source of truth: alef.toml [workspace.scaffold.cargo] build_jobs.
+# Hand-aligned here because alef is not installed on this host; next
+# `alef scaffold` will rewrite this file (and the alef:hash header) from
+# that setting. package-cli-windows.ps1 still overrides via --jobs.
+jobs = 28
 
 [net]
 git-fetch-with-cli = true

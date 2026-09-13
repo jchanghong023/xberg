@@ -3,8 +3,11 @@ name: Build Windows CLI
 on:
   workflow_dispatch:
 
+# Read-only at the workflow level: only the release job writes (tag + release), so
+# the build steps -- and the third-party actions they run -- never hold a
+# write-scoped token.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: build-windows-cli-${{ github.ref }}
@@ -51,11 +54,24 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  release-windows-cli:
+    name: Publish timestamped GitHub release
+    needs: build-windows-cli
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - name: Download Windows CLI artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: xberg-cli-x86_64-pc-windows-msvc
+          path: .
+
       - name: Generate timestamped release version
         id: release
         shell: pwsh
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           $chinaTimeZone = [TimeZoneInfo]::FindSystemTimeZoneById("China Standard Time")
           $releaseTime = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $chinaTimeZone)
@@ -100,14 +116,12 @@ jobs:
           | **EMF/WMF → PNG** | Windows 下用 GDI 把 Office 里的 EMF/WMF 光栅化成 PNG，Markdown 预览器可直接显示 |
           | **图片 URL 同步** | re-encode 后重写 `content` 与 `formatted_content` 里的 `image_N.emf` → `.png`（含中文内容，UTF-8 安全） |
           | **alt 路径清洗** | 去掉 `C:\Users\...` 这类文件系统路径型 alt 文本，避免泄露本机路径 |
-          | **Markdown 图文块** | 图片路径与 OCR 文字保持在同一 fenced block（便于检索与阅读） |
-          | **PaddleOCR 默认** | OCR 默认后端改为 PaddleOCR（中文课件/扫描页更友好） |
+          | **Markdown 图片独立成段** | 图片标记作为独立段落写出，便于预览器渲染；OCR 文字在后续 `text` 围栏中保留版式 |
+          | **精简 OCR / 转写** | 打包版 OCR 走 Tesseract；音视频离线转写附带 Whisper tiny（不带 PaddleOCR / layout 模型） |
+          | **批处理图片分目录** | batch 文本/Toon 输出把各文档图片写入 `doc_<N>/`，避免同名 `image_N` 互相覆盖 |
 
           对应提交：
           - `feat(images): rasterize EMF/WMF to PNG and sanitize path-like alt text`
-          - `feat(ocr,markdown): default to PaddleOCR, and keep every image's path and text in one block`
-          - `fix(markdown): keep image OCR text when ocr_text_only is on`
-          - `feat(markdown): keep image OCR text and its path in one position-preserving fence`
           EOF
           )
           BUILD_INFO=$(cat <<EOF
@@ -124,7 +138,7 @@ jobs:
           ## 注意
 
           - 与上游 [xberg-io/xberg](https://github.com/xberg-io/xberg) 无关的第三方 fork；上游更新请自行 merge。
-          - 首次 OCR / layout 可能下载模型（PaddleOCR / RT-DETR），需外网。
+          - 首次 Tesseract OCR 可能按需下载语言数据，需外网；音视频转写使用包内 Whisper tiny，可离线。
           - 本包来自自动化流水线，未做人工全量回归；破坏性整理/清理不在本 CLI 默认路径中。
           EOF
           )

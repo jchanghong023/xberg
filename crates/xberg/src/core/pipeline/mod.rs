@@ -337,7 +337,10 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
     }
 
     #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
-    let image_ocr_enabled = config.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true);
+    // `disable_ocr` and `ocr.enabled = false` are hard switches: an explicit opt-out must
+    // never get image OCR, however `images.run_ocr_on_images` (on by default) is set. ~keep
+    let image_ocr_enabled = config.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true)
+        && !config.effective_disable_ocr();
     #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
     if image_ocr_enabled && !doc.images.is_empty() {
         let image_positions = image_ocr_positions(&doc);

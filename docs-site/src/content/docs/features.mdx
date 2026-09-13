@@ -6,13 +6,13 @@ import { Tabs, TabItem } from "@astrojs/starlight/components";
 
 A map of what Xberg can do. Each section links to the guide or reference page with configuration details and code examples.
 
-![Xberg features overview -- 106 input formats flow through extraction, OCR, and processing to produce text, tables, chunks, and metadata](../../assets/feature-overview.png)
+![Xberg features overview -- 110 input formats flow through extraction, OCR, and processing to produce text, tables, chunks, and metadata](../../assets/feature-overview.png)
 
 ---
 
 ## Format Support
 
-110 file formats across 140 unique file extensions, with 53 compatibility MIME aliases, are handled by native Rust
+110 file formats across 146 unique file extensions, with 58 compatibility MIME aliases, are handled by native Rust
 extractors — no LibreOffice or other external tools required.
 
 <Tabs syncKey="lang">
@@ -33,6 +33,7 @@ extractors — no LibreOffice or other external tools required.
 <span class="format-chip">reStructuredText <code>.rst</code></span>
 <span class="format-chip">Org <code>.org</code></span>
 <span class="format-chip">Hangul <code>.hwp .hwpx</code></span>
+<span class="format-chip">Visio <code>.vsd .vsdx .vsdm</code></span>
 </div>
 
 </TabItem>
@@ -98,6 +99,7 @@ for the full notice and source pointer.
 <span class="format-chip">MP4 audio track <code>.mp4 .mpg4 .mp4v .m4v</code></span>
 <span class="format-chip">MPEG audio track <code>.mpeg .mpg .mpe .m1v .m2v</code></span>
 <span class="format-chip">WebM audio track <code>.webm</code></span>
+<span class="format-chip">Windows Media <code>.wmv .asf</code></span>
 </div>
 
 Enable the `transcription` feature and set a `transcription` config block to extract Whisper ONNX transcripts from audio files and video audio tracks. See [Audio and Video Transcription](/guides/transcription/).

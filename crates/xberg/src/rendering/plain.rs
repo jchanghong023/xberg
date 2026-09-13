@@ -10,6 +10,8 @@ use crate::types::annotations::PdfAnnotation;
 use crate::types::document_structure::ContentLayer;
 use crate::types::internal::{ElementKind, InternalDocument};
 
+use super::{image_ocr_contents, ocr_duplicate_indices};
+
 use super::common::{
     annotation_display_text, annotation_type_label, get_admonition_kind, get_admonition_title, parse_metadata_entries,
     render_table_plain,
@@ -19,8 +21,12 @@ use super::common::{
 pub(crate) fn render_plain(doc: &InternalDocument) -> String {
     let mut out = String::with_capacity(doc.elements.len() * 80);
     let mut last_heading_depth: Option<u16> = None;
+    let repeated_ocr = ocr_duplicate_indices(&body_paragraph_texts(doc), &image_ocr_contents(doc));
 
-    for elem in &doc.elements {
+    for (index, elem) in doc.elements.iter().enumerate() {
+        if repeated_ocr[index] {
+            continue;
+        }
         if elem.layer != ContentLayer::Body {
             continue;
         }
@@ -293,6 +299,28 @@ fn render_annotations_plain(annotations: &[PdfAnnotation]) -> String {
         out.push('\n');
     }
     out
+}
+
+/// The text of each element when it is a body paragraph, and an empty string otherwise.
+///
+/// The empty string is the neutral value [`ocr_duplicate_indices`] expects for entries that
+/// cannot take part in a reproduction of a picture's recognized text.
+fn body_paragraph_texts(doc: &InternalDocument) -> Vec<&str> {
+    doc.elements
+        .iter()
+        .map(|elem| {
+            if elem.layer == ContentLayer::Body
+                && matches!(
+                    elem.kind,
+                    ElementKind::Title | ElementKind::Heading { .. } | ElementKind::Paragraph
+                )
+            {
+                elem.text.as_str()
+            } else {
+                ""
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

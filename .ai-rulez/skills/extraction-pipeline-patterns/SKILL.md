@@ -9,7 +9,7 @@ priority: critical
 
 # Extraction Pipeline Patterns
 
-**Format detection → extractor routing → post-processing, across 106 formats / 140 file extensions**
+**Format detection → extractor routing → post-processing, across 110 formats / 146 file extensions**
 
 The full-registry counts are verified against published claims by
 `scripts/sync_supported_counts.py verify`. Runtime `SUPPORTED_FORMAT_COUNT` and

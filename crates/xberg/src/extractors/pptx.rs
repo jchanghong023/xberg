@@ -449,8 +449,11 @@ fn strip_repeated_decoration_images(doc: &mut InternalDocument) {
         }
     }
 
-    // Slides covered per content hash (several indexes can share one logo's bytes).
+    // Slides covered per content hash (several indexes can share one logo's bytes),
+    // plus each image's hash: the retain below then decides from that map instead of
+    // re-hashing the image bytes once per referencing element.
     let mut slides_per_hash: ahash::AHashMap<u64, std::collections::BTreeSet<u32>> = ahash::AHashMap::new();
+    let mut hash_by_index: ahash::AHashMap<u32, u64> = ahash::AHashMap::new();
     for (image_index, image) in doc.images.iter().enumerate() {
         let Some(referencing) = slides_per_image.get(&(image_index as u32)) else {
             continue;
@@ -458,6 +461,7 @@ fn strip_repeated_decoration_images(doc: &mut InternalDocument) {
         let mut hasher = DefaultHasher::new();
         image.data.hash(&mut hasher);
         let hash = hasher.finish();
+        hash_by_index.insert(image_index as u32, hash);
         slides_per_hash.entry(hash).or_default().extend(referencing.iter().copied());
     }
     let decoration_hashes: std::collections::HashSet<u64> = slides_per_hash
@@ -469,17 +473,14 @@ fn strip_repeated_decoration_images(doc: &mut InternalDocument) {
         return;
     }
 
-    let is_decoration = |image_index: u32| -> bool {
-        doc.images
-            .get(image_index as usize)
-            .is_some_and(|image| {
-                let mut hasher = DefaultHasher::new();
-                image.data.hash(&mut hasher);
-                decoration_hashes.contains(&hasher.finish())
-            })
-    };
+    // Every index sharing a decoration image's bytes gets the same (dropped) decision.
+    let decoration_indexes: ahash::AHashSet<u32> = hash_by_index
+        .into_iter()
+        .filter(|(_, hash)| decoration_hashes.contains(hash))
+        .map(|(index, _)| index)
+        .collect();
     doc.elements.retain(|element| {
-        !matches!(element.kind, crate::types::internal::ElementKind::Image { image_index } if is_decoration(image_index))
+        !matches!(element.kind, crate::types::internal::ElementKind::Image { image_index } if decoration_indexes.contains(&image_index))
     });
 }
 
@@ -764,6 +765,7 @@ impl InternalDocumentExtractor for PptxExtractor {
             .await;
             if !children.is_empty() {
                 doc.children = Some(children);
+                crate::extraction::ooxml_embedded::append_embedded_object_text(&mut doc);
             }
             doc.processing_warnings.extend(embed_warnings);
         }
@@ -843,6 +845,7 @@ impl InternalDocumentExtractor for PptxExtractor {
                         .await;
                     if !children.is_empty() {
                         doc.children = Some(children);
+                        crate::extraction::ooxml_embedded::append_embedded_object_text(&mut doc);
                     }
                     doc.processing_warnings.extend(embed_warnings);
                 }

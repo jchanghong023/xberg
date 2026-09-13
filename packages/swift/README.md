@@ -91,7 +91,7 @@
   </a>
 </div>
 
-Extract text, tables, images, metadata, and code intelligence from 110 and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Swift bindings via swift-bridge for macOS and iOS, with native Swift types and async/await support.
+Extract text, tables, images, metadata, and code intelligence from 110 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Swift bindings via swift-bridge for macOS and iOS, with native Swift types and async/await support.
 
 ## What This Package Provides
 
@@ -217,9 +217,9 @@ print("Results: \(output.summary().results())")
 
 ## Features
 
-### Supported File Formats (110 · 146 · 58 MIME aliases)
+### Supported File Formats (110 formats · 146 file extensions · 58 MIME aliases)
 
-110 across 140 unique file extensions, with 56 compatibility MIME aliases, intelligent format detection, and comprehensive metadata extraction.
+110 formats across 146 unique file extensions, with 58 compatibility MIME aliases, intelligent format detection, and comprehensive metadata extraction.
 
 #### Office Documents
 
@@ -250,6 +250,7 @@ print("Results: \(output.summary().results())")
 | **MP4 audio track** | `.mp4`, `.mpg4`, `.mp4v`, `.m4v` | Audio-track transcription only |
 | **MPEG audio track** | `.mpeg`, `.mpg`, `.mpe`, `.m1v`, `.m2v` | Audio-track transcription only |
 | **WebM audio track** | `.webm` | Audio-track transcription only |
+| **Windows Media audio track** | `.wmv`, `.asf` | Audio-track transcription only (Windows Media Foundation, or `ffmpeg` where the codecs are absent) |
 
 #### Web & Data
 
@@ -296,7 +297,7 @@ Powered by [tree-sitter-language-pack](https://github.com/xberg-io/tree-sitter-l
 - **Metadata Extraction** - Retrieve document properties, creation date, author, etc.
 - **Table Extraction** - Parse tables with structure and cell content preservation
 - **Image Extraction** - Extract embedded images and render page previews
-- **Audio/Video Transcription** - Extract speech transcripts from MP3, M4A, WAV, WebM, and MP4 inputs when the native transcription feature is available
+- **Audio/Video Transcription** - Extract speech transcripts from MP3, M4A, WAV, WebM, MP4, and Windows Media (WMV/ASF) inputs when the native transcription feature is available
 - **OCR Support** - Integrate multiple OCR backends for scanned documents
 - **Async/Await** - Non-blocking document processing with concurrent operations
 - **Plugin System** - Extensible post-processing for custom text transformation
@@ -404,7 +405,7 @@ Contributions are welcome! See [Contributing Guide](https://github.com/xberg-io/
 
 ## Part of Xberg.io
 
-- [Xberg](https://github.com/xberg-io/xberg) — the open-source content-intelligence engine: text, tables, and metadata from 110 (146), with OCR, transcription, and code intelligence. MIT.
+- [Xberg](https://github.com/xberg-io/xberg) — the open-source content-intelligence engine: text, tables, and metadata from 110 formats (146 file extensions), with OCR, transcription, and code intelligence. MIT.
 - [Xberg Pro](https://xberg.io) — a complete self-hosted content-intelligence backend in a single container. Commercial.
 - [Xberg Enterprise](https://xberg.io) — the distributed, governed content-intelligence platform, scaled on Kubernetes with team governance and support. Commercial.
 - [crawlberg](https://github.com/xberg-io/crawlberg) — web crawling and scraping with HTML→Markdown and headless-Chrome fallback.

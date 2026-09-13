@@ -333,11 +333,22 @@ const FURNITURE_MIN_PAGE_FRACTION: f64 = 0.25;
 const FURNITURE_MIN_PAGES: usize = 3;
 const FURNITURE_MIN_CONSECUTIVE_PAGES: usize = 8;
 
+/// Consecutive-page bar shared with the structured-PDF furniture pass.
+pub(crate) fn furniture_min_consecutive_pages() -> usize {
+    FURNITURE_MIN_CONSECUTIVE_PAGES
+}
+
 /// Pages with fewer non-empty lines than this are never furniture candidates:
 /// below `2 * EDGE_LINES + 1` the top and bottom zones overlap and every line
 /// would look like an edge line, so a short page carries no trustworthy
 /// "middle" to protect and passes through untouched.
 const FURNITURE_MIN_PAGE_LINES: usize = 2 * EDGE_LINES + 1;
+
+/// Minimum non-empty lines a page needs before its edge zones are trusted
+/// (below this the top/bottom zones overlap). Shared with the structured pass.
+pub(crate) fn furniture_min_page_lines() -> usize {
+    FURNITURE_MIN_PAGE_LINES
+}
 
 /// Drop lines that repeat across many pages' top/bottom edges (running headers
 /// and footers) from every page.
@@ -350,8 +361,8 @@ const FURNITURE_MIN_PAGE_LINES: usize = 2 * EDGE_LINES + 1;
 /// parks a running footer mid-page, so confining removal to the edges leaves
 /// most copies behind.
 ///
-/// Docs with fewer than four pages carry too little evidence to judge a line
-/// furniture, so they pass through unchanged.
+/// Docs with fewer than [`FURNITURE_MIN_PAGES`] pages carry too little
+/// evidence to judge a line furniture, so they pass through unchanged.
 /// Furniture strings for pages given as per-page line lists.
 ///
 /// Same thresholds as [`strip_repeated_edge_furniture`], exposed so the
@@ -438,8 +449,14 @@ pub(crate) fn furniture_from_page_lines(pages: &[Vec<String>]) -> std::collectio
 /// parks a running footer mid-page, so confining removal to the edges leaves
 /// most copies behind.
 ///
-/// Docs with fewer than four pages carry too little evidence to judge a line
-/// furniture, so they pass through unchanged.
+/// Matching is exact (`line == furniture`), not substring: a body line that
+/// merely contains a furniture string — a section title under a running
+/// header, say — is real content and stays. The cost is that a wrapped
+/// variant of the footer (the note breaks at a different word on some pages)
+/// no longer matches and can survive as an extra line.
+///
+/// Docs with fewer than [`FURNITURE_MIN_PAGES`] pages carry too little
+/// evidence to judge a line furniture, so they pass through unchanged.
 pub(crate) fn strip_repeated_edge_furniture(pages: &mut [String]) {
     let as_lines: Vec<Vec<String>> = pages
         .iter()
@@ -460,13 +477,13 @@ pub(crate) fn strip_repeated_edge_furniture(pages: &mut [String]) {
             // pages; removal is global, because once that bar is met the exact
             // string is page furniture wherever it appears — column-aware
             // reading order frequently parks a footer mid-page.
-            // A wrapped variant of a furniture line (the note breaks at a
-            // different word on some pages) is a strict substring of the
-            // registered string, so substring matching catches it; a distinct
-            // body sentence never is.
+            // The match is exact: a body line that merely contains a furniture
+            // string (a section title under a running header, say) is real
+            // content and stays, at the cost of leaving a wrapped footer
+            // variant that no longer equals the registered string behind.
             let is_furniture = !trimmed.is_empty()
                 && trimmed.chars().count() >= FURNITURE_MIN_LINE_CHARS
-                && furniture.iter().any(|line| line.contains(trimmed));
+                && furniture.contains(trimmed);
             if is_furniture {
                 continue;
             }
@@ -2064,6 +2081,34 @@ mod tests {
 
         for (page, text) in pages.iter().enumerate() {
             assert!(text.contains(body), "page {page} lost repeated body text: {text:?}");
+        }
+    }
+
+    /// Matching is exact. A body line that merely contains a furniture string
+    /// as a proper substring of its own is content, while the identical header
+    /// line is still dropped from every page.
+    #[test]
+    fn a_body_line_that_only_contains_a_furniture_string_is_kept() {
+        let header = "Chapter 3 Installation Guide";
+        let body_line = "Installation Guide";
+        let mut pages: Vec<String> = (0..8)
+            .map(|page| {
+                let mut lines: Vec<String> =
+                    (0..5).map(|line| format!("body {page}.{line}")).collect();
+                // Middle of the page: outside the first/last three edge lines,
+                // so it never becomes a furniture candidate itself.
+                lines.insert(2, body_line.to_string());
+                format!("{header}\n{}\n", lines.join("\n"))
+            })
+            .collect();
+        strip_repeated_edge_furniture(&mut pages);
+
+        for (page, text) in pages.iter().enumerate() {
+            assert!(!text.contains(header), "page {page} still carries the header: {text:?}");
+            assert!(
+                text.contains(body_line),
+                "page {page} lost a body line that only contains the header: {text:?}"
+            );
         }
     }
 

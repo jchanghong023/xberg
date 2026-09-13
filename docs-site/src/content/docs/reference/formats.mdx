@@ -4,7 +4,7 @@ title: "Format Support"
 
 import { Tabs, TabItem } from "@astrojs/starlight/components";
 
-Xberg supports 110 file formats across 140 unique file extensions and accepts 53 compatibility MIME aliases.
+Xberg supports 110 file formats across 146 unique file extensions and accepts 58 compatibility MIME aliases.
 
 ## Overview
 
@@ -41,6 +41,7 @@ All formats support async/await and batch processing. Image formats and PDFs sup
 | Apple Numbers            | `.numbers`                                                                  | `application/x-iwork-numbers-sffnumbers`                                    | Native Rust             | No                        | Spreadsheet extraction                                      |
 | Apple Keynote            | `.key`                                                                      | `application/x-iwork-keynote-sffkey`                                        | Native Rust             | No                        | Slide and speaker notes extraction                          |
 | WordPerfect              | `.wpd`, `.wp`, `.wp5`, `.wp6`                                               | `application/vnd.wordperfect`                                               | Native libwpd binding   | No                        | WP 4.2–X-series document extraction                          |
+| Visio                    | `.vsd`, `.vsdx`, `.vsdm`                                                    | `application/vnd.visio`, `application/vnd.ms-visio.drawing`                 | Native Rust (OLE/CFB + OPC) | No                        | Shape text from legacy binary `.vsd` and OPC `.vsdx`/`.vsdm` drawing packages |
 
 ### Text & Markup
 
@@ -119,6 +120,7 @@ Audio/video formats use Whisper ONNX transcription when the `transcription` Carg
 | MP4 Video Audio | `.mp4`, `.mpg4`, `.mp4v`, `.m4v` | `video/mp4` | Whisper ONNX          | No          | Audio-track transcription only           |
 | MPEG Video Audio | `.mpeg`, `.mpg`, `.mpe`, `.m1v`, `.m2v` | `video/mpeg` | Whisper ONNX       | No          | Audio-track transcription only           |
 | WebM Video Audio | `.webm`         | `video/webm` | Whisper ONNX            | No          | Audio-track transcription only           |
+| Windows Media | `.wmv`, `.asf` | `video/x-ms-wmv` | Whisper ONNX (audio via Windows Media Foundation) | No | Audio-track transcription only; an `ffmpeg` on `PATH` or `XBERG_FFMPEG` is used where the media codecs are absent |
 
 ### Archives
 

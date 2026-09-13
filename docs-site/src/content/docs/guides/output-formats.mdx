@@ -94,15 +94,15 @@ table_anchors = true
 
 **Structure contract.** `output_format = Plain` skips the structure heuristic entirely and returns raw
 text. Any other `output_format` always runs the heuristic; when layout detection is also enabled, its
-detections are layered on top. Layout detection is off by default, and `Plain` is the default
+detections are layered on top. Layout detection is off by default, and `Markdown` is the default
 `output_format`. The two are not currently linked: enabling layout detection while `output_format`
 stays `Plain` still runs the layout model, but its result is computed and then discarded rather than
 forcing a non-`Plain` output.
 
 | `OutputFormat`    | Description                                                              |
 | ----------------- | ----------------------------------------------------------------------- |
-| `Plain` (default) | Raw extracted text with minimal formatting                              |
-| `Markdown`        | Markdown-formatted content                                              |
+| `Plain`          | Raw extracted text with minimal formatting                              |
+| `Markdown` (default) | Markdown-formatted content                                          |
 | `Djot`            | Djot markup                                                            |
 | `Html`            | HTML-formatted content                                                  |
 | `Json`            | JSON tree with heading-driven sections                                  |

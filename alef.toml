@@ -30,6 +30,14 @@ languages = [
 python_package_manager = "uv"
 node_package_manager = "pnpm"
 
+# Written into the scaffold-managed .cargo/config.toml (`[build] jobs`).
+# Default is 4 (safe for 16 GB machines); this host is 16C/32T with ~47 GB
+# RAM, so a higher cap is safe for day-to-day cargo build/check/clippy.
+# package-cli-windows.ps1 still passes --jobs explicitly and overrides this.
+# ~keep
+[workspace.scaffold.cargo]
+build_jobs = 28
+
 [workspace.ownership]
 user_owned = [
   "e2e/csharp/Xberg.E2eTests.csproj",

@@ -2579,4 +2579,37 @@ mod document_counts {
             "unrenamed indices must keep their extension; got: {content}"
         );
     }
+
+    /// The PPTX content path bakes a picture's placeholder into the code block around it. Left
+    /// there, the reference is inside a fence, where no markdown reader fetches or draws it.
+    #[test]
+    fn image_marker_is_lifted_out_of_the_fence_around_it() {
+        let mut content =
+            String::from("前言\n\n```text\n![](image_3.png)\n-flag value\n-other value\n```\n\n后记\n");
+        crate::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(
+            content,
+            "前言\n\n![](image_3.png)\n\n```text\n-flag value\n-other value\n```\n\n后记\n",
+            "the marker must be its own paragraph and the fence must keep the listing"
+        );
+    }
+
+    /// A picture with no recognized text leaves a fence holding nothing but the marker: the
+    /// whole fence goes away instead of leaving an unopened closing line behind.
+    #[test]
+    fn a_fence_holding_only_the_marker_loses_the_whole_fence() {
+        let mut content = String::from("前言\n```text\n![](image_7.emf)\n```\n后记\n");
+        crate::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(content, "前言\n![](image_7.emf)\n\n后记\n");
+    }
+
+    /// Code that merely starts with an image-looking line is still code: only a fence whose
+    /// body opens with a real markdown image reference is rewritten.
+    #[test]
+    fn a_fence_whose_first_line_is_not_a_marker_is_untouched() {
+        let source = String::from("```text\n![bracketed](not a reference\nprint(1)\n```\n");
+        let mut content = source.clone();
+        crate::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(content, source);
+    }
 }

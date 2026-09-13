@@ -207,11 +207,11 @@ pub struct ExtractionConfig {
     #[serde(default = "ExtractionConfig::default_max_embedded_file_bytes")]
     pub max_embedded_file_bytes: Option<u64>,
 
-    /// Content text format (default: Plain).
+    /// Content text format (default: `Markdown`).
     ///
     /// Controls the format of the extracted content:
-    /// - `Plain`: Raw extracted text (default)
-    /// - `Markdown`: Markdown formatted output
+    /// - `Plain`: Raw extracted text
+    /// - `Markdown`: Markdown formatted output (default)
     /// - `Djot`: Djot markup format (requires djot feature)
     /// - `Html`: HTML formatted output
     ///

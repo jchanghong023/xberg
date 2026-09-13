@@ -121,7 +121,7 @@ pub(crate) fn tesseract_language_name(code: &str) -> String {
     let lowered = code.trim().to_ascii_lowercase();
     match lowered.as_str() {
         // Chinese packs are chosen by script, not by language.
-        "zh" | "zh-cn" | "zh-hans" | "zho" | "chs" => "chi_sim",
+        "zh" | "zh-cn" | "zh-hans" | "zho" | "chs" | "chi" => "chi_sim",
         "zh-tw" | "zh-hk" | "zh-hant" | "cht" => "chi_tra",
         // ISO 639-1 → the ISO 639-2/T name Tesseract uses.
         "en" => "eng",
@@ -168,6 +168,7 @@ mod language_name_tests {
     fn maps_iso_codes_to_the_pack_tesseract_ships() {
         assert_eq!(tesseract_language_name("zh"), "chi_sim");
         assert_eq!(tesseract_language_name("zh-TW"), "chi_tra");
+        assert_eq!(tesseract_language_name("chi"), "chi_sim");
         assert_eq!(tesseract_language_name("en"), "eng");
         assert_eq!(tesseract_language_name("de"), "deu");
         assert_eq!(tesseract_language_name("ja"), "jpn");

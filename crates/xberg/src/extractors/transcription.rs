@@ -140,11 +140,21 @@ async fn run_transcription_pipeline(
 ) -> Result<InternalDocument> {
     let bytes_owned = content.to_vec();
     let max_bytes_for_decode = tcfg.max_bytes;
+    let max_duration_for_decode = tcfg.max_duration_ms;
+    let timeout_for_decode = tcfg.timeout_ms;
     let mime_owned = mime_type.to_string();
     let (pcm, tags): (PcmAudio, crate::transcription::tags::AudioTags) = task::spawn_blocking(move || {
         // ASF/WMV comes back through Media Foundation; everything else uses the
-        // built-in decoder unchanged.
-        let pcm = decode_to_pcm(&bytes_owned, &mime_owned, max_bytes_for_decode)?;
+        // built-in decoder unchanged. The limits travel with the call because this
+        // task outlives the extractor's timeout: a rescue decoder has to stop
+        // itself, the wrapper above can only stop waiting for it.
+        let pcm = decode_to_pcm(
+            &bytes_owned,
+            &mime_owned,
+            max_bytes_for_decode,
+            max_duration_for_decode,
+            timeout_for_decode,
+        )?;
         let tags = crate::transcription::tags::read_audio_tags(&bytes_owned);
         Ok::<_, XbergError>((pcm, tags))
     })
@@ -303,7 +313,7 @@ impl TranscriptionExtractor {
             )));
         }
 
-        let pcm = decode_to_pcm(content, mime_type, tcfg.max_bytes)?;
+        let pcm = decode_to_pcm(content, mime_type, tcfg.max_bytes, tcfg.max_duration_ms, tcfg.timeout_ms)?;
         let tags = crate::transcription::tags::read_audio_tags(content);
 
         if let Some(max_d) = tcfg.max_duration_ms

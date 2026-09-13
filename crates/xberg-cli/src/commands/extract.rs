@@ -117,6 +117,24 @@ fn write_extracted_images(images: &[ExtractedImage], output_dir: &Path) -> Resul
     Ok(())
 }
 
+/// Directory a batch result's extracted images are written to.
+///
+/// Always namespaced by the result's position in `results` — the only self-proving unique key —
+/// under `base` (`--output-dir` when given, otherwise `.`). Writing every document's
+/// `image_N.ext` into one directory made each document overwrite the previous one's pictures
+/// while their references all pointed at the survivors.
+fn batch_image_dir(base: &Path, result_index: usize) -> PathBuf {
+    base.join(format!("doc_{}", result_index + 1))
+}
+
+/// Rewrite `](image_N.ext)` references so they name the directory the image files were written
+/// to, using forward slashes so the result stays portable markdown.
+fn prefix_image_refs(content: &str, dir: &Path) -> String {
+    let normalized = dir.to_string_lossy().replace('\\', "/");
+    let prefix = format!("]({}/image_", normalized.trim_end_matches('/'));
+    content.replace("](image_", &prefix)
+}
+
 /// Execute single document extraction command.
 ///
 /// `process_start` is the [`Instant`] captured as early as feasible in `main()`. It is used only
@@ -146,11 +164,28 @@ pub fn extract_command(
 
     match format {
         WireFormat::Text => {
+            let mut content = std::borrow::Cow::Borrowed(result.content.as_str());
+            // A picture's placeholder can arrive inside the code block drawn around it (the PPTX
+            // content builder writes both into one block), where markdown never fetches it. The
+            // pipeline lifts it for library callers; this covers any path that produced the text
+            // without going through that pass.
+            if content.contains("```text") {
+                let mut lifted = result.content.clone();
+                xberg::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut lifted);
+                content = std::borrow::Cow::Owned(lifted);
+            }
             if let Some(images) = &result.images {
                 let dir = output_dir.as_deref().unwrap_or(Path::new("."));
                 write_extracted_images(images, dir)?;
+                if let Some(explicit) = output_dir.as_deref() {
+                    // The renderer names each image by file name, which only resolves when the
+                    // text is written *into* the directory the files went to. With an explicit
+                    // `--output-dir` the references carry that directory instead, so the written
+                    // markdown finds its pictures wherever it is saved.
+                    content = std::borrow::Cow::Owned(prefix_image_refs(&content, explicit));
+                }
             }
-            print!("{}", result.content);
+            print!("{content}");
             // `stdout` stays exactly the extracted content so it remains pipeable; everything
             // else the extraction produced — warnings included — goes to `stderr`.
             let mut diagnostics = std::io::stderr().lock();
@@ -233,15 +268,24 @@ pub fn batch_command(
         }
         WireFormat::Text => {
             let output = run_batch_sync(&uris, file_configs_map.as_ref(), &config)?;
-            let dir = output_dir.as_deref().unwrap_or(Path::new("."));
             let mut diagnostics = std::io::stderr().lock();
             for (i, result) in output.results.iter().enumerate() {
+                let mut content = std::borrow::Cow::Borrowed(result.content.as_str());
+                if content.contains("```text") {
+                    let mut lifted = result.content.clone();
+                    xberg::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut lifted);
+                    content = std::borrow::Cow::Owned(lifted);
+                }
                 if let Some(images) = &result.images {
-                    write_extracted_images(images, dir)?;
+                    let base = output_dir.as_deref().unwrap_or(Path::new("."));
+                    let dir = batch_image_dir(base, i);
+                    std::fs::create_dir_all(&dir).context("Failed to create the batch image directory")?;
+                    write_extracted_images(images, &dir)?;
+                    content = std::borrow::Cow::Owned(prefix_image_refs(&content, &dir));
                 }
                 println!("{}", style::header(&format!("=== Document {} ===", i + 1)));
                 println!("{} {}", style::label("MIME Type:"), style::success(&result.mime_type));
-                println!("{}\n{}", style::label("Content:"), result.content);
+                println!("{}\n{}", style::label("Content:"), content);
                 println!();
                 // Warnings go to `stderr` for the same reason as in `extract_command`: the
                 // batch text stream is content, not diagnostics.
@@ -254,12 +298,17 @@ pub fn batch_command(
         WireFormat::Toon => {
             let total_t0 = Instant::now();
             let inputs = build_batch_inputs(&uris, file_configs_map.as_ref())?;
-            let (output, per_file_ms) = run_json_batch_sync(inputs, &config)?;
+            let (mut output, per_file_ms) = run_json_batch_sync(inputs, &config)?;
             let total_ms = total_t0.elapsed().as_secs_f64() * 1000.0;
-            let dir = output_dir.as_deref().unwrap_or(Path::new("."));
-            for result in &output.results {
-                if let Some(images) = &result.images {
-                    write_extracted_images(images, dir)?;
+            for (i, result) in output.results.iter_mut().enumerate() {
+                if result.images.as_ref().is_some_and(|images| !images.is_empty()) {
+                    let base = output_dir.as_deref().unwrap_or(Path::new("."));
+                    let dir = batch_image_dir(base, i);
+                    std::fs::create_dir_all(&dir).context("Failed to create the batch image directory")?;
+                    if let Some(images) = &result.images {
+                        write_extracted_images(images, &dir)?;
+                    }
+                    result.content = prefix_image_refs(&result.content, &dir);
                 }
             }
             let envelope = BatchEnvelope {

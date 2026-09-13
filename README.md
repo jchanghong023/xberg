@@ -104,7 +104,7 @@
 
 Point Xberg at anything — a PDF, a scanned image, a spreadsheet, an audio file, a URL, a whole archive, or a source tree — and get back clean text, tables, metadata, and structured data. One engine handles format detection, reading, OCR, and extraction, so you never stitch a pipeline together from a dozen libraries.
 
-**110 · 146** · **371 code languages** · **15 language bindings** · **6 output formats** · OCR · transcription · embeddings
+**110 formats · 146 file extensions** · **371 code languages** · **15 language bindings** · **6 output formats** · OCR · transcription · embeddings
 
 The fastest, most precise open-source document and PDF-to-Markdown engine — [see the benchmarks](https://xberg.io/benchmarks).
 
@@ -122,9 +122,9 @@ Point Xberg at anything — a PDF, a spreadsheet, a scanned image, an audio file
 
 | Capability | What you get |
 |---|---|
-| **110** | PDFs, Office, images, HTML, email, e-books, scientific publications, and structured data across 146, with intelligent MIME detection and bounded extraction controls. |
+| **110 document formats** | PDFs, Office, images, HTML, email, e-books, scientific publications, and structured data across 146 file extensions, with intelligent MIME detection and bounded extraction controls. |
 | **URLs & the web** | Point Xberg at an `http(s)` URL — it fetches and extracts a single document, or crawls and follows links (Auto / Document / Crawl modes via the [crawlberg](https://github.com/xberg-io/crawlberg) engine). *Requires the `url-ingestion` feature.* |
-| **Audio & video transcription** | Speech-to-text from MP3, M4A, WAV, WebM, and MP4 tracks via Whisper ONNX (tiny → large-v3). *Requires the `transcription` feature.* |
+| **Audio & video transcription** | Speech-to-text from MP3, M4A, WAV, WebM, MP4, and Windows Media (WMV/ASF) tracks via Whisper ONNX (tiny → large-v3). *Requires the `transcription` feature.* |
 | **Archives, traversed** | List and **recursively** extract nested `.zip`, `.tar`, `.gz`, `.7z` — documents inside documents — guarded by zip-bomb, compression-ratio, and nesting-depth limits. |
 | **OCR on demand** | Tesseract, PaddleOCR, Candle, or VLM backends — fallback chains, confidence scores, language auto-detection, extensible via plugins. |
 | **Layout & tables** | ML layout models (PP-DocLayout-V3, RT-DETR) and table structure (TATR, SLANet) reconstruct reading order and cell grids for clean Markdown. |
@@ -460,9 +460,9 @@ Common use cases — see [Quick start guide](https://docs.xberg.io/getting-start
 <details>
 <summary><strong>Full feature list</strong></summary>
 
-### Supported File Formats (110 · 146 · 58 MIME aliases)
+### Supported File Formats (110 formats · 146 file extensions · 58 MIME aliases)
 
-110 across 140 unique file extensions, with 56 compatibility MIME aliases, intelligent format detection, and comprehensive metadata extraction.
+110 formats across 146 unique file extensions, with 58 compatibility MIME aliases, intelligent format detection, and comprehensive metadata extraction.
 
 #### Office Documents
 
@@ -493,6 +493,7 @@ Common use cases — see [Quick start guide](https://docs.xberg.io/getting-start
 | **MP4 audio track** | `.mp4`, `.mpg4`, `.mp4v`, `.m4v` | Audio-track transcription only |
 | **MPEG audio track** | `.mpeg`, `.mpg`, `.mpe`, `.m1v`, `.m2v` | Audio-track transcription only |
 | **WebM audio track** | `.webm` | Audio-track transcription only |
+| **Windows Media audio track** | `.wmv`, `.asf` | Audio-track transcription only (Windows Media Foundation, or `ffmpeg` where the codecs are absent) |
 
 #### Web & Data
 
@@ -684,7 +685,7 @@ Join our [Discord community](https://discord.gg/xt9WY3GnKR) for questions and di
 
 ## Part of Xberg.io
 
-- [Xberg](https://github.com/xberg-io/xberg) — the open-source content-intelligence engine: text, tables, and metadata from 110 (146), with OCR, transcription, and code intelligence. MIT.
+- [Xberg](https://github.com/xberg-io/xberg) — the open-source content-intelligence engine: text, tables, and metadata from 110 formats (146 file extensions), with OCR, transcription, and code intelligence. MIT.
 - [Xberg Pro](https://xberg.io) — a complete self-hosted content-intelligence backend in a single container. Commercial.
 - [Xberg Enterprise](https://xberg.io) — the distributed, governed content-intelligence platform, scaled on Kubernetes with team governance and support. Commercial.
 - [crawlberg](https://github.com/xberg-io/crawlberg) — web crawling and scraping with HTML→Markdown and headless-Chrome fallback.

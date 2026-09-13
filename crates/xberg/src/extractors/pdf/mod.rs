@@ -422,6 +422,15 @@ fn structured_native_token_coverage(document: &InternalDocument, native_text: &s
 /// cleaned. Paragraphs are grouped by their page attribute, the same edge-zone
 /// thresholds decide which strings are furniture, and only plain paragraphs are
 /// removed — headings and lists stay even if their text collides.
+///
+/// Two detectors run over the same page-grouped paragraph lists:
+/// 1. The shared edge-zone pass (`furniture_from_page_lines`) — first/last
+///    few non-empty paragraphs on enough pages.
+/// 2. A consecutive-page streak on the full page list — a chapter running
+///    header often sits *below* the top-3 paragraph window in the structured
+///    document (page number, book title and section title occupy those slots),
+///    so edge-zone detection misses it even though the exact string repeats on
+///    every page of the chapter.
 fn strip_furniture_from_structured_document(document: &mut InternalDocument) {
     use crate::types::internal::{ElementKind, InternalElement};
 
@@ -442,7 +451,10 @@ fn strip_furniture_from_structured_document(document: &mut InternalDocument) {
         .iter()
         .filter_map(|page| pages.get(page).cloned())
         .collect();
-    let furniture = crate::pdf::native::text::furniture_from_page_lines(&page_line_lists);
+    let mut furniture = crate::pdf::native::text::furniture_from_page_lines(&page_line_lists);
+    furniture.extend(furniture_from_consecutive_page_paragraphs(
+        &page_line_lists,
+    ));
     if furniture.is_empty() {
         return;
     }
@@ -455,10 +467,73 @@ fn strip_furniture_from_structured_document(document: &mut InternalDocument) {
         if trimmed.chars().count() < crate::pdf::native::text::FURNITURE_MIN_LINE_CHARS {
             return true;
         }
-        // Substring matching absorbs wrapped variants of the same footer, the
-        // same way the flat-text pass does.
-        !furniture.iter().any(|line| line.contains(trimmed))
+        // Exact matching, the same way the flat-text pass works: a paragraph
+        // that merely contains a furniture string is real content and stays.
+        !furniture.contains(trimmed)
     });
+}
+
+/// Exact paragraph strings that appear on a dense consecutive run of pages, or
+/// on a large share of pages at any position.
+///
+/// Complements [`crate::pdf::native::text::furniture_from_page_lines`], which
+/// only inspects each page's edge zones. A chapter running header is often the
+/// 4th–6th paragraph of the structured page (after the book title, page number
+/// and a section title), so it never enters the edge window even though it
+/// repeats verbatim on every page of the chapter.
+fn furniture_from_consecutive_page_paragraphs(pages: &[Vec<String>]) -> std::collections::HashSet<String> {
+    use crate::pdf::native::text::FURNITURE_MIN_LINE_CHARS;
+
+    let mut furniture = std::collections::HashSet::new();
+    if pages.len() < crate::pdf::native::text::furniture_min_page_lines() {
+        return furniture;
+    }
+
+    // Per page: set of trimmed paragraph strings long enough to be furniture.
+    let per_page: Vec<std::collections::HashSet<&str>> = pages
+        .iter()
+        .map(|lines| {
+            lines
+                .iter()
+                .map(|line| line.trim())
+                .filter(|line| line.chars().count() >= FURNITURE_MIN_LINE_CHARS)
+                .collect()
+        })
+        .collect();
+
+    // For every candidate string: pages that contain it, plus the longest run
+    // of consecutive pages that each contain it as a standalone paragraph.
+    let mut last_page: ahash::AHashMap<&str, usize> = ahash::AHashMap::new();
+    let mut streak: ahash::AHashMap<&str, usize> = ahash::AHashMap::new();
+    let mut best_streak: ahash::AHashMap<&str, usize> = ahash::AHashMap::new();
+    let mut page_hits: ahash::AHashMap<&str, usize> = ahash::AHashMap::new();
+    for (page_index, set) in per_page.iter().enumerate() {
+        for &line in set {
+            *page_hits.entry(line).or_insert(0) += 1;
+            let run = match last_page.get(line) {
+                Some(&prev) if prev + 1 == page_index => streak.get(line).copied().unwrap_or(1) + 1,
+                _ => 1,
+            };
+            streak.insert(line, run);
+            last_page.insert(line, page_index);
+            let best = best_streak.entry(line).or_insert(0);
+            if run > *best {
+                *best = run;
+            }
+        }
+    }
+
+    // Same consecutive-run bar as the edge-zone pass; plus a document-wide
+    // share bar so a header that is only ever paragraph #4 still gets caught.
+    let min_share = ((pages.len() as f64) * 0.25).ceil() as usize;
+    let min_share = min_share.max(3);
+    for (line, hits) in page_hits {
+        let run = best_streak.get(line).copied().unwrap_or(0);
+        if run >= crate::pdf::native::text::furniture_min_consecutive_pages() || hits >= min_share {
+            furniture.insert(line.to_string());
+        }
+    }
+    furniture
 }
 
 fn select_native_pdf_document(

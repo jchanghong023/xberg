@@ -121,7 +121,7 @@ Multiple backends ship out of the box:
 
 | Backend       | Engine               | Strengths                                                                                         |
 | ------------- | -------------------- | ------------------------------------------------------------------------------------------------- |
-| **Tesseract** | Native Rust bindings | Fast, general-purpose, default backend. Good accuracy for Latin scripts.                          |
+| **Tesseract** | Native Rust bindings | Fast, general-purpose. Good accuracy for Latin scripts.                                            |
 | **PaddleOCR** | ONNX Runtime         | Best accuracy for CJK (Chinese, Japanese, Korean) scripts. No Python dependency.                  |
 | **Sceptre**   | ORT or tract         | EasyOCR Gen2 CRAFT and CRNN pipeline with line geometry and confidence.                           |
 | **VLM OCR**   | liter-llm providers  | Vision-model OCR for handwriting, poor scans, and complex layouts.                                |

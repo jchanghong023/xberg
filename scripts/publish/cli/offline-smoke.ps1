@@ -5,15 +5,18 @@ Offline smoke test for a staged Windows CLI bundle: proves the bundled models
 are the models the binary loads.
 
 .DESCRIPTION
-Runs `xberg.exe extract <Fixture> --ocr-backend paddle-ocr --layout --format
-json` with -CleanPath on PATH, HF_HUB_OFFLINE=1 and HF_HUB_CACHE set to
--CacheDir, and asserts one of two outcomes:
+Runs `xberg.exe extract <Fixture> --format json` with -CleanPath on PATH,
+HF_HUB_OFFLINE=1 and HF_HUB_CACHE set to -CacheDir, and asserts one of two
+outcomes:
 
   default                      exit 0, parseable JSON on stdout, non-empty
-                               result.content -- the bundled models loaded.
+                               result.content -- extraction works offline.
   -ExpectEmptyCacheFailure     non-zero exit whose stderr mentions offline mode
                                -- the same command against an empty cache has to
-                               fail rather than silently download.
+                               fail rather than silently download. Only valid
+                               when the bundle actually stages HF models for
+                               this extract path (paddle/layout); the lean
+                               package omits this probe.
 
 One `smoke=ok ...` line on stdout and exit 0 on success; otherwise the reason
 goes to stderr and the exit code is 1. package-cli-windows.ps1 runs it twice, as
@@ -70,7 +73,7 @@ $env:HF_HUB_CACHE = $CacheDir
 $env:HF_HUB_OFFLINE = "1"
 $env:HUGGINGFACE_HUB_OFFLINE = "1"
 
-$extractArgs = @("extract", $Fixture, "--ocr-backend", "paddle-ocr", "--layout", "--format", "json")
+$extractArgs = @("extract", $Fixture, "--format", "json")
 $result = Invoke-Captured -FilePath $Exe -Arguments $extractArgs
 
 if ($ExpectEmptyCacheFailure) {

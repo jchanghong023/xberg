@@ -91,7 +91,7 @@
   </a>
 </div>
 
-Extract text, tables, images, metadata, and code intelligence from 110 and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Native Python bindings with async/await support, multiple OCR backends (Tesseract, PaddleOCR, Sceptre), and extensible plugin system.
+Extract text, tables, images, metadata, and code intelligence from 110 file formats and 371 programming languages including PDF, Office documents, images, and audio/video transcripts where native transcription is available. Native Python bindings with async/await support, multiple OCR backends (Tesseract, PaddleOCR, Sceptre), and extensible plugin system.
 
 ## What This Package Provides
 
@@ -548,7 +548,7 @@ For comprehensive documentation, visit [https://xberg.io](https://xberg.io)
 
 ## Part of Xberg.io
 
-- [Xberg](https://github.com/xberg-io/xberg) — the open-source content-intelligence engine: text, tables, and metadata from 110 (146), with OCR, transcription, and code intelligence. MIT.
+- [Xberg](https://github.com/xberg-io/xberg) — the open-source content-intelligence engine: text, tables, and metadata from 110 formats (146 file extensions), with OCR, transcription, and code intelligence. MIT.
 - [Xberg Pro](https://xberg.io) — a complete self-hosted content-intelligence backend in a single container. Commercial.
 - [Xberg Enterprise](https://xberg.io) — the distributed, governed content-intelligence platform, scaled on Kubernetes with team governance and support. Commercial.
 - [crawlberg](https://github.com/xberg-io/crawlberg) — web crawling and scraping with HTML→Markdown and headless-Chrome fallback.

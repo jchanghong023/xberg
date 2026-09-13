@@ -185,8 +185,8 @@ xberg extract document.pdf --force-ocr true
 | PaddleOCR | short codes / language names | `en`, `ch`, `french`, `korean`, `thai`, `cyrillic` |
 
 ```bash title="Terminal"
-# French OCR with Tesseract (default backend)
-xberg extract --ocr true --ocr-language fra document.pdf
+# French OCR with Tesseract
+xberg extract --ocr true --ocr-backend tesseract --ocr-language fra document.pdf
 
 # Chinese OCR with PaddleOCR
 xberg extract --ocr true --ocr-backend paddle-ocr --ocr-language ch document.pdf
@@ -195,7 +195,7 @@ xberg extract --ocr true --ocr-backend paddle-ocr --ocr-language ch document.pdf
 xberg extract --ocr true --ocr-backend paddle-ocr --ocr-language thai document.pdf
 
 # German OCR with Tesseract
-xberg extract --ocr true --ocr-language deu document.pdf
+xberg extract --ocr true --ocr-backend tesseract --ocr-language deu document.pdf
 
 # Override config file language with Spanish
 xberg extract document.pdf --config xberg.toml --ocr-language spa
@@ -444,7 +444,7 @@ When `XBERG_CACHE_DIR` is set, cache inspection and `--clean` are disabled (repo
 
 | Flag                              | Description                                                                                                                  |
 | --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `--ocr <true\|false>`             | Enable or disable OCR. Defaults to tesseract backend when enabled.                                                           |
+| `--ocr <true\|false>`             | Enable or disable OCR. The backend defaults to `paddle-ocr` wherever it is compiled in (all default CLI builds) and to `tesseract` otherwise; override with `--ocr-backend`. |
 | `--ocr-backend <BACKEND>`         | OCR backend: `tesseract`, `paddle-ocr`, `sceptre`, `candle-trocr`, `candle-paddleocr-vl`, `candle-paddleocr-vl-15`, `candle-glm-ocr`, `candle-deepseek-ocr`, or `vlm`. |
 | `--ocr-language <LANG>` | OCR language code. Sceptre accepts its eight group tokens or ISO aliases such as `eng`, `deu`, `tel`, and `kan`. |
 | `--force-ocr <true\|false>`       | Force OCR even if the document has an existing text layer.                                                                   |

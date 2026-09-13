@@ -24,6 +24,110 @@ fn clamp_declared_size(declared: u64, cap: u64) -> u64 {
     declared.min(cap)
 }
 
+/// Append non-empty embedded-object text into the parent document body.
+///
+/// `extract_ooxml_embedded_objects` only attaches children on
+/// [`crate::types::internal::InternalDocument::children`]. Markdown/`content`
+/// is rendered from `elements`, so a successfully extracted legacy Word OLE
+/// (and any other embedded document with text) was searchable in JSON children
+/// but invisible in the Markdown the CLI writes. Email already merges
+/// attachment text into the body the same way; this mirrors that for OOXML.
+///
+/// Children stay on `children` for structured consumers. Graphical OLE
+/// payloads that never identified as a document never become children and are
+/// unaffected.
+pub(crate) fn append_embedded_object_text(document: &mut crate::types::internal::InternalDocument) {
+    use crate::types::internal::{ElementKind, InternalElement};
+
+    let Some(children) = document.children.as_ref() else {
+        return;
+    };
+    // Collect first: pushing elements needs a mutable borrow of `document`
+    // while children still borrow it immutably.
+    let merged: Vec<(String, String)> = children
+        .iter()
+        .filter_map(|child| {
+            let content = child.result.content.trim();
+            if content.is_empty() {
+                return None;
+            }
+            let title = child
+                .path
+                .rsplit(['/', '\\'])
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(child.path.as_str())
+                .to_string();
+            // Nested extractors emit image Markdown that points at files only
+            // they exported. Those assets are not in the parent's image set, so
+            // leaving the refs in the body produces broken links and inflates
+            // the parent's image-ref count.
+            Some((title, strip_markdown_image_refs(content)))
+        })
+        .filter(|(_, content)| !content.trim().is_empty())
+        .collect();
+    for (title, content) in merged {
+        let heading = InternalElement::text(ElementKind::Heading { level: 2 }, title, 0);
+        document.push_element(heading);
+        let paragraph = InternalElement::text(ElementKind::Paragraph, content, 0);
+        document.push_element(paragraph);
+    }
+}
+
+/// Remove `![alt](target)` image references, keeping the alt text when present.
+///
+/// Embedded-object children carry their own image assets under their own
+/// export path; those files are not copied into the parent document's image
+/// directory, so the references would dangle in the merged body.
+fn strip_markdown_image_refs(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'!' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            // Find the closing `](...)` for this image. Alt may contain
+            // escaped brackets; a simple scan is enough for extractor output.
+            if let Some((alt, after_alt)) = find_markdown_link_parts(&text[i..]) {
+                if !alt.is_empty() {
+                    out.push_str(alt);
+                }
+                // `after_alt` is relative to `&text[i..]`.
+                i += after_alt;
+                continue;
+            }
+        }
+        let ch_len = utf8_char_len(bytes[i]);
+        out.push_str(&text[i..i + ch_len]);
+        i += ch_len;
+    }
+    out
+}
+
+/// Given a slice starting at `![`, return `(alt, end_index)` when it is a
+/// well-formed image reference. `end_index` is relative to `s`.
+fn find_markdown_link_parts(s: &str) -> Option<(&str, usize)> {
+    debug_assert!(s.starts_with("!["));
+    let rest = &s[2..];
+    let close_bracket = rest.find(']')?;
+    let alt = &rest[..close_bracket];
+    let after = &rest[close_bracket + 1..];
+    if !after.starts_with('(') {
+        return None;
+    }
+    let close_paren = after.find(')')?;
+    Some((alt, 2 + close_bracket + 1 + close_paren + 1))
+}
+
+fn utf8_char_len(first: u8) -> usize {
+    match first {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => 1,
+    }
+}
+
 /// Extract embedded objects from an OOXML ZIP archive and recursively process them.
 ///
 /// Scans the given `embeddings_prefix` directory (e.g. `word/embeddings/` or
@@ -740,6 +844,78 @@ fn extract_ole_embedded_object(_data: &[u8], _source_name: &str, _max_bytes: u64
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// Embedded document text must land in `elements` so Markdown/`content` is
+    /// searchable, not only on `children`.
+    #[test]
+    fn append_embedded_object_text_merges_child_content_into_body() {
+        use crate::types::internal::{ElementKind, InternalDocument};
+        use crate::types::ExtractedDocument;
+
+        let child = ExtractedDocument {
+            content: "SCAN设计流程介绍\n\n拟制".to_string(),
+            mime_type: crate::core::mime::LEGACY_WORD_MIME_TYPE.into(),
+            ..Default::default()
+        };
+        let mut doc = InternalDocument::default();
+        doc.children = Some(vec![ArchiveEntry {
+            path: "oleObject15.bin".to_string(),
+            mime_type: crate::core::mime::LEGACY_WORD_MIME_TYPE.into(),
+            result: Box::new(child),
+        }]);
+
+        append_embedded_object_text(&mut doc);
+
+        let texts: Vec<&str> = doc
+            .elements
+            .iter()
+            .map(|element| element.text.as_str())
+            .collect();
+        assert!(
+            texts.iter().any(|text| *text == "oleObject15.bin"),
+            "expected filename heading, got {texts:?}"
+        );
+        assert!(
+            texts.iter().any(|text| text.contains("SCAN设计流程介绍")),
+            "expected child body in elements, got {texts:?}"
+        );
+        assert!(
+            doc.elements
+                .iter()
+                .any(|element| matches!(element.kind, ElementKind::Heading { level: 2 })),
+            "expected an H2 for the embedded object"
+        );
+    }
+
+    /// Nested image Markdown must be stripped so the parent document does not
+    /// reference assets that were never exported beside it.
+    #[test]
+    fn strip_markdown_image_refs_keeps_alt_text() {
+        let input = "前言\n![流程图](image_3.png)\n后记 ![x](a/b.png) 结束";
+        let stripped = strip_markdown_image_refs(input);
+        assert!(!stripped.contains("image_3.png"), "got {stripped}");
+        assert!(!stripped.contains("a/b.png"), "got {stripped}");
+        assert!(stripped.contains("流程图"), "alt should remain, got {stripped}");
+        assert!(stripped.contains("前言"), "got {stripped}");
+        assert!(stripped.contains("后记"), "got {stripped}");
+    }
+
+    /// Blank child payloads must not inject empty headings/paragraphs.
+    #[test]
+    fn append_embedded_object_text_skips_blank_children() {
+        use crate::types::internal::InternalDocument;
+        use crate::types::ExtractedDocument;
+
+        let mut doc = InternalDocument::default();
+        doc.children = Some(vec![ArchiveEntry {
+            path: "oleObject1.bin".to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            result: Box::new(ExtractedDocument::default()),
+        }]);
+
+        append_embedded_object_text(&mut doc);
+        assert!(doc.elements.is_empty(), "blank children must not add elements");
+    }
 
     /// Build a minimal ZIP in memory with one file at the given path and contents.
     fn make_zip_with_file(entry_path: &str, entry_data: &[u8]) -> Vec<u8> {

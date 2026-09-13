@@ -34,7 +34,14 @@ mod imp {
     use crate::transcription::decode::{PcmAudio, down_mix_to_mono, resample_linear_to_16k};
 
     /// Media Foundation session; shutdown runs on every exit path.
-    struct Session;
+    struct Session {
+        /// Whether `CoInitializeEx` succeeded on this thread -- only then does
+        /// this thread owe a matching `CoUninitialize`.
+        com_initialized: bool,
+        /// Whether `MFStartup` succeeded -- only then does this thread owe a
+        /// matching `MFShutdown`.
+        mf_started: bool,
+    }
 
     impl Session {
         #[allow(unsafe_code)]
@@ -42,13 +49,19 @@ mod imp {
             // MF runs on COM. The extraction path is already multi-threaded, so
             // the multithreaded apartment is the right one; `RPC_E_CHANGED_MODE`
             // means this thread already lives in another apartment, which Media
-            // Foundation tolerates.
+            // Foundation tolerates -- but that call added no COM reference of
+            // ours, so it must not be released in `Drop`. The guard exists
+            // before `MFStartup` so a failing startup still runs this cleanup.
+            let mut session = Self {
+                com_initialized: unsafe { CoInitializeEx(None, COINIT_MULTITHREADED).is_ok() },
+                mf_started: false,
+            };
             unsafe {
-                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
                 MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET)
                     .map_err(|e| XbergError::transcription(format!("Media Foundation could not start: {e}")))?;
             }
-            Ok(Self)
+            session.mf_started = true;
+            Ok(session)
         }
     }
 
@@ -56,8 +69,12 @@ mod imp {
         #[allow(unsafe_code)]
         fn drop(&mut self) {
             unsafe {
-                let _ = MFShutdown();
-                CoUninitialize();
+                if self.mf_started {
+                    let _ = MFShutdown();
+                }
+                if self.com_initialized {
+                    CoUninitialize();
+                }
             }
         }
     }
@@ -152,9 +169,22 @@ mod imp {
         }
     }
 
+    /// Decoded duration of `raw` in milliseconds, from the layout's own frame
+    /// rate. The reader delivers interleaved frames, so the sample count is the
+    /// exact decoded length -- no per-sample COM query is needed.
+    fn decoded_duration_ms(raw: &[f32], layout: PcmLayout) -> u64 {
+        let channels = layout.channels.max(1) as u64;
+        let frame_rate = u64::from(layout.sample_rate.max(1));
+        (raw.len() as u64 / channels) * 1000 / frame_rate
+    }
+
+    /// Consecutive `ReadSample` calls that may deliver no new sample before the
+    /// stream is treated as stalled.
+    const MAX_IDLE_READS: usize = 64;
+
     /// Decode the audio track of `path` into 16 kHz mono PCM.
     #[allow(unsafe_code)]
-    pub(super) fn decode_file(path: &Path, max_bytes: Option<u64>) -> Result<PcmAudio> {
+    pub(super) fn decode_file(path: &Path, max_bytes: Option<u64>, max_duration_ms: Option<u64>) -> Result<PcmAudio> {
         let _session = Session::start()?;
         let stream = MF_SOURCE_READER_FIRST_AUDIO_STREAM.0 as u32;
 
@@ -165,9 +195,17 @@ mod imp {
         };
         let layout = configure_pcm_output(&reader)?;
 
-        // Decoded-audio ceiling, not container size: 16 kHz mono f32 is 64 kB/s.
-        let raw_limit = max_bytes.map(|bytes| (bytes as usize).saturating_mul(16));
+        // Decoded-audio ceiling: the input byte budget, reused as a sample count
+        // (16 kHz mono f32 is 64 kB/s, so the default 512 MB still admits hours of
+        // audio while rejecting a pathological stream). `transcription.max_duration_ms`
+        // is applied below while the stream decodes, so neither a stream that never
+        // ends nor one that outlasts the limit can hold this thread.
+        let raw_limit = max_bytes.map(|bytes| bytes as usize);
         let mut raw: Vec<f32> = Vec::new();
+        // Reads that delivered no new sample. A reader that keeps succeeding
+        // without samples and without the end-of-stream flag would otherwise spin
+        // here forever, holding one of the caller's blocking threads.
+        let mut idle_reads = 0usize;
 
         loop {
             let mut flags = 0u32;
@@ -177,11 +215,25 @@ mod imp {
                     .ReadSample(stream, 0, None, Some(&mut flags), None, Some(&mut sample))
                     .map_err(|e| XbergError::transcription(format!("Media Foundation read failed: {e}")))?;
             }
-            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
-                break;
-            }
+            // Appended before the end-of-stream test: one call may deliver the
+            // last sample and the end-of-stream flag together.
+            let samples_before = raw.len();
             if let Some(sample) = sample {
                 append_sample(&sample, layout, &mut raw)?;
+            }
+            if raw.len() == samples_before {
+                idle_reads += 1;
+                if idle_reads >= MAX_IDLE_READS {
+                    return Err(XbergError::transcription(format!(
+                        "Media Foundation produced no audio samples for {MAX_IDLE_READS} consecutive reads \
+                         without reaching the end of the stream"
+                    )));
+                }
+            } else {
+                idle_reads = 0;
+            }
+            if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
+                break;
             }
             if let Some(limit) = raw_limit
                 && raw.len() > limit
@@ -189,6 +241,13 @@ mod imp {
                 return Err(XbergError::transcription(format!(
                     "decoded audio exceeds the transcription.max_bytes budget ({} bytes)",
                     max_bytes.unwrap_or_default()
+                )));
+            }
+            if let Some(limit_ms) = max_duration_ms
+                && decoded_duration_ms(&raw, layout) > limit_ms
+            {
+                return Err(XbergError::transcription(format!(
+                    "decoded audio exceeds the transcription.max_duration_ms budget ({limit_ms} ms)"
                 )));
             }
         }
@@ -219,14 +278,21 @@ mod imp {
 ///
 /// `max_bytes` mirrors `transcription.max_bytes`: it bounds the decoded audio,
 /// not the container size (the caller already bounded the input).
-pub(crate) fn decode_file_to_pcm(path: &Path, max_bytes: Option<u64>) -> Result<PcmAudio> {
+/// `max_duration_ms` mirrors `transcription.max_duration_ms` and stops the read
+/// loop once that much audio has been decoded, instead of only rejecting the
+/// result after the whole stream has been read.
+pub(crate) fn decode_file_to_pcm(
+    path: &Path,
+    max_bytes: Option<u64>,
+    max_duration_ms: Option<u64>,
+) -> Result<PcmAudio> {
     #[cfg(target_os = "windows")]
     {
-        imp::decode_file(path, max_bytes)
+        imp::decode_file(path, max_bytes, max_duration_ms)
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let _ = (path, max_bytes);
+        let _ = (path, max_bytes, max_duration_ms);
         Err(crate::XbergError::transcription(
             "this build cannot read Windows Media (ASF/WMV) containers: decoding them needs Windows Media \
              Foundation. Convert the file to MP4/WebM/WAV first (for example with ffmpeg), or use the Windows build."

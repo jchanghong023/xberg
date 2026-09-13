@@ -196,8 +196,11 @@ xberg-paddle-ocr = { path = "crates/xberg-paddle-ocr" }
 xberg-candle-ocr = { path = "crates/xberg-candle-ocr" }
 
 [profile.release]
-lto = "thin"
-codegen-units = 1
+# Local/CI package target is wall-clock: thin LTO + codegen-units=1 made a cold
+# xberg-cli zip take tens of minutes. opt-level=3 and strip stay; LTO off and
+# high codegen-units let rustc actually use the 30-job local default.
+lto = false
+codegen-units = 256
 opt-level = 3
 strip = true
 
@@ -216,7 +219,9 @@ opt-level = "z"
 
 [profile.dev]
 opt-level = 0
-debug = true
+# Line tables + some debug info: cuts Windows PDB/link time and target size
+# vs full `debug = true`; backtraces stay usable. `profiling` keeps full debug.
+debug = 1
 
 [profile.profiling]
 inherits = "release"

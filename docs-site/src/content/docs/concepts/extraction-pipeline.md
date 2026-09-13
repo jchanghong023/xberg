@@ -150,7 +150,7 @@ Xberg ships multiple OCR backends:
 
 | Backend       | Engine               | When to use it                                                                                                               |
 | ------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| **Tesseract** | Native Rust bindings | Default. Fast, solid accuracy for Latin scripts. Good general-purpose choice.                                                |
+| **Tesseract** | Native Rust bindings | Fast, solid accuracy for Latin scripts. Good general-purpose choice.                                                |
 | **PaddleOCR** | ONNX Runtime         | Best accuracy for Chinese, Japanese, Korean (CJK) scripts. Runs natively without Python.                                     |
 | **Sceptre**   | ORT or tract         | EasyOCR Gen2 CRAFT and CRNN pipeline with structured line geometry and confidence.                                          |
 | **VLM OCR**   | liter-llm providers  | Best for handwriting, poor scans, and complex layouts. Requires a vision-capable model.                                      |

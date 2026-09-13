@@ -9,15 +9,13 @@ Single source of truth for "build + package" on Windows. Used locally and by
 .github/workflows/build-windows-cli.yml; the workflow continues afterwards with
 artifact upload, version stamping and `gh release create`.
 
-The cargo feature set is the crate's `all` aggregate minus `embeddings`,
-`ner-onnx` and `ner-llm`: full document conversion (formats, OCR, layout,
-chunking, tree-sitter, URL ingestion, API/MCP servers, transcription) without
-the embedding/NER model stacks. `--no-default-features` is required because
-`default` carries `embeddings`. Only the default tier of each enabled model
-capability ships (PaddleOCR pp-ocrv6 small + both PP-LCNet orientation
-classifiers, layout RT-DETR and table TATR, plus the Whisper tiny transcription
-model so video/audio inputs transcribe without network); GLiNER, embedding,
-candle-VLM and SLANeXT models are deliberately not bundled, nor is tessdata.
+The cargo feature set matches the fork's development build: document formats
+(no HEIC), analysis, CLI core, Tesseract OCR, and audio/video transcription.
+`--no-default-features` drops the heavy default stacks (embeddings, paddle-ocr,
+candle-VLM, layout-detection). Deliberately excluded: heic (no stock Windows
+libheif build path), pdfium, api/mcp, embedding/NER. Only the Whisper tiny
+transcription model is bundled so video/audio inputs transcribe offline; no
+PaddleOCR/layout ONNX models and no pdfium.dll.
 
 Before zipping, the staged tree must pass: a cleaned-PATH `--version` probe,
 in-tree MSVC CRT deployment, the shared PE import-closure gate
@@ -27,9 +25,10 @@ the same command against an empty cache must fail instead of silently
 downloading.
 
 Every stage that can overlap does, and all of it is throttled by -Jobs: the
-pdfium download races the cargo build, the four stage-directory writes and the
-five validation probes run concurrently, and the model downloads were already
-parallel. While any of that runs the script samples system CPU and, at the end,
+pinned Whisper tiny files race the cargo build into
+target/package-models-<target>; the stage-directory writes
+and the validation probes run concurrently. While any of that runs the script
+samples system CPU and, at the end,
 writes the sampling log and a "quiet window" report to
 target/package-cpu-<timestamp>.csv and -summary.txt, so a stage that leaves the
 machine idle can be located from its timestamps alone. The report is diagnostic
@@ -38,27 +37,25 @@ only -- it never changes the exit code (-NoCpuMonitor turns sampling off).
 .EXAMPLE
 pwsh -NoProfile -File scripts/publish/cli/package-cli-windows.ps1
 
-Bare invocation, the way CI runs it: the 6-job default, sized for the runner.
+Bare invocation. On GitHub Actions this stays at the 6-job runner default.
+Locally it auto-selects min(30, logical cores) so a workstation is not
+pinned to the pipeline's 6.
 
 .EXAMPLE
-pwsh -NoProfile -File scripts/publish/cli/package-cli-windows.ps1 -Target x86_64-pc-windows-msvc -Jobs 32
+pwsh -NoProfile -File scripts/publish/cli/package-cli-windows.ps1 -Target x86_64-pc-windows-msvc -Jobs 8
 
-Local package: pass the machine's core count. The pipeline's 6-job default is
-sized for the runner and leaves a workstation idle.
+Local override when you want a specific parallelism instead of the auto
+local/cap choice. Explicit -Jobs always wins over auto-detection.
 #>
 [CmdletBinding()]
 param(
   [string]$Target = "x86_64-pc-windows-msvc",
-  # 6 is the pipeline value: .github/workflows/build-windows-cli.yml passes no
-  # -Jobs, and the runner has few cores. A developer machine is not the runner:
-  # pass the local core count explicitly (-Jobs 32 here), because 6 leaves a
-  # 32-thread box at ~19% load and multiplies the build time.
-  [int]$Jobs = 6,
+  # 0 = auto. Resolved right after param() to either the pipeline's 6
+  # (GITHUB_ACTIONS) or min(30, [Environment]::ProcessorCount) on a
+  # developer machine. .github/workflows/build-windows-cli.yml still passes
+  # no -Jobs, so CI behavior is unchanged.
+  [int]$Jobs = 0,
   [string]$OrtVersion = "1.24.2",
-  # pdfium-binaries `chromium/<n>` tag. Pinned because it must match the binding
-  # set of the xberg-pdfium-render crate this build links. Bumping it is its own
-  # task (it needs the pdfium binding compatibility re-checked), not a drive-by.
-  [string]$PdfiumVersion = "7881",
   # CPU sampling: one sample every -MonitorIntervalSec, a run of samples below
   # -QuietCpuPct lasting -QuietSeconds or longer is reported as a quiet window.
   # Anything at or under 20% of the machine is treated as a stalled/serial stage.
@@ -67,12 +64,23 @@ param(
   [int]$QuietCpuPct = 20,
   [int]$QuietSeconds = 20,
   [string]$MonitorCsv = "",
-  [switch]$NoCpuMonitor
+  [switch]$NoCpuMonitor,
+  # Skip the post-compress `7z t` integrity pass. CI keeps the default (test);
+  # local iterations can opt out to avoid reading the whole zip back.
+  [switch]$SkipZipTest
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+
+# Resolve -Jobs=0 (auto) before any stage consumes it. CI (GITHUB_ACTIONS)
+# keeps the runner-sized 6 so build-windows-cli.yml stays on its historical
+# parallelism; a local bare invocation uses min(30, logical cores). An
+# explicit -Jobs still overrides both.
+if ($Jobs -le 0) {
+  $Jobs = if ($env:GITHUB_ACTIONS) { 6 } else { [Math]::Min(30, [Environment]::ProcessorCount) }
+}
 
 $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "../../..")).Path
 $StageName = "xberg-cli-$Target"
@@ -80,50 +88,25 @@ $Stage = Join-Path $RepoRoot $StageName
 $ZipPath = Join-Path $RepoRoot "$StageName.zip"
 $StageExe = Join-Path $Stage "xberg.exe"
 $ModelsRoot = Join-Path $Stage "models"
+# Persistent local model cache (same HF layout as the bundle). Whisper + any
+# already-verified OCR/layout file is reused across runs; the Stage wipe never
+# touches this directory.
+$ModelCacheRoot = Join-Path $RepoRoot "target/package-models-$Target"
 
-# `all` (crates/xberg-cli/Cargo.toml) minus embeddings, ner-onnx, ner-llm. Keep
-# in sync with that aggregate; check-feature-parity.py does not cover this list.
+# Keep in sync with AGENTS.md「编译」小节. Fork scope: file→Markdown + OCR +
+# transcription only. No heic/pdfium/paddle/layout/candle/api/mcp/embeddings/NER.
 $Features = @(
   "formats-no-heic"
   "analysis"
   "core-cli"
-  "html"
-  "url-ingestion"
-  "liter-llm"
   "ocr"
-  "paddle-ocr"
-  "sceptre-ocr"
-  "candle-vlm-ocr"
-  "layout-detection"
-  "chunking-tokenizers"
-  "tree-sitter"
-  "api"
-  "heic"
-  "mcp"
-  "mcp-http"
-  "classification"
-  "captioning"
-  "summarization"
-  "summarization-llm"
   "transcription"
-  "pdf-pdfium-surface"
 )
 
-# Manifest entries that must exist for the bundle to be usable offline, matched
-# by `relative_path` from `xberg cache manifest --format json`. Exact paths for
-# PaddleOCR (repository-relative), revision-agnostic for the layout repo (its
-# snapshot directory embeds the commit). A miss here means upstream renamed or
-# dropped an artifact: fail loudly instead of shipping a bundle that silently
-# downloads at runtime.
-$RequiredModels = @(
-  @{ Regex = '^v6/det/small/model\.onnx$'; Label = "PaddleOCR pp-ocrv6 det small" }
-  @{ Regex = '^v6/rec/small/model\.onnx$'; Label = "PaddleOCR pp-ocrv6 rec small" }
-  @{ Regex = '^v6/rec/small/dict\.txt$'; Label = "PaddleOCR pp-ocrv6 rec small dictionary" }
-  @{ Regex = '^v2/classifiers/PP-LCNet_x1_0_textline_ori\.onnx$'; Label = "text line orientation classifier" }
-  @{ Regex = '^v2/classifiers/PP-LCNet_x1_0_doc_ori\.onnx$'; Label = "document orientation classifier" }
-  @{ Regex = '^models--xberg-io--layout-models/snapshots/[0-9a-f]{40}/rtdetr/model\.onnx$'; Label = "layout RT-DETR" }
-  @{ Regex = '^models--xberg-io--layout-models/snapshots/[0-9a-f]{40}/tatr/model\.onnx$'; Label = "table TATR" }
-)
+# No paddle/layout ONNX models in this feature set, so the cache-manifest
+# required-model list is empty. Whisper tiny is staged separately via
+# $TranscriptionFiles (not listed by `cache manifest`).
+$RequiredModels = @()
 
 # The transcription model the runtime resolves for `transcription.model = "tiny"`
 # (video/audio extraction). `xberg cache manifest` does not list it -- the CLI
@@ -388,7 +371,23 @@ function Test-ModelFile([string]$Path, [string]$Sha256, [int64]$SizeBytes) {
 }
 
 function Get-RequiredModelEntries([string]$Exe, [string]$ModelsRoot) {
-  $manifest = Invoke-Captured -FilePath $Exe -Arguments @("cache", "manifest", "--format", "json")
+  # Lean feature set ships no paddle/layout ONNX models; Whisper is handled by
+  # Get-TranscriptionModelEntries. Skip the cache-manifest probe entirely.
+  if ($RequiredModels.Count -eq 0) {
+    return @()
+  }
+  # This may run against the target-dir exe (before Stage copies ORT dlls next
+  # to it). Put ORT_LIB_LOCATION on PATH so the binary can load onnxruntime.
+  $savedPath = $env:PATH
+  if (-not [string]::IsNullOrWhiteSpace($env:ORT_LIB_LOCATION)) {
+    $env:PATH = $env:ORT_LIB_LOCATION + [System.IO.Path]::PathSeparator + $env:PATH
+  }
+  try {
+    $manifest = Invoke-Captured -FilePath $Exe -Arguments @("cache", "manifest", "--format", "json")
+  }
+  finally {
+    $env:PATH = $savedPath
+  }
   if ($manifest.ExitCode -ne 0) {
     throw "'$Exe cache manifest --format json' failed with exit code $($manifest.ExitCode): $($manifest.Stderr)"
   }
@@ -433,21 +432,37 @@ function Get-TranscriptionModelEntries([string]$ModelsRoot) {
   return @($entries)
 }
 
-function Install-Models([object[]]$Edges, [int]$Throttle) {
-  # [object[]], not [string[]]: the edges are PSCustomObjects and string
-  # coercion would drop Target/Sha256/Url before any download happens.
-  $plan = @($Edges | Where-Object { -not (Test-ModelFile $_.Target $_.Sha256 $_.SizeBytes) })
-  $skipped = $Edges.Count - $plan.Count
-  if ($skipped -gt 0) { Write-Host "  $skipped model file(s) already present and verified" }
-
-  if ($plan.Count -gt 0) {
-    Write-Host "  downloading $($plan.Count) model file(s) with $Throttle parallel worker(s)"
-    $results = $plan | ForEach-Object -Parallel {
+# Shared download worker. A ThreadJob cannot dot-source this script or call its
+# functions, so the install body lives here once and is invoked from both the
+# synchronous Install-Models path and the race-the-build job.
+function Start-ModelDownloadJob([object[]]$Plan, [int]$Throttle, [string]$LocalCache) {
+  return Start-ThreadJob -ArgumentList $Plan, $Throttle, $LocalCache -ScriptBlock {
+    param([object[]]$Plan, [int]$Throttle, [string]$LocalCache)
+    $ProgressPreference = "SilentlyContinue"
+    if (-not $Plan -or $Plan.Count -eq 0) { return @() }
+    # Copy into a local for $using: — nested ForEach-Object -Parallel cannot
+    # reliably bind $using: to a ThreadJob param across runspaces.
+    $cacheRootShared = $LocalCache
+    return @($Plan | ForEach-Object -Parallel {
       $ProgressPreference = "SilentlyContinue"
       $edge = $_
       $target = $edge.Target
       $dir = Split-Path -Parent $target
       New-Item -ItemType Directory -Path $dir -Force | Out-Null
+
+      $cacheRoot = $using:cacheRootShared
+      if ($cacheRoot) {
+        $cached = Join-Path $cacheRoot ($edge.RelativePath -replace '/', '\')
+        if (Test-Path -LiteralPath $cached -PathType Leaf) {
+          $cacheHash = (Get-FileHash -LiteralPath $cached -Algorithm SHA256).Hash
+          $cacheLen = (Get-Item -LiteralPath $cached).Length
+          if ($cacheHash -eq $edge.Sha256 -and ($edge.SizeBytes -le 0 -or $cacheLen -eq $edge.SizeBytes)) {
+            Copy-Item -LiteralPath $cached -Destination $target -Force
+            return [pscustomobject]@{ Label = $edge.Label; Ok = $true; Bytes = $cacheLen; Error = $null; Source = "cache" }
+          }
+        }
+      }
+
       $tmp = "$target.partial-$([Guid]::NewGuid().ToString('N').Substring(0, 8))"
       $error_ = "unknown failure"
       for ($attempt = 1; $attempt -le 3; $attempt++) {
@@ -460,7 +475,13 @@ function Install-Models([object[]]$Edges, [int]$Throttle) {
             throw "size mismatch (expected $($edge.SizeBytes) bytes, got $length)"
           }
           Move-Item -LiteralPath $tmp -Destination $target -Force
-          return [pscustomobject]@{ Label = $edge.Label; Ok = $true; Bytes = $length; Error = $null }
+          if ($cacheRoot) {
+            $cacheDest = Join-Path $cacheRoot ($edge.RelativePath -replace '/', '\')
+            $cacheDir = Split-Path -Parent $cacheDest
+            New-Item -ItemType Directory -Path $cacheDir -Force | Out-Null
+            Copy-Item -LiteralPath $target -Destination $cacheDest -Force
+          }
+          return [pscustomobject]@{ Label = $edge.Label; Ok = $true; Bytes = $length; Error = $null; Source = "download" }
         }
         catch {
           $error_ = $_.Exception.Message
@@ -469,18 +490,49 @@ function Install-Models([object[]]$Edges, [int]$Throttle) {
         }
       }
       Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-      [pscustomobject]@{ Label = $edge.Label; Ok = $false; Bytes = 0; Error = $error_ }
-    } -ThrottleLimit $Throttle
+      [pscustomobject]@{ Label = $edge.Label; Ok = $false; Bytes = 0; Error = $error_; Source = "none" }
+    } -ThrottleLimit $Throttle)
+  }
+}
 
-    foreach ($result in $results | Where-Object { -not $_.Ok }) {
-      Write-Warning "  download failed: $($result.Label): $($result.Error)"
+function Complete-ModelInstall([object[]]$Plan, [object]$Job) {
+  $results = @()
+  if ($Job) {
+    $jobErrors = @()
+    $results = @(Receive-Job -Job $Job -Wait -ErrorVariable jobErrors -ErrorAction SilentlyContinue)
+    $state = $Job.State
+    Remove-Job -Job $Job -Force -ErrorAction SilentlyContinue
+    if ($state -ne "Completed" -and $state -ne "CompletedWithWarnings") {
+      throw "model install job ended in state ${state}: $($jobErrors -join '; ')"
     }
   }
+  foreach ($result in $results | Where-Object { $_ -and -not $_.Ok }) {
+    Write-Warning "  download failed: $($result.Label): $($result.Error)"
+  }
 
-  $invalid = @($Edges | Where-Object { -not (Test-ModelFile $_.Target $_.Sha256 $_.SizeBytes) })
+  # Re-verify only the files this run installed. Already-verified edges were
+  # checksummed once in the plan filter; hashing the full ~650MB set again is
+  # pure SATA tax on every package.
+  $invalid = @($Plan | Where-Object { -not (Test-ModelFile $_.Target $_.Sha256 $_.SizeBytes) })
   if ($invalid.Count -gt 0) {
     throw "model staging failed checksum/size verification for: $($invalid.Label -join ', ')"
   }
+  return $results
+}
+
+function Install-Models([object[]]$Edges, [int]$Throttle, [string]$LocalCache = "") {
+  # [object[]], not [string[]]: the edges are PSCustomObjects and string
+  # coercion would drop Target/Sha256/Url before any download happens.
+  $plan = @($Edges | Where-Object { -not (Test-ModelFile $_.Target $_.Sha256 $_.SizeBytes) })
+  $skipped = $Edges.Count - $plan.Count
+  if ($skipped -gt 0) { Write-Host "  $skipped model file(s) already present and verified" }
+
+  $job = $null
+  if ($plan.Count -gt 0) {
+    Write-Host "  installing $($plan.Count) model file(s) with $Throttle parallel worker(s)"
+    $job = Start-ModelDownloadJob -Plan $plan -Throttle $Throttle -LocalCache $LocalCache
+  }
+  return Complete-ModelInstall -Plan $plan -Job $job
 }
 
 function Install-CrtDlls([string]$Stage, [string]$RepoRoot) {
@@ -502,8 +554,16 @@ function Install-CrtDlls([string]$Stage, [string]$RepoRoot) {
           ForEach-Object { $_.FullName })
     }
   }
-  $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
-  if (Test-Path -LiteralPath $vswhere) {
+  # ProgramFiles(x86) is missing in some local pwsh sandboxes; Join-Path $null
+  # used to abort CRT staging before any DLL was copied. Probe the usual roots.
+  $vswhereCandidates = [System.Collections.Generic.List[string]]::new()
+  foreach ($root in @(${env:ProgramFiles(x86)}, $env:ProgramFiles, "C:\Program Files (x86)", "C:\Program Files")) {
+    if ([string]::IsNullOrWhiteSpace($root)) { continue }
+    $candidate = Join-Path $root "Microsoft Visual Studio/Installer/vswhere.exe"
+    if ($vswhereCandidates -notcontains $candidate) { $vswhereCandidates.Add($candidate) }
+  }
+  $vswhere = $vswhereCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+  if ($vswhere) {
     $installation = (& $vswhere -latest -products "*" -property installationPath 2>$null | Select-Object -First 1)
     if ($installation) {
       $redist = Join-Path $installation.Trim() "VC/Redist/MSVC"
@@ -520,6 +580,9 @@ function Install-CrtDlls([string]$Stage, [string]$RepoRoot) {
     }
   }
   $redistDirs = @($redistDirs | Select-Object -Unique)
+  if (-not $env:SystemRoot) {
+    throw "SystemRoot is not set; cannot fall back to System32 for CRT DLLs"
+  }
   $system32 = Join-Path $env:SystemRoot "System32"
 
   $missing = @()
@@ -550,8 +613,8 @@ function Install-CrtDlls([string]$Stage, [string]$RepoRoot) {
 
 Push-Location $RepoRoot
 $cpuJob = $null
-$pdfiumJob = $null
-$pdfiumWork = $null
+$whisperJob = $null
+$modelJob = $null
 $emptyCache = $null
 $validateRoot = $null
 try {
@@ -560,7 +623,8 @@ try {
   }
   Write-Host "repo:   $RepoRoot"
   Write-Host "target: $Target"
-  Write-Host "jobs:   $Jobs of $([Environment]::ProcessorCount) logical cores"
+  $jobsSource = if ($MyInvocation.BoundParameters.ContainsKey('Jobs')) { "explicit" } elseif ($env:GITHUB_ACTIONS) { "ci-default" } else { "local-auto" }
+  Write-Host "jobs:   $Jobs of $([Environment]::ProcessorCount) logical cores ($jobsSource)"
 
   if (-not $NoCpuMonitor) {
     # Resolved before the first Write-Phase so the marker queue has a sink.
@@ -579,6 +643,17 @@ try {
     # libheif-sys (the `heic` feature) resolves libheif/boost/zlib through vcpkg.
     $env:VCPKG_ROOT = "C:\vcpkg"
     Write-Host "VCPKG_ROOT not set; defaulting to $env:VCPKG_ROOT"
+  }
+
+  # Local reuse: a previous run stages ORT under target/ort-staging and leaves
+  # it there. Point ORT_LIB_LOCATION at it so a bare local invocation does not
+  # re-download the archive every time. CI exports ORT_LIB_LOCATION itself.
+  if ([string]::IsNullOrWhiteSpace($env:ORT_LIB_LOCATION)) {
+    $ortStaging = Join-Path $RepoRoot "target/ort-staging"
+    if (Test-Path -LiteralPath (Join-Path $ortStaging "onnxruntime.dll")) {
+      $env:ORT_LIB_LOCATION = $ortStaging
+      Write-Host "ORT_LIB_LOCATION not set; reusing $ortStaging"
+    }
   }
 
   if ([string]::IsNullOrWhiteSpace($env:ORT_LIB_LOCATION)) {
@@ -625,40 +700,15 @@ try {
     Write-Host "  using the ONNX Runtime staged by the environment (ORT_LIB_LOCATION=$env:ORT_LIB_LOCATION)"
   }
 
-  # pdfium is downloaded rather than built and staging only needs the file after
-  # the build, so its download races the build instead of extending the critical
-  # path. The temp tree path is computed here and passed in so the finally block
-  # can delete it no matter what happens to the job.
-  $pdfiumWork = Join-Path ([System.IO.Path]::GetTempPath()) ("xberg-pdfium-" + [Guid]::NewGuid().ToString("N"))
-  $pdfiumJob = Start-ThreadJob -ArgumentList $PdfiumVersion, $pdfiumWork -ScriptBlock {
-    param([string]$Version, [string]$Work)
-    # The download/extract/locate flow is duplicated here on purpose: a thread
-    # job cannot dot-source this script (the body would run again) and a
-    # function cannot be handed across runspaces.
-    $ProgressPreference = "SilentlyContinue"
-    $url = "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/$Version/pdfium-win-x64.tgz"
-    New-Item -ItemType Directory -Path $Work -Force | Out-Null
-    $archive = Join-Path $Work "pdfium-win-x64.tgz"
-    $lastError = $null
-    for ($attempt = 1; $attempt -le 5; $attempt++) {
-      try {
-        Invoke-WebRequest -Uri $url -OutFile $archive -UseBasicParsing
-        $lastError = $null
-        break
-      }
-      catch {
-        $lastError = $_.Exception.Message
-        if ($attempt -lt 5) { Start-Sleep -Seconds (5 * $attempt) }
-      }
-    }
-    if ($lastError) { throw "could not download pdfium $Version from $url : $lastError" }
-
-    & tar -xzf $archive -C $Work
-    if ($LASTEXITCODE -ne 0) { throw "tar failed to extract $archive" }
-
-    $pdfium = Get-ChildItem -Path $Work -Recurse -File -Filter "pdfium.dll" | Select-Object -First 1
-    if (-not $pdfium) { throw "pdfium.dll not found in the extracted pdfium $Version archive" }
-    return $pdfium.FullName
+  # Whisper is fully pinned here (URL + SHA + size) and does not need the built
+  # exe. Prefetch it into the persistent model cache so a cold
+  # run does not wait until after CRT to pull ~265MB.
+  New-Item -ItemType Directory -Path $ModelCacheRoot -Force | Out-Null
+  $whisperCacheEdges = @(Get-TranscriptionModelEntries -ModelsRoot $ModelCacheRoot |
+    Where-Object { -not (Test-ModelFile $_.Target $_.Sha256 $_.SizeBytes) })
+  if ($whisperCacheEdges.Count -gt 0) {
+    Write-Host "whisper: prefetching $($whisperCacheEdges.Count) file(s) into $ModelCacheRoot (races cargo build)"
+    $whisperJob = Start-ModelDownloadJob -Plan $whisperCacheEdges -Throttle ([Math]::Min(4, $Jobs)) -LocalCache ""
   }
 
   Write-Phase "Build"
@@ -684,31 +734,43 @@ try {
     throw "expected binary at $builtExe after the build"
   }
 
-  # Collected with its own message: a pdfium download failure is a network
-  # failure and would otherwise read as part of the build.
-  $pdfiumErrors = @()
-  $pdfiumPath = Receive-Job -Job $pdfiumJob -Wait -ErrorVariable pdfiumErrors -ErrorAction SilentlyContinue
-  $pdfiumState = $pdfiumJob.State
-  Remove-Job -Job $pdfiumJob -Force -ErrorAction SilentlyContinue
-  $pdfiumJob = $null
-  if ($pdfiumState -ne "Completed" -or [string]::IsNullOrWhiteSpace($pdfiumPath)) {
-    throw "pdfium $PdfiumVersion download failed (job state $pdfiumState): $($pdfiumErrors -join '; ')"
+  if ($whisperJob) {
+    Complete-ModelInstall -Plan @() -Job $whisperJob | Out-Null
+    $whisperJob = $null
+    Write-Host "  whisper prefetch into $ModelCacheRoot done"
   }
-  $pdfiumPath = @($pdfiumPath)[-1]
-  Write-Host "  pdfium.dll $PdfiumVersion ready"
+
+  # Manifest only needs the freshly built target exe (normal PATH / MSVC CRT),
+  # not the staged tree. Resolve OCR/layout edges here so downloads can overlap
+  # Stage + CRT instead of waiting for both.
+  $selected = @(Get-RequiredModelEntries -Exe $builtExe -ModelsRoot $ModelsRoot)
+  $selected += @(Get-TranscriptionModelEntries -ModelsRoot $ModelsRoot)
 
   Write-Phase "Stage"
   Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Path $Stage -Force | Out-Null
-  # The binary first: the model manifest and the CRT scan both need it in place.
+  New-Item -ItemType Directory -Path $ModelsRoot -Force | Out-Null
+  # The binary first: the CRT scan and smoke tests need it in place.
   Copy-Item -LiteralPath $builtExe -Destination $StageExe -Force
   Write-Host "  staged xberg.exe"
 
-  # Four independent writes into the stage directory, in flight at once and
+  # Start model installs into the freshly created Stage/models while the rest
+  # of Stage and CRT run. Cache hits (Whisper + previous OCR/layout) copy
+  # locally; misses download.
+  $modelPlan = @($selected | Where-Object { -not (Test-ModelFile $_.Target $_.Sha256 $_.SizeBytes) })
+  $modelSkipped = $selected.Count - $modelPlan.Count
+  if ($modelSkipped -gt 0) { Write-Host "  $modelSkipped model file(s) already present and verified" }
+  if ($modelPlan.Count -gt 0) {
+    Write-Host "  installing $($modelPlan.Count) model file(s) with $Jobs parallel worker(s) (races Stage/CRT)"
+    $modelJob = Start-ModelDownloadJob -Plan $modelPlan -Throttle $Jobs -LocalCache $ModelCacheRoot
+  }
+
+  # Independent writes into the stage directory, in flight at once and
   # bounded by -Jobs. Each reports its own outcome instead of throwing, so one
   # failure cannot hide another; the parent summarizes and throws once.
   $ortLib = $env:ORT_LIB_LOCATION
-  $stageResults = @("ort-dlls", "pdfium", "licenses", "launcher") | ForEach-Object -Parallel {
+  $stageTasks = @("ort-dlls", "licenses", "launcher")
+  $stageResults = @($stageTasks) | ForEach-Object -Parallel {
     $ProgressPreference = "SilentlyContinue"
     $task = $_
     try {
@@ -724,10 +786,6 @@ try {
           }
           "$($dlls.Count) ONNX Runtime DLL(s)"
         }
-        "pdfium" {
-          Copy-Item -LiteralPath $using:pdfiumPath -Destination (Join-Path $using:Stage "pdfium.dll") -Force
-          "pdfium.dll $using:PdfiumVersion"
-        }
         "licenses" {
           foreach ($file in @("LICENSE", "THIRD_PARTY_LICENSES.md")) {
             Copy-Item -LiteralPath (Join-Path $using:RepoRoot $file) -Destination (Join-Path $using:Stage $file) -Force
@@ -740,7 +798,6 @@ try {
             "setlocal"
             'set "XBERG_ROOT=%~dp0"'
             'set "HF_HUB_CACHE=%XBERG_ROOT%models"'
-            'set "PDFIUM_DYNAMIC_LIB_PATH=%XBERG_ROOT%"'
             '"%XBERG_ROOT%xberg.exe" %*'
             "exit /b %ERRORLEVEL%"
           ) -join "`r`n"
@@ -757,7 +814,7 @@ try {
 
   # Reported in the declared order, not in completion order, so two runs of the
   # same failure read the same way.
-  foreach ($name in @("ort-dlls", "pdfium", "licenses", "launcher")) {
+  foreach ($name in $stageTasks) {
     $result = @($stageResults | Where-Object { $_.Name -eq $name })[0]
     if (-not $result) { continue }
     if ($result.Ok) {
@@ -773,22 +830,15 @@ try {
     throw "staging the bundle failed: $summary"
   }
 
-  # Deploy the MSVC runtime before the first run of the staged binary: the
-  # freshly built xberg.exe imports vcruntime140.dll, and a host without the
-  # redistributable somewhere on its search path would fail to launch it during
-  # model staging, before validation ever runs. That dependency is the reason
-  # this stage cannot overlap the model stage, which opens by running the staged
-  # binary for `cache manifest`.
+  # Deploy the MSVC runtime before the first run of the staged binary (smoke /
+  # --version). `cache manifest` already ran off the target exe above, so CRT
+  # no longer blocks model resolution -- only the in-flight download job does.
   Write-Phase "CRT"
   Install-CrtDlls -Stage $Stage -RepoRoot $RepoRoot
 
   Write-Phase "Models"
-  $selected = @(Get-RequiredModelEntries -Exe $StageExe -ModelsRoot $ModelsRoot)
-  # The transcription model rides the same parallel download + verification pass
-  # as the OCR/layout set; it is not in the CLI manifest, so it is pinned in
-  # $TranscriptionFiles.
-  $selected += @(Get-TranscriptionModelEntries -ModelsRoot $ModelsRoot)
-  Install-Models -Edges $selected -Throttle $Jobs
+  Complete-ModelInstall -Plan $modelPlan -Job $modelJob | Out-Null
+  $modelJob = $null
   $modelTotal = 0
   foreach ($edge in $selected) {
     $length = (Get-Item -LiteralPath $edge.Target).Length
@@ -808,24 +858,16 @@ try {
   $verifyScript = Join-Path $RepoRoot "scripts/ci/verify-windows-dll-closure.ps1"
   $smokeScript = Join-Path $RepoRoot "scripts/publish/cli/offline-smoke.ps1"
   $verifyPwsh = Join-Path $PSHOME "pwsh.exe"
-  # Five read-only probes against the staged tree, all in flight at once. Every
-  # probe that runs the binary installs the cleaned PATH itself rather than
-  # inheriting it: Start-Process -Environment replaces ordinary variables, but
-  # for PATH it always puts $PSHOME first and appends the Machine/User scope
-  # afterwards, which is not the PATH Get-CleanPath computed. -CleanPath does
-  # that for the smoke script, XBERG_PROBE_PATH for the --version wrapper.
+  # Four read-only probes against the staged tree, all in flight at once.
+  # dll-closure + -RequireImportClosure is one invocation: the verify script
+  # always runs ABSENCE/PRESENCE and only adds the import walk when asked, so
+  # the previous un-flagged duplicate probe was pure PE re-walk cost.
   $checks = @(
     @{
       Name = "version"
       Exe = $verifyPwsh
       Args = @("-NoProfile", "-Command", '$env:PATH = $env:XBERG_PROBE_PATH; & $env:XBERG_PROBE_EXE --version; exit $LASTEXITCODE')
       Env = @{ XBERG_PROBE_PATH = $cleanPath; XBERG_PROBE_EXE = $StageExe }
-    }
-    @{
-      Name = "dll-closure"
-      Exe = $verifyPwsh
-      Args = @("-NoProfile", "-File", $verifyScript, "-Artifact", $Stage, "-NativeGlob", "xberg.exe")
-      Env = @{}
     }
     @{
       Name = "dll-import-closure"
@@ -839,13 +881,20 @@ try {
       Args = @("-NoProfile", "-File", $smokeScript, "-Exe", $StageExe, "-Fixture", $fixture, "-CacheDir", $ModelsRoot, "-CleanPath", $cleanPath)
       Env = @{}
     }
-    @{
-      Name = "smoke-empty-cache"
-      Exe = $verifyPwsh
-      Args = @("-NoProfile", "-File", $smokeScript, "-Exe", $StageExe, "-Fixture", $fixture, "-CacheDir", $emptyCache, "-CleanPath", $cleanPath, "-ExpectEmptyCacheFailure")
-      Env = @{}
-    }
   )
+  # Empty-cache probe only makes sense when HF layout models are bundled
+  # (paddle/layout). This lean package stages Whisper under models/ for
+  # transcription, not for the PNG extract smoke path.
+  if ($RequiredModels.Count -gt 0) {
+    $checks += @(
+      @{
+        Name = "smoke-empty-cache"
+        Exe = $verifyPwsh
+        Args = @("-NoProfile", "-File", $smokeScript, "-Exe", $StageExe, "-Fixture", $fixture, "-CacheDir", $emptyCache, "-CleanPath", $cleanPath, "-ExpectEmptyCacheFailure")
+        Env = @{}
+      }
+    )
+  }
 
   $running = foreach ($check in $checks) {
     $stdoutFile = Join-Path $validateRoot ($check.Name + ".stdout.txt")
@@ -891,7 +940,12 @@ try {
   Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue
   $sevenZip = (Get-Command 7z -ErrorAction Stop).Source
   Invoke-Native -FilePath $sevenZip -Arguments @("a", "-mmt=$Jobs", $ZipPath, $StageName) -WorkingDirectory $RepoRoot | Out-Null
-  Invoke-Native -FilePath $sevenZip -Arguments @("t", $ZipPath) -WorkingDirectory $RepoRoot | Out-Null
+  if (-not $SkipZipTest) {
+    Invoke-Native -FilePath $sevenZip -Arguments @("t", $ZipPath) -WorkingDirectory $RepoRoot | Out-Null
+  }
+  else {
+    Write-Host "  skipped 7z t (-SkipZipTest)"
+  }
 
   Write-Phase "Done"
   Write-Host "staging dir: $Stage"
@@ -908,11 +962,12 @@ try {
 }
 finally {
   if ($cpuJob) { Stop-CpuMonitor -Job $cpuJob }
-  if ($pdfiumJob) {
-    Stop-Job -Job $pdfiumJob -ErrorAction SilentlyContinue
-    Remove-Job -Job $pdfiumJob -Force -ErrorAction SilentlyContinue
+  foreach ($job in @($whisperJob, $modelJob)) {
+    if ($job) {
+      Stop-Job -Job $job -ErrorAction SilentlyContinue
+      Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    }
   }
-  if ($pdfiumWork) { Remove-Item -Recurse -Force $pdfiumWork -ErrorAction SilentlyContinue }
   if ($emptyCache) { Remove-Item -Recurse -Force $emptyCache -ErrorAction SilentlyContinue }
   if ($validateRoot) { Remove-Item -Recurse -Force $validateRoot -ErrorAction SilentlyContinue }
   Pop-Location

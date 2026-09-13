@@ -1,6 +1,6 @@
 ### Supported File Formats (110 formats · 146 file extensions · 58 MIME aliases)
 
-110 formats across 140 unique file extensions, with 56 compatibility MIME aliases, intelligent format detection, and comprehensive metadata extraction.
+110 formats across 146 unique file extensions, with 58 compatibility MIME aliases, intelligent format detection, and comprehensive metadata extraction.
 
 #### Office Documents
 
@@ -34,6 +34,7 @@
 | **MP4 audio track** | `.mp4`, `.mpg4`, `.mp4v`, `.m4v` | Audio-track transcription only |
 | **MPEG audio track** | `.mpeg`, `.mpg`, `.mpe`, `.m1v`, `.m2v` | Audio-track transcription only |
 | **WebM audio track** | `.webm` | Audio-track transcription only |
+| **Windows Media audio track** | `.wmv`, `.asf` | Audio-track transcription only (Windows Media Foundation, or `ffmpeg` where the codecs are absent) |
 {% endif %}
 
 #### Web & Data
@@ -82,7 +83,7 @@ Powered by [tree-sitter-language-pack](https://github.com/xberg-io/tree-sitter-l
 - **Table Extraction** - Parse tables with structure and cell content preservation
 - **Image Extraction** - Extract embedded images and render page previews
 {% if language != "r" and language != "wasm" %}
-- **Audio/Video Transcription** - Extract speech transcripts from MP3, M4A, WAV, WebM, and MP4 inputs when the native transcription feature is available
+- **Audio/Video Transcription** - Extract speech transcripts from MP3, M4A, WAV, WebM, MP4, and Windows Media (WMV/ASF) inputs when the native transcription feature is available
 {% endif %}
 - **OCR Support** - Integrate multiple OCR backends for scanned documents
 {% if features.async %}

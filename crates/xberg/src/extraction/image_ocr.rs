@@ -358,6 +358,13 @@ pub(crate) async fn process_images_with_ocr(
         return Ok(images);
     }
 
+    // A caller that disabled OCR (`disable_ocr` or `ocr.enabled = false`) must not get image
+    // OCR out of this shared helper just because it was handed images anyway: defend the hard
+    // switch here instead of trusting every call site's gate. ~keep
+    if config.effective_disable_ocr() {
+        return Ok(images);
+    }
+
     // Image OCR is on by default (`ImageExtractionConfig::run_ocr_on_images`), so a caller
     // who never configured an `ocr` section still gets their images OCR'd: fall back to the
     // default backend rather than silently skipping every image. ~keep
@@ -838,5 +845,112 @@ mod tests {
         assert!(nested.ocr_elements.is_none());
         assert!(warnings.is_empty());
         crate::plugins::unregister_ocr_backend(POLICY_BACKEND_NAME).unwrap();
+    }
+
+    const DISABLED_OCR_BACKEND_NAME: &str = "disabled-image-ocr-test-backend";
+
+    /// Counts every `process_image` call, so a test can assert that a caller who disabled OCR
+    /// never reached the backend rather than trusting the returned images alone.
+    struct CountingBackend {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Plugin for CountingBackend {
+        fn name(&self) -> &str {
+            DISABLED_OCR_BACKEND_NAME
+        }
+
+        fn version(&self) -> String {
+            "1.0.0".to_string()
+        }
+
+        fn initialize(&self) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn shutdown(&self) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl OcrBackend for CountingBackend {
+        async fn process_image(&self, _image_bytes: &[u8], _config: &OcrConfig) -> crate::Result<ExtractedDocument> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ExtractedDocument::default())
+        }
+
+        fn supports_language(&self, _lang: &str) -> bool {
+            true
+        }
+
+        fn backend_type(&self) -> OcrBackendType {
+            OcrBackendType::Custom
+        }
+    }
+
+    struct DisabledBackendGuard;
+
+    impl Drop for DisabledBackendGuard {
+        fn drop(&mut self) {
+            let _ = crate::plugins::unregister_ocr_backend(DISABLED_OCR_BACKEND_NAME);
+        }
+    }
+
+    /// `disable_ocr` and the `ocr.enabled = false` shorthand are documented as hard switches
+    /// ("Disable OCR entirely, even for images"), but this helper used to synthesize a default
+    /// (enabled) `OcrConfig` when none was configured and forward any caller config verbatim —
+    /// so an explicit opt-out still OCR'd every image and loaded the default backend's model.
+    /// Both variants must now short-circuit before the backend runs, while the images survive
+    /// unprocessed.
+    #[tokio::test]
+    async fn disabled_ocr_never_reaches_the_backend() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        crate::plugins::register_ocr_backend(Arc::new(CountingBackend {
+            calls: Arc::clone(&calls),
+        }))
+        .expect("register counting OCR backend");
+        let _guard = DisabledBackendGuard;
+
+        let image = || ExtractedImage {
+            data: Bytes::from_static(b"image"),
+            ..Default::default()
+        };
+        let mut warnings = Vec::new();
+
+        let config = crate::core::config::ExtractionConfig {
+            ocr: Some(OcrConfig {
+                backend: DISABLED_OCR_BACKEND_NAME.to_string(),
+                enabled: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let images = process_images_with_ocr(vec![image()], &config, &mut warnings)
+            .await
+            .expect("a disabled OCR config must still return the images");
+        assert!(
+            images[0].ocr_result.is_none(),
+            "ocr.enabled = false must skip embedded-image OCR"
+        );
+
+        let config = crate::core::config::ExtractionConfig {
+            disable_ocr: true,
+            ..Default::default()
+        };
+        let images = process_images_with_ocr(vec![image()], &config, &mut warnings)
+            .await
+            .expect("a disabled OCR config must still return the images");
+        assert!(
+            images[0].ocr_result.is_none(),
+            "disable_ocr must skip embedded-image OCR"
+        );
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a caller who disabled OCR must never reach the OCR backend"
+        );
+        assert!(warnings.is_empty());
     }
 }

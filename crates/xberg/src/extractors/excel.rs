@@ -608,6 +608,7 @@ impl InternalDocumentExtractor for ExcelExtractor {
             .await;
             if !children.is_empty() {
                 doc.children = Some(children);
+                crate::extraction::ooxml_embedded::append_embedded_object_text(&mut doc);
             }
             doc.processing_warnings.extend(embed_warnings);
         }

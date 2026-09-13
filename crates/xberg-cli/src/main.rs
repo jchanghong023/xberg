@@ -176,8 +176,15 @@ enum Commands {
         ///
         /// When `--extract-images true` is used with text or toon format, the markdown content
         /// references image files by name (e.g. `image_0.png`). Pass this flag to control where
-        /// those files land. Defaults to the current working directory when not specified.
+        /// those files land: with an explicit directory the references name it
+        /// (`<dir>/image_0.png`) so the written text finds the pictures wherever it is saved,
+        /// while the default writes name-only references that resolve when the text is saved
+        /// into that same directory.
         /// Ignored for `--format json` because JSON embeds image bytes inline.
+        /// In batch mode each result's images go to `<dir>/doc_<N>/` (N is the result's position
+        /// in the batch; without this flag the base is the current directory), because one
+        /// directory holding every document's `image_N.ext` files would drop all but the last
+        /// document's pictures.
         /// The directory must already exist.
         #[arg(long)]
         output_dir: Option<PathBuf>,
@@ -230,8 +237,15 @@ enum Commands {
         ///
         /// When `--extract-images true` is used with text or toon format, the markdown content
         /// references image files by name (e.g. `image_0.png`). Pass this flag to control where
-        /// those files land. Defaults to the current working directory when not specified.
+        /// those files land: with an explicit directory the references name it
+        /// (`<dir>/image_0.png`) so the written text finds the pictures wherever it is saved,
+        /// while the default writes name-only references that resolve when the text is saved
+        /// into that same directory.
         /// Ignored for `--format json` because JSON embeds image bytes inline.
+        /// In batch mode each result's images go to `<dir>/doc_<N>/` (N is the result's position
+        /// in the batch; without this flag the base is the current directory), because one
+        /// directory holding every document's `image_N.ext` files would drop all but the last
+        /// document's pictures.
         /// The directory must already exist.
         #[arg(long)]
         output_dir: Option<PathBuf>,
