@@ -7,9 +7,10 @@
 三层检查（每层都独立出码）：
   1. 进程/结构 —— CLI 退出码、空结果、乱码/控制字符/格式泄漏、Markdown 围栏与表格列、
      图片引用可解析性、落盘图片文件合法性（大小 + magic bytes）
-  2. 源文对齐   —— 字符 bigram 召回率 + 数字/ID token 召回率（源文关键数字是否仍在 MD 中）
-  3. 交叉核对   —— 源页数/幻灯片数 vs 引擎 counts vs `## Page N` 标题；元数据图片数 vs 磁盘；
-     音视频文件体积 vs 转写文本量（防空转写）
+  2. 源文对齐   —— 基准去页眉页脚后 bigram 召回 + 数字/标识边界匹配 + 正文字符量比值 +
+     分页/分片内容覆盖（源页有字而 MD 几乎对不上 → FAIL）
+  3. 交叉核对   —— 源页数 vs 引擎 counts vs `## Page N`；源文件媒体清单 vs 引擎图片数 vs
+     磁盘落盘 vs MD 引用（四方对账）；音视频文件体积 vs 转写文本量
 
 用法:
     python fulltest.py [--cli PATH] [--src DIR] [--out DIR] [--timeout SECS]
@@ -48,6 +49,19 @@ TRANSCRIPTION_CFG = {"enabled": True, "model": "tiny", "language": "zh"}
 RECALL_GOOD = 0.85
 RECALL_FAIL = 0.60
 NUM_RECALL_FAIL = 0.50
+
+# 正文体量：norm(MD)/norm(源)。MD 允许略少（剥页眉/结构重排），但不能塌缩。
+CHAR_RATIO_FAIL = 0.35
+CHAR_RATIO_WARN = 0.50
+CHAR_RATIO_MIN_SRC = 80          # 源归一后不足此长度不评估
+# 源基准清洗：重复页眉/页脚（PDF 整页 get_text 会带进来）
+HEADER_MIN_COUNT = 4             # 同一短行出现 >=N 次视为页眉/页脚
+HEADER_LINE_MIN = 8
+HEADER_LINE_MAX = 90
+# 分页内容覆盖：该页归一后字符 bigram 被 MD 命中的比例
+PAGE_MIN_NORM_CHARS = 30         # 页内有效字太少不抽查
+PAGE_COVER_FAIL = 0.12           # 命中率低于此 → 整页疑似丢失
+PAGE_COVER_WARN = 0.35
 
 TICKER_INTERVAL = 5  # 秒
 
@@ -94,9 +108,15 @@ ISSUE_META = {
     "IMG_LOST": "FAIL",         # 引用数 > 落盘数（丢图）
     "IMG_CORRUPT": "FAIL",      # 零字节 / 过小 / magic 不匹配
     "IMG_META": "WARN",
+    "IMG_SRC_EMPTY": "FAIL",    # 源文件有图，但 MD 无引用且磁盘无落盘
+    "IMG_SRC_GAP": "WARN",      # 源媒体数明显多于导出/落盘
     "RECALL_LOW": "FAIL",
     "NUM_RECALL_LOW": "FAIL",
     "RECALL_WEAK": "WARN",
+    "CHAR_THIN": "FAIL",        # 正文体量相对源文过低
+    "CHAR_THIN_SOFT": "WARN",
+    "PAGE_BODY_MISSING": "FAIL",  # 源页有正文，MD 几乎对不上
+    "PAGE_BODY_WEAK": "WARN",
     "AV_SPARSE": "FAIL",
     "AV_THIN": "WARN",
     "PAGE_MISMATCH": "WARN",
@@ -173,12 +193,106 @@ def extract_source_text(path: Path):
     return None, None, extras  # 该格式没有对应的基准抽取器
 
 
+def count_source_images(path: Path):
+    """独立统计源文件内嵌图片数量（不依赖 xberg）。返回 (数量|None, 备注)。"""
+    ext = path.suffix.lower().lstrip(".")
+    try:
+        if ext == "pdf":
+            import pymupdf
+            with pymupdf.open(path) as doc:
+                n = 0
+                for page in doc:
+                    n += len(page.get_images(full=True))
+                return n, "pymupdf.get_images"
+        if ext in ("docx", "pptx", "xlsx", "ods"):
+            import zipfile
+            prefixes = {
+                "docx": ("word/media/",),
+                "pptx": ("ppt/media/",),
+                "xlsx": ("xl/media/",),
+                "ods": ("Pictures/", "ObjectReplacements/"),
+            }[ext if ext != "ods" else "ods"]
+            with zipfile.ZipFile(path) as z:
+                n = sum(
+                    1 for name in z.namelist()
+                    if any(name.startswith(p) for p in prefixes)
+                    and not name.endswith("/")
+                    and not name.endswith(".bin")
+                )
+                return n, f"zip:{prefixes[0]}*"
+    except Exception as e:
+        return None, f"源图片清单失败: {e}"
+    return None, None
+
+
+def page_text_chunks(path: Path):
+    """按页/按幻灯片拆出源文，供分页内容抽查。返回 list[str] 或 None。"""
+    ext = path.suffix.lower().lstrip(".")
+    try:
+        if ext == "pdf":
+            import pymupdf
+            with pymupdf.open(path) as doc:
+                return [page.get_text() or "" for page in doc]
+        if ext == "pptx":
+            from pptx import Presentation
+            prs = Presentation(str(path))
+            chunks = []
+            for slide in prs.slides:
+                parts = []
+                for shape in slide.shapes:
+                    if shape.has_text_frame:
+                        parts.append(shape.text_frame.text or "")
+                    if getattr(shape, "has_table", False):
+                        for row in shape.table.rows:
+                            parts.append(" ".join(c.text or "" for c in row.cells))
+                chunks.append("\n".join(parts))
+            return chunks
+    except Exception:
+        return None
+    return None
+
+
 def strip_pdf_page_numbers(text: str) -> str:
     """去掉「整行只有数字」的页脚/页码，避免把页码算进数字召回率基准。"""
     return "\n".join(
         line for line in (text or "").splitlines()
         if not re.fullmatch(r"\s*\d{1,4}\s*", line)
     )
+
+
+# 公认无信息的重复行（分隔线/表格框）
+DUP_IGNORE_RE = re.compile(r"^(?:[-=_*|:\s]+|#*\s*Page\s*\d+\s*|#*\s*\d+\s*)$")
+
+
+def strip_repeated_short_lines(text: str) -> str:
+    """去掉源文里反复出现的短行（PDF 页眉/页脚、版式装饰），再进入召回基准。
+
+    只对非表格、长度适中的行做去重；xlsx 合法重复单元格通常更短或进表格路径。
+    """
+    if not text:
+        return text
+    lines = text.splitlines()
+    counter: Counter = Counter()
+    for line in lines:
+        raw = line.strip()
+        if not raw or raw.startswith("|"):
+            continue
+        if HEADER_LINE_MIN <= len(raw) <= HEADER_LINE_MAX and not DUP_IGNORE_RE.match(raw):
+            # 页码/版本号归一，避免「…, 41」「…, 42」被算成两行
+            key = re.sub(r"\d+", "#", raw)
+            counter[key] += 1
+    drop = {k for k, c in counter.items() if c >= HEADER_MIN_COUNT}
+    if not drop:
+        return text
+    kept = []
+    for line in lines:
+        raw = line.strip()
+        if raw and not raw.startswith("|") and HEADER_LINE_MIN <= len(raw) <= HEADER_LINE_MAX:
+            key = re.sub(r"\d+", "#", raw)
+            if key in drop:
+                continue
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def _norm_ws(s: str) -> str:
@@ -197,6 +311,14 @@ def bigram_recall(source: str, md: str) -> float:
     return len(grams & out_set) / len(grams)
 
 
+def char_volume_ratio(source: str, md: str) -> float | None:
+    """norm(MD)/norm(源)；源过短返回 None。"""
+    src_n = len(_norm_ws(source))
+    if src_n < CHAR_RATIO_MIN_SRC:
+        return None
+    return len(_norm_ws(md)) / src_n
+
+
 # 数字 / 短 ID：验收时最关键，漏掉一个关键参数就可能整份文档不可用
 NUMBER_TOKEN_RE = re.compile(r"(?<![\w.])(?:\d+\.\d+|\d{2,})(?![\w.])")
 # 技术标识（含下划线/连字符的英文短词，长度≥4，避免 a/the/of 这类）
@@ -212,19 +334,29 @@ def extract_critical_tokens(text: str) -> tuple[set, set]:
     return nums, idents
 
 
+def _token_boundary_hit(token: str, md: str, out_tokens: set) -> bool:
+    """token 必须整词命中，禁止「12」撞进「312」这类子串虚高。"""
+    if token in out_tokens:
+        return True
+    if not md:
+        return False
+    # 非字母数字边界（含中文/标点/空白/围栏字符）视为整词边界
+    pat = re.compile(rf"(?<![0-9A-Za-z_.]){re.escape(token)}(?![0-9A-Za-z_.])")
+    return bool(pat.search(md))
+
+
 def token_recall(source: str, md: str):
     """返回 (数字召回率, 标识召回率, 数字缺失样例, 标识缺失样例)。无源 token 时返回 -1。"""
     src_nums, src_idents = extract_critical_tokens(source)
     out_nums, out_idents = extract_critical_tokens(md)
-    # MD 里也允许以粗体/代码围栏出现，extract 已覆盖
     if src_nums:
-        hit = {t for t in src_nums if t in out_nums or t in md}
+        hit = {t for t in src_nums if _token_boundary_hit(t, md, out_nums)}
         num_r = len(hit) / len(src_nums)
         missing_nums = sorted(src_nums - hit, key=lambda x: (-len(x), x))[:8]
     else:
         num_r, missing_nums = -1.0, []
     if src_idents:
-        hit_i = {t for t in src_idents if t in out_idents or t in md}
+        hit_i = {t for t in src_idents if _token_boundary_hit(t, md, out_idents)}
         id_r = len(hit_i) / len(src_idents)
         missing_id = sorted(src_idents - hit_i, key=lambda x: (-len(x), x))[:8]
     else:
@@ -243,8 +375,6 @@ XML_LEAK_RE = re.compile(
 )
 BINARY_LEAK_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]{3,}")
 PAGE_TITLE_RE = re.compile(r"^#{1,3}\s*Page\s+(\d+)\s*$", re.I | re.M)
-# 公认无信息的重复行（分隔线/表格框）
-DUP_IGNORE_RE = re.compile(r"^(?:[-=_*|:\s]+|#*\s*Page\s*\d+\s*|#*\s*\d+\s*)$")
 
 
 def structural_metrics(md_text: str, img_dir: Path):
@@ -430,6 +560,79 @@ def judge_meta_images(meta, m, issues):
         issues.append(make_issue(
             "IMG_META",
             f"元数据图片数({imgs_meta})与磁盘导出数({m['imgs_on_disk']})不一致"))
+
+
+def judge_source_images(src_img_count, meta, m, issues):
+    """源文件媒体清单 vs 引擎图片数 vs 磁盘 vs MD 引用（四方对账）。
+
+    堵住「引擎丢图且不写引用 → 引用0/落盘0 → 旧检查全过」的漏洞。
+    """
+    if src_img_count is None or src_img_count <= 0:
+        return
+    disk = m["imgs_on_disk"]
+    refs = m["img_refs"]
+    imgs_meta = (meta.get("counts") or {}).get("images") or 0
+
+    # 源里有图，但既无引用也无落盘 → 整类丢失
+    if refs == 0 and disk == 0:
+        issues.append(make_issue(
+            "IMG_SRC_EMPTY",
+            f"源文件内嵌图片约 {src_img_count} 个，但 MD 无图片引用且磁盘无落盘"))
+        return
+
+    # 源媒体数明显多于导出（去重/装饰图会略少，留 2 张或 30% 容差）
+    recovered = max(disk, imgs_meta, refs)
+    slack = max(2, int(src_img_count * 0.3))
+    if src_img_count - recovered > slack:
+        issues.append(make_issue(
+            "IMG_SRC_GAP",
+            f"源媒体约 {src_img_count} 个，恢复 {recovered} 个"
+            f"(磁盘{disk}/元数据{imgs_meta}/引用{refs})，缺口 {src_img_count - recovered}"))
+
+
+def judge_char_volume(ratio, issues):
+    """正文体量：norm(MD)/norm(源) 过低说明可能整段丢失。"""
+    if ratio is None:
+        return
+    if ratio < CHAR_RATIO_FAIL:
+        issues.append(make_issue(
+            "CHAR_THIN",
+            f"正文体量比过低(MD/源={ratio:.2f} < {CHAR_RATIO_FAIL:.2f})"))
+    elif ratio < CHAR_RATIO_WARN:
+        issues.append(make_issue(
+            "CHAR_THIN_SOFT",
+            f"正文体量比偏低(MD/源={ratio:.2f} < {CHAR_RATIO_WARN:.2f})"))
+
+
+def judge_page_body_coverage(chunks, md_text, issues):
+    """源页/幻灯片有正文，但 MD 中几乎找不到 → 整页疑似丢失。"""
+    if not chunks or len(chunks) < 2:
+        return
+    missing, weak = [], []
+    for i, chunk in enumerate(chunks, 1):
+        body = strip_repeated_short_lines(strip_pdf_page_numbers(chunk))
+        src_n = len(_norm_ws(body))
+        if src_n < PAGE_MIN_NORM_CHARS:
+            continue
+        cover = bigram_recall(body, md_text)
+        if cover < 0:
+            continue
+        if cover < PAGE_COVER_FAIL:
+            missing.append(i)
+        elif cover < PAGE_COVER_WARN:
+            weak.append(i)
+    if missing:
+        preview = ",".join(str(x) for x in missing[:8])
+        issues.append(make_issue(
+            "PAGE_BODY_MISSING",
+            f"{len(missing)} 个源页正文在 MD 中几乎无覆盖(页码 {preview}"
+            f"{'…' if len(missing) > 8 else ''})"))
+    if weak and not missing:
+        preview = ",".join(str(x) for x in weak[:8])
+        issues.append(make_issue(
+            "PAGE_BODY_WEAK",
+            f"{len(weak)} 个源页正文覆盖偏低(页码 {preview}"
+            f"{'…' if len(weak) > 8 else ''})"))
 
 
 def judge_page_cross(meta, source_pages, m, issues):
@@ -631,6 +834,11 @@ def report_file(name, verdict, m, recall_info, meta, elapsed, issues, used_cli):
                 if ri.get("missing_nums") and num_r < 0.85 else ""))
     if id_r is not None and id_r >= 0:
         emit(f"  标识召回率: {id_r:.1%}")
+    cr = ri.get("char_ratio")
+    if cr is not None:
+        emit(f"  正文体量比(MD/源): {cr:.2f}")
+    if ri.get("src_images") is not None:
+        emit(f"  源内嵌图片数(独立统计): {ri['src_images']}")
     method = meta.get("extraction_method")
     counts = {k: v for k, v in (meta.get("counts") or {}).items() if v}
     qs = meta.get("quality_score")
@@ -840,21 +1048,30 @@ def main():
 
         recall_info = {"note": None, "bigram": None, "num_recall": None,
                        "ident_recall": None, "missing_nums": [], "missing_id": [],
+                       "char_ratio": None, "src_images": None,
                        "recall_good": RECALL_GOOD, "recall_fail": RECALL_FAIL}
         source_pages = None
         if rc == 0:
             print("  抽取源文本基准并计算召回率 ...", flush=True)
             src_text, note, extras = extract_source_text(f)
             source_pages = extras.get("pages") if extras else None
+            src_img_n, src_img_note = count_source_images(f)
+            recall_info["src_images"] = src_img_n
+            if src_img_note and src_img_n is None:
+                # 探测失败只记录，不阻断
+                pass
             if src_text is not None:
-                # PDF 页脚页码不应算作「数字内容」
-                src_for_tokens = strip_pdf_page_numbers(src_text) if f.suffix.lower() == ".pdf" else src_text
-                bigram = bigram_recall(src_text, md_text)
+                # 去掉整页 PDF 里反复出现的页眉/页脚，再进入召回与体量评估
+                src_clean = strip_repeated_short_lines(src_text)
+                src_for_tokens = strip_pdf_page_numbers(src_clean)
+                bigram = bigram_recall(src_clean, md_text)
                 num_r, id_r, miss_n, miss_i = token_recall(src_for_tokens, md_text)
+                char_ratio = char_volume_ratio(src_clean, md_text)
                 recall_info.update({
                     "bigram": bigram, "num_recall": num_r, "ident_recall": id_r,
                     "missing_nums": miss_n, "missing_id": miss_i,
-                    "note": f"基准抽取: {note}",
+                    "char_ratio": char_ratio,
+                    "note": f"基准抽取: {note}" + (f"；已剥重复短行" if src_clean != src_text else ""),
                 })
                 if bigram >= 0 and bigram < RECALL_FAIL:
                     issues.append(make_issue(
@@ -867,8 +1084,18 @@ def main():
                     issues.append(make_issue(
                         "NUM_RECALL_LOW",
                         f"数字召回率过低({num_r:.0%} < {NUM_RECALL_FAIL:.0%}){sample}"))
+                judge_char_volume(char_ratio, issues)
             elif note:
                 recall_info["note"] = note
+
+            judge_source_images(src_img_n, meta, m, issues)
+
+            # PDF/PPTX：按页/按幻灯片抽查「源页有字、MD 对不上」
+            if f.suffix.lower() in (".pdf", ".pptx"):
+                chunks = page_text_chunks(f)
+                if chunks:
+                    judge_page_body_coverage(chunks, md_text, issues)
+
             if source_pages:
                 judge_page_cross(meta, source_pages, m, issues)
 
@@ -890,6 +1117,8 @@ def main():
             "ident_recall": recall_info.get("ident_recall"),
             "missing_numbers": recall_info.get("missing_nums") or [],
             "missing_idents": recall_info.get("missing_id") or [],
+            "char_ratio": recall_info.get("char_ratio"),
+            "src_images": recall_info.get("src_images"),
             "source_pages": source_pages,
             "metrics": {
                 "chars": m["chars"], "nonempty": m["nonempty"],
@@ -916,7 +1145,8 @@ def main():
     header = (f"# xberg 转换质量报告\n\n- CLI: `{cli}`\n- 源目录: `{src}`\n"
               f"- 生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
               f"- 阈值: recall_fail={RECALL_FAIL} recall_good={RECALL_GOOD} "
-              f"num_recall_fail={NUM_RECALL_FAIL} strict={args.strict}\n")
+              f"num_recall_fail={NUM_RECALL_FAIL} char_ratio={CHAR_RATIO_FAIL}/{CHAR_RATIO_WARN} "
+              f"page_cover={PAGE_COVER_FAIL}/{PAGE_COVER_WARN} strict={args.strict}\n")
     report_path = out_dir / "_quality-report.md"
     report_path.write_text(header + "\n".join(REPORT_LINES) + "\n", encoding="utf-8")
     json_path = out_dir / "_quality-report.json"
@@ -927,6 +1157,8 @@ def main():
         "thresholds": {
             "recall_fail": RECALL_FAIL, "recall_good": RECALL_GOOD,
             "num_recall_fail": NUM_RECALL_FAIL, "strict": args.strict,
+            "char_ratio_fail": CHAR_RATIO_FAIL, "char_ratio_warn": CHAR_RATIO_WARN,
+            "page_cover_fail": PAGE_COVER_FAIL, "page_cover_warn": PAGE_COVER_WARN,
         },
         "totals": {
             "files": len(results),
