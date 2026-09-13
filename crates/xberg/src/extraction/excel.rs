@@ -117,18 +117,15 @@ pub(crate) type ExcelReadResult = (ExcelWorkbook, Vec<ProcessingWarning>);
 /// Silently returns `Ok(())` when `reader` is not a readable ZIP at all (e.g. a legacy
 /// `.xls`/`.xla` OLE2 file misrouted here) — the subsequent calamine open then reports a
 /// format error with clearer context than this pre-check could.
+///
+/// `declared_legacy` names a format calamine reads as an OLE2/CFB container, never as a ZIP
+/// (`.xls`/`.xla`). Only those may tolerate an unreadable entry header — what a stray central
+/// directory inside an OLE2 container produces: the ZIP validator stops at the first entry it
+/// cannot read, so tolerating it on a real ZIP would stop the accounting for every entry after
+/// it. The flag comes from the declared format, never from the bytes, which are
+/// attacker-controlled.
 #[cfg(feature = "excel")]
-fn validate_zip_container<R: Read + Seek>(mut reader: R, limits: &SecurityLimits) -> Result<()> {
-    // The first four bytes decide only whether an unreadable archive is reported as "not a
-    // ZIP" or as a broken one: a real ZIP may carry prepended data (the specification allows
-    // it, and the reader locates the central directory from the EOCD), so the archive is
-    // *always* parsed and validated, and only an entry header that cannot be read at all —
-    // what a legacy `.xls`/`.xla` OLE2 container produces, since it can hold a stray central
-    // directory without any local header — falls through to the format-specific parser.
-    let mut magic = [0u8; 4];
-    let has_zip_magic = reader.read_exact(&mut magic).is_ok()
-        && (magic == *b"PK\x03\x04" || magic == *b"PK\x05\x06" || magic == *b"PK\x06\x06");
-    let _ = reader.seek(std::io::SeekFrom::Start(0));
+fn validate_zip_container<R: Read + Seek>(reader: R, limits: &SecurityLimits, declared_legacy: bool) -> Result<()> {
     let mut archive = match zip::ZipArchive::new(reader) {
         Ok(archive) => archive,
         Err(_) => return Ok(()),
@@ -143,7 +140,7 @@ fn validate_zip_container<R: Read + Seek>(mut reader: R, limits: &SecurityLimits
     }
     match crate::extractors::security::ZipBombValidator::new(limits.clone()).validate(&mut archive) {
         Ok(()) => Ok(()),
-        Err(crate::extractors::security::SecurityError::UnreadableEntry { .. }) if !has_zip_magic => Ok(()),
+        Err(crate::extractors::security::SecurityError::UnreadableEntry { .. }) if declared_legacy => Ok(()),
         Err(error) => Err(error.into()),
     }
 }
@@ -155,7 +152,18 @@ pub(crate) fn read_excel_file(file_path: &str, limits: &SecurityLimits) -> Resul
     #[cfg(feature = "excel")]
     {
         let check_file = std::fs::File::open(file_path)?;
-        validate_zip_container(std::io::BufReader::new(check_file), limits)?;
+        // Calamine picks its reader from the *raw* extension: only an exact `xls` reaches its
+        // CFB reader through `open_workbook_auto`, while `xla` in any casing hits the explicit
+        // `Xls` branch below. Every other spelling falls into content sniffing, which can pick
+        // the ZIP-based Xlsx reader — so the tolerance has to follow the reader, not a
+        // lowercased path, or a ZIP renamed `BOOK.XLS` would be parsed as Xlsx without any zip
+        // validation.
+        let raw_extension = Path::new(file_path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default();
+        let declared_legacy = raw_extension == "xls" || raw_extension.eq_ignore_ascii_case("xla");
+        validate_zip_container(std::io::BufReader::new(check_file), limits, declared_legacy)?;
     }
     #[cfg(not(feature = "excel"))]
     let _ = limits;
@@ -269,7 +277,18 @@ pub(crate) fn read_excel_bytes(data: &[u8], file_extension: &str, limits: &Secur
     let mut warnings: Vec<ProcessingWarning> = Vec::new();
 
     #[cfg(feature = "excel")]
-    validate_zip_container(Cursor::new(data), limits)?;
+    {
+        // Same rule as `read_excel_file`: `.xls`/`.xla` are dispatched to calamine's CFB
+        // reader below, so an unreadable entry header in a stray central directory must not
+        // reject them. Every other extension — including unknown ones the auto-detector may
+        // read as a ZIP — is accounted for in full.
+        let extension = file_extension.to_lowercase();
+        validate_zip_container(
+            Cursor::new(data),
+            limits,
+            extension == ".xls" || extension == ".xla",
+        )?;
+    }
     #[cfg(not(feature = "excel"))]
     let _ = limits;
 

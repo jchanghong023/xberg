@@ -117,7 +117,7 @@ jobs:
           | **图片 URL 同步** | re-encode 后重写 `content` 与 `formatted_content` 里的 `image_N.emf` → `.png`（含中文内容，UTF-8 安全） |
           | **alt 路径清洗** | 去掉 `C:\Users\...` 这类文件系统路径型 alt 文本，避免泄露本机路径 |
           | **Markdown 图片独立成段** | 图片标记作为独立段落写出，便于预览器渲染；OCR 文字在后续 `text` 围栏中保留版式 |
-          | **精简 OCR / 转写** | 打包版 OCR 走 Tesseract；音视频离线转写附带 Whisper tiny（不带 PaddleOCR / layout 模型） |
+          | **精简 OCR / 转写** | 打包版默认 OCR 为 PaddleOCR pp-ocrv6 tiny（模型随包离线可用）；Tesseract 仍编入作后备；音视频离线转写附带 Whisper tiny + layout 模型 |
           | **批处理图片分目录** | batch 文本/Toon 输出把各文档图片写入 `doc_<N>/`，避免同名 `image_N` 互相覆盖 |
 
           对应提交：
@@ -138,7 +138,7 @@ jobs:
           ## 注意
 
           - 与上游 [xberg-io/xberg](https://github.com/xberg-io/xberg) 无关的第三方 fork；上游更新请自行 merge。
-          - 首次 Tesseract OCR 可能按需下载语言数据，需外网；音视频转写使用包内 Whisper tiny，可离线。
+          - 默认 OCR 使用包内 PaddleOCR pp-ocrv6 tiny 模型（约 13 MiB），可离线；如需 Tesseract 后备请自行安装。音视频转写使用包内 Whisper tiny，可离线。
           - 本包来自自动化流水线，未做人工全量回归；破坏性整理/清理不在本 CLI 默认路径中。
           EOF
           )

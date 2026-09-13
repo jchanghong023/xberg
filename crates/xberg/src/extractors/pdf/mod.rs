@@ -485,7 +485,11 @@ fn furniture_from_consecutive_page_paragraphs(pages: &[Vec<String>]) -> std::col
     use crate::pdf::native::text::FURNITURE_MIN_LINE_CHARS;
 
     let mut furniture = std::collections::HashSet::new();
-    if pages.len() < crate::pdf::native::text::furniture_min_page_lines() {
+    // A page-count floor, not the per-page line count the edge pass uses: `pages` is one
+    // paragraph list per page, so gating on `furniture_min_page_lines()` skipped every
+    // document with fewer than seven pages — the 3–6 page chapter headers this pass exists
+    // for returned nothing before examining a single paragraph.
+    if pages.len() < crate::pdf::native::text::furniture_min_pages() {
         return furniture;
     }
 
@@ -2744,8 +2748,11 @@ impl PdfExtractor {
 
         #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
         if used_ocr && !doc.images.is_empty() {
-            let images_enabled = config.images.as_ref().map(|c| c.extract_images).unwrap_or(false)
-                || config.pdf_options.as_ref().map(|p| p.extract_images).unwrap_or(false);
+            // An absent `images` section means "use the defaults", and the defaults extract
+            // images (`needs_image_data`), so this gate must not read the absence as an opt-out
+            // — it would drop the placeholder of an image the document does carry.
+            let images_enabled = config.images.as_ref().map(|c| c.extract_images).unwrap_or(true)
+                || config.pdf_options.as_ref().map(|p| p.extract_images).unwrap_or(true);
             if images_enabled && config.images.as_ref().map(|c| c.inject_placeholders).unwrap_or(true) {
                 let referenced_images: std::collections::HashSet<u32> = doc
                     .elements

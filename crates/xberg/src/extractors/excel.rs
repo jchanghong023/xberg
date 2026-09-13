@@ -327,6 +327,13 @@ impl ExcelExtractor {
                 ));
             }
             pages[page_index].image_indices = sheet_image_indices;
+            // A sheet with no cells is blank only while nothing is anchored to it: a picture
+            // the page carries is content, and every other extractor clears `is_blank` when it
+            // attaches one. Leaving `Some(true)` here made consumers that test the flag drop a
+            // page whose only content is a screenshot.
+            if !pages[page_index].image_indices.is_empty() && pages[page_index].is_blank == Some(true) {
+                pages[page_index].is_blank = Some(false);
+            }
         }
 
         for picture in pictures {
@@ -567,6 +574,10 @@ impl InternalDocumentExtractor for ExcelExtractor {
             .await;
             if !children.is_empty() {
                 doc.children = Some(children);
+                // The path entry point merges embedded-object text into the body; the bytes
+                // entry point must produce the same document, or the same workbook renders
+                // with the embedded text (path/CLI) or without it (bytes/HTTP/FFI).
+                crate::extraction::ooxml_embedded::append_embedded_object_text(&mut doc);
             }
             doc.processing_warnings.extend(embed_warnings);
         }

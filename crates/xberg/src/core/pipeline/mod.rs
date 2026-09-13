@@ -450,6 +450,16 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
     // the document text. See `discard_diverged_internal_document`.
     let internal_document_source_content = result.internal_document.is_some().then(|| result.content.clone());
 
+    // The styled prerender is part of the rendering the snapshot stands for: assigning it
+    // after the snapshot made `discard_diverged_formatted_content` read it as "a processor
+    // rewrote the rendering", so a content-only rewrite (a post-processor, the captioning
+    // carry-over) was silently overwritten by HTML rendered before that rewrite — and the
+    // sync pipeline, which assigns it before its snapshot, disagreed. ~keep
+    #[cfg(feature = "html")]
+    if let Some(html) = styled_html_prerender {
+        result.formatted_content = Some(html);
+    }
+
     // #331: same idea for the rendered output format, which `apply_output_format` swaps into
     // `content` at the very end. See `discard_diverged_formatted_content`. Snapshotted before
     // the captioning carry-over applies: the carry-over is itself a content rewrite by a
@@ -463,11 +473,6 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
         .map(|formatted| (result.content.clone(), formatted.clone()));
 
     captioning_carry_over.apply(&mut result);
-
-    #[cfg(feature = "html")]
-    if let Some(html) = styled_html_prerender {
-        result.formatted_content = Some(html);
-    }
 
     #[cfg(feature = "image-encode")]
     if let Some(ref image_cfg) = config.images {

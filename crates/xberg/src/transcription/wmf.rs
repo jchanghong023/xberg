@@ -195,12 +195,32 @@ mod imp {
         };
         let layout = configure_pcm_output(&reader)?;
 
-        // Decoded-audio ceiling: the input byte budget, reused as a sample count
-        // (16 kHz mono f32 is 64 kB/s, so the default 512 MB still admits hours of
-        // audio while rejecting a pathological stream). `transcription.max_duration_ms`
-        // is applied below while the stream decodes, so neither a stream that never
-        // ends nor one that outlasts the limit can hold this thread.
-        let raw_limit = max_bytes.map(|bytes| bytes as usize);
+        // Decoded-audio ceiling, measured in bytes of the f32 samples actually buffered (4
+        // bytes each) rather than in their count: the count was 4x looser than the budget it
+        // was named after and depended on the stream's own layout, so the ceiling and the
+        // memory the buffer could reach disagreed.
+        //
+        // `transcription.max_bytes` documents the *input* size (and is enforced on it before
+        // this path runs), while `raw` is the reader's own layout (rate x channels x 4), so a
+        // plain `max_bytes` ceiling would reject audio that `max_duration_ms` still admits --
+        // 48 kHz stereo reaches 512 MiB after ~23 minutes. Whenever a duration budget is
+        // configured, let it raise the ceiling to what that duration needs; with
+        // `max_duration_ms = None` the byte budget stays the only bound on a stream that never
+        // ends. `max_duration_ms` is checked below while the stream decodes, so neither a
+        // stream that never ends nor one that outlasts the duration limit can hold this
+        // thread.
+        let duration_bytes = max_duration_ms.map(|ms| {
+            u64::from(layout.sample_rate)
+                .max(1)
+                .saturating_mul(layout.channels.max(1) as u64)
+                .saturating_mul(std::mem::size_of::<f32>() as u64)
+                .saturating_mul(ms)
+                / 1000
+        });
+        let raw_limit = match (max_bytes, duration_bytes) {
+            (Some(bytes), Some(needed)) => Some(bytes.max(needed)),
+            (budget, _) => budget,
+        };
         let mut raw: Vec<f32> = Vec::new();
         // Reads that delivered no new sample. A reader that keeps succeeding
         // without samples and without the end-of-stream flag would otherwise spin
@@ -235,19 +255,23 @@ mod imp {
             if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
                 break;
             }
-            if let Some(limit) = raw_limit
-                && raw.len() > limit
-            {
-                return Err(XbergError::transcription(format!(
-                    "decoded audio exceeds the transcription.max_bytes budget ({} bytes)",
-                    max_bytes.unwrap_or_default()
-                )));
-            }
+            // Checked before the byte ceiling: the ceiling is derived from this budget when a
+            // duration limit is configured, so a too-long stream would otherwise be reported
+            // as a byte overrun whose suggested fix does not help.
             if let Some(limit_ms) = max_duration_ms
                 && decoded_duration_ms(&raw, layout) > limit_ms
             {
                 return Err(XbergError::transcription(format!(
                     "decoded audio exceeds the transcription.max_duration_ms budget ({limit_ms} ms)"
+                )));
+            }
+            if let Some(limit) = raw_limit
+                && (raw.len() as u64).saturating_mul(std::mem::size_of::<f32>() as u64) > limit
+            {
+                return Err(XbergError::transcription(format!(
+                    "decoded audio exceeds the transcription budget ({limit} bytes of f32 samples buffered; \
+                     raise transcription.max_bytes, or set transcription.max_duration_ms to bound the length \
+                     instead)"
                 )));
             }
         }
@@ -277,7 +301,9 @@ mod imp {
 /// Decode the audio track of a rescued container into 16 kHz mono PCM.
 ///
 /// `max_bytes` mirrors `transcription.max_bytes`: it bounds the decoded audio,
-/// not the container size (the caller already bounded the input).
+/// not the container size (the caller already bounded the input), and a
+/// configured `max_duration_ms` raises that ceiling to whatever the duration
+/// needs so the byte budget cannot reject a stream the duration budget admits.
 /// `max_duration_ms` mirrors `transcription.max_duration_ms` and stops the read
 /// loop once that much audio has been decoded, instead of only rejecting the
 /// result after the whole stream has been read.

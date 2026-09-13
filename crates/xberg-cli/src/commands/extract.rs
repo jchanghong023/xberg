@@ -129,9 +129,37 @@ fn batch_image_dir(base: &Path, result_index: usize) -> PathBuf {
 
 /// Rewrite `](image_N.ext)` references so they name the directory the image files were written
 /// to, using forward slashes so the result stays portable markdown.
+///
+/// The directory is percent-encoded for the characters that would end or unbalance a CommonMark
+/// link destination: a space ends the destination, an unbalanced `)` closes it early, and `<`
+/// or `>` can open the pointy-bracket form. `C:\Users\John Doe\out` otherwise produced
+/// `![](C:/Users/John Doe/out/image_0.png)`, which no renderer resolves and which leaks the
+/// path tail as loose text.
 fn prefix_image_refs(content: &str, dir: &Path) -> String {
     let normalized = dir.to_string_lossy().replace('\\', "/");
-    let prefix = format!("]({}/image_", normalized.trim_end_matches('/'));
+    let mut encoded = String::with_capacity(normalized.len());
+    for character in normalized.trim_end_matches('/').chars() {
+        match character {
+            ' ' => encoded.push_str("%20"),
+            '(' => encoded.push_str("%28"),
+            ')' => encoded.push_str("%29"),
+            '<' => encoded.push_str("%3C"),
+            '>' => encoded.push_str("%3E"),
+            '"' => encoded.push_str("%22"),
+            '`' => encoded.push_str("%60"),
+            // A literal `%` must be encoded or a renderer percent-decodes the directory into a
+            // different one (`100%25` -> `100%`). Unlike the library's `sanitize_marker_url`,
+            // which rewrites document-supplied (already percent-encoded) relationship targets,
+            // this is a raw filesystem path, so encoding `%` cannot double-encode anything.
+            '%' => encoded.push_str("%25"),
+            // Control characters cannot appear in a Windows file name, but a path handed to the
+            // CLI on another platform must not break the marker line either — the library drops
+            // them for the same reason.
+            control if control.is_control() => {}
+            other => encoded.push(other),
+        }
+    }
+    let prefix = format!("]({encoded}/image_");
     content.replace("](image_", &prefix)
 }
 

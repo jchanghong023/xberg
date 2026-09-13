@@ -5189,11 +5189,20 @@ pub(crate) fn strip_repeating_text_from_pages(pages: &mut [Vec<PdfParagraph>], p
 /// Filter page furniture paragraphs with a safety valve.
 ///
 /// Removes paragraphs marked as page furniture (headers/footers) by layout
-/// detection. If removing ALL furniture-marked paragraphs would leave zero
-/// content, the furniture markings are cleared instead — better to include
-/// headers/footers than to produce empty output. This handles layout models
-/// misclassifying body text as page furniture on non-standard document types
-/// (e.g., legal transcripts, cover pages).
+/// detection. If every paragraph on the page is marked, the furniture markings
+/// are cleared instead — better to include headers/footers than to produce
+/// empty output. That is the cover-page / legal-transcript case: a detector
+/// that finds no body text at all must not be trusted to delete the page.
+///
+/// The valve deliberately does **not** fire on a page where furniture merely
+/// dominates the *paragraph* text. Furniture share is a bad proxy for "the page
+/// is empty": a page whose body is a table or a figure carries almost no
+/// paragraph text, so its running footer and folio alone clear any share bar —
+/// the old 30% rule then cleared the page's markings and printed the running
+/// footer as body copy. A 357-page manual re-emitted its running footer on each
+/// of the 25 pages whose body was tabular or graphical. Marks that a
+/// share-based valve would have restored are evidence-backed anyway: cross-page
+/// repetition and page-number sequencing put them there.
 fn retain_page_furniture_safely(paragraphs: &mut Vec<PdfParagraph>) {
     let total = paragraphs.len();
     let furniture_count = paragraphs.iter().filter(|p| p.is_page_furniture).count();
@@ -5209,23 +5218,8 @@ fn retain_page_furniture_safely(paragraphs: &mut Vec<PdfParagraph>) {
         return;
     }
 
-    let total_alphanum: usize = paragraphs.iter().map(paragraph_alphanum_len).sum();
-
-    if total_alphanum > 0 {
-        let furniture_alphanum: usize = paragraphs
-            .iter()
-            .filter(|p| p.is_page_furniture)
-            .map(paragraph_alphanum_len)
-            .sum();
-
-        if furniture_alphanum * 100 > total_alphanum * 30 {
-            for para in paragraphs.iter_mut() {
-                para.is_page_furniture = false;
-            }
-            return;
-        }
-    }
-
+    // Furniture shorter than this is a running head/footer, folio or stamp
+    // rather than prose a detector mistook for one (GH#1411).
     const MIN_SUBSTANTIVE_CHARS: usize = 80;
 
     paragraphs.retain(|p| {
@@ -10277,6 +10271,47 @@ where new shares are issued;";
         retain_page_furniture_safely(&mut on);
         assert_eq!(on.len(), 2, "footnote body must survive when include_footnotes=true");
         assert!(!on[1].is_page_furniture);
+    }
+
+    #[test]
+    fn should_delete_running_furniture_on_a_page_whose_body_is_tabular() {
+        // Regression: a page whose body is a table or a figure carries almost no
+        // paragraph text, so its running footer, folio and date dominate the
+        // page's paragraph characters. The old share-based valve (clear markings
+        // when furniture exceeded 30% of the page's paragraph text) fired on
+        // those pages and re-emitted the running footer as body copy — one per
+        // page across 25 pages of a 357-page manual.
+        let body = para(vec![line(vec![full_line_seg("RAM and ROM 220")])]);
+        let mut footer = para(vec![line(vec![full_line_seg("Tessent Cell Library Manual, v2017.4")])]);
+        footer.is_page_furniture = true;
+        let mut folio = para(vec![line(vec![full_line_seg("220")])]);
+        folio.is_page_furniture = true;
+        let mut date = para(vec![line(vec![full_line_seg("December 2017")])]);
+        date.is_page_furniture = true;
+
+        let mut paragraphs = vec![body, footer, folio, date];
+        retain_page_furniture_safely(&mut paragraphs);
+
+        assert_eq!(
+            paragraphs.iter().map(paragraph_text_raw).collect::<Vec<_>>(),
+            ["RAM and ROM 220"],
+            "the body paragraph must survive its page's running footer, folio and date"
+        );
+    }
+
+    #[test]
+    fn should_keep_every_marking_when_the_page_has_no_unmarked_paragraph() {
+        // The valve's cover-page case: a detector that marks every paragraph on
+        // the page leaves no body text to protect, so the markings are cleared
+        // rather than emptying the page.
+        let mut paragraphs = vec![
+            furniture_para_with_class(LayoutHintClass::PageHeader),
+            furniture_para_with_class(LayoutHintClass::PageFooter),
+        ];
+        retain_page_furniture_safely(&mut paragraphs);
+
+        assert_eq!(paragraphs.len(), 2, "an all-furniture page must keep its text");
+        assert!(paragraphs.iter().all(|p| !p.is_page_furniture));
     }
 
     /// Builds a single-page table-coverage map whose one table's cell text

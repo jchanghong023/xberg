@@ -833,7 +833,10 @@ impl InternalDocumentExtractor for PptxExtractor {
         // Only the bytes are needed, so re-read the file here rather than widening the
         // extraction API; a read failure is reported as a warning, not a hard failure.
         if config.max_archive_depth > 0 {
-            match std::fs::read(path) {
+            // Same zero-copy reader the Excel path uses for `xl/embeddings/`: `std::fs::read`
+            // copied the whole presentation onto the heap a second time (the container was
+            // already opened from the file) just to look for `ppt/embeddings/`.
+            match crate::core::io::open_file_bytes(path) {
                 Ok(content) => {
                     let (children, embed_warnings) =
                         crate::extraction::ooxml_embedded::extract_ooxml_embedded_objects(

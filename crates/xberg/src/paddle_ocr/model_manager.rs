@@ -1184,9 +1184,10 @@ mod tests {
         assert_eq!(effective_v6_tier("medium"), "medium");
         assert_eq!(effective_v6_tier("small"), "small");
         assert_eq!(effective_v6_tier("tiny"), "tiny");
-        // GH#1602: `mobile` is the DEFAULT model_tier and the v5 name for the lightweight
-        // tier, so it must not resolve to the heaviest v6 model. `small` keeps the full
-        // recognition dictionary; `tiny` would narrow it to ~zh/en. ~keep
+        // `tiny` is the DEFAULT model_tier for this fork's packaged CLI. `mobile` stays the
+        // v5 name for the lightweight tier and must not resolve to the heaviest v6 model.
+        // `small` keeps the full recognition dictionary; `tiny` is the intentional default
+        // (~zh/en) for the offline bundle. ~keep
         assert_eq!(effective_v6_tier("mobile"), "small");
         assert_eq!(effective_v6_tier("server"), "medium");
         // An unrecognised tier must land on the documented default (`small`), not the heaviest

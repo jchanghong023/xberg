@@ -55,7 +55,13 @@ pub fn lift_image_markers_out_of_fences(content: &mut String) {
         out.push_str(first_line);
         out.push_str("\n\n");
         rest = &body[first_line_end..];
-        if rest.starts_with("```") {
+        // Only a line that is nothing but backticks — at least as many as the opener — closes
+        // the fence. A body line that merely starts with backticks (a nested ```python opener,
+        // say) is content: skipping it dropped the line from the output and left the re-opened
+        // fence below unclosed, which then swallows every paragraph after it on re-parse.
+        let next_line = rest.split('\n').next().unwrap_or(rest).trim_end();
+        let closes_fence = next_line.len() >= opener_backticks && next_line.bytes().all(|byte| byte == b'`');
+        if closes_fence {
             let closing_end = rest.find('\n').map_or(rest.len(), |index| index + 1);
             rest = &rest[closing_end..];
         } else {

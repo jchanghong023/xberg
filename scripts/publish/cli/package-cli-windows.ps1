@@ -10,12 +10,17 @@ Single source of truth for "build + package" on Windows. Used locally and by
 artifact upload, version stamping and `gh release create`.
 
 The cargo feature set matches the fork's development build: document formats
-(no HEIC), analysis, CLI core, Tesseract OCR, and audio/video transcription.
-`--no-default-features` drops the heavy default stacks (embeddings, paddle-ocr,
-candle-VLM, layout-detection). Deliberately excluded: heic (no stock Windows
-libheif build path), pdfium, api/mcp, embedding/NER. Only the Whisper tiny
-transcription model is bundled so video/audio inputs transcribe offline; no
-PaddleOCR/layout ONNX models and no pdfium.dll.
+(no HEIC), analysis, CLI core, Tesseract OCR as a fallback, PaddleOCR
+(pp-ocrv6 tiny — the default OCR backend), audio/video transcription,
+layout detection with TATR table structure recognition, plus the `xberg serve`
+HTTP API server (axum).
+`--no-default-features` drops the heavy default stacks (embeddings,
+candle-VLM). Deliberately excluded: heic (no stock Windows libheif build path),
+pdfium, mcp, embedding/NER. Whisper tiny is bundled so video/audio inputs
+transcribe offline; the two layout models the image/PDF path resolves
+(RT-DETR 161.3 MiB + TATR 28.8 MiB) and the PaddleOCR pp-ocrv6 tiny set
+(~13 MiB: det + rec + dict + textline cls) are bundled so image tables,
+layout regions, and OCR work offline.
 
 Before zipping, the staged tree must pass: a cleaned-PATH `--version` probe,
 in-tree MSVC CRT deployment, the shared PE import-closure gate
@@ -94,19 +99,39 @@ $ModelsRoot = Join-Path $Stage "models"
 $ModelCacheRoot = Join-Path $RepoRoot "target/package-models-$Target"
 
 # Keep in sync with AGENTS.md「编译」小节. Fork scope: file→Markdown + OCR +
-# transcription only. No heic/pdfium/paddle/layout/candle/api/mcp/embeddings/NER.
+# transcription + layout/table structure + HTTP API (`xberg serve`). No
+# heic/pdfium/candle/mcp/embeddings/NER. PaddleOCR (pp-ocrv6 tiny) is the
+# default OCR backend; Tesseract stays compiled as a fallback.
 $Features = @(
   "formats-no-heic"
   "analysis"
   "core-cli"
   "ocr"
+  "paddle-ocr"
   "transcription"
+  "layout-detection"
+  "api"
 )
 
-# No paddle/layout ONNX models in this feature set, so the cache-manifest
-# required-model list is empty. Whisper tiny is staged separately via
+# Layout ONNX models staged from the CLI's own `cache manifest` (checksums and
+# sizes come from the binary, so they cannot drift). Only the two models the
+# image/PDF extraction path actually resolves are selected -- RT-DETR (layout
+# regions, 161.3 MiB) and TATR (table structure, 28.8 MiB); the manifest also
+# lists SLANeXT/SLANet_plus/table-classifier/pp_doclayout_v3, but those are for
+# table models and layout backends this build does not use, and each spec below
+# must match exactly one entry. Whisper tiny is staged separately via
 # $TranscriptionFiles (not listed by `cache manifest`).
-$RequiredModels = @()
+# PaddleOCR pp-ocrv6 tiny (~13 MiB): det + rec + dict + the v2 textline
+# orientation classifier the v6 path still resolves. `small`/`medium`
+# det/rec entries stay out of the bundle — only the default tier ships.
+$RequiredModels = @(
+  @{ Label = "layout RT-DETR"; Regex = 'models--xberg-io--layout-models/snapshots/[0-9a-f]+/rtdetr/model\.onnx$' }
+  @{ Label = "layout TATR"; Regex = 'models--xberg-io--layout-models/snapshots/[0-9a-f]+/tatr/model\.onnx$' }
+  @{ Label = "paddle det tiny"; Regex = '^v6/det/tiny/model\.onnx$' }
+  @{ Label = "paddle rec tiny"; Regex = '^v6/rec/tiny/model\.onnx$' }
+  @{ Label = "paddle dict tiny"; Regex = '^v6/rec/tiny/dict\.txt$' }
+  @{ Label = "paddle cls"; Regex = '^v2/classifiers/PP-LCNet_x1_0_textline_ori\.onnx$' }
+)
 
 # The transcription model the runtime resolves for `transcription.model = "tiny"`
 # (video/audio extraction). `xberg cache manifest` does not list it -- the CLI
@@ -371,7 +396,7 @@ function Test-ModelFile([string]$Path, [string]$Sha256, [int64]$SizeBytes) {
 }
 
 function Get-RequiredModelEntries([string]$Exe, [string]$ModelsRoot) {
-  # Lean feature set ships no paddle/layout ONNX models; Whisper is handled by
+  # No layout models requested (lean feature set); Whisper is handled by
   # Get-TranscriptionModelEntries. Skip the cache-manifest probe entirely.
   if ($RequiredModels.Count -eq 0) {
     return @()
@@ -882,9 +907,13 @@ try {
       Env = @{}
     }
   )
-  # Empty-cache probe only makes sense when HF layout models are bundled
-  # (paddle/layout). This lean package stages Whisper under models/ for
-  # transcription, not for the PNG extract smoke path.
+  # Empty-cache probe: with HF models bundled, offline-smoke.ps1 runs the
+  # fixture with the layout path enabled (`{"layout":{},"ocr":{}}`), so the
+  # extract resolves RT-DETR/TATR through the cache under test. Against an empty
+  # cache the run must report the offline model-cache miss instead of silently
+  # downloading. The exit code is deliberately not asserted: the layout path
+  # falls back to whole-image OCR, whose own model needs depend on the compiled
+  # OCR backend, so the diagnostic is what proves the cache was consulted.
   if ($RequiredModels.Count -gt 0) {
     $checks += @(
       @{

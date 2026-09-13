@@ -10,17 +10,30 @@ HF_HUB_OFFLINE=1 and HF_HUB_CACHE set to -CacheDir, and asserts one of two
 outcomes:
 
   default                      exit 0, parseable JSON on stdout, non-empty
-                               result.content -- extraction works offline.
-  -ExpectEmptyCacheFailure     non-zero exit whose stderr mentions offline mode
-                               -- the same command against an empty cache has to
-                               fail rather than silently download. Only valid
-                               when the bundle actually stages HF models for
-                               this extract path (paddle/layout); the lean
-                               package omits this probe.
+                               result.content, a `Layout detection completed`
+                               line on stderr (the bundled RT-DETR/TATR loaded
+                               from -CacheDir) and no model-cache miss --
+                               extraction works offline off the bundle's cache.
+  -ExpectEmptyCacheFailure     stderr reports the offline model-cache miss
+                               ("Hugging Face offline mode is enabled and ...
+                               is not available in the local cache"). Whether
+                               the process also fails is not asserted: the
+                               layout path falls back to whole-image OCR, and
+                               whether that fallback needs its own HF model
+                               depends on the OCR backend the build compiles in
+                               (bundled PaddleOCR does, Tesseract does not). The
+                               diagnostic, not the exit code, is the contract --
+                               a run that never reports a miss is not reading
+                               the cache under test.
+
+The fixture is extracted with layout detection enabled (an inline config that
+also sets `ocr`, so `should_use_layout_ocr` is true and the RT-DETR/TATR files
+are part of the extract path). Without that config the PNG smoke needs no
+HF-cached model and neither probe proves anything about the bundled models.
 
 One `smoke=ok ...` line on stdout and exit 0 on success; otherwise the reason
 goes to stderr and the exit code is 1. package-cli-windows.ps1 runs it twice, as
-two of its five parallel validation probes.
+two of its parallel validation probes.
 
 .EXAMPLE
 pwsh -NoProfile -File scripts/publish/cli/offline-smoke.ps1 -Exe xberg-cli-x86_64-pc-windows-msvc/xberg.exe -Fixture fixtures/images/test_hello_world.png -CacheDir xberg-cli-x86_64-pc-windows-msvc/models -CleanPath $env:PATH
@@ -73,15 +86,23 @@ $env:HF_HUB_CACHE = $CacheDir
 $env:HF_HUB_OFFLINE = "1"
 $env:HUGGINGFACE_HUB_OFFLINE = "1"
 
-$extractArgs = @("extract", $Fixture, "--format", "json")
+# base64 of {"layout":{},"ocr":{}} -- inline JSON would need quoting through the native
+# argv handoff; the base64 form is exactly one argument with no escaping. The `ocr`
+# section is what enables the layout path for an image (`should_use_layout_ocr`), and
+# therefore what makes the bundled RT-DETR/TATR files part of the extract path.
+$layoutConfigB64 = "eyJsYXlvdXQiOnt9LCJvY3IiOnt9fQ=="
+$extractArgs = @("extract", $Fixture, "--format", "json",
+                 "--config-json-base64", $layoutConfigB64)
 $result = Invoke-Captured -FilePath $Exe -Arguments $extractArgs
 
 if ($ExpectEmptyCacheFailure) {
-  if ($result.ExitCode -eq 0) {
-    Fail "the bundled models are not what the smoke test loaded: with HF_HUB_CACHE=$CacheDir and offline mode forced, the extraction still succeeded"
-  }
+  # An empty cache does not have to make the process fail: the image extractor falls back to
+  # whole-image OCR after a layout-model failure, and that fallback fails too only when its own
+  # backend needs an HF model (bundled PaddleOCR does, Tesseract does not). The missing-model
+  # diagnostic is the assertion, because a run that never reports a miss is not reading the
+  # cache under test.
   if ($result.Stderr -notmatch "offline mode") {
-    Fail "cache-miss probe failed as expected (exit $($result.ExitCode)) but stderr does not mention offline mode: $($result.Stderr)"
+    Fail "the bundled models are not what the smoke test loaded: with HF_HUB_CACHE=$CacheDir and offline mode forced, the run exited $($result.ExitCode) without reporting a model-cache miss"
   }
   Write-Host "smoke=ok kind=empty-cache exit=$($result.ExitCode) cache=$CacheDir"
   exit 0
@@ -108,6 +129,15 @@ catch {
 }
 if ([string]::IsNullOrWhiteSpace($content)) {
   Fail "extraction produced empty content with HF_HUB_CACHE=$CacheDir"
+}
+# The config enables the layout path, so this run resolved RT-DETR/TATR through the cache
+# under test. A miss here means the bundled models did not satisfy the extract path; no
+# `Layout detection completed` line means the path never ran and nothing was proven.
+if ($result.Stderr -match "offline mode") {
+  Fail "the staged cache at $CacheDir did not satisfy the extract path: stderr reports a model-cache miss: $($result.Stderr)"
+}
+if ($result.Stderr -notmatch "Layout detection completed") {
+  Fail "the layout path never ran, so the bundled models were not exercised (no 'Layout detection completed' on stderr): $($result.Stderr)"
 }
 Write-Host "smoke=ok kind=positive content_len=$($content.Length) cache=$CacheDir"
 exit 0

@@ -19,9 +19,12 @@ const LZW_DICTIONARY_SIZE: usize = 4096;
 
 /// Extract the individual shape-text records from a legacy Visio document.
 ///
-/// `max_stream_size` limits both the OLE `VisioDocument` stream and every
-/// decompressed Visio stream. It is supplied by the caller's archive/security
-/// budget so malformed files cannot grow an unbounded allocation.
+/// `max_stream_size` limits both the OLE `VisioDocument` stream and the total
+/// decompressed Visio stream data the parse may materialize. It is supplied by
+/// the caller's archive/security budget, so malformed files cannot grow an
+/// unbounded allocation: the per-stream cap alone bounds one read, not a deep
+/// pointer tree that keeps a decompressed copy per level, so every read is
+/// charged against the one budget and exhausting it fails the extraction.
 pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Result<Vec<String>> {
     let mut compound_file = cfb::CompoundFile::open(Cursor::new(content))
         .map_err(|error| XbergError::parsing(format!("Failed to open VSD as OLE container: {error}")))?;
@@ -99,10 +102,20 @@ pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Resu
         document: &document_stream,
         version,
         max_stream_size,
+        remaining_stream_bytes: max_stream_size,
+        stream_budget_exhausted: false,
         visited: HashSet::new(),
         text: Vec::new(),
     };
     parser.scan_stream(root_pointer, 0)?;
+    // A descendant whose read the budget rejected is tolerated during the descent (a damaged
+    // child must not hide its siblings), but the result would then be silently truncated text.
+    // Report it instead, the way the archive readers reject rather than truncate.
+    if parser.stream_budget_exhausted {
+        return Err(XbergError::parsing(format!(
+            "Visio stream data exceeds the configured budget of {max_stream_size} bytes"
+        )));
+    }
     Ok(parser.text)
 }
 
@@ -113,13 +126,20 @@ pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Resu
 /// parts. This is the OOXML counterpart of [`extract_visio_text`], which reads
 /// the binary `.vsd` container.
 ///
-/// `max_stream_size` bounds every individual package part; a part that exceeds
-/// it aborts the extraction, mirroring the binary reader's behavior.
+/// `max_stream_size` is one budget across all package parts: a single part over
+/// it aborts the extraction, and so does the running total once it is spent,
+/// mirroring the binary reader's behavior (a per-part cap alone does not bound
+/// a container with many parts).
 pub(crate) fn extract_visio_package_text(content: &[u8], max_stream_size: usize) -> Result<Vec<String>> {
     let mut archive = zip::ZipArchive::new(Cursor::new(content))
         .map_err(|error| XbergError::parsing(format!("Failed to open VSDX as ZIP package: {error}")))?;
 
     let mut text = Vec::new();
+    // A per-part cap does not bound the package: a container with many small parts still makes
+    // the reader decompress (and parse) arithmetically more than `max_stream_size`. Charge every
+    // part against one budget, as the binary reader now does, so a crafted package cannot exceed
+    // the limit the caller thinks it set.
+    let mut remaining = max_stream_size;
     for index in 0..archive.len() {
         let file = match archive.by_index(index) {
             Ok(file) => file,
@@ -148,6 +168,12 @@ pub(crate) fn extract_visio_package_text(content: &[u8], max_stream_size: usize)
                 "Visio package part '{name}' exceeds configured limit of {max_stream_size} bytes"
             )));
         }
+        if xml.len() > remaining {
+            return Err(XbergError::parsing(format!(
+                "Visio package parts exceed the configured budget of {max_stream_size} bytes"
+            )));
+        }
+        remaining -= xml.len();
         let Ok(document) = roxmltree::Document::parse(&xml) else {
             continue;
         };
@@ -174,6 +200,19 @@ struct VisioParser<'a> {
     document: &'a [u8],
     version: u16,
     max_stream_size: usize,
+    /// Decompressed stream bytes the parse may still materialize, shared by every stream read.
+    ///
+    /// The per-stream cap bounds one stream, not the pointer tree: a deep chain of distinct keys
+    /// keeps one decompressed copy alive per recursion level, and each key re-decodes the same
+    /// region. Charging every read keeps the module's promise ("malformed files cannot grow an
+    /// unbounded allocation") true for the whole descent.
+    remaining_stream_bytes: usize,
+    /// Set when a stream read was rejected by the budget.
+    ///
+    /// Descendant reads are tolerated on purpose (`let _ = self.scan_stream(child, ..)`), so a
+    /// budget failure there would otherwise degrade into silently truncated text. The caller
+    /// checks this flag after the descent and reports the failure instead.
+    stream_budget_exhausted: bool,
     visited: HashSet<StreamKey>,
     text: Vec<String>,
 }
@@ -235,7 +274,7 @@ impl<'a> VisioParser<'a> {
         Ok(())
     }
 
-    fn read_stream(&self, pointer: Pointer) -> Result<StreamData> {
+    fn read_stream(&mut self, pointer: Pointer) -> Result<StreamData> {
         let end = pointer
             .offset
             .checked_add(pointer.length)
@@ -249,15 +288,34 @@ impl<'a> VisioParser<'a> {
             )));
         }
 
-        let raw = &self.document[pointer.offset..end];
+        // Copied out of `self` first: the slice borrows the document, not the parser, so the
+        // budget charge below can take `&mut self` while `raw` is still alive.
+        let document = self.document;
+        let raw = &document[pointer.offset..end];
         if !pointer_compressed(pointer) {
+            self.charge_stream_bytes(raw.len())?;
             return Ok(StreamData {
                 contents: raw.to_vec(),
                 block_header: None,
             });
         }
 
-        let decompressed = decode_visio_lzw(raw, self.max_stream_size)?;
+        // Also limited by the parse-wide budget, so a decompression bomb cannot expand past it
+        // even when this is the deepest stream in the chain.
+        let cap = self.max_stream_size.min(self.remaining_stream_bytes.max(1));
+        let decompressed = match decode_visio_lzw(raw, cap) {
+            Ok(decompressed) => decompressed,
+            Err(error) => {
+                // The per-stream cap and the budget are the same knob: when the budget lowered
+                // it, this read was refused by the budget, and returning `Err` without the flag
+                // would let a caller's descendant read swallow it and report truncated text.
+                if cap < self.max_stream_size {
+                    self.stream_budget_exhausted = true;
+                }
+                return Err(error);
+            }
+        };
+        self.charge_stream_bytes(decompressed.len())?;
         if decompressed.len() < 4 {
             return Err(XbergError::parsing("Compressed Visio stream has no block header"));
         }
@@ -267,6 +325,18 @@ impl<'a> VisioParser<'a> {
             contents: decompressed[4..].to_vec(),
             block_header: Some(block_header),
         })
+    }
+
+    /// Charge `bytes` against the parse-wide decompressed-stream budget.
+    fn charge_stream_bytes(&mut self, bytes: usize) -> Result<()> {
+        if bytes > self.remaining_stream_bytes {
+            self.stream_budget_exhausted = true;
+            return Err(XbergError::parsing(
+                "Visio stream data exceeds the configured stream budget".to_string(),
+            ));
+        }
+        self.remaining_stream_bytes -= bytes;
+        Ok(())
     }
 
     fn parse_child_pointers(&self, parent: Pointer, contents: &[u8]) -> Result<Vec<Pointer>> {

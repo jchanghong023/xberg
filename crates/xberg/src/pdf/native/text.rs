@@ -350,6 +350,14 @@ pub(crate) fn furniture_min_page_lines() -> usize {
     FURNITURE_MIN_PAGE_LINES
 }
 
+/// Page-count floor shared with the structured-PDF furniture pass.
+///
+/// Distinct from [`furniture_min_page_lines`], which is a *per-page line count*: using that
+/// value as a page count silently disables a pass for every document shorter than it.
+pub(crate) fn furniture_min_pages() -> usize {
+    FURNITURE_MIN_PAGES
+}
+
 /// Drop lines that repeat across many pages' top/bottom edges (running headers
 /// and footers) from every page.
 ///

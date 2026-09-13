@@ -648,13 +648,32 @@ fn escape_marker_alt(text: &str) -> String {
     escaped
 }
 
-/// Strip whitespace and control characters from a marker's link destination.
+/// Percent-encode the characters that would end or unbalance a marker's link destination.
 ///
 /// The destination is built from the extractor's own naming, not from document text, so this
-/// only guards the line's syntax: a space inside `(...)` ends a CommonMark link destination
-/// early and leaves the rest of the marker as loose text.
+/// only guards the line's syntax: a space ends a CommonMark link destination early, an
+/// unbalanced `)` closes it early (an extractor relationship target like `media/image1).png`
+/// did exactly that, leaving the tail of the name as loose text), and `<`/`>` can open the
+/// pointy-bracket form. Percent-encoding keeps the path resolvable and survives
+/// `render_markdown`'s backslash-unescape pass, which a backslash escape would not.
 fn sanitize_marker_url(url: &str) -> String {
-    url.chars().filter(|character| !character.is_whitespace() && !character.is_control()).collect()
+    let mut sanitized = String::with_capacity(url.len());
+    for character in url.chars() {
+        match character {
+            ' ' => sanitized.push_str("%20"),
+            '(' => sanitized.push_str("%28"),
+            ')' => sanitized.push_str("%29"),
+            '<' => sanitized.push_str("%3C"),
+            '>' => sanitized.push_str("%3E"),
+            '"' => sanitized.push_str("%22"),
+            '`' => sanitized.push_str("%60"),
+            // Control characters have no place in the destination and no encoding that would
+            // make them printable here, so they are dropped rather than encoded.
+            control if control.is_control() => {}
+            other => sanitized.push(other),
+        }
+    }
+    sanitized
 }
 
 /// Build a comrak AST from an `InternalDocument`.

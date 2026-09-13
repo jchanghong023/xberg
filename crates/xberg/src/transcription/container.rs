@@ -224,7 +224,18 @@ fn decode_via_ffmpeg(
 
     let wav = std::fs::read(&output.path)
         .map_err(|e| crate::XbergError::transcription(format!("ffmpeg produced no audio: {e}")))?;
-    decode_audio_to_pcm(&wav, max_bytes)
+    // `max_bytes` documents the *input* size (and is enforced on it before this path runs),
+    // while the WAV `-t` above produced is decoded audio (16 kHz mono s16 = 32 000 B/s), so a
+    // plain cap would reject valid in-budget input -- a 20-minute file at a 32 MiB cap writes a
+    // 38 MB WAV. Let the duration budget raise the ceiling to what it needs, exactly as
+    // `wmf::decode_file` does; with `max_duration_ms = None` the byte cap stays the only bound.
+    let duration_bytes = max_duration_ms
+        .map(|ms| ms.saturating_add(FFMPEG_DURATION_MARGIN_MS).saturating_mul(32_000) / 1000);
+    let wav_limit = match (max_bytes, duration_bytes) {
+        (Some(bytes), Some(needed)) => Some(bytes.max(needed)),
+        (budget, _) => budget,
+    };
+    decode_audio_to_pcm(&wav, wav_limit)
 }
 
 /// `XBERG_FFMPEG` wins; then an ffmpeg staged next to the running binary (the
@@ -322,11 +333,17 @@ impl TempInput {
         use std::io::Write as _;
 
         let (path, mut file) = Self::create(suffix)?;
-        file.write_all(bytes)
-            .map_err(|e| crate::XbergError::transcription(format!("cannot write the media file at {path:?}: {e}")))?;
-        file.flush()
-            .map_err(|e| crate::XbergError::transcription(format!("cannot flush the media file at {path:?}: {e}")))?;
-        Ok(Self { path })
+        // The guard exists before the first fallible write, so a short write or a full disk
+        // still deletes the file that was just created. The handle stays open until this
+        // function returns; `File` opens with delete sharing on Windows, so the unlink works.
+        let staged = Self { path };
+        file.write_all(bytes).map_err(|e| {
+            crate::XbergError::transcription(format!("cannot write the media file at {:?}: {e}", staged.path))
+        })?;
+        file.flush().map_err(|e| {
+            crate::XbergError::transcription(format!("cannot flush the media file at {:?}: {e}", staged.path))
+        })?;
+        Ok(staged)
     }
 }
 

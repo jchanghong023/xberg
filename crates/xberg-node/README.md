@@ -332,6 +332,7 @@ This binding uses NAPI-RS to provide native Node.js bindings with:
 | **eBooks** | `.epub`, `.fb2` | Chapters, metadata, embedded resources |
 | **Database** | `.dbf`, `.sqlite`, `.sqlite3`, `.db`, `.gpkg`, `.gpkx` | Bounded table extraction, schema metadata, GeoPackage detection |
 | **Hangul** | `.hwp`, `.hwpx` | Korean document format, text extraction |
+| **Drawings** | `.vsd`, `.vsdx`, `.vsdm` | Shape text from legacy binary VSD and OPC VSDX/VSDM packages |
 
 #### Images (OCR-Enabled)
 
