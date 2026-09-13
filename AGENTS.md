@@ -17,7 +17,7 @@
 ## 项目结构
 
 - Rust workspace，核心 crate：`crates/xberg`（核心库）、`crates/xberg-cli`（二进制 `xberg`，clap 定义在 `src/main.rs`）；其余 `xberg-ffi` / `xberg-node` / `xberg-wasm` / `xberg-py` 等为语言绑定。
-- `docs-site/`（Docusaurus 文档）、`e2e/` + `fixtures/`（端到端测试）、`.ai-rulez/`（ai-rulez 管理的 AI 规则/技能，改规则后需用固定版本的 ai-rulez 重新生成 bundle）、`round1~4-convert.sh`（历史转换脚本，fulltest.py 的参照）。
+- `docs-site/`（Docusaurus 文档）、`e2e/` + `fixtures/`（端到端测试）、`.ai-rulez/`（ai-rulez 管理的 AI 规则/技能，改规则后需用固定版本的 ai-rulez 重新生成 bundle）。
 
 ## 编译 / 打包 / 测试（仅在用户明确要求时执行）
 
