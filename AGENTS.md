@@ -11,6 +11,7 @@
 - **总工作流（用户的固定需求，以后无需重新解释）**：日常开发改完代码 → 用户明确要求时跑 `fulltest.py`（本地编译的二进制，快速验证转换质量）；发布前用户明确要求时跑 `slowtest.py`（完整打包 → 打包版全量端到端测试 → 质量报告），是否发布由用户根据报告决定。
 - **严禁私自跑费时操作**：未经用户明确点名要求，不得运行任何编译（`cargo build`/`check`/`clippy`/`test` 等一切编译类命令）、测试（`fulltest.py`、`slowtest.py`、端到端测试）或打包（`package-cli-windows.ps1`）。何时测试由用户自己决定。
 - **修改代码时不要编译本地代码（效率很低），尽快交付改动**。修改后的验证以静态手段为限：阅读代码、diff 审查、脚本类语法检查。
+- **临时脚本 / 临时目录 / 临时文件只准放 `./.tmp`**：仓库内的一次性脚本、临时目录、临时文件一律建在仓库根目录的 `.tmp\`（不存在先 `mkdir -p .tmp`），不得散落在仓库根、`scratch*` 或其他任何目录——根目录只保留仓库资产，避免 `git status` 噪音和误提交；`.tmp/` 已在 `.gitignore` 中（不入库）。验证完自行清理临时产物。
 - **`fulltest.py`（仓库根目录）只在用户明确要求时才运行**。它是文档转换效果的集成测试：遍历 `D:\测试转markdown转换效果\测试文档`，逐文件调用本地编译的 CLI 转成 Markdown，打印三层质量评估（结构启发式、用 pymupdf/python-docx/python-pptx/openpyxl 对源文件算文本召回率、xberg 元数据警告），结果输出到 `D:\测试转markdown转换效果\测试文档_md_fulltest`。运行它只需本地编译出 exe（不需要打包），默认遇 FAIL 立即终止，`--keep-going` 跑完；音视频转写超时默认 1800s。音视频也只用本地编译版：预检会用 max_bytes=1 快速探测 transcription feature，缺 feature 直接报错退出并提示 `cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,transcription`，**不回退打包版**。
 - **`slowtest.py`（仓库根目录）同样只在用户明确要求时才运行**。慢速全量验证，测**打包版 CLI**：① 跑 `scripts/publish/cli/package-cli-windows.ps1` 打完整 zip；② 解压到临时目录，对解压出的 xberg.exe 跑 fulltest.py（`--keep-going` 全量测完，`--pkg-dir` 指向解压目录）；③ 输出转码质量报告（报告副本存 `target/slowtest-report-<时间戳>.md`）。包含完整 release 编译与打包，耗时可能 30 分钟以上；`--skip-package` 可复用已有 zip。**用户根据该报告决定是否发布版本。**
 

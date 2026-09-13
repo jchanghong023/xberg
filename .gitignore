@@ -306,6 +306,9 @@ scratch/
 /xberg-cli-*/
 /xberg-cli-*.zip
 /scratch*/
+# AGENTS.md rule: every throwaway script / dir / file lives in ./.tmp. Already covered by
+# the unanchored `.tmp/` in CI / Tools; repeated root-anchored so the rule reads in place.
+/.tmp/
 # PowerShell redirect accident: `> file` on a failed command wrote the error text itself.
 /System.IO.TextWriter+SyncTextWriter
 
