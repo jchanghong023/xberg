@@ -1922,11 +1922,13 @@ def _git_info() -> dict:
         return {"commit": None, "dirty": None}
 
 
-def compare_baseline(prev: dict, cur: list) -> dict:
+def compare_baseline(prev: dict, cur: list, expectations_loaded: bool = True) -> dict:
     """按文件名对齐问题码，产出新增/已修复（比 code 集合）与恶化（比出现次数）。
 
     依赖金标准的码（GOLDEN_*/OCR 期望码）在未加载金标准的运行里不会产生，
-    必须从两侧剔除，否则会得到假的「已修复」。
+    必须从两侧剔除，否则会得到假的「已修复」。剔除只在真正不可比时发生：
+    金标准未全局加载、或该文件在基线里有记录而本次没有金标准条目（条目被删/改名）。
+    对抗语料文件本来就没有金标准条目，属设计内，不因此把整场对比标成「未加载金标准」。
     同一码次数增加（如 DUP_SPAM 2→5）不算新增但算恶化——只比集合会把它判成
     「无变化」，质量劣化被吞掉。
     """
@@ -1942,8 +1944,16 @@ def compare_baseline(prev: dict, cur: list) -> dict:
         prev_rec = prev_files.get(name) or {}
         # 基线未记录 golden_applied（旧格式）时按「有金标准」处理，保持原有可追踪性
         prev_applied = prev_rec.get("golden_applied", True)
-        drop = set() if (cur_applied and prev_applied is True) else EXP_GATED_CODES
-        if drop:
+        if not expectations_loaded:
+            drop, flag = set(EXP_GATED_CODES), True
+        elif not cur_applied:
+            drop = set(EXP_GATED_CODES)
+            flag = bool(prev_rec)
+        elif prev_applied is not True:
+            drop, flag = set(EXP_GATED_CODES), True
+        else:
+            drop, flag = set(), False
+        if flag:
             out["skipped_exp_codes"] = True
         now_c = Counter(i["code"] for i in (rec.get("issues") or []))
         before_c = Counter(i["code"] for i in (prev_rec.get("issues") or []))
@@ -2500,15 +2510,28 @@ def run_selftest() -> int:
             {"name": "b.pdf", "golden": {"applied": False},   # 本次未加载金标准
              "issues": []},
         ]
-        out = compare_baseline(prev, cur)
+        out = compare_baseline(prev, cur, expectations_loaded=True)
         a = out["files"].get("a.pdf") or {}
         check("同码次数 2→5 判为恶化而非无变化",
               a.get("worse") == {"DUP_SPAM": (2, 5)} and not a.get("new"))
         check("消失的码仍判已修复", a.get("fixed") == ["NOTES_MISSING"])
         check("依赖金标准的码被剔除(不算已修复)",
               "b.pdf" not in out["files"] and out["skipped_exp_codes"])
+        # 对抗语料文件没有金标准条目属设计内：不得把整场对比标成「未加载金标准」
+        out_adv = compare_baseline(
+            {"files": [{"name": "main.pdf", "golden_applied": True, "issues": []}]},
+            [{"name": "main.pdf", "golden": {"applied": True}, "issues": []},
+             {"name": "adv_empty.pdf", "golden": {"applied": False}, "issues": []}],
+            expectations_loaded=True)
+        check("对抗文件无金标准条目不触发「未加载金标准」",
+              not out_adv["skipped_exp_codes"])
+        check("金标准未加载仍触发剔除标记",
+              compare_baseline({"files": []},
+                               [{"name": "x", "golden": {"applied": False}, "issues": []}],
+                               expectations_loaded=False)["skipped_exp_codes"])
         check("金标准 sha 不一致被标记",
-              compare_baseline({"expectations_sha256": "a" * 64, "files": []}, [])
+              compare_baseline({"expectations_sha256": "a" * 64, "files": []}, [],
+                               expectations_loaded=True)
               ["expectations_changed"] is not None)
     finally:
         EXPECTATIONS_SHA256 = saved_sha
@@ -2859,7 +2882,9 @@ def main():
 
     # 回归对比：只呈现在报告里，不追加 issue、不影响 verdict
     prev_baseline = load_baseline(Path(args.baseline))
-    regression = compare_baseline(prev_baseline, JSON_RESULTS) if prev_baseline else None
+    regression = (compare_baseline(prev_baseline, JSON_RESULTS,
+                                   bool(EXPECTATIONS.get("files")))
+                  if prev_baseline else None)
     if regression is None:
         emit("\n## 与基线对比")
         emit("  （未找到基线文件，未做回归对比；用 --save-baseline 生成）")
