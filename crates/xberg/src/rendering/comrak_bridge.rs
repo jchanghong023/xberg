@@ -774,7 +774,10 @@ pub(crate) fn build_comrak_ast<'a>(
             ElementView::Merged { text, .. } => text,
         })
         .collect();
-    let repeated_ocr = super::ocr_duplicate_indices(&view_texts, &super::image_ocr_contents(doc));
+    let repeated_ocr = super::ocr_duplicate_indices(
+        &view_texts,
+        &super::image_ocr_contents(doc, image_block_style == ImageBlockStyle::Node),
+    );
 
     for (entry_index, consolidated_elem) in consolidated.iter().enumerate() {
         if repeated_ocr[entry_index] {

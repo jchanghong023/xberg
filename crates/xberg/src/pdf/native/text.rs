@@ -349,24 +349,18 @@ pub(crate) fn furniture_min_pages() -> usize {
     FURNITURE_MIN_PAGES
 }
 
-/// Drop lines that repeat across many pages' top/bottom edges (running headers
-/// and footers) from every page.
-///
-/// A manual whose footer note repeats on hundreds of pages otherwise survives
-/// every per-page filter (the default margins are 0.0, so no band is cut) and
-/// lands once per page in the output. A line only becomes furniture by sitting
-/// in a page's edge zones on a quarter of the pages — a bar no body sentence
-/// meets — but removal is then global: column-aware reading order frequently
-/// parks a running footer mid-page, so confining removal to the edges leaves
-/// most copies behind.
-///
-/// Docs with fewer than [`FURNITURE_MIN_PAGES`] pages carry too little
-/// evidence to judge a line furniture, so they pass through unchanged.
+/// Whole-document page-share floor shared with the structured-PDF furniture pass.
+pub(crate) fn furniture_min_page_fraction() -> f64 {
+    FURNITURE_MIN_PAGE_FRACTION
+}
+
 /// Furniture strings for pages given as per-page line lists.
 ///
 /// Same thresholds as [`strip_repeated_edge_furniture`], exposed so the
 /// structured-PDF path (whose document is built from spans, not page text) can
-/// detect furniture over its own page-grouped paragraphs.
+/// detect furniture over its own page-grouped paragraphs. Unlike that pass,
+/// this function only *returns* the furniture strings; removal is the caller's
+/// job.
 pub(crate) fn furniture_from_page_lines(pages: &[Vec<String>]) -> std::collections::HashSet<String> {
     if pages.len() < FURNITURE_MIN_PAGES {
         return Default::default();
@@ -377,7 +371,7 @@ pub(crate) fn furniture_from_page_lines(pages: &[Vec<String>]) -> std::collectio
     // on a dense consecutive run that can stay far below the whole-document
     // page share, so either signal is enough.
     let mut page_counts: HashMap<String, usize> = HashMap::new();
-    let mut streaks: HashMap<&str, (usize, usize)> = HashMap::new();
+    let mut streaks: HashMap<&str, (usize, usize, usize)> = HashMap::new();
     for (page_index, lines) in pages.iter().enumerate() {
         let non_empty: Vec<usize> = lines
             .iter()
@@ -411,10 +405,18 @@ pub(crate) fn furniture_from_page_lines(pages: &[Vec<String>]) -> std::collectio
                 *page_counts.entry(line.to_string()).or_insert(0) += 1;
                 let streak = match streaks.get(line) {
                     // Continues the run only when this is the immediately previous page.
-                    Some(&(last_index, run)) if last_index + 1 == page_index => run + 1,
-                    _ => 1,
+                    // The best run is what counts, not the one ending at the last
+                    // sighting: a single sparse page inside the book (or a page with
+                    // too few lines, skipped above) breaks the chain, and an isolated
+                    // later appearance would otherwise bury the dense run the
+                    // documented "longest run" rule is about.
+                    Some(&(last_index, run, best)) => {
+                        let run = if last_index + 1 == page_index { run + 1 } else { 1 };
+                        (page_index, run, best.max(run))
+                    }
+                    None => (page_index, 1, 1),
                 };
-                streaks.insert(line, (page_index, streak));
+                streaks.insert(line, streak);
             }
         }
     }
@@ -428,7 +430,7 @@ pub(crate) fn furniture_from_page_lines(pages: &[Vec<String>]) -> std::collectio
             *count >= minimum_pages
                 || streaks
                     .get(line.as_str())
-                    .is_some_and(|&(_, run)| run >= FURNITURE_MIN_CONSECUTIVE_PAGES)
+                    .is_some_and(|&(_, _, best)| best >= FURNITURE_MIN_CONSECUTIVE_PAGES)
         })
         .map(|(line, _)| line)
         .collect();
@@ -438,7 +440,7 @@ pub(crate) fn furniture_from_page_lines(pages: &[Vec<String>]) -> std::collectio
         consecutive_pages = FURNITURE_MIN_CONSECUTIVE_PAGES,
         candidates,
         furniture = furniture.len(),
-        "strip_repeated_edge_furniture pass"
+        "furniture_from_page_lines pass"
     );
     furniture
 }

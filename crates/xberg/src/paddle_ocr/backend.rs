@@ -236,16 +236,6 @@ fn image_metadata(outcome: &RotationOutcome) -> AHashMap<Cow<'static, str>, serd
     additional
 }
 
-/// PaddleOCR backend using ONNX Runtime.
-///
-/// Maintains a pool of OCR engines keyed by script family. Each family has its own
-/// recognition model and character dictionary, while detection and classification
-/// models are shared across all families.
-///
-/// # Thread Safety
-///
-/// The backend is `Send + Sync` and can be used across threads safely via `Arc`.
-/// Per-key initialization cells serialize each cold start. Initialized engines
 /// Upper bound on concurrently loaded PaddleOCR engines per model key.
 ///
 /// One engine owns its ORT sessions behind a mutex, so it can only run a single image at a
@@ -262,7 +252,9 @@ const MAX_PADDLE_ENGINE_SLOTS: usize = 8;
 const MAX_PADDLE_ENGINE_SLOTS_OVERRIDE: usize = 32;
 
 /// `(slots, intra_op_threads)`: how many engines to load per model key and how much of the
-/// process budget each may claim. `slots * intra_op_threads <= budget` always holds.
+/// process budget each may claim. On the policy path `slots * intra_op_threads <= budget`
+/// always holds; the `XBERG_PADDLE_ENGINE_SLOTS` override is the deliberate exception —
+/// it is a memory-cap tuning knob and may over-subscribe the thread budget.
 ///
 /// `XBERG_PADDLE_ENGINE_SLOTS` overrides the slot count for tuning (0 or unparsable = policy).
 fn paddle_engine_layout(total_budget: usize) -> (usize, usize) {
@@ -341,6 +333,16 @@ impl EngineSlots {
     }
 }
 
+/// PaddleOCR backend using ONNX Runtime.
+///
+/// Maintains a pool of OCR engines keyed by script family. Each family has its own
+/// recognition model and character dictionary, while detection and classification
+/// models are shared across all families.
+///
+/// # Thread Safety
+///
+/// The backend is `Send + Sync` and can be used across threads safely via `Arc`.
+/// Per-key initialization cells serialize each cold start. Initialized engines
 /// can run OCR concurrently without holding the pool lock.
 #[cfg_attr(alef, alef(skip))]
 pub struct PaddleOcrBackend {

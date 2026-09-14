@@ -21,7 +21,7 @@ use super::common::{
 pub(crate) fn render_plain(doc: &InternalDocument) -> String {
     let mut out = String::with_capacity(doc.elements.len() * 80);
     let mut last_heading_depth: Option<u16> = None;
-    let repeated_ocr = ocr_duplicate_indices(&body_paragraph_texts(doc), &image_ocr_contents(doc));
+    let repeated_ocr = ocr_duplicate_indices(&body_paragraph_texts(doc), &image_ocr_contents(doc, false));
 
     for (index, elem) in doc.elements.iter().enumerate() {
         if repeated_ocr[index] {

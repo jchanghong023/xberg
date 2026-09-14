@@ -485,8 +485,8 @@ fn furniture_from_consecutive_page_paragraphs(pages: &[Vec<String>]) -> std::col
     use crate::pdf::native::text::FURNITURE_MIN_LINE_CHARS;
 
     let mut furniture = std::collections::HashSet::new();
-    // A page-count floor, not the per-page line count the edge pass uses: `pages` is one
-    // paragraph list per page, so gating on `furniture_min_page_lines()` skipped every
+    // A page-count floor, not a per-page line count: `pages` is one paragraph list
+    // per page, so gating on the edge pass's per-page line floor skipped every
     // document with fewer than seven pages — the 3–6 page chapter headers this pass exists
     // for returned nothing before examining a single paragraph.
     if pages.len() < crate::pdf::native::text::furniture_min_pages() {
@@ -529,8 +529,8 @@ fn furniture_from_consecutive_page_paragraphs(pages: &[Vec<String>]) -> std::col
 
     // Same consecutive-run bar as the edge-zone pass; plus a document-wide
     // share bar so a header that is only ever paragraph #4 still gets caught.
-    let min_share = ((pages.len() as f64) * 0.25).ceil() as usize;
-    let min_share = min_share.max(3);
+    let min_share = ((pages.len() as f64) * crate::pdf::native::text::furniture_min_page_fraction()).ceil() as usize;
+    let min_share = min_share.max(crate::pdf::native::text::furniture_min_pages());
     for (line, hits) in page_hits {
         let run = best_streak.get(line).copied().unwrap_or(0);
         if run >= crate::pdf::native::text::furniture_min_consecutive_pages() || hits >= min_share {
@@ -1938,6 +1938,18 @@ impl PdfExtractor {
                     "inline image OCR was requested but no OCR backend is registered; \
                      images are returned without OCR results"
                 );
+                // The tracing line alone made a misconfigured backend a silent
+                // downgrade: the caller explicitly asked for inline OCR and got
+                // none, so the same fact must reach the document's warning list
+                // where consumers and fulltest actually look.
+                pdf_extraction_warnings.push(crate::types::ProcessingWarning {
+                    source: std::borrow::Cow::Borrowed("ocr"),
+                    message: std::borrow::Cow::Owned(format!(
+                        "inline image OCR requested but no OCR backend '{}' is registered; \
+                         images are returned without OCR results",
+                        ocr_config.backend
+                    )),
+                });
             }
         }
 

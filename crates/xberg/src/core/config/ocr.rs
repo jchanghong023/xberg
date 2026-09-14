@@ -1096,7 +1096,7 @@ impl OcrConfig {
         };
         resolved
             .iter()
-            .map(|code| crate::ocr::tessdata_download::tesseract_language_name(code))
+            .map(|code| crate::ocr::types::tesseract_language_name(code))
             .collect()
     }
 

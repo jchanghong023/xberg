@@ -171,9 +171,17 @@ pub(crate) fn extract_visio_package_text(content: &[u8], max_stream_size: usize)
             )));
         }
         let mut xml = String::with_capacity(file.size() as usize);
-        file.take(max_stream_size.saturating_add(1) as u64)
+        // A part that cannot be read (I/O error, non-UTF-8 bytes) must not hide
+        // its siblings: the part failures above and below both skip the part,
+        // and a damaged master must not cost the pages' text. Only the budget
+        // checks abort the whole extraction — that is the caller's explicit cap.
+        if file
+            .take(max_stream_size.saturating_add(1) as u64)
             .read_to_string(&mut xml)
-            .map_err(|error| XbergError::parsing(format!("Failed to read Visio package part '{name}': {error}")))?;
+            .is_err()
+        {
+            continue;
+        }
         if xml.len() > max_stream_size {
             return Err(XbergError::parsing(format!(
                 "Visio package part '{name}' exceeds configured limit of {max_stream_size} bytes"
@@ -344,9 +352,10 @@ impl<'a> VisioParser<'a> {
     fn charge_stream_bytes(&mut self, bytes: usize) -> Result<()> {
         if bytes > self.remaining_stream_bytes {
             self.stream_budget_exhausted = true;
-            return Err(XbergError::parsing(
-                "Visio stream data exceeds the configured stream budget".to_string(),
-            ));
+            return Err(XbergError::parsing(format!(
+                "Visio stream data exceeds the configured budget of {} bytes",
+                self.max_stream_size
+            )));
         }
         self.remaining_stream_bytes -= bytes;
         Ok(())

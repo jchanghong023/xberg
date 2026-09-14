@@ -152,6 +152,11 @@ impl PptxExtractor {
         let forms = Self::math_forms(formulas);
 
         for (slide_num, content) in slide_contents {
+            // add_notes writes a slide's notes last, as one string — so a blank
+            // line inside the notes splits them across blocks, and only the
+            // first carries the marker. Once notes start, every later block of
+            // the same slide is note text and none of it can be the title.
+            let mut in_notes = false;
             for block in content.split("\n\n") {
                 budget.step()?;
                 let mut trimmed = block.trim();
@@ -167,7 +172,6 @@ impl PptxExtractor {
                 // whatever follows it. What follows is the note's content, so it never
                 // counts as the slide's title: a note opening with `# ` is prose, and
                 // taking it as a heading folded the whole note into one element.
-                let mut in_notes = false;
                 if let Some(rest) = Self::strip_notes_marker(trimmed) {
                     trimmed = rest.trim();
                     in_notes = true;
@@ -1347,6 +1351,36 @@ mod tests {
             .iter()
             .any(|e| e.kind == ElementKind::Paragraph && e.text.contains("# not a title"));
         assert!(note_kept, "the note's first paragraph must survive as body text");
+    }
+
+    /// The notes flag outlives its block: `add_notes` writes a slide's notes as
+    /// one string, and a blank line inside them splits the block — only the
+    /// first carries the marker, so a later note paragraph starting with `# `
+    /// must still not become the slide's title. The next slide's title branch
+    /// works again, because the flag resets per slide.
+    #[test]
+    fn test_build_internal_document_keeps_later_note_paragraphs_out_of_the_outline() {
+        use crate::types::internal::ElementKind;
+
+        let slide_contents = vec![
+            (1u32, "# Slide One\n\n### Notes:\nfirst note\n\n# also note text\n".to_string()),
+            (2u32, "# Slide Two\n".to_string()),
+        ];
+        let mut budget = SecurityBudget::with_defaults();
+        let doc = PptxExtractor::build_internal_document(&slide_contents, 2, &[], false, &mut budget)
+            .unwrap();
+
+        let headings: Vec<&str> = doc
+            .elements
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::Heading { .. }))
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(
+            headings,
+            vec!["Slide One", "Slide Two"],
+            "the second note paragraph is not a heading, the next slide's title is"
+        );
     }
 
     /// An escaped `\|` round-trips as a literal pipe inside its cell, a

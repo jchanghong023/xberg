@@ -80,7 +80,7 @@ pub(crate) fn append_embedded_object_text(document: &mut crate::types::internal:
             .map(|image| image.image_index)
             .max()
             .map_or(0, |highest| highest.saturating_add(1));
-        let body = renumber_embedded_image_refs(content, next_image_base, child_images);
+        let (body, referenced) = renumber_embedded_image_refs(content, next_image_base, child_images);
         if body.trim().is_empty() {
             // Nothing of the child's body survives (e.g. it was only image
             // references whose alt text was empty): advancing the base and
@@ -89,6 +89,13 @@ pub(crate) fn append_embedded_object_text(document: &mut crate::types::internal:
             continue;
         }
         for image in child_images {
+            // Stage only the images the rewritten body actually points at: a
+            // child asset its own Markdown never referenced would otherwise be
+            // exported as an orphan file next to the parent document. The full
+            // set stays on the child for structured consumers.
+            if !referenced.contains(&image.image_index) {
+                continue;
+            }
             let mut image = image.clone();
             image.image_index = next_image_base.saturating_add(image.image_index);
             staged_images.push(image);
@@ -122,42 +129,68 @@ pub(crate) fn append_embedded_object_text(document: &mut crate::types::internal:
 /// the same number (or to nothing at all). `base` is the parent slot the
 /// child's image 0 was moved to. A reference with no matching child image is
 /// dropped, keeping its alt text — the same rule the export path applies to
-/// assets it cannot carry over.
-fn renumber_embedded_image_refs(text: &str, base: u32, images: &[crate::types::ExtractedImage]) -> String {
+/// assets it cannot carry over. Returns the rewritten body and the child image
+/// indices the body still points at, so the caller stages exactly the assets
+/// the merged output references.
+fn renumber_embedded_image_refs(
+    text: &str,
+    base: u32,
+    images: &[crate::types::ExtractedImage],
+) -> (String, Vec<u32>) {
     let mut out = String::with_capacity(text.len());
+    let mut referenced: Vec<u32> = Vec::new();
     let bytes = text.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'!' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
-            if let Some((alt, target, after)) = find_markdown_image_parts(&text[i..]) {
-                if target.starts_with("data:") {
-                    // Self-contained payload: nothing to renumber, and dropping
-                    // it would discard the only copy of the picture.
-                    out.push_str(&text[i..i + after]);
-                } else if let Some((index, suffix)) = parse_image_ref(target)
-                    && images.iter().any(|image| image.image_index == index)
-                {
-                    out.push_str("![");
-                    out.push_str(alt);
-                    out.push_str("](image_");
-                    out.push_str(&base.saturating_add(index).to_string());
-                    out.push_str(suffix);
-                    out.push(')');
-                } else if !alt.is_empty() {
-                    // Not one of this child's exported images: keep the alt text
-                    // rather than emit a reference that would resolve to an
-                    // unrelated picture of the same number in the parent.
-                    out.push_str(alt);
+            match find_markdown_image_parts(&text[i..]) {
+                ImageScan::Parts(alt, target, after) => {
+                    if target.starts_with("data:") {
+                        // Self-contained payload: nothing to renumber, and dropping
+                        // it would discard the only copy of the picture.
+                        out.push_str(&text[i..i + after]);
+                    } else if let Some((index, suffix)) = parse_image_ref(target)
+                        && images.iter().any(|image| image.image_index == index)
+                    {
+                        out.push_str("![");
+                        out.push_str(alt);
+                        out.push_str("](image_");
+                        out.push_str(&base.saturating_add(index).to_string());
+                        out.push_str(suffix);
+                        out.push(')');
+                        referenced.push(index);
+                    } else if !alt.is_empty() {
+                        // Not one of this child's exported images: keep the alt text
+                        // rather than emit a reference that would resolve to an
+                        // unrelated picture of the same number in the parent.
+                        out.push_str(alt);
+                    }
+                    i += after;
+                    continue;
                 }
-                i += after;
-                continue;
+                // No unescaped closing bracket or paren follows anywhere: no image
+                // reference can start later in this text either, so copying the
+                // rest verbatim reproduces the byte-for-byte output of rescanning
+                // — without paying an end-of-text scan per stray opener on a body
+                // full of unclosed `![`.
+                ImageScan::NoTerminator => {
+                    out.push_str(&text[i..]);
+                    break;
+                }
+                // The closing bracket exists but is not followed by `(`: this
+                // opener is not an image, but later ones may still be.
+                ImageScan::Malformed => {
+                    out.push_str(&text[i..i + 2]);
+                    i += 2;
+                    continue;
+                }
             }
         }
         let ch_len = utf8_char_len(bytes[i]);
         out.push_str(&text[i..i + ch_len]);
         i += ch_len;
     }
-    out
+    (out, referenced)
 }
 
 /// Split an `image_N.ext` reference target into its index and its `.ext` suffix.
@@ -171,24 +204,39 @@ fn parse_image_ref(target: &str) -> Option<(u32, &str)> {
     Some((index, &rest[digits_len..]))
 }
 
-/// Given a slice starting at `![`, return `(alt, target, end_index)` for a
-/// well-formed image reference. `end_index` is relative to `s`.
+/// Outcome of scanning one `![` opener.
+enum ImageScan<'a> {
+    /// A well-formed `![alt](target)`; the index is relative to the opener's slice.
+    Parts(&'a str, &'a str, usize),
+    /// No unescaped closing bracket (or, past a `(`, closing paren) follows
+    /// anywhere in the rest of the text — no image reference can start later.
+    NoTerminator,
+    /// A closing bracket exists but is not followed by `(`: this opener is not
+    /// an image, but later ones may still be well-formed.
+    Malformed,
+}
+
+/// Scan a slice starting at `![` for a well-formed image reference.
 ///
 /// The scan skips backslash-escaped characters: the CommonMark writer escapes a
 /// literal `]` in alt text and a literal `)` in a target as `\]`/`\)`, and
 /// stopping at those folded an escaped reference's parse and left the child's
 /// numbering in the parent's body.
-fn find_markdown_image_parts(s: &str) -> Option<(&str, &str, usize)> {
+fn find_markdown_image_parts(s: &str) -> ImageScan {
     debug_assert!(s.starts_with("!["));
     let rest = &s[2..];
-    let close_bracket = find_unescaped(rest, b']')?;
+    let Some(close_bracket) = find_unescaped(rest, b']') else {
+        return ImageScan::NoTerminator;
+    };
     let alt = &rest[..close_bracket];
     let after = &rest[close_bracket + 1..];
     if !after.starts_with('(') {
-        return None;
+        return ImageScan::Malformed;
     }
-    let close_paren = find_unescaped(after, b')')?;
-    Some((alt, &after[1..close_paren], 2 + close_bracket + 1 + close_paren + 1))
+    let Some(close_paren) = find_unescaped(after, b')') else {
+        return ImageScan::NoTerminator;
+    };
+    ImageScan::Parts(alt, &after[1..close_paren], 2 + close_bracket + 1 + close_paren + 1)
 }
 
 /// Index of the first unescaped `needle` byte in `s`. A `\` escapes the character
@@ -993,12 +1041,59 @@ mod tests {
         };
         let images = vec![image(0), image(1)];
         let input = "前言\n![流程图](image_1.png)\n后记 ![x](image_7.png) 结束";
-        let rewritten = renumber_embedded_image_refs(input, 4, &images);
+        let (rewritten, referenced) = renumber_embedded_image_refs(input, 4, &images);
         assert!(rewritten.contains("![流程图](image_5.png)"), "got {rewritten}");
         // Index 7 is not one of the child's images: the alt text stays, the
         // reference (which would resolve to an unrelated picture) does not.
         assert!(!rewritten.contains("image_7.png"), "got {rewritten}");
         assert!(rewritten.contains("后记 x 结束"), "got {rewritten}");
+        // Only the image the body still points at is reported for staging.
+        assert_eq!(referenced, vec![1]);
+    }
+
+    /// Alt text the CommonMark writer escaped (`\]`) must not end the parse:
+    /// the old `find(']')` stopped at the escape and the reference kept the
+    /// child's numbering in the parent's body.
+    #[test]
+    fn renumber_embedded_image_refs_parses_escaped_alt_text() {
+        let images = vec![crate::types::ExtractedImage {
+            image_index: 0,
+            ..Default::default()
+        }];
+        let (rewritten, referenced) = renumber_embedded_image_refs("![flow \\] chart](image_0.png)", 2, &images);
+        assert!(
+            rewritten.contains("![flow \\] chart](image_2.png)"),
+            "the escaped reference is renumbered, got {rewritten}"
+        );
+        assert_eq!(referenced, vec![0], "the escaped reference counts as a staging candidate");
+    }
+
+    /// A child whose body is empty after renumbering (a reference that matches
+    /// no child image and has no alt text) must not stage its images either:
+    /// the parent would export picture files that nothing in the body refers
+    /// to. The base must also not advance past the unused slots.
+    #[test]
+    fn append_embedded_object_text_skips_orphan_images_of_empty_children() {
+        use crate::types::internal::InternalDocument;
+        use crate::types::ExtractedDocument;
+
+        let mut child_result = ExtractedDocument::default();
+        child_result.content = "![](image_7.png)".to_string();
+        child_result.images = Some(vec![crate::types::ExtractedImage {
+            image_index: 0,
+            ..Default::default()
+        }]);
+
+        let mut doc = InternalDocument::default();
+        doc.children = Some(vec![ArchiveEntry {
+            path: "oleObject1.bin".to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            result: Box::new(child_result),
+        }]);
+
+        append_embedded_object_text(&mut doc);
+        assert!(doc.images.is_empty(), "orphan images must not be staged: {:?}", doc.images);
+        assert!(doc.elements.is_empty(), "an empty child adds no elements");
     }
 
     /// Blank child payloads must not inject empty captions/raw blocks.

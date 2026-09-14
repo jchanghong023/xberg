@@ -214,8 +214,10 @@ fn detect_format(data: &[u8], part: &str) -> Cow<'static, str> {
 
 /// Format from magic bytes, via the detector shared with DOCX/PPTX.
 ///
-/// `image_format` lives behind the `office` feature, so an Excel-only build
-/// falls back to the extension instead of duplicating the signature table.
+/// `image_format` lives behind `any(office, ocr)`, so an Excel-only build
+/// without either falls back to the extension instead of duplicating the
+/// signature table; with `ocr` alone the shared detector is skipped anyway —
+/// `xl/media/` part names always carry an extension, so the fallback is exact.
 #[cfg(feature = "office")]
 fn magic_format(data: &[u8]) -> Option<Cow<'static, str>> {
     let format = crate::extraction::image_format::detect_image_format(data);
@@ -352,6 +354,15 @@ fn collect_sheet_placements<R: Read + Seek>(
         let Some(part) = resolve_relative(parent_dir(worksheet), target) else {
             continue;
         };
+        // First sheet to reference this drawing part owns its walk, and the
+        // gate sits before the ZIP reads so a later sheet sharing the part pays
+        // nothing for it. The placements such a walk records are deduped
+        // first-wins anyway; this is what keeps a shared part's shape text from
+        // appearing twice. (VML writes only first-wins placements, so a repeat
+        // walk is harmless there and needs no gate.)
+        if !is_vml && !visited_parts.insert(part.clone()) {
+            continue;
+        }
         let Some(part_rels_path) = rels_path_for(&part) else {
             continue;
         };
@@ -367,10 +378,7 @@ fn collect_sheet_placements<R: Read + Seek>(
         };
         if is_vml {
             collect_vml_placements(&xml, parent_dir(&part), sheet_name, &part_rels, placements);
-        } else if visited_parts.insert(part.clone()) {
-            // First sheet to reference this drawing part owns its walk: the
-            // placements it records are deduped first-wins anyway, and this is
-            // what keeps a shared part's shape text from appearing twice.
+        } else {
             collect_drawing_placements(&xml, parent_dir(&part), sheet_name, &part_rels, placements, shapes);
         }
     }

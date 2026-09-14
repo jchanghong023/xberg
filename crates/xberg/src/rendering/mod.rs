@@ -103,7 +103,20 @@ pub(crate) fn ocr_duplicate_indices(texts: &[&str], ocr_contents: &[&str]) -> Ve
 /// Only an image whose own text reaches the output can make an inlined copy redundant, and only
 /// a body image element that renders its OCR text does that. `ExtractedImage::image_index` is
 /// the key the element stream refers to; it is not the image's position in the vector.
-pub(crate) fn image_ocr_contents(doc: &crate::types::internal::InternalDocument) -> Vec<&str> {
+///
+/// `respect_ocr_flags` mirrors the renderer's own handling of `ocr_text_only` / `append_ocr_text`:
+/// the Node-style renderers (HTML) print no recognized text when neither flag is set and the
+/// pipeline then also creates no inline copy, so a body paragraph that merely matches the
+/// invisible OCR content is the only occurrence and must survive — those callers pass `true`.
+/// The markdown fence path and the plain renderer print the recognized text unconditionally,
+/// so their dedup passes `false`.
+pub(crate) fn image_ocr_contents(
+    doc: &crate::types::internal::InternalDocument,
+    respect_ocr_flags: bool,
+) -> Vec<&str> {
+    if respect_ocr_flags && !(doc.ocr_text_only || doc.append_ocr_text) {
+        return Vec::new();
+    }
     doc.images
         .iter()
         .filter(|image| {
@@ -121,4 +134,31 @@ pub(crate) fn image_ocr_contents(doc: &crate::types::internal::InternalDocument)
 
 pub(crate) use markdown::render_markdown;
 pub(crate) use plain::render_plain;
+
+#[cfg(test)]
+mod tests {
+    use super::ocr_duplicate_indices;
+
+    /// Only the inlined copy is deleted: a body paragraph the document itself
+    /// repeats after the image's text stays. The old keep-scanning behavior
+    /// marked every later line-for-line reproduction too, deleting the
+    /// document's own paragraph (a title above a logo image's text, a repeated
+    /// warning) along with the copy.
+    #[test]
+    fn only_the_first_reproduction_of_ocr_text_is_deleted() {
+        let texts = ["logo", "Acme Dashboard", "Acme Dashboard"];
+        let repeats = ocr_duplicate_indices(&texts, &["Acme Dashboard"]);
+        assert_eq!(repeats, vec![false, true, false]);
+    }
+
+    /// Two images whose recognized text is identical each eliminate their own
+    /// inlined copy; an already-eliminated element can't be consumed twice and
+    /// the document's original paragraph after the copies still survives.
+    #[test]
+    fn two_identical_ocr_contents_each_consume_their_own_copy() {
+        let texts = ["copy", "copy", "original"];
+        let repeats = ocr_duplicate_indices(&texts, &["copy", "copy"]);
+        assert_eq!(repeats, vec![true, true, false]);
+    }
+}
 

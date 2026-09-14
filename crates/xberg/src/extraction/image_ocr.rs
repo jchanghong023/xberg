@@ -30,7 +30,10 @@ use std::borrow::Cow;
 use crate::types::{ExtractedDocument, ExtractedImage};
 
 /// Why a Windows metafile could not be prepared for OCR, tagged with the pipeline stage so
-/// the resulting warning says whether detection, dimension bounding, or rasterization failed.
+/// the resulting warning says whether format detection or rasterization failed. Dimension
+/// bounding failures share the rasterization stage — both answer "this metafile cannot be
+/// turned into a bitmap within its limits", and the `reason` carries the specific bound
+/// that was exceeded.
 #[derive(Debug)]
 pub(crate) struct ImageOcrPreprocessError {
     stage: &'static str,
