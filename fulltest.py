@@ -18,6 +18,15 @@
     python fulltest.py [--cli PATH] [--src DIR] [--out DIR] [--timeout SECS]
                        [--keep-going] [--strict]
                        [--recall-fail F] [--recall-good F] [--num-recall-fail F]
+                       [--save-baseline [--force]] [--selftest]
+
+附加机制:
+    - `--selftest`         判定器自测（合成样例，不需要 CLI/语料/金标准）
+    - 金标准加载自检        未知键/pattern 卫生告警；报告与基线记录金标准 sha256 与代码 commit
+    - `_adversarial/`      源目录下的对抗语料子目录（损坏/截断/空文件），主队列后追加
+                           失败路径测试（ADV_* 码：必须优雅失败，不得 panic/静默/吐垃圾）
+    - `--save-baseline` 护栏 存在 FAIL 或金标准未加载时拒绝保存（`--force` 覆盖）；
+                           基线对比含「恶化」计数（同码次数增加）
 
 默认调用 target\\debug\\xberg.exe，输出到 D:\\测试转markdown转换效果\\测试文档_md_fulltest。
 每个文件打印质量报告；结束时写 `_quality-report.md` 与 `_quality-report.json`。
@@ -25,6 +34,7 @@
 """
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -164,6 +174,11 @@ ISSUE_META = {
     "TABLE_CELL_FOLDED": "WARN",     # xlsx 单元格内部换行被折叠
     "RUNNING_HEAD": "WARN",          # 书眉/运行标题残留为纯加粗短行
     "BULLET_LEVEL_FLAT": "WARN",     # 源有层级项目符号但 MD 无缩进列表
+    # 失败路径（对抗语料 _adversarial/：损坏/截断/空文件必须优雅失败，不得 panic）
+    "ADV_PANIC": "FAIL",             # 对抗文件触发引擎 panic/backtrace
+    "ADV_SILENT_FAIL": "FAIL",       # 对抗文件非零退出但无任何诊断输出
+    "ADV_GARBAGE_OK": "FAIL",        # 对抗文件「成功」但输出含 FAIL 级结构问题
+    "ADV_EMPTY_OK": "WARN",          # 对抗文件「成功」且输出为空/过短（信息可见，不阻断）
 }
 
 
@@ -363,6 +378,9 @@ EXPECTATIONS: dict = {}
 OCR_CONFIG: dict = {}
 # None = 不给 CLI 传 layout；{} = 按引擎默认注入 layout（需 layout-detection 构建）
 LAYOUT_CONFIG = None
+# 金标准文件指纹与加载期自检结果（load_expectations 填充；进报告与基线，供篡改可见性）
+EXPECTATIONS_SHA256: str | None = None
+EXPECTATIONS_WARNINGS: list = []
 
 
 def strip_repeated_short_lines(text: str) -> str:
@@ -1483,17 +1501,29 @@ def _golden_token_hit(token: str, md_nos: str) -> bool:
     图形/OCR 的保版面输出会把不同文本框交错进同一行（已知不自动判定形态③
     「中文词内部被插空」的交错变体），token 字符齐全且有序却不再连续。对含
     中文的 token 允许相邻字符之间夹最多 GOLDEN_CJK_TOKEN_MAX_GAP 个其他字符
-    （须全部按序出现，窗口有界，不会把「宏连接」误配成无关文本）；拉丁
-    token（标识符/短语）仍要求整串连续，避免子串虚高。
+    （须全部按序出现，窗口有界，不会把「宏连接」误配成无关文本）。纯拉丁
+    token（标识符/短语）仍要求整串连续，避免子串虚高；混合 token 的拉丁
+    片段与中文字符同样逐字容差——版面交错对拉丁片段一样打乱顺序。
+
+    逐字匹配用可达位置集合的线性 DP：reach 是「前缀已按 ≤GAP 间隔匹配到
+    该字符」的全部结束位置，与 `.{0,GAP}` 逐字正则的回溯语义严格等价（正则
+    能找到一条链 ⟺ DP 的 reach 非空走完全串；生产域内 md_nos 已剥除全部
+    空白，正则 `.` 不跨行的差异不会出现），但没有回溯引擎在「token 前
+    缀高频重复字 + 文本同字长 run + token 真缺失」叠加时的指数回溯形态——
+    DP 的代价上界是 O(文本长 × token 长)，最坏也只是慢，不会挂起。
     """
     t = _norm_ws(token)
     if t in md_nos:
         return True
     if len(t) < 2 or not re.search(r"[\u4e00-\u9fff]", t):
         return False
-    gap = ".{0,%d}" % GOLDEN_CJK_TOKEN_MAX_GAP
-    pat = re.compile(gap.join(re.escape(ch) for ch in t))
-    return bool(pat.search(md_nos))
+    reach = {i for i, ch in enumerate(md_nos) if ch == t[0]}
+    for ch in t[1:]:
+        reach = {j for i in reach for j in range(i + 1, i + GOLDEN_CJK_TOKEN_MAX_GAP + 2)
+                 if j < len(md_nos) and md_nos[j] == ch}
+        if not reach:
+            return False
+    return True
 
 
 def _judge_expectations(md_text: str, m, issues, exp):
@@ -1768,16 +1798,92 @@ def judge_running_head(md_text: str, issues, exp=None):
 
 
 # ---------------------------------------------------------------- 金标准 / 回归基线
+# 判定代码实际读取的逐文件键（含 metric_specs 与各 judge 的 exp.get/_exp_int/_exp_msg 全量）。
+# 维护约定：新增读取 exp 的键必须同步登记；拼错的键 = 检查静默不生效（全绿假象），
+# 加载期自检会按本表对未知键告警。`_note` 前缀是给人看的推导依据，豁免。
+KNOWN_FILE_KEYS = {
+    "max_pseudo_headings", "max_escapes", "max_dash_lines", "max_merged_cells",
+    "max_page_footer_body", "require_chinese_ocr", "min_cjk", "min_fenced_cjk",
+    "toc_heading_min_recall", "required_tokens", "forbidden_patterns", "order",
+    "min_headings", "max_headings", "min_tables", "max_tables", "min_chars",
+    "max_chars", "min_images", "max_images", "max_line_len", "max_code_tables",
+    "max_highlights", "max_folded_cells", "max_bold_short_lines",
+    "require_nested_bullets",
+}
+KNOWN_RUN_KEYS = {"ocr_config", "layout_config"}
+KNOWN_TOP_KEYS = {"version", "note", "files", "run"}
+
+
+def _validate_expectations(data: dict) -> list:
+    """金标准自检：未知键 / pattern 卫生。返回配置级告警（打印并进报告，不进逐文件 issues）。
+
+    动机：期望文件在仓外、无版本控制——键名拼错 = 检查静默不生效；JSON 的 \\b 是退格
+    转义，曾把 forbidden 正则变成「退格字面量」，回归守卫永远打不中（2026-09-14 实例）。
+    """
+    warns = []
+    if not isinstance(data, dict):
+        return ["金标准顶层不是 JSON 对象"]
+    for k in data:
+        if k not in KNOWN_TOP_KEYS:
+            warns.append(f"顶层未知键「{k}」（判定代码不读取）")
+    for name, ent in (data.get("files") or {}).items():
+        if not isinstance(ent, dict):
+            warns.append(f"{name}: 文件条目不是对象")
+            continue
+        for k in ent:
+            if k.startswith("_note") or k in KNOWN_FILE_KEYS:
+                continue
+            warns.append(f"{name}: 未知键「{k}」（判定代码不读取，疑似拼写错误→检查静默不生效）")
+        for pat in ent.get("forbidden_patterns") or []:
+            p = str(pat)
+            if not p:
+                warns.append(f"{name}: forbidden_patterns 含空模式")
+                continue
+            if any(unicodedata.category(ch) == "Cc" for ch in p):
+                warns.append(
+                    f"{name}: forbidden 模式含控制字符 {p!r}"
+                    "（JSON \\b/\\t/\\n 转义错误→永远匹配不到真实输出）")
+                continue
+            try:
+                rx = re.compile(p)
+            except re.error as e:
+                warns.append(f"{name}: forbidden 模式编译失败「{p}」: {e}")
+                continue
+            if rx.search(""):
+                warns.append(f"{name}: forbidden 模式能匹配空串「{p}」（会在任意输出上误报）")
+        for tok in ent.get("required_tokens") or []:
+            if len(_norm_ws(str(tok))) < 2:
+                warns.append(f"{name}: required token 过短，无法构成断言: {tok!r}")
+    run = data.get("run")
+    if isinstance(run, dict):
+        for k in run:
+            if k.startswith("_note") or k in KNOWN_RUN_KEYS:
+                continue
+            warns.append(f"run: 未知键「{k}」（fulltest 不读取，覆盖配置疑似拼错→不生效）")
+    return warns
+
+
 def load_expectations(path: Path) -> dict:
-    """读取逐文件金标准；缺失/损坏只打印提示，不影响其余检查。"""
+    """读取逐文件金标准；缺失/损坏只打印提示，不影响其余检查。
+
+    同时计算文件 sha256（进报告与基线，金标准被动过时对比两侧可对上号）并做
+    配置自检（未知键 / pattern 卫生），告警只提示不阻断——由人决定是否修正。
+    """
+    global EXPECTATIONS_SHA256, EXPECTATIONS_WARNINGS
     if not path.is_file():
         print(f"[expectations] 未找到 {path}，跳过金标准检查", flush=True)
         return {}
     try:
-        data = json.loads(path.read_text("utf-8"))
-        print(f"[expectations] 已加载 {path}（{len(data.get('files') or {})} 个文件条目）",
-              flush=True)
-        return data if isinstance(data, dict) else {}
+        raw = path.read_bytes()
+        EXPECTATIONS_SHA256 = hashlib.sha256(raw).hexdigest()
+        data = json.loads(raw.decode("utf-8"))
+        data = data if isinstance(data, dict) else {}
+        print(f"[expectations] 已加载 {path}（{len(data.get('files') or {})} 个文件条目，"
+              f"sha256 {EXPECTATIONS_SHA256[:12]}）", flush=True)
+        EXPECTATIONS_WARNINGS = _validate_expectations(data)
+        for w in EXPECTATIONS_WARNINGS:
+            print(f"[expectations] 配置告警: {w}", flush=True)
+        return data
     except Exception as e:
         print(f"[expectations] 解析失败 {path}: {e}（跳过金标准检查）", flush=True)
         return {}
@@ -1800,14 +1906,36 @@ def load_baseline(path: Path) -> dict:
         return {}
 
 
+def _git_info() -> dict:
+    """取当前代码指纹（commit + 是否有未提交改动），进报告与基线。
+
+    报告能对上「哪次代码跑出来的」全靠它；git 不可用时不阻断，仅记 null。
+    """
+    try:
+        c = subprocess.run(["git", "-C", str(REPO), "rev-parse", "HEAD"],
+                           capture_output=True, text=True, timeout=15)
+        s = subprocess.run(["git", "-C", str(REPO), "status", "--porcelain"],
+                           capture_output=True, text=True, timeout=15)
+        return {"commit": c.stdout.strip() or None,
+                "dirty": bool(s.stdout.strip()) if s.returncode == 0 else None}
+    except Exception:
+        return {"commit": None, "dirty": None}
+
+
 def compare_baseline(prev: dict, cur: list) -> dict:
-    """按文件名对齐问题码集合，产出新增/已修复（只比 code，不比 message）。
+    """按文件名对齐问题码，产出新增/已修复（比 code 集合）与恶化（比出现次数）。
 
     依赖金标准的码（GOLDEN_*/OCR 期望码）在未加载金标准的运行里不会产生，
     必须从两侧剔除，否则会得到假的「已修复」。
+    同一码次数增加（如 DUP_SPAM 2→5）不算新增但算恶化——只比集合会把它判成
+    「无变化」，质量劣化被吞掉。
     """
     prev_files = {f.get("name"): f for f in (prev.get("files") or [])}
-    out = {"files": {}, "totals": {"new": 0, "fixed": 0}, "skipped_exp_codes": False}
+    out = {"files": {}, "totals": {"new": 0, "fixed": 0, "worsened": 0},
+           "skipped_exp_codes": False, "expectations_changed": None}
+    prev_sha = prev.get("expectations_sha256")
+    if prev_sha and EXPECTATIONS_SHA256 and prev_sha != EXPECTATIONS_SHA256:
+        out["expectations_changed"] = (prev_sha, EXPECTATIONS_SHA256)
     for rec in cur:
         name = rec.get("name")
         cur_applied = bool((rec.get("golden") or {}).get("applied"))
@@ -1817,14 +1945,140 @@ def compare_baseline(prev: dict, cur: list) -> dict:
         drop = set() if (cur_applied and prev_applied is True) else EXP_GATED_CODES
         if drop:
             out["skipped_exp_codes"] = True
-        now = {i["code"] for i in (rec.get("issues") or [])} - drop
-        before = {i["code"] for i in (prev_rec.get("issues") or [])} - drop
+        now_c = Counter(i["code"] for i in (rec.get("issues") or []))
+        before_c = Counter(i["code"] for i in (prev_rec.get("issues") or []))
+        for code in drop:
+            now_c.pop(code, None)
+            before_c.pop(code, None)
+        now, before = set(now_c), set(before_c)
         new, fixed = sorted(now - before), sorted(before - now)
-        if new or fixed:
-            out["files"][name] = {"new": new, "fixed": fixed}
+        worse = {c: (before_c[c], now_c[c])
+                 for c in sorted(now & before) if now_c[c] > before_c[c]}
+        if new or fixed or worse:
+            out["files"][name] = {"new": new, "fixed": fixed, "worse": worse}
             out["totals"]["new"] += len(new)
             out["totals"]["fixed"] += len(fixed)
+            out["totals"]["worsened"] += len(worse)
     return out
+
+
+def baseline_block_reason(results: list, expectations_loaded: bool) -> str | None:
+    """--save-baseline 的护栏：返回不可保存的原因，None 表示可以保存。
+
+    把坏状态（带 FAIL、或金标准未加载的降级跑）存成回归基准，会静默遮蔽之后的
+    真回归——重设基线应发生在「确认当前红项为接受状态」之后，绕过护栏需显式 --force。
+    """
+    fails = [r.get("name") for r in results if r.get("verdict") == "FAIL"]
+    if fails:
+        return ("存在 FAIL 判定文件: " + ", ".join(str(f) for f in fails[:5])
+                + ("…" if len(fails) > 5 else "")
+                + "——基线应记录达标/已接受状态；确认这些红项可接受后加 --force 保存")
+    if not expectations_loaded:
+        return ("金标准未加载（--no-expectations 或文件缺失）：依赖金标准的码本次未产出，"
+                "此时存的基线会把它们全判成「已修复」；确要保存请加 --force")
+    return None
+
+
+# ---------------------------------------------------------------- 失败路径（对抗语料）
+ADV_PANIC_MARKERS = ("panicked at", "rust_backtrace")
+
+
+def classify_adversarial_failure(rc: int, err_text: str) -> tuple:
+    """对抗文件非零退出的分类。返回 (verdict, issues)。
+
+    优雅失败 = 非零退出 + stderr 有诊断；panic/backtrace = 崩溃而非诊断，必须 FAIL；
+    非零退出但 stderr 全空 = 静默失败，调试与排障无从下手，FAIL。
+    （故意不含 "internal error"/"corrupt" 字样判定：它们在失败路径上是合法诊断文案。）
+    """
+    low = (err_text or "").strip().lower()
+    if any(k in low for k in ADV_PANIC_MARKERS):
+        return "FAIL", [make_issue(
+            "ADV_PANIC", "对抗文件触发引擎 panic（失败路径必须优雅：给出诊断，而不是崩溃）")]
+    if not low:
+        return "FAIL", [make_issue(
+            "ADV_SILENT_FAIL", f"对抗文件退出码 {rc} 但无任何诊断输出")]
+    return "PASS", []
+
+
+def run_adversarial(cli: Path, adv_dir: Path, out_dir: Path, timeout: int,
+                    env: dict) -> list:
+    """对抗语料（<src>/_adversarial/）：损坏/截断/空文件必须优雅失败或优雅处理。
+
+    判定：非零退出且有诊断 → PASS（优雅失败）；非零退出无诊断/panic → FAIL；
+    转换「成功」则跑结构检查——输出垃圾（乱码/泄漏/坏引用）→ ADV_GARBAGE_OK，
+    输出为空/过短 → ADV_EMPTY_OK（WARN：对空文件而言空结果可辩护，但必须可见）。
+    超时沿用 TIMEOUT（对抗文件应快速失败，超时上限取 min(timeout, 300)）。
+    """
+    files = sorted(p for p in adv_dir.iterdir() if p.is_file()
+                   and p.suffix.lower().lstrip(".") not in AV_EXTS)
+    emit("\n## 失败路径（对抗）测试")
+    emit(f"  语料: {adv_dir}（{len(files)} 个文件；损坏/截断/空样本必须优雅失败）")
+    results = []
+    for f in files:
+        emit(f"\n[对抗] {f.name} ({f.stat().st_size/1024:.1f} KB) ...")
+        exp = expect_for(f.name)
+        try:
+            md_text, meta, elapsed, rc, used_cli = convert_one(
+                cli, f, out_dir, min(timeout, 300), env, transcription=False)
+        except subprocess.TimeoutExpired:
+            m = structural_metrics("", out_dir / f"{f.stem}_images")
+            issues = [make_issue("TIMEOUT", "对抗文件超时(疑似挂死而非快速失败)")]
+            verdict = "FAIL"
+            elapsed = float(min(timeout, 300))
+            rc = None
+            meta = {"warnings": [], "notes": []}
+        else:
+            m = structural_metrics(md_text, out_dir / f"{f.stem}_images")
+            issues = []
+            if rc == 0:
+                judge_structure(m, issues)
+                judge_md_integrity(md_text, issues)
+                judge_tables(md_text, issues)
+                soft = {"EMPTY", "TOO_SHORT"}
+                hard = sorted({i["code"] for i in issues
+                               if i["severity"] == "FAIL" and i["code"] not in soft})
+                if hard:
+                    issues.append(make_issue(
+                        "ADV_GARBAGE_OK",
+                        f"对抗文件「成功」但输出含结构问题 [{', '.join(hard)}]"))
+                elif any(i["code"] in soft for i in issues):
+                    issues.append(make_issue(
+                        "ADV_EMPTY_OK",
+                        f"对抗文件「成功」且输出为空/过短({m['chars']}字符)——静默空结果，请确认可接受"))
+                else:
+                    emit("  优雅处理：转换成功且无结构问题")
+            else:
+                err_path = out_dir / f"{f.stem}.err.txt"
+                err_text = err_path.read_text("utf-8", errors="replace") \
+                    if err_path.is_file() else ""
+                adv_verdict, adv_issues = classify_adversarial_failure(rc, err_text)
+                issues.extend(adv_issues)
+                emit(f"  退出码 {rc}；诊断首行: "
+                     f"{(err_text.strip().splitlines() or ['(无)'])[0][:120]}")
+            verdict = issues_to_verdict(issues)
+        mark = "✅" if verdict == "PASS" else ("⚠️ " if verdict == "WARN" else "❌")
+        emit(f"{mark} [{verdict}] {f.name}   ({elapsed:.1f}s)"
+             + (f"   问题: {_fmt_issues(issues)}" if issues else ""))
+        results.append({
+            "name": f.name, "verdict": verdict, "elapsed": elapsed,
+            "recall": None, "num_recall": None, "issues": issues,
+            "chars": m["chars"], "method": meta.get("extraction_method") if rc == 0 else None,
+            "counts": meta.get("counts") or {},
+        })
+        JSON_RESULTS.append({
+            "name": f.name, "verdict": verdict, "elapsed_s": round(elapsed, 2),
+            "recall": None, "num_recall": None, "ident_recall": None,
+            "missing_numbers": [], "missing_idents": [],
+            "char_ratio": None, "src_images": None, "src_images_note": None,
+            "source_pages": None,
+            "metrics": json_metrics(m), "issues": issues,
+            "warnings": (meta.get("warnings") if rc == 0 else []) or [],
+            "notes": (meta.get("notes") if rc == 0 else []) or [],
+            "golden": {"applied": bool(exp)},
+            "ocr": None, "counts": {}, "extraction_method": None,
+            "adversarial": True,
+        })
+    return results
 
 
 def judge_engine_warnings(meta, issues):
@@ -1973,9 +2227,15 @@ def _encode_markdown_dir(name: str) -> str:
 
 
 def save_markdown(out_dir: Path, stem: str, md_text: str, img_dirname: str):
-    """把 markdown 里的图片引用加上子目录前缀后再保存，保证打开时图片可见。"""
+    """把 markdown 里的图片引用加上子目录前缀后再保存，保证打开时图片可见。
+
+    只对「裸文件名」引用加前缀：引擎自产的引用形如 `image_N.ext`，不含空白、
+    括号或目录分隔。target 类曾只排除 `)/`，对含括号的带路径引用会在第一个
+    `)` 处半匹配截断、把链接改坏——那种形态不是引擎产物，收紧为不匹配、
+    原样保留，交给后面的引用对账判定。
+    """
     prefix = _encode_markdown_dir(img_dirname)
-    saved = re.sub(r"(!\[[^\]]*\]\()([^)/]+)\)",
+    saved = re.sub(r"(!\[[^\]]*\]\()([^\s()/]+)\)",
                    lambda match: f"{match.group(1)}{prefix}/{match.group(2)})", md_text)
     (out_dir / f"{stem}.md").write_text(saved, encoding="utf-8")
 
@@ -2121,6 +2381,163 @@ def print_summary(results, stopped_early, early_reason="", strict=False):
     return n_fail, n_warn
 
 
+# ---------------------------------------------------------------- 判定器自测
+def _golden_token_hit_reference(token: str, md_nos: str) -> bool:
+    """selftest 专用参考实现：与 _golden_token_hit 的旧回溯正则语义逐字等价（含 CJK 闸门）。
+
+    生产实现改为线性 DP 后，等价性靠随机对照持续验证（run_selftest）。
+    """
+    t = _norm_ws(token)
+    if t in md_nos:
+        return True
+    if len(t) < 2 or not re.search(r"[\u4e00-\u9fff]", t):
+        return False
+    gap = ".{0,%d}" % GOLDEN_CJK_TOKEN_MAX_GAP
+    pat = re.compile(gap.join(re.escape(ch) for ch in t))
+    return bool(pat.search(md_nos))
+
+
+def run_selftest() -> int:
+    """判定器自测：合成样例 + 随机等价性对照；不需要 CLI / 语料 / 金标准。
+
+    维护约定：改判定核心函数（_golden_token_hit / save_markdown / _validate_expectations /
+    compare_baseline / baseline_block_reason / classify_adversarial_failure）必须同步
+    加/改本函数用例——验收器自身的回归同样算回归。
+    """
+    import random
+    import tempfile
+
+    fails = []
+
+    def check(name: str, cond, detail: str = ""):
+        print(f"  [{'ok' if cond else 'FAIL'}] {name}"
+              + (f" | {detail}" if detail and not cond else ""), flush=True)
+        if not cond:
+            fails.append(name)
+
+    print("selftest: 判定器自测开始", flush=True)
+
+    # --- _golden_token_hit：命中语义（闸门/容差边界） ---
+    check("token 精确子串命中", _golden_token_hit("include", "xx#includeyy"))
+    check("token 缺失不命中", not _golden_token_hit("include", "xx#mcludefile"))
+    check("纯拉丁不享容差(非空白打断)", not _golden_token_hit("Implements", "Impl-ements"))
+    g = GOLDEN_CJK_TOKEN_MAX_GAP
+    check(f"CJK 交错间隔={g} 命中",
+          _golden_token_hit("中文", "中" + "x" * g + "文"))
+    check(f"CJK 交错间隔={g + 1} 不命中",
+          not _golden_token_hit("中文", "中" + "x" * (g + 1) + "文"))
+    check("混合 token 拉丁片段同享容差",
+          _golden_token_hit("第3课", "第abc3课"))
+    check("单字符 token 走子串短路", _golden_token_hit("a", "xa y"))
+
+    # --- _golden_token_hit：DP 与旧正则参考实现随机等价 ---
+    rng = random.Random(20260914)
+    alphabet = "abcxy数据测试01"
+    mismatch = 0
+    for _ in range(300):
+        tok = "".join(rng.choice(alphabet) for _ in range(rng.randint(2, 6)))
+        md = _norm_ws("".join(rng.choice(alphabet + " .,")
+                              for _ in range(rng.randint(10, 60))))
+        if _golden_token_hit(tok, md) != _golden_token_hit_reference(tok, md):
+            mismatch += 1
+    check("DP 与正则参考实现 300 组随机等价", mismatch == 0, f"{mismatch} 组不一致")
+
+    # --- save_markdown：只给裸文件名加前缀，带路径/括号引用原样保留 ---
+    tmp_root = REPO / ".tmp"
+    tmp_root.mkdir(exist_ok=True)
+    tmp = Path(tempfile.mkdtemp(prefix="fulltest-selftest-", dir=str(tmp_root)))
+    try:
+        md = ("![a](image_0.png)\n![b](sub/dir.png)\n![c](im (1).png)\n"
+              "![d](image_1.png)\n")
+        save_markdown(tmp, "t", md, "doc_images")
+        saved = (tmp / "t.md").read_text("utf-8")
+        check("裸文件名引用被加前缀", "](doc_images/image_0.png)" in saved
+              and "](doc_images/image_1.png)" in saved)
+        check("带路径引用原样保留", "](sub/dir.png)" in saved)
+        check("含括号引用原样保留(不半匹配截断)", "](im (1).png)" in saved)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    # --- _validate_expectations：未知键 / pattern 卫生 ---
+    bad = {
+        "version": 1, "note": "t", "extra_top": 1,
+        "files": {"a.pdf": {
+            "min_table": 3, "min_tables": 3, "_note_min_tables": "依据",
+            "forbidden_patterns": ["\bfi(?:x)\b", "[", "a|"],
+            "required_tokens": ["x"],
+        }},
+        "run": {"ocr_config": {}, "layout_config": {}, "_note_x": "ok", "ocr_cfg": {}},
+    }
+    warns = "\n".join(_validate_expectations(bad))
+    check("拼错键名被告警", "未知键「min_table」" in warns)
+    check("顶层未知键被告警", "顶层未知键「extra_top」" in warns)
+    check("run 未知键被告警", "run: 未知键「ocr_cfg」" in warns)
+    check("JSON \\b 退格损坏的 pattern 被告警", "控制字符" in warns)
+    check("非法正则被告警", "编译失败" in warns)
+    check("过短 required token 被告警", "过短" in warns)
+    good = {
+        "version": 1,
+        "files": {"a.pdf": {"min_tables": 3, "_note_min_tables": "依据"}},
+        "run": {"ocr_config": {}, "_note_layout_config": "ok"},
+    }
+    check("合法配置零告警", _validate_expectations(good) == [],
+          str(_validate_expectations(good)))
+
+    # --- compare_baseline：集合对比 + 同码次数恶化 + 金标准门控剔除 ---
+    global EXPECTATIONS_SHA256
+    saved_sha = EXPECTATIONS_SHA256
+    try:
+        EXPECTATIONS_SHA256 = "b" * 64
+        prev = {"files": [
+            {"name": "a.pdf", "golden_applied": True, "issues": [
+                {"code": "DUP_SPAM"}, {"code": "DUP_SPAM"}, {"code": "NOTES_MISSING"}]},
+            {"name": "b.pdf", "golden_applied": True,
+             "issues": [{"code": "TOC_HEADING_GAP"}]},
+        ]}
+        cur = [
+            {"name": "a.pdf", "golden": {"applied": True},
+             "issues": [{"code": "DUP_SPAM"}] * 5},
+            {"name": "b.pdf", "golden": {"applied": False},   # 本次未加载金标准
+             "issues": []},
+        ]
+        out = compare_baseline(prev, cur)
+        a = out["files"].get("a.pdf") or {}
+        check("同码次数 2→5 判为恶化而非无变化",
+              a.get("worse") == {"DUP_SPAM": (2, 5)} and not a.get("new"))
+        check("消失的码仍判已修复", a.get("fixed") == ["NOTES_MISSING"])
+        check("依赖金标准的码被剔除(不算已修复)",
+              "b.pdf" not in out["files"] and out["skipped_exp_codes"])
+        check("金标准 sha 不一致被标记",
+              compare_baseline({"expectations_sha256": "a" * 64, "files": []}, [])
+              ["expectations_changed"] is not None)
+    finally:
+        EXPECTATIONS_SHA256 = saved_sha
+
+    # --- baseline_block_reason：护栏判定 ---
+    check("存在 FAIL 时拒绝保存",
+          "FAIL" in (baseline_block_reason(
+              [{"name": "x.pdf", "verdict": "FAIL"}], True) or ""))
+    check("金标准未加载时拒绝保存",
+          "金标准" in (baseline_block_reason(
+              [{"name": "x.pdf", "verdict": "WARN"}], False) or ""))
+    check("干净结果允许保存",
+          baseline_block_reason([{"name": "x.pdf", "verdict": "PASS"}], True) is None)
+
+    # --- classify_adversarial_failure：失败路径分类 ---
+    check("panic 判 FAIL",
+          classify_adversarial_failure(101, "thread 'main' panicked at src\\main.rs:5")
+          [0] == "FAIL")
+    check("非零退出无诊断判 FAIL(静默失败)",
+          classify_adversarial_failure(1, "   ")[0] == "FAIL")
+    check("非零退出带诊断判 PASS(优雅失败)",
+          classify_adversarial_failure(2, "Error: invalid PDF: unexpected end of file")
+          [0] == "PASS")
+
+    verdict = "全部通过" if not fails else f"{len(fails)} 项失败: {fails}"
+    print(f"selftest: {verdict}", flush=True)
+    return 1 if fails else 0
+
+
 # ---------------------------------------------------------------- 主流程
 def preflight(cli: Path, env: dict, files: list):
     if not cli.is_file():
@@ -2184,7 +2601,13 @@ def main():
     ap.add_argument("--save-baseline", action="store_true",
                     help="跑完后把本次结果写入基线文件")
     ap.add_argument("--no-expectations", action="store_true", help="强制跳过金标准检查")
+    ap.add_argument("--selftest", action="store_true",
+                    help="只跑判定器自测（合成样例，不需要 CLI/语料/金标准），退出码 0/1")
+    ap.add_argument("--force", action="store_true",
+                    help="跳过 --save-baseline 护栏（存在 FAIL 或金标准未加载时仍保存基线）")
     args = ap.parse_args()
+    if args.selftest:
+        sys.exit(run_selftest())
     RECALL_FAIL = args.recall_fail
     RECALL_GOOD = args.recall_good
     NUM_RECALL_FAIL = args.num_recall_fail
@@ -2199,6 +2622,9 @@ def main():
     if LAYOUT_CONFIG is not None:
         print(f"[expectations] layout 覆盖配置: {json.dumps(LAYOUT_CONFIG, ensure_ascii=False)}",
               flush=True)
+    # 配置级告警（未知键/pattern 卫生）必须进报告文件，不能只打在终端
+    for w in EXPECTATIONS_WARNINGS:
+        emit(f"[expectations] 配置告警: {w}")
 
     cli = Path(args.cli)
     src = Path(args.src)
@@ -2226,6 +2652,13 @@ def main():
         print(f"  {j}. {f.name} ({f.stat().st_size/1024:.0f} KB){tag}", flush=True)
     if len(files) > 5:
         print(f"  ... 其余 {len(files) - 5} 个略", flush=True)
+    # 对抗语料（子目录不进主队列；主队列全部跑完后追加失败路径测试）
+    adv_dir = src / "_adversarial"
+    if adv_dir.is_dir():
+        n_adv = sum(1 for p in adv_dir.iterdir() if p.is_file())
+        if n_adv:
+            print(f"[preflight] 对抗语料: {adv_dir}（{n_adv} 个失败路径样本，主队列后追加）",
+                  flush=True)
 
     preflight(cli, env, files)
     print(f"集成测试: {len(files)} 个文件 | 源: {src} | 输出: {out_dir} | "
@@ -2236,6 +2669,8 @@ def main():
     stopped_early, early_reason = False, ""
     t_start = time.time()
     n = len(files)
+    # 代码指纹（进报告与基线；失败不阻断，记 null）
+    git_info = _git_info()
 
     def progress_line(i, verdict, elapsed, t_start):
         done = time.time() - t_start
@@ -2415,6 +2850,11 @@ def main():
             stopped_early, early_reason = True, f.name
             break
 
+    # 对抗语料：主队列后追加，结果并入汇总/JSON/基线对比（对抗文件名作 key）；
+    # 默认遇 FAIL 提前终止时同样跳过（与「立即终止」语义一致，--keep-going 才会跑到这里）
+    if not stopped_early and adv_dir.is_dir() and any(p.is_file() for p in adv_dir.iterdir()):
+        results.extend(run_adversarial(cli, adv_dir, out_dir, args.timeout, env))
+
     n_fail, n_warn = print_summary(results, stopped_early, early_reason, strict=args.strict)
 
     # 回归对比：只呈现在报告里，不追加 issue、不影响 verdict
@@ -2429,34 +2869,60 @@ def main():
         if regression.get("skipped_exp_codes"):
             emit("  （本次有文件未加载金标准：其依赖金标准的检查码"
                  "（GOLDEN_*/OCR/阈值类）已从对比中剔除）")
+        if regression.get("expectations_changed"):
+            prev_sha, cur_sha = regression["expectations_changed"]
+            emit(f"  ⚠ 金标准文件与基线生成时不同（sha256 {prev_sha[:12]} → {cur_sha[:12]}）："
+                 "阈值类对比仅供参考；若金标准确经校准修改，请确认依据后 --save-baseline 重设。")
         for name, d in regression["files"].items():
-            emit(f"  {name}: 新增 [{', '.join(d['new'])}] | 已修复 [{', '.join(d['fixed'])}]")
+            worse_s = "，".join(f"{c}×{b}→{n}" for c, (b, n) in (d.get("worse") or {}).items())
+            emit(f"  {name}: 新增 [{', '.join(d['new'])}] | 已修复 [{', '.join(d['fixed'])}]"
+                 + (f" | 恶化 [{worse_s}]" if worse_s else ""))
         emit(f"  合计: 新增 {regression['totals']['new']} 项 | "
-             f"已修复 {regression['totals']['fixed']} 项")
+             f"已修复 {regression['totals']['fixed']} 项 | "
+             f"恶化 {regression['totals']['worsened']} 项(同码次数增加)")
 
     if args.save_baseline:
-        Path(args.baseline).write_text(json.dumps({
-            "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "cli": str(cli),
-            "files": [
-                {"name": r["name"], "verdict": r["verdict"],
-                 "golden_applied": bool((r.get("golden") or {}).get("applied")),
-                 "issues": [{"code": i["code"], "message": i["message"]}
-                            for i in r["issues"]],
-                 "metrics": r["metrics"]}
-                for r in JSON_RESULTS
-            ],
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"回归基线已保存: {args.baseline}")
+        reason = baseline_block_reason(JSON_RESULTS, bool(EXPECTATIONS.get("files")))
+        if reason and not args.force:
+            emit(f"\n--save-baseline 已跳过: {reason}")
+            print(f"回归基线未保存（护栏拦截；确认后可加 --force）: {args.baseline}")
+        else:
+            if reason:
+                emit(f"\n--save-baseline: {reason}（--force 已给定，仍按本次结果保存）")
+            Path(args.baseline).write_text(json.dumps({
+                "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "cli": str(cli),
+                "git": git_info,
+                "expectations_sha256": EXPECTATIONS_SHA256,
+                "thresholds": {
+                    "recall_fail": RECALL_FAIL, "recall_good": RECALL_GOOD,
+                    "num_recall_fail": NUM_RECALL_FAIL, "strict": args.strict,
+                    "char_ratio_fail": CHAR_RATIO_FAIL, "char_ratio_warn": CHAR_RATIO_WARN,
+                    "page_cover_fail": PAGE_COVER_FAIL, "page_cover_warn": PAGE_COVER_WARN,
+                },
+                "argv": sys.argv[1:],
+                "files": [
+                    {"name": r["name"], "verdict": r["verdict"],
+                     "golden_applied": bool((r.get("golden") or {}).get("applied")),
+                     "adversarial": bool(r.get("adversarial")),
+                     "issues": [{"code": i["code"], "message": i["message"]}
+                                for i in r["issues"]],
+                     "metrics": r["metrics"]}
+                    for r in JSON_RESULTS
+                ],
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+            print(f"回归基线已保存: {args.baseline}")
 
     emit(f"\n总耗时 {time.time()-t_start:.0f}s")
     header = (f"# xberg 转换质量报告\n\n- CLI: `{cli}`\n- 源目录: `{src}`\n"
               f"- 生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+              f"- 代码: commit `{git_info['commit'] or '?'}`"
+              f"{'（含未提交改动）' if git_info['dirty'] else ''}\n"
               f"- 阈值: recall_fail={RECALL_FAIL} recall_good={RECALL_GOOD} "
               f"num_recall_fail={NUM_RECALL_FAIL} char_ratio={CHAR_RATIO_FAIL}/{CHAR_RATIO_WARN} "
               f"page_cover={PAGE_COVER_FAIL}/{PAGE_COVER_WARN} strict={args.strict}\n"
               f"- 金标准: {args.expectations}（{len(EXPECTATIONS.get('files') or {})} 个文件条目；"
-              f"每个文件应用的键见报告内问题码）\n")
+              f"sha256 {(EXPECTATIONS_SHA256 or '?')[:12]}；每个文件应用的键见报告内问题码）\n")
     report_path = out_dir / "_quality-report.md"
     report_path.write_text(header + "\n".join(REPORT_LINES) + "\n", encoding="utf-8")
     json_path = out_dir / "_quality-report.json"
@@ -2464,7 +2930,10 @@ def main():
         "cli": str(cli),
         "src": str(src),
         "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "git": git_info,
         "expectations_path": args.expectations,
+        "expectations_sha256": EXPECTATIONS_SHA256,
+        "expectations_warnings": EXPECTATIONS_WARNINGS,
         "ocr_requested": OCR_CONFIG,
         "layout_requested": LAYOUT_CONFIG,
         "regression": regression,
