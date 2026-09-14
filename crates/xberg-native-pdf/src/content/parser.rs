@@ -229,8 +229,14 @@ pub fn parse_content_stream_paths_only(data: &[u8]) -> Result<Vec<Operator>> {
                         b'f' | b'F' => Some(Operator::Fill),
                         b'B' => Some(Operator::FillStroke),
                         b'b' => Some(Operator::CloseFillStroke),
-                        // s = close path + stroke (not a named variant, emit ClosePath + Stroke)
-                        // ~keep
+                        // s = close path + stroke. This byte-level fast path emits the
+                        // decomposed ClosePath + Stroke pair; the object parser emits the
+                        // single Operator::CloseStroke variant instead. The split is
+                        // deliberate -- consumers handle both, and PathExtractor's
+                        // close_and_stroke() is exactly close_path() + stroke() -- but it
+                        // means a CloseStroke arm is unreachable from THIS parser. Do not
+                        // "tidy" those arms away. See GH#1633 and the matching note in
+                        // rendering/page_renderer.rs. ~keep
                         b's' => {
                             operators.push(Operator::ClosePath);
                             Some(Operator::Stroke)
@@ -2585,6 +2591,7 @@ fn build_path_operator(name: &str, operands: &[Object]) -> Option<Operator> {
             Operator::Rectangle { x, y, width, height }
         }
         "S" => Operator::Stroke,
+        "s" => Operator::CloseStroke,
         "f" | "F" => Operator::Fill,
         // ~keep
         "f*" => Operator::FillEvenOdd,
@@ -5425,6 +5432,33 @@ mod tests {
         let ops = parse_content_stream(stream).unwrap();
         assert_eq!(ops.len(), 1);
         assert!(matches!(ops[0], Operator::CloseFillStroke));
+    }
+
+    #[test]
+    fn close_stroke_operator_reaches_consumers_instead_of_being_dropped() {
+        // GH#1633: `s` fell through to `Operator::Other`, which every consumer
+        // ignores -- so the stroke was never painted AND the path was never
+        // cleared, leaving the geometry for the next fill to paint. ~keep
+        let op = build_operator("s", SmallVec::new());
+        assert!(
+            matches!(op, Operator::CloseStroke),
+            "object parser must map `s` to CloseStroke, got {op:?}"
+        );
+    }
+
+    #[test]
+    fn both_parsers_agree_that_s_closes_then_strokes() {
+        // The byte-level fast path (`parse_content_stream_paths_only`)
+        // decomposes `s` into ClosePath + Stroke; the object parser emits the
+        // single CloseStroke variant. Different shapes, same semantics --
+        // assert both, so neither can drift back to a no-op. ~keep
+        let byte_ops = parse_content_stream_paths_only(b"20 20 m 180 20 l s").unwrap();
+        let tail = &byte_ops[byte_ops.len() - 2..];
+        assert!(
+            matches!(tail[0], Operator::ClosePath) && matches!(tail[1], Operator::Stroke),
+            "byte parser must decompose `s`, got {tail:?}"
+        );
+        assert!(matches!(build_operator("s", SmallVec::new()), Operator::CloseStroke));
     }
 
     #[test]

@@ -7,7 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.1.6] - 2026-09-12
+## [1.2.2] - 2026-09-14
+
+### Fixed
+
+- **(pdf render): `s` (close-and-stroke) is no longer dropped, and no longer floods the next fill.**
+  The object-level content parser had arms for every path-painting operator in ISO 32000-1 Table 60
+  except `s`, which fell through to an operator every consumer ignores. Two things followed: the
+  stroke was never painted, and — because only a painting arm resets the path builder — the
+  abandoned geometry stayed in the builder and was painted by the **next** fill. A stroked frame
+  followed by an ordinary white label fill therefore flooded the frame's whole interior, wiping
+  anything already drawn inside it. Text extraction was unaffected: the byte-level fast path always
+  decomposed `s` correctly. (GH#1633)
+- **(pdf render): a glyph is no longer discarded because its *inferred* Unicode is whitespace.**
+  The byte-indexed rasterizer decided whether to paint by asking what character a code represents
+  rather than whether there was an outline to draw. For a simple TrueType font with a byte-indexed
+  cmap and no `/Encoding` that character is the glyph id reverse-mapped through the font's own
+  `(1, 0)` subtable and read as ASCII or Mac Roman — private glyph ordering decoded as an encoding
+  it never expressed. Six byte values were affected (`0x09`–`0x0D`, `0x20`, and `0xCA` → U+00A0);
+  re-indexed subsets numbering their glyphs from `0x01` upward walked through a whole run unpainted
+  while the advance still applied, leaving gaps that read as spaces. (GH#1632)
+- **(pdf): a hanging-number heading no longer swallows body text indented to its title's edge.**
+  A line was treated as a numbered heading's continuation whenever the heading had a hanging indent
+  and the line began at the title's left edge — which is equally the geometry of any layout that
+  indents the whole clause, as contracts, tenders and many installation manuals are set. Wrapping
+  now also requires that the preceding line actually ran out of room. Separately, a heading that had
+  absorbed a genuine wrap could never be closed, so the sub-heading and entire body below were
+  pulled in after it. (GH#1634)
+- **(cli): the Linux musl CLI binaries are published again.**
+  Since 1.2.0 the `aarch64-unknown-linux-musl` CLI build has been killed mid-link, and because
+  the upload job requires every musl leg to succeed, *no* CLI assets were attached to the 1.2.0
+  or 1.2.1 releases. The cause was the switch to fat LTO: over the `all` feature set the final
+  whole-program link exceeded what the arm64 runner could complete. That build now uses a
+  `release-musl` profile with thin LTO; every other target keeps fat LTO.
+
+---
+
+## [1.2.1] - 2026-09-14
+
+### Fixed
+
+- **(swift): externally tagged enums now decode the wire the core types actually emit.** Regenerated
+  on alef 0.87.1. `EntityCategory`, `PiiCategory` and `ConfidenceSemantics` relied on Swift's
+  synthesized `Codable`, which keys every variant (`{"person":{}}`), while serde writes a bare
+  string for a fieldless variant and a single-keyed object whose value is the payload
+  (`{"custom":"foo"}`). Every bridge-constructed value carrying one of these threw
+  `DecodingError.typeMismatch` — `Entity` and `PiiEntity` decode their `category` into a
+  non-optional field, so any result containing an entity failed. `OutputFormat` is handled
+  separately: its `Custom(String)` variant carries `#[serde(untagged)]`, so it round-trips as a
+  bare string rather than a keyed object.
+
+### Changed
+
+- Dependencies upgraded across the workspace, including `crawlberg` 1.6.1 → 1.6.3 and
+  `tree-sitter-language-pack` 1.19.0 → 1.19.1. `skrifa` stays pinned at 0.46: 0.47 moves to
+  read-fonts 0.44 while harfrust 0.13.3 is still on 0.43, and the PDF text rasterizer passes a
+  harfrust `FontRef` to skrifa's `OutlineFace`.
+
+## [1.2.0] - 2026-09-13
 
 ### Added
 
@@ -28,6 +85,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   change (GH#1626).
 
 ### Fixed
+
+- `OutputFormat.custom` in the Python binding always returned `None`, even when the value genuinely
+  was a custom format. The accessor derived a discriminator from the enum's JSON, which works for
+  every tagged representation but not for this variant, whose payload is untagged and so carries no
+  discriminator to find. It now matches on the variant directly and returns the label.
+
+- The Python type stub declared a `type: str` attribute on 23 enum classes that have no such
+  attribute at runtime. The stub emitted it for every data enum, while the runtime only exposes it
+  for enums carrying an explicit serde tag -- so for externally tagged enums (`EntityCategory`,
+  `PiiCategory`, `OutputFormat`) a type checker accepted `category.type`, which raised
+  `AttributeError` on use. Stub-only change; no runtime behaviour moved.
+
+- The Ruby binding's `FormatMetadata.from_hash` and `DiffLine.from_hash` read a `_0` key that no
+  longer exists on the wire, so **every variant deserialized with a `nil` payload**. All 24 call
+  sites are corrected: the 21 `FormatMetadata` variants now build their payload from the flattened
+  hash, and the 3 `DiffLine` variants read the `text` key the enum's `#[serde(content = "text")]`
+  actually emits ([#1594](https://github.com/xberg-io/xberg/issues/1594)).
+
+- The Python type stub declared format-metadata payloads as `_0` (for example
+  `_0: ExcelMetadata`), a key present neither on the wire nor on the runtime object -- the runtime
+  per-variant getters such as `.excel` were always correct. The stub now names the real fields, so
+  type checkers stop reporting valid code as an error. Runtime behaviour is unchanged
+  ([#1594](https://github.com/xberg-io/xberg/issues/1594)).
+
+- The Elixir `Xberg.FormatMetadata` typespec documented a `metadata:` payload key that matched
+  neither the NIF struct nor the serialized wire. It now matches the struct the NIF actually
+  returns ([#1594](https://github.com/xberg-io/xberg/issues/1594)).
 
 - A Type0 (composite) font's content-stream character codes are now translated to CIDs before glyph
   widths and vertical metrics are looked up, instead of being used as if they already were CIDs.
@@ -235,6 +319,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   list of Tesseract-supported codes, so this class of divergence cannot recur (GH#1621).
 
 ### Changed
+
+- **Breaking (Java binding):** enum constants now follow Java's own convention and are
+  `SCREAMING_SNAKE_CASE` instead of carrying Rust's PascalCase verbatim -- `LinkStyle.Inline`
+  becomes `LinkStyle.INLINE`, across roughly 75 generated enums. **The JSON wire value is
+  unchanged**; only the Java identifier moves, so serialized documents and stored payloads are
+  unaffected. Update references to the constants themselves; generated default values
+  (`ChunkType.Unknown`, `OutputFormat.Plain`) moved with the declarations.
+
+- **Breaking (Ruby binding):** an externally tagged enum variant carrying a single payload
+  (`EntityCategory::Custom`, `PiiCategory::Custom`, `OutputFormat::Custom`) now serializes the way
+  the Rust core always did -- `{"custom" => "my-label"}` -- instead of wrapping the payload in an
+  extra object keyed by a synthesized positional name, `{"custom" => {"_0" => "my-label"}}`. Code
+  reading `hash[:custom][:_0]` should read `hash[:custom]`. The previous shape matched no other
+  binding and no core output.
+
+- **Breaking (PHP binding):** `EntityCategory`, `PiiCategory` and `OutputFormat` change from
+  constants-only classes to classes with static factories, because the old shape could not carry a
+  payload at all: a caller-supplied label was silently discarded in both directions, so
+  `Custom($label)` always round-tripped as an empty string. Use `EntityCategory::custom($label)`
+  and `EntityCategory::person()` in place of the old `Xberg\EntityCategory::PERSON` constants; the
+  label is readable from the readonly `$custom` property.
+
+- **Breaking (Node binding):** the JSON surface is camelCase throughout, nested types included, and
+  `FormatMetadata` is a flat discriminated union keyed by `formatType` whose variant payload fields
+  sit directly on the object (`{ formatType: "excel", sheetCount: 2 }`). The binding previously
+  exposed two parallel shapes for one Rust type -- an idiomatic camelCase interface beside a
+  snake_case structural twin -- and only the latter was reachable from a result.
+
+- **Breaking (Node, Swift bindings):** `FormatMetadata` now serializes flat in every binding --
+  `{"format_type": "pdf", "page_count": 12, ...}` -- matching what the core Rust enum has always
+  serialized (`#[serde(tag = "format_type")]`), what the OpenAPI discriminator describes, and what
+  the REST API serves. Two bindings disagreed with that wire and have been corrected:
+  - **Node** nested the payload one level down under a property named for the variant, so
+    `doc.metadata.format.pdf.pageCount` becomes `doc.metadata.format.page_count`. Note the field
+    names are **snake_case**, unlike the camelCase Node uses elsewhere: the variants carry
+    mutually incompatible field types (`headers` is `string[]` for text and an object array for
+    HTML), so no single Node class can describe them and the value is passed through as serde
+    emits it. `format` is typed as a discriminated union in `index.d.ts`, so narrowing on
+    `format_type` still gives a fully typed payload. This also resolves the Node and WebAssembly
+    bindings disagreeing with each other -- WASM was already passing serde's shape through, so the
+    two now emit an identical `format` object for the same document.
+  - **Swift**'s `FormatMetadata` was a `typealias` to an opaque bridge class carrying no payload,
+    so the JSON in `Metadata.format` could not be decoded into anything useful. It is now a real
+    `Codable`/`Sendable` enum with one case per format, making the payload reachable:
+
+    ```swift
+    if let json = doc.metadata?.format,
+       case .excel(let meta) = try formatMetadataFromJson(json) {
+        print(meta.sheetCount)
+    }
+    ```
+
+    `Metadata.format` still hands back the serialized JSON `String`; what changed is that
+    `formatMetadataFromJson` now yields a pattern-matchable enum carrying the payload instead of
+    an opaque handle. The wire was already correct here -- the Swift type system was the part
+    that was missing.
+
+  Python, Go, Java, C#, Kotlin, PHP and Ruby are unaffected on the wire: they either already
+  emitted the flat shape or expose native per-variant accessors over it
+  ([#1594](https://github.com/xberg-io/xberg/issues/1594)).
 
 - **Breaking (Rust source, Java):** `ServerConfig` adds `job_timeout_secs`. Exhaustive Rust struct
   literals must set the field or use `..ServerConfig::default()`, and the Java record's canonical

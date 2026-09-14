@@ -1,0 +1,109 @@
+name: CI Scripts
+
+on:
+  push:
+    branches: [main]
+    paths: &script-paths
+      - "scripts/**"
+      - ".editorconfig"
+      - "Taskfile.yml"
+      - ".github/workflows/ci-scripts.yaml"
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    branches: [main]
+    paths: *script-paths
+  workflow_dispatch:
+
+concurrency:
+  group: ci-scripts-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # The same versions the Taskfile expects locally, so a green run here means the same tools a
+  # developer has. Both are passed explicitly rather than relying on the action defaults: a
+  # default only helps the caller who omits it, and omitting it is how a workflow ends up reading
+  # as pinned while installing whatever the registry served that morning.
+  BATS_VERSION: "1.14.0"
+  PESTER_VERSION: "6.2.0"
+
+jobs:
+  bats:
+    name: Bats on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both, because these helpers branch on RUNNER_OS and the macOS arm sets DYLD_* where the
+        # Linux arm sets LD_LIBRARY_PATH. A Linux-only job would never execute half the code.
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Bats
+        uses: xberg-io/actions/install-bats@v1
+        with:
+          version: ${{ env.BATS_VERSION }}
+
+      - name: Run the shell contract tests
+        uses: xberg-io/actions/run-bats@v1
+        env:
+          # `bats_load_library` searches BATS_LIB_PATH and nothing else. run-bats grew a lib-path
+          # input for this, but it is not in the released v1 yet, so the variable is set directly;
+          # switch to `lib-path: scripts/tests/lib` once actions ships it. ~keep
+          BATS_LIB_PATH: ${{ github.workspace }}/scripts/tests/lib
+        with:
+          path: scripts/tests/bats
+          args: |-
+            --recursive
+            --print-output-on-failure
+
+  pester:
+    name: Pester on windows-latest
+    # windows-latest only. These scripts exist to run on Windows, and the path semantics their
+    # assertions depend on -- backslash separators, case-insensitive comparison -- only differ
+    # there. The suite passes under pwsh on Linux too, but a green run on Linux is not evidence
+    # about the behaviour this job exists to cover. ~keep
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Pester
+        id: pester
+        uses: xberg-io/actions/install-pester@v1
+        with:
+          version: ${{ env.PESTER_VERSION }}
+
+      - name: Run the PowerShell contract tests
+        uses: xberg-io/actions/run-pester@v1
+        with:
+          path: scripts/tests/pester
+          module-path: ${{ steps.pester.outputs.module-path }}
+          version: ${{ env.PESTER_VERSION }}
+
+  format:
+    name: Shell formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Task
+        uses: xberg-io/actions/install-task@v1
+
+      # shfmt is not on the runner image and `task lint:shell` invokes it directly, so this job
+      # exited 127 -- "executable file not found in $PATH" -- and reported a shell FORMATTING
+      # failure while having formatted nothing. It had never once run. Pinned to the version used
+      # locally so a developer's `task lint:shell` and CI cannot disagree about what is clean.
+      # ~keep
+      - name: Install shfmt
+        run: |
+          go install mvdan.cc/sh/v3/cmd/shfmt@v3.14.1
+          echo "$(go env GOPATH)/bin" >>"$GITHUB_PATH"
+
+      - name: Check shell formatting
+        run: |
+          command -v shfmt >/dev/null || { echo "shfmt still not on PATH" >&2; exit 1; }
+          shfmt --version
+          task lint:shell

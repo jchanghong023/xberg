@@ -1,14 +1,14 @@
-<!--
-AI-RULEZ :: GENERATED FILE — DO NOT EDIT
-Content-Hash: blake3:d6d56b2edd04ca0d29fb7a17e53e82db1ed01f46ceb3097381d82e6e0964794e
-Source-Hash: blake3:3247949a089ee3c52bc58fc1c821484cf0c0674ff31a41aab6a9f806e9c98f16
-Schema-Version: v1
--->
-
 ---
 name: picking-a-format
 description: Use when choosing an output format for extracted documents — plain text, markdown, djot, HTML, JSON, or DocTags. Maps consumer (LLM, parser, archive) to the right `--format` / `--content-format` pair.
 ---
+
+<!--
+AI-RULEZ :: GENERATED FILE — DO NOT EDIT
+Content-Hash: blake3:bcdbffe958890e1c589f3ea44540c67c86540196a844e6de5c011faccdd345fc
+Source-Hash: blake3:5f5a598889c48eafed824c3d233459b3a360278d1175be7d6c4267d3aaf96d87
+Schema-Version: v1
+-->
 
 # Picking a format
 

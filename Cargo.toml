@@ -26,7 +26,7 @@ default-members = ["crates/xberg", "crates/xberg-cli"]
 resolver = "2"
 
 [workspace.package]
-version = "1.1.6"
+version = "1.2.2"
 edition = "2024"
 rust-version = "1.92"
 authors = ["Na'aman Hirschfeld <naaman@xberg.io>"]
@@ -63,7 +63,7 @@ chrono = "0.4"
 clap = { version = "4.6", features = ["derive", "color", "suggestions"] }
 comrak = { version = "0.55", default-features = false }
 console_error_panic_hook = "0.1"
-crawlberg = { version = "1.5.2", default-features = false }
+crawlberg = { version = "1.6.4", default-features = false }
 criterion = { version = "0.8", features = ["html_reports"] }
 dbase = "0.8"
 flate2 = "1.1"
@@ -103,7 +103,7 @@ parking_lot = "0.12.5"
 # (matches the `[lib] name = "pdfium_render"` in crates/xberg-pdfium-render/Cargo.toml),
 # so any `use pdfium_render::...` call site is unaffected. Path dependency inside the
 # workspace; needs no [patch.crates-io] entry (see the note above that block).
-pdfium-render = { package = "xberg-pdfium-render", path = "./crates/xberg-pdfium-render", version = "1.1.6" }
+pdfium-render = { package = "xberg-pdfium-render", path = "./crates/xberg-pdfium-render", version = "1.2.2" }
 rayon = "1.12.0"
 reqwest = { version = "0.13.5", default-features = false }
 # SVG rendering (resvg re-exports tiny_skia and usvg; default-features = false
@@ -142,7 +142,7 @@ tracing = "0.1"
 # and WASM-safe; the top-level `tract` facade instead defaults to CUDA and bundles
 # GPU backends, so it is unusable here. See issue #1275.
 tract-onnx = { version = "0.23.7", default-features = false }
-tree-sitter-language-pack = { version = "1.18.0", default-features = false, features = ["serde"] }
+tree-sitter-language-pack = { version = "1.19.1", default-features = false, features = ["serde"] }
 url = "2.5.8"
 # usvg (re-exported by resvg) with only the `writer` feature so `Tree::to_string`
 # / `WriteOptions` are available for SVG sanitize re-serialization. `writer` pulls
@@ -161,8 +161,8 @@ web-sys = { version = "0.3", features = [
     "Window",
     "Response",
 ] }
-xberg = { path = "./crates/xberg", version = "1.1.6", default-features = false }
-xberg-gliner = { path = "./crates/xberg-gliner", version = "1.1.6", default-features = false }
+xberg = { path = "./crates/xberg", version = "1.2.2", default-features = false }
+xberg-gliner = { path = "./crates/xberg-gliner", version = "1.2.2", default-features = false }
 # The native PDF engine, vendored into this workspace at crates/xberg-native-pdf. It began as
 # a fork of a third-party project; see ATTRIBUTIONS.md, which is now the ONLY place in this
 # repo that names the upstream. There is deliberately no `package =` alias: the extern crate
@@ -170,7 +170,7 @@ xberg-gliner = { path = "./crates/xberg-gliner", version = "1.1.6", default-feat
 # target (`module_path!()`, rooted at `[lib] name`) matches the crate you are reading. An alias
 # hiding a different lib name is what cost twelve days of dropped font warnings in GH#697.
 # Path dependency inside the workspace; needs no [patch.crates-io] entry.
-xberg-native-pdf = { path = "./crates/xberg-native-pdf", version = "1.1.6" }
+xberg-native-pdf = { path = "./crates/xberg-native-pdf", version = "1.2.2" }
 
 [patch.crates-io]
 # No out-of-tree sibling override is active, so the standing "do not release while a patch
@@ -199,6 +199,7 @@ xberg-candle-ocr = { path = "crates/xberg-candle-ocr" }
 # Local/CI package target is wall-clock: thin LTO + codegen-units=1 made a cold
 # xberg-cli zip take tens of minutes. opt-level=3 and strip stay; LTO off and
 # high codegen-units let rustc actually use the 30-job local default.
+# (fork keeps this over upstream's `lto = "fat"`, which slows local packaging further)
 lto = false
 codegen-units = 256
 opt-level = 3
@@ -207,6 +208,8 @@ strip = true
 # Archive crates crash with SIGBUS under opt-level=3 on macOS ARM64.
 # Reduce optimization to prevent miscompilation of unsafe code.
 # sevenz-rust2 requires opt-level=1 specifically (opt-level=2 still SIGBUS'd in go:e2e).
+# Retained under `lto = "fat"`: a local 7z round-trip passes at opt-level=3, but the crash was
+# only ever observed through go:e2e's cgo boundary, which that probe does not cover.
 [profile.release.package.sevenz-rust2]
 opt-level = 1
 
@@ -216,6 +219,29 @@ opt-level = 2
 # WASM size optimization: reduce memory spikes during compilation
 [profile.release.package.xberg-wasm]
 opt-level = "z"
+
+# Thin LTO for the musl CLI, the one build fat LTO cannot finish. With `--features all` the
+# aarch64 job reaches the final crate and then emits nothing for 45 minutes -- fat LTO produces
+# no output while it links -- until the runner is reclaimed with SIGTERM. Bracketed two ways:
+# the job succeeded on 1.1.4 and 1.1.5 and has failed on every release since fat LTO landed, and
+# within a single run the smaller `binstall` feature set links fine on the identical triple and
+# runner. Everything else keeps fat LTO.
+#
+# Position is load-bearing in both directions. cargo-sort requires it here, after the
+# `[profile.release.package.*]` group; Dockerfile.musl-build used to delete from the xberg-wasm
+# header to end of file, which would have silently eaten it, so that deletion was narrowed to
+# the one block it actually needs to remove. The package overrides are restated rather than left
+# to `inherits`, so the sevenz-rust2 pin cannot be dropped by a change in how Cargo propagates
+# them. ~keep
+[profile.release-musl]
+inherits = "release"
+lto = "thin"
+
+[profile.release-musl.package.sevenz-rust2]
+opt-level = 1
+
+[profile.release-musl.package.zip]
+opt-level = 2
 
 [profile.dev]
 opt-level = 0
