@@ -59,6 +59,17 @@ pub fn apply_output_format(result: ExtractedDocument, output_format: OutputForma
     if let Some(formatted) = result.formatted_content.take() {
         result.content = formatted;
     }
+    // A picture's placeholder can arrive inside the code block drawn around it — the pptx
+    // content builder writes both into one block, so the picture comes out as
+    // `![](image_7.png)` *inside* a fence, a path no markdown reader fetches. Lifting it here
+    // covers every extractor and every requested format, since this is the last step all of
+    // them pass through.
+    crate::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut result.content);
+    if let Some(pages) = result.pages.as_mut() {
+        for page in pages.iter_mut() {
+            crate::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut page.content);
+        }
+    }
     result
 }
 

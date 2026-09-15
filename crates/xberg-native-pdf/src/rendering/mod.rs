@@ -351,6 +351,10 @@ pub fn render_page(
     page_num: usize,
     options: &RenderOptions,
 ) -> Result<RenderedImage> {
+    // The rasterizer decodes text through the same font paths as extraction, so
+    // it needs the document in scope for those recoveries to be counted rather
+    // than lost (GH#1547). ~keep
+    let _recovery_scope = crate::extractors::recovery_tally::RecoveryScope::enter(doc.recovery_counts());
     let mut renderer = PageRenderer::new(options.clone());
     let result = renderer.render_page(doc, page_num);
     if let Err(error) = &result {

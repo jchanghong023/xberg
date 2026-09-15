@@ -24,6 +24,249 @@ fn clamp_declared_size(declared: u64, cap: u64) -> u64 {
     declared.min(cap)
 }
 
+/// Append non-empty embedded-object content into the parent document body.
+///
+/// `extract_ooxml_embedded_objects` only attaches children on
+/// [`crate::types::internal::InternalDocument::children`]. Markdown/`content`
+/// is rendered from `elements`, so a successfully extracted legacy Word OLE
+/// (and any other embedded document with text) was searchable in JSON children
+/// but invisible in the Markdown the CLI writes. Email already merges
+/// attachment text into the body the same way; this mirrors that for OOXML.
+///
+/// Each child contributes a plain-text caption and its own Markdown as a raw
+/// block, with `](image_N.ext)` references renumbered onto the parent's image
+/// table (see [`renumber_embedded_image_refs`]). A raw block — rather than
+/// heading + paragraph — keeps the child's own structure: a paragraph element
+/// flattens every line break into one line and escapes the child's Markdown
+/// markers, which turned an embedded spreadsheet's tables into a single
+/// 78k-character paragraph of `\#`-escaped text.
+///
+/// Children stay on `children` for structured consumers. Graphical OLE
+/// payloads that never identified as a document never become children and are
+/// unaffected.
+pub(crate) fn append_embedded_object_text(document: &mut crate::types::internal::InternalDocument) {
+    use crate::types::internal::{ElementKind, InternalElement};
+
+    let Some(children) = document.children.as_ref() else {
+        return;
+    };
+    // Collect first: pushing elements (and images) needs a mutable borrow of
+    // `document` while children still borrow it immutably.
+    let mut staged_images = Vec::new();
+    let mut merged: Vec<(String, String)> = Vec::new();
+    // Next free slot in the parent's image table. Advanced by one past the
+    // highest child index rather than by the child's image count, so a child
+    // whose indices are not dense cannot collide with the next child's range.
+    let mut next_image_base = document.images.len() as u32;
+    for child in children {
+        let content = child.result.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        let title = child
+            .path
+            .rsplit(['/', '\\'])
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or(child.path.as_str())
+            .to_string();
+        // `images` is optional on an extraction result: a caller that asked for no
+        // image data (or an extractor that produces none) leaves it empty, and the
+        // body's references then simply keep their alt text.
+        let child_images: &[crate::types::ExtractedImage] =
+            child.result.images.as_deref().unwrap_or_default();
+        let span = child_images
+            .iter()
+            .map(|image| image.image_index)
+            .max()
+            .map_or(0, |highest| highest.saturating_add(1));
+        let (body, referenced) = renumber_embedded_image_refs(content, next_image_base, child_images);
+        if body.trim().is_empty() {
+            // Nothing of the child's body survives (e.g. it was only image
+            // references whose alt text was empty): advancing the base and
+            // staging the images would export files the body never refers to.
+            // The images stay on the child for structured consumers.
+            continue;
+        }
+        for image in child_images {
+            // Stage only the images the rewritten body actually points at: a
+            // child asset its own Markdown never referenced would otherwise be
+            // exported as an orphan file next to the parent document. The full
+            // set stays on the child for structured consumers.
+            if !referenced.contains(&image.image_index) {
+                continue;
+            }
+            let mut image = image.clone();
+            image.image_index = next_image_base.saturating_add(image.image_index);
+            staged_images.push(image);
+        }
+        next_image_base = next_image_base.saturating_add(span);
+        merged.push((title, body));
+    }
+    document.images.extend(staged_images);
+    for (title, content) in merged {
+        if content.trim().is_empty() {
+            continue;
+        }
+        // A filename is not a section of the host document: emit it as a plain
+        // caption so the host's outline keeps only real headings, and keep the
+        // child body as a raw block so its own Markdown (headings, tables,
+        // lists, code) survives verbatim instead of being escaped into one
+        // flattened paragraph.
+        let caption = InternalElement::text(ElementKind::Paragraph, format!("Embedded object: {title}"), 0);
+        document.push_element(caption);
+        let raw = InternalElement::text(ElementKind::RawBlock, format!("\n{content}\n"), 0);
+        document.push_element(raw);
+    }
+}
+
+/// Copy a nested document's Markdown into the parent body, moving its
+/// `](image_N.ext)` references onto the parent's image table.
+///
+/// A child extractor names its images by its own `ExtractedImage::image_index`
+/// and exports them beside itself; the parent only ever writes *its* image
+/// table, so a reference left as-is would resolve to an unrelated picture of
+/// the same number (or to nothing at all). `base` is the parent slot the
+/// child's image 0 was moved to. A reference with no matching child image is
+/// dropped, keeping its alt text — the same rule the export path applies to
+/// assets it cannot carry over. Returns the rewritten body and the child image
+/// indices the body still points at, so the caller stages exactly the assets
+/// the merged output references.
+fn renumber_embedded_image_refs(
+    text: &str,
+    base: u32,
+    images: &[crate::types::ExtractedImage],
+) -> (String, Vec<u32>) {
+    let mut out = String::with_capacity(text.len());
+    let mut referenced: Vec<u32> = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'!' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            match find_markdown_image_parts(&text[i..]) {
+                ImageScan::Parts(alt, target, after) => {
+                    if target.starts_with("data:") {
+                        // Self-contained payload: nothing to renumber, and dropping
+                        // it would discard the only copy of the picture.
+                        out.push_str(&text[i..i + after]);
+                    } else if let Some((index, suffix)) = parse_image_ref(target)
+                        && images.iter().any(|image| image.image_index == index)
+                    {
+                        out.push_str("![");
+                        out.push_str(alt);
+                        out.push_str("](image_");
+                        out.push_str(&base.saturating_add(index).to_string());
+                        out.push_str(suffix);
+                        out.push(')');
+                        referenced.push(index);
+                    } else if !alt.is_empty() {
+                        // Not one of this child's exported images: keep the alt text
+                        // rather than emit a reference that would resolve to an
+                        // unrelated picture of the same number in the parent.
+                        out.push_str(alt);
+                    }
+                    i += after;
+                    continue;
+                }
+                // No unescaped closing bracket or paren follows anywhere: no image
+                // reference can start later in this text either, so copying the
+                // rest verbatim reproduces the byte-for-byte output of rescanning
+                // — without paying an end-of-text scan per stray opener on a body
+                // full of unclosed `![`.
+                ImageScan::NoTerminator => {
+                    out.push_str(&text[i..]);
+                    break;
+                }
+                // The closing bracket exists but is not followed by `(`: this
+                // opener is not an image, but later ones may still be.
+                ImageScan::Malformed => {
+                    out.push_str(&text[i..i + 2]);
+                    i += 2;
+                    continue;
+                }
+            }
+        }
+        let ch_len = utf8_char_len(bytes[i]);
+        out.push_str(&text[i..i + ch_len]);
+        i += ch_len;
+    }
+    (out, referenced)
+}
+
+/// Split an `image_N.ext` reference target into its index and its `.ext` suffix.
+fn parse_image_ref(target: &str) -> Option<(u32, &str)> {
+    let rest = target.strip_prefix("image_")?;
+    let digits_len = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits_len == 0 || !rest[digits_len..].starts_with('.') {
+        return None;
+    }
+    let index = rest[..digits_len].parse().ok()?;
+    Some((index, &rest[digits_len..]))
+}
+
+/// Outcome of scanning one `![` opener.
+enum ImageScan<'a> {
+    /// A well-formed `![alt](target)`; the index is relative to the opener's slice.
+    Parts(&'a str, &'a str, usize),
+    /// No unescaped closing bracket (or, past a `(`, closing paren) follows
+    /// anywhere in the rest of the text — no image reference can start later.
+    NoTerminator,
+    /// A closing bracket exists but is not followed by `(`: this opener is not
+    /// an image, but later ones may still be well-formed.
+    Malformed,
+}
+
+/// Scan a slice starting at `![` for a well-formed image reference.
+///
+/// The scan skips backslash-escaped characters: the CommonMark writer escapes a
+/// literal `]` in alt text and a literal `)` in a target as `\]`/`\)`, and
+/// stopping at those folded an escaped reference's parse and left the child's
+/// numbering in the parent's body.
+fn find_markdown_image_parts(s: &str) -> ImageScan<'_> {
+    debug_assert!(s.starts_with("!["));
+    let rest = &s[2..];
+    let Some(close_bracket) = find_unescaped(rest, b']') else {
+        return ImageScan::NoTerminator;
+    };
+    let alt = &rest[..close_bracket];
+    let after = &rest[close_bracket + 1..];
+    if !after.starts_with('(') {
+        return ImageScan::Malformed;
+    }
+    let Some(close_paren) = find_unescaped(after, b')') else {
+        return ImageScan::NoTerminator;
+    };
+    ImageScan::Parts(alt, &after[1..close_paren], 2 + close_bracket + 1 + close_paren + 1)
+}
+
+/// Index of the first unescaped `needle` byte in `s`. A `\` escapes the character
+/// after it, which is how the CommonMark writer emits a literal bracket.
+fn find_unescaped(s: &str, needle: u8) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if bytes[i] == needle {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn utf8_char_len(first: u8) -> usize {
+    match first {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => 1,
+    }
+}
+
 /// Extract embedded objects from an OOXML ZIP archive and recursively process them.
 ///
 /// Scans the given `embeddings_prefix` directory (e.g. `word/embeddings/` or
@@ -164,8 +407,19 @@ pub(crate) async fn extract_ooxml_embedded_objects(
         }
 
         let is_ole_binary = data.len() >= 4 && data[0..4] == [0xD0, 0xCF, 0x11, 0xE0];
-        if is_ole_binary {
-            match extract_ole_embedded_object(&data) {
+        let ole_offset = if is_ole_binary {
+            Some(0)
+        } else if filename.to_ascii_lowercase().starts_with("oleobject") {
+            embedded_payload_start(&data).filter(|&offset| {
+                data.get(offset..)
+                    .is_some_and(|payload| payload.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]))
+            })
+        } else {
+            None
+        };
+        if let Some(ole_offset) = ole_offset {
+            let ole_data = &data[ole_offset..];
+            match extract_ole_embedded_object(ole_data, &filename, embedded_capacity_cap) {
                 Some((inner_bytes, inner_mime)) => {
                     match crate::core::extractor::extract_bytes(&inner_bytes, &inner_mime, &child_config).await {
                         Ok(result) => {
@@ -243,55 +497,485 @@ pub(crate) async fn extract_ooxml_embedded_objects(
 
 /// Attempt to identify and unwrap an OLE (CFB) compound-file embedded object.
 ///
-/// Two shapes are recognized:
-/// - A "Package" stream: the OLE wrapper carries a modern Office document (e.g. an
-///   embedded `.xlsx` chart source) verbatim as an OPC/ZIP package in a stream named
-///   `Package`. The stream bytes are returned as-is with their detected MIME type.
-/// - A legacy binary root stream (`WordDocument`, `PowerPoint Document`, `Workbook`, or
-///   `Book`): the OLE container itself *is* the legacy `.doc`/`.ppt`/`.xls` document, so
-///   the original bytes are handed back with the matching legacy MIME type for the
-///   existing OLE-aware extractors to parse.
+/// OLE embeds modern packages in a `Package` stream, native files in an
+/// `Ole10Native` stream, and legacy Office/Visio documents in their own root
+/// streams. Stream names are not consistently rooted or cased across
+/// producers, so discovery also walks the bounded stream list.
 ///
-/// Returns `None` when the container can't be opened or none of the above streams are
-/// present, so the caller can fall back to a "format identification not supported"
-/// warning instead of silently dropping the object.
-///
-/// Only compiled when the `cfb` dependency is guaranteed active (via `office`, `hwp`, or
-/// `email`); other feature combinations (e.g. `excel` alone, which also calls this
-/// module) keep the pre-existing warn-and-skip behavior.
+/// Returns `None` when the container can't be opened or none of the supported
+/// streams contains a recognizable payload.
 #[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
-fn extract_ole_embedded_object(data: &[u8]) -> Option<(Vec<u8>, String)> {
+fn extract_ole_embedded_object(data: &[u8], source_name: &str, max_bytes: u64) -> Option<(Vec<u8>, String)> {
     let mut compound_file = cfb::CompoundFile::open(Cursor::new(data)).ok()?;
+    let stream_paths = collect_ole_stream_paths(&compound_file);
 
-    if compound_file.exists("Package") {
-        let mut stream = compound_file.open_stream("Package").ok()?;
-        let mut buf = Vec::new();
-        stream.read_to_end(&mut buf).ok()?;
-        if buf.is_empty() {
-            return None;
+    let native_names = ["/\x01Ole10Native", "\x01Ole10Native", "Ole10Native"];
+    if let Some(native) = read_ole_stream(&mut compound_file, &stream_paths, &native_names, max_bytes) {
+        if let Some((payload, name_hint)) = parse_ole10_native(&native)
+            && let Some(result) = identify_ole_payload(payload, name_hint.as_deref().or(Some(source_name)), max_bytes)
+        {
+            return Some(result);
         }
-        let mime = crate::core::mime::detect_mime_type_from_bytes(&buf).ok()?;
-        return Some((buf, mime));
+        if let Some(start) = embedded_payload_start(&native)
+            && let Some(payload) = native.get(start..)
+            && let Some(result) = identify_ole_payload(payload.to_vec(), Some(source_name), max_bytes)
+        {
+            return Some(result);
+        }
     }
 
-    let legacy_mime = if compound_file.exists("WordDocument") {
-        "application/msword"
-    } else if compound_file.exists("PowerPoint Document") {
-        "application/vnd.ms-powerpoint"
-    } else if compound_file.exists("Workbook") || compound_file.exists("Book") {
-        "application/vnd.ms-excel"
-    } else {
-        return None;
-    };
+    let package_names = ["Package", "/Package"];
+    if let Some(package) = read_ole_stream(&mut compound_file, &stream_paths, &package_names, max_bytes) {
+        if let Some((payload, name_hint)) = parse_ole_package(&package)
+            && let Some(result) = identify_ole_payload(payload, name_hint.as_deref().or(Some(source_name)), max_bytes)
+        {
+            return Some(result);
+        }
+        if let Some(result) = identify_ole_payload(package, Some(source_name), max_bytes) {
+            return Some(result);
+        }
+    }
 
-    Some((data.to_vec(), legacy_mime.to_string()))
+    let legacy_mime = if has_ole_stream(&compound_file, &stream_paths, &["VisioDocument", "/VisioDocument"]) {
+        Some(crate::core::mime::VISIO_MIME_TYPE)
+    } else if has_ole_stream(&compound_file, &stream_paths, &["WordDocument", "/WordDocument"]) {
+        Some(crate::core::mime::LEGACY_WORD_MIME_TYPE)
+    } else if has_ole_stream(
+        &compound_file,
+        &stream_paths,
+        &["PowerPoint Document", "/PowerPoint Document"],
+    ) {
+        Some(crate::core::mime::LEGACY_POWERPOINT_MIME_TYPE)
+    } else if has_ole_stream(&compound_file, &stream_paths, &["Workbook", "/Workbook"])
+        || has_ole_stream(&compound_file, &stream_paths, &["Book", "/Book"])
+    {
+        Some("application/vnd.ms-excel")
+    } else {
+        None
+    };
+    if let Some(mime) = legacy_mime {
+        return Some((data.to_vec(), mime.to_string()));
+    }
+
+    // Some producers omit the conventional root stream name and only leave a
+    // `\x01CompObj` class descriptor. Use that descriptor to classify the
+    // complete CFB, so the native extractor still receives the container. The
+    // descriptor names the *editing application*, not the container layout: one
+    // such object claimed Visio while carrying no `VisioDocument` stream, and
+    // handing it to the Visio reader only produced a dead-end warning. Trust the
+    // descriptor only when the native stream it implies is really there;
+    // otherwise the signature scan below still gets the actual streams.
+    let compobj_names = ["\x01CompObj", "/\x01CompObj", "CompObj"];
+    if let Some(compobj) = read_ole_stream(&mut compound_file, &stream_paths, &compobj_names, max_bytes)
+        && let Some(mime) = classify_ole_program(&compobj)
+        && native_stream_present(&compound_file, &stream_paths, mime)
+    {
+        return Some((data.to_vec(), mime.to_string()));
+    }
+
+    // A few wrappers store a recognizable payload in a non-standard stream.
+    // Only inspect streams carrying a file signature; property streams cannot
+    // be mistaken for arbitrary text or metadata.
+    for path in &stream_paths {
+        if ole_path_matches(
+            path,
+            &[
+                "/\x01Ole10Native",
+                "\x01Ole10Native",
+                "Ole10Native",
+                "Package",
+                "/Package",
+                "\x01CompObj",
+                "/\x01CompObj",
+                "CompObj",
+            ],
+        ) {
+            continue;
+        }
+        let Some(stream) = read_ole_stream_path(&mut compound_file, path, max_bytes) else {
+            continue;
+        };
+        if !has_embedded_payload_signature(&stream) {
+            continue;
+        }
+        if let Some(result) = identify_ole_payload(stream, Some(source_name), max_bytes) {
+            return Some(result);
+        }
+    }
+
+    None
+}
+
+/// Whether the legacy root stream a legacy MIME type implies actually exists.
+///
+/// A native Office container is identified by its root stream (`VisioDocument`,
+/// `WordDocument`, …); a class descriptor alone does not make the container
+/// readable by the matching extractor.
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn native_stream_present<F: Read + std::io::Seek>(
+    compound_file: &cfb::CompoundFile<F>,
+    stream_paths: &[std::path::PathBuf],
+    mime: &str,
+) -> bool {
+    match mime {
+        crate::core::mime::VISIO_MIME_TYPE => {
+            has_ole_stream(compound_file, stream_paths, &["VisioDocument", "/VisioDocument"])
+        }
+        crate::core::mime::LEGACY_WORD_MIME_TYPE => {
+            has_ole_stream(compound_file, stream_paths, &["WordDocument", "/WordDocument"])
+        }
+        crate::core::mime::LEGACY_POWERPOINT_MIME_TYPE => has_ole_stream(
+            compound_file,
+            stream_paths,
+            &["PowerPoint Document", "/PowerPoint Document"],
+        ),
+        "application/vnd.ms-excel" => {
+            has_ole_stream(compound_file, stream_paths, &["Workbook", "/Workbook"])
+                || has_ole_stream(compound_file, stream_paths, &["Book", "/Book"])
+        }
+        _ => true,
+    }
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn collect_ole_stream_paths<F: Read + std::io::Seek>(compound_file: &cfb::CompoundFile<F>) -> Vec<std::path::PathBuf> {    compound_file
+        .walk()
+        .filter(|entry| entry.is_stream())
+        .take(256)
+        .map(|entry| entry.path().to_path_buf())
+        .collect()
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn ole_path_matches(path: &std::path::Path, names: &[&str]) -> bool {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let file_name = file_name.trim_start_matches('/');
+    names.iter().any(|name| {
+        name.rsplit('/')
+            .next()
+            .unwrap_or(name)
+            .trim_start_matches('/')
+            .eq_ignore_ascii_case(file_name)
+    })
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn read_ole_stream(
+    compound_file: &mut cfb::CompoundFile<Cursor<&[u8]>>,
+    stream_paths: &[std::path::PathBuf],
+    names: &[&str],
+    max_bytes: u64,
+) -> Option<Vec<u8>> {
+    for name in names {
+        if let Some(data) = read_ole_stream_named(compound_file, name, max_bytes) {
+            return Some(data);
+        }
+    }
+    for path in stream_paths {
+        if ole_path_matches(path, names) {
+            if let Some(data) = read_ole_stream_path(compound_file, path, max_bytes) {
+                return Some(data);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn read_ole_stream_named(
+    compound_file: &mut cfb::CompoundFile<Cursor<&[u8]>>,
+    name: &str,
+    max_bytes: u64,
+) -> Option<Vec<u8>> {
+    let stream = compound_file.open_stream(name).ok()?;
+    read_bounded_ole_stream(stream, max_bytes)
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn read_ole_stream_path(
+    compound_file: &mut cfb::CompoundFile<Cursor<&[u8]>>,
+    path: &std::path::Path,
+    max_bytes: u64,
+) -> Option<Vec<u8>> {
+    let stream = compound_file.open_stream(path).ok()?;
+    read_bounded_ole_stream(stream, max_bytes)
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn read_bounded_ole_stream<R: Read>(stream: R, max_bytes: u64) -> Option<Vec<u8>> {
+    let mut data = Vec::new();
+    if stream.take(max_bytes.saturating_add(1)).read_to_end(&mut data).is_ok() && data.len() as u64 <= max_bytes {
+        return (!data.is_empty()).then_some(data);
+    }
+    None
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn has_ole_stream<F: Read + std::io::Seek>(
+    compound_file: &cfb::CompoundFile<F>,
+    stream_paths: &[std::path::PathBuf],
+    names: &[&str],
+) -> bool {
+    names.iter().any(|name| compound_file.exists(name)) || stream_paths.iter().any(|path| ole_path_matches(path, names))
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn identify_ole_payload(mut payload: Vec<u8>, name_hint: Option<&str>, max_bytes: u64) -> Option<(Vec<u8>, String)> {
+    if payload.is_empty() {
+        return None;
+    }
+
+    if let Some(mime) = identify_ole_container_mime(&payload, max_bytes) {
+        return Some((payload, mime.to_string()));
+    }
+
+    let detected = crate::core::mime::detect_mime_type_from_bytes(&payload)
+        .ok()
+        .filter(|mime| mime != "application/octet-stream");
+    if let Some(detected) = detected {
+        let mime = crate::core::mime::validate_mime_type(&detected).ok()?;
+        return Some((std::mem::take(&mut payload), mime));
+    }
+
+    // `Package` and native wrappers may prepend a small header before the
+    // actual file. Strip only up to the first bounded, known file signature;
+    // this avoids guessing offsets for arbitrary binary data. Do this before
+    // consulting the filename or class descriptor, because both can describe
+    // the wrapper rather than the bytes that must be handed to the extractor.
+    if let Some(start) = embedded_payload_start(&payload)
+        && start > 0
+    {
+        let candidate = payload.get(start..)?.to_vec();
+        return identify_ole_payload(candidate, name_hint, max_bytes);
+    }
+
+    let detected = name_hint
+        .and_then(|name| std::path::Path::new(name).extension())
+        .and_then(|extension| extension.to_str())
+        .and_then(|extension| mime_guess::from_ext(extension).first())
+        .map(|mime| mime.to_string())
+        .filter(|mime| mime != "application/octet-stream")
+        .or_else(|| classify_ole_program(&payload).map(str::to_string))?;
+    let mime = crate::core::mime::validate_mime_type(&detected).ok()?;
+    Some((std::mem::take(&mut payload), mime))
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn identify_ole_container_mime(data: &[u8], max_bytes: u64) -> Option<&'static str> {
+    if !data.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
+        return None;
+    }
+    let compound_file = cfb::CompoundFile::open(Cursor::new(data)).ok()?;
+    let stream_paths = collect_ole_stream_paths(&compound_file);
+    if has_ole_stream(&compound_file, &stream_paths, &["VisioDocument", "/VisioDocument"]) {
+        return Some(crate::core::mime::VISIO_MIME_TYPE);
+    }
+    if has_ole_stream(&compound_file, &stream_paths, &["WordDocument", "/WordDocument"]) {
+        return Some(crate::core::mime::LEGACY_WORD_MIME_TYPE);
+    }
+    if has_ole_stream(
+        &compound_file,
+        &stream_paths,
+        &["PowerPoint Document", "/PowerPoint Document"],
+    ) {
+        return Some(crate::core::mime::LEGACY_POWERPOINT_MIME_TYPE);
+    }
+    if has_ole_stream(&compound_file, &stream_paths, &["Workbook", "/Workbook"])
+        || has_ole_stream(&compound_file, &stream_paths, &["Book", "/Book"])
+    {
+        return Some("application/vnd.ms-excel");
+    }
+
+    let compobj_names = ["\x01CompObj", "/\x01CompObj", "CompObj"];
+    let mut compound_file = compound_file;
+    let compobj = read_ole_stream(&mut compound_file, &stream_paths, &compobj_names, max_bytes)?;
+    let mime = classify_ole_program(&compobj)?;
+    // Same guard as the container-level CompObj branch: a descriptor naming an
+    // application whose native root stream is absent must not label the CFB.
+    native_stream_present(&compound_file, &stream_paths, mime).then_some(mime)
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn classify_ole_program(data: &[u8]) -> Option<&'static str> {
+    if contains_ole_text(data, b"microsoft excel")
+        || contains_ole_text(data, b"excel.sheet")
+        || contains_ole_text(data, b"excel worksheet")
+    {
+        return Some("application/vnd.ms-excel");
+    }
+    if contains_ole_text(data, b"microsoft word")
+        || contains_ole_text(data, b"word.document")
+        || contains_ole_text(data, b"word document")
+    {
+        return Some(crate::core::mime::LEGACY_WORD_MIME_TYPE);
+    }
+    if contains_ole_text(data, b"microsoft powerpoint")
+        || contains_ole_text(data, b"powerpoint.presentation")
+        || contains_ole_text(data, b"powerpoint presentation")
+    {
+        return Some(crate::core::mime::LEGACY_POWERPOINT_MIME_TYPE);
+    }
+    if contains_ole_text(data, b"microsoft visio")
+        || contains_ole_text(data, b"visio.drawing")
+        || contains_ole_text(data, b"visio drawing")
+    {
+        return Some(crate::core::mime::VISIO_MIME_TYPE);
+    }
+    None
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn contains_ole_text(data: &[u8], needle: &[u8]) -> bool {
+    let scan = &data[..data.len().min(64 * 1024)];
+    scan.windows(needle.len()).any(|window| {
+        window
+            .iter()
+            .zip(needle)
+            .all(|(actual, expected)| actual.to_ascii_lowercase() == *expected)
+    }) || scan.windows(needle.len() * 2).any(|window| {
+        window
+            .chunks_exact(2)
+            .zip(needle)
+            .all(|(pair, expected)| pair[0].to_ascii_lowercase() == *expected && pair[1] == 0)
+    })
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn has_embedded_payload_signature(data: &[u8]) -> bool {
+    embedded_payload_start(data).is_some()
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn embedded_payload_start(data: &[u8]) -> Option<usize> {
+    [
+        &[0xD0, 0xCF, 0x11, 0xE0][..],
+        &[0x50, 0x4B, 0x03, 0x04][..],
+        b"%PDF-",
+        &[0x89, 0x50, 0x4E, 0x47][..],
+        &[0xFF, 0xD8, 0xFF][..],
+        b"GIF8",
+        b"{\\rtf",
+    ]
+    .iter()
+    .filter_map(|signature| data.windows(signature.len()).position(|window| window == *signature))
+    .min()
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn parse_ole10_native(data: &[u8]) -> Option<(Vec<u8>, Option<String>)> {
+    let parsed = (|| {
+        let mut offset = 4usize;
+        let _native_data_size = read_u32_le(data, 0)?;
+        let _flags = read_u16_le(data, offset)?;
+        offset += 2;
+        let filename = read_ole_c_string(data, &mut offset)?;
+        let _source_path = read_ole_c_string(data, &mut offset)?;
+        offset = offset.checked_add(8)?;
+        let _temporary_path = read_ole_c_string(data, &mut offset)?;
+        let data_len = read_u32_le(data, offset)? as usize;
+        offset += 4;
+        let end = offset.checked_add(data_len)?;
+        let payload = data.get(offset..end)?;
+        (!payload.is_empty()).then(|| (payload.to_vec(), (!filename.is_empty()).then_some(filename)))
+    })();
+    if parsed.is_some() {
+        return parsed;
+    }
+
+    let start = embedded_payload_start(data)?;
+    let payload = data.get(start..)?;
+    (!payload.is_empty()).then(|| (payload.to_vec(), None))
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn parse_ole_package(data: &[u8]) -> Option<(Vec<u8>, Option<String>)> {
+    for base in [0usize, 4] {
+        let Some(mut offset) = base.checked_add(4) else {
+            continue;
+        };
+        if read_u32_le(data, base).is_none() {
+            continue;
+        }
+        let Some(label) = read_ole_c_string(data, &mut offset) else {
+            continue;
+        };
+        let Some(original_path) = read_ole_c_string(data, &mut offset) else {
+            continue;
+        };
+        let Some(after_format) = offset.checked_add(4) else {
+            continue;
+        };
+        if read_u32_le(data, after_format).is_none() {
+            continue;
+        }
+        let Some(mut offset) = after_format.checked_add(4) else {
+            continue;
+        };
+        if read_u32_le(data, offset).is_none() {
+            continue;
+        }
+        offset += 4;
+        if read_ole_c_string(data, &mut offset).is_none() {
+            continue;
+        }
+        let Some(data_len) = read_u32_le(data, offset).map(|length| length as usize) else {
+            continue;
+        };
+        let Some(payload_start) = offset.checked_add(4) else {
+            continue;
+        };
+        let Some(payload_end) = payload_start.checked_add(data_len) else {
+            continue;
+        };
+        let Some(payload) = data.get(payload_start..payload_end) else {
+            continue;
+        };
+        if payload.is_empty() {
+            continue;
+        }
+        let name_hint = if !original_path.is_empty() {
+            Some(original_path)
+        } else if !label.is_empty() {
+            Some(label)
+        } else {
+            None
+        };
+        return Some((payload.to_vec(), name_hint));
+    }
+
+    let start = embedded_payload_start(data)?;
+    let payload = data.get(start..)?;
+    (!payload.is_empty()).then(|| (payload.to_vec(), None))
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn read_ole_c_string(data: &[u8], offset: &mut usize) -> Option<String> {
+    let rest = data.get(*offset..)?;
+    let end = rest.iter().position(|byte| *byte == 0)?;
+    let value = String::from_utf8_lossy(&rest[..end]).into_owned();
+    *offset = offset.checked_add(end + 1)?;
+    Some(value)
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn read_u16_le(data: &[u8], offset: usize) -> Option<u16> {
+    let bytes = data.get(offset..offset.checked_add(2)?)?;
+    Some(u16::from_le_bytes([bytes[0], bytes[1]]))
+}
+
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn read_u32_le(data: &[u8], offset: usize) -> Option<u32> {
+    let bytes = data.get(offset..offset.checked_add(4)?)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 /// Fallback used when the `cfb` dependency isn't active for the enabled feature set
-/// (e.g. `excel` without `office`/`hwp`/`email`): OLE objects are always reported as
-/// unidentifiable rather than attempting extraction.
+/// (e.g. `excel` without `office`/`hwp`/`email`): OLE objects are always reported
+/// as unidentifiable rather than attempting extraction.
 #[cfg(not(any(feature = "office", feature = "hwp", feature = "email")))]
-fn extract_ole_embedded_object(_data: &[u8]) -> Option<(Vec<u8>, String)> {
+fn extract_ole_embedded_object(_data: &[u8], _source_name: &str, _max_bytes: u64) -> Option<(Vec<u8>, String)> {
     None
 }
 
@@ -299,6 +983,135 @@ fn extract_ole_embedded_object(_data: &[u8]) -> Option<(Vec<u8>, String)> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// Embedded document text must land in `elements` so Markdown/`content` is
+    /// searchable, not only on `children`.
+    #[test]
+    fn append_embedded_object_text_merges_child_content_into_body() {
+        use crate::types::internal::{ElementKind, InternalDocument};
+        use crate::types::ExtractedDocument;
+
+        let child = ExtractedDocument {
+            content: "SCAN设计流程介绍\n\n拟制".to_string(),
+            mime_type: crate::core::mime::LEGACY_WORD_MIME_TYPE.into(),
+            ..Default::default()
+        };
+        let mut doc = InternalDocument::default();
+        doc.children = Some(vec![ArchiveEntry {
+            path: "oleObject15.bin".to_string(),
+            mime_type: crate::core::mime::LEGACY_WORD_MIME_TYPE.into(),
+            result: Box::new(child),
+        }]);
+
+        append_embedded_object_text(&mut doc);
+
+        let texts: Vec<&str> = doc
+            .elements
+            .iter()
+            .map(|element| element.text.as_str())
+            .collect();
+        assert!(
+            texts.iter().any(|text| text.contains("SCAN设计流程介绍")),
+            "expected child body in elements, got {texts:?}"
+        );
+        // The child's own Markdown has to survive verbatim: as a paragraph, its line
+        // breaks collapse into one line and its markers get escaped.
+        assert!(
+            doc.elements
+                .iter()
+                .any(|element| matches!(element.kind, ElementKind::RawBlock) && element.text.contains("拟制")),
+            "expected the child body as a raw block, got {texts:?}"
+        );
+        // A filename is not a heading of the host document.
+        assert!(
+            !doc.elements
+                .iter()
+                .any(|element| matches!(element.kind, ElementKind::Heading { .. })),
+            "expected no heading for the embedded object, got {texts:?}"
+        );
+    }
+
+    /// A child's images are renumbered into the parent's image table, and a
+    /// reference with no matching child image keeps only its alt text.
+    #[test]
+    fn renumber_embedded_image_refs_moves_refs_onto_the_parent_table() {
+        let image = |index: u32| crate::types::ExtractedImage {
+            image_index: index,
+            ..Default::default()
+        };
+        let images = vec![image(0), image(1)];
+        let input = "前言\n![流程图](image_1.png)\n后记 ![x](image_7.png) 结束";
+        let (rewritten, referenced) = renumber_embedded_image_refs(input, 4, &images);
+        assert!(rewritten.contains("![流程图](image_5.png)"), "got {rewritten}");
+        // Index 7 is not one of the child's images: the alt text stays, the
+        // reference (which would resolve to an unrelated picture) does not.
+        assert!(!rewritten.contains("image_7.png"), "got {rewritten}");
+        assert!(rewritten.contains("后记 x 结束"), "got {rewritten}");
+        // Only the image the body still points at is reported for staging.
+        assert_eq!(referenced, vec![1]);
+    }
+
+    /// Alt text the CommonMark writer escaped (`\]`) must not end the parse:
+    /// the old `find(']')` stopped at the escape and the reference kept the
+    /// child's numbering in the parent's body.
+    #[test]
+    fn renumber_embedded_image_refs_parses_escaped_alt_text() {
+        let images = vec![crate::types::ExtractedImage {
+            image_index: 0,
+            ..Default::default()
+        }];
+        let (rewritten, referenced) = renumber_embedded_image_refs("![flow \\] chart](image_0.png)", 2, &images);
+        assert!(
+            rewritten.contains("![flow \\] chart](image_2.png)"),
+            "the escaped reference is renumbered, got {rewritten}"
+        );
+        assert_eq!(referenced, vec![0], "the escaped reference counts as a staging candidate");
+    }
+
+    /// A child whose body is empty after renumbering (a reference that matches
+    /// no child image and has no alt text) must not stage its images either:
+    /// the parent would export picture files that nothing in the body refers
+    /// to. The base must also not advance past the unused slots.
+    #[test]
+    fn append_embedded_object_text_skips_orphan_images_of_empty_children() {
+        use crate::types::internal::InternalDocument;
+        use crate::types::ExtractedDocument;
+
+        let mut child_result = ExtractedDocument::default();
+        child_result.content = "![](image_7.png)".to_string();
+        child_result.images = Some(vec![crate::types::ExtractedImage {
+            image_index: 0,
+            ..Default::default()
+        }]);
+
+        let mut doc = InternalDocument::default();
+        doc.children = Some(vec![ArchiveEntry {
+            path: "oleObject1.bin".to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            result: Box::new(child_result),
+        }]);
+
+        append_embedded_object_text(&mut doc);
+        assert!(doc.images.is_empty(), "orphan images must not be staged: {:?}", doc.images);
+        assert!(doc.elements.is_empty(), "an empty child adds no elements");
+    }
+
+    /// Blank child payloads must not inject empty captions/raw blocks.
+    #[test]
+    fn append_embedded_object_text_skips_blank_children() {
+        use crate::types::internal::InternalDocument;
+        use crate::types::ExtractedDocument;
+
+        let mut doc = InternalDocument::default();
+        doc.children = Some(vec![ArchiveEntry {
+            path: "oleObject1.bin".to_string(),
+            mime_type: "application/octet-stream".to_string(),
+            result: Box::new(ExtractedDocument::default()),
+        }]);
+
+        append_embedded_object_text(&mut doc);
+        assert!(doc.elements.is_empty(), "blank children must not add elements");
+    }
 
     /// Build a minimal ZIP in memory with one file at the given path and contents.
     fn make_zip_with_file(entry_path: &str, entry_data: &[u8]) -> Vec<u8> {
@@ -958,7 +1771,12 @@ mod tests {
         let payload = b"Hello, world!";
         let zip_bytes = make_forged_zip64_entry("word/embeddings/note.txt", payload, u64::MAX);
 
-        let config = ExtractionConfig::default();
+        // The default output format is Markdown, which escapes the payload's `!`. These tests
+        // pin that the *bytes* survived the forged size, so ask for the plain rendering. ~keep
+        let config = ExtractionConfig {
+            output_format: crate::core::config::OutputFormat::Plain,
+            ..Default::default()
+        };
         let (children, warnings) =
             extract_ooxml_embedded_objects(&zip_bytes, "word/embeddings/", "test", &config).await;
 
@@ -984,7 +1802,11 @@ mod tests {
         let payload = b"Hello, world!";
         let zip_bytes = make_zip_with_file("word/embeddings/note.txt", payload);
 
-        let config = ExtractionConfig::default();
+        // Plain rendering for the same reason as the forged-size test above. ~keep
+        let config = ExtractionConfig {
+            output_format: crate::core::config::OutputFormat::Plain,
+            ..Default::default()
+        };
         let (children, warnings) =
             extract_ooxml_embedded_objects(&zip_bytes, "word/embeddings/", "test", &config).await;
 

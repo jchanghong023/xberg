@@ -35,6 +35,11 @@ pub(crate) use sections::{
     validate_chunking_params, validate_confidence, validate_csv_delimiter, validate_dpi, validate_language_code,
     validate_ocr_backend, validate_token_reduction_level, validate_vlm_backend_config,
 };
+// Re-exported only for `ocr::validation`, which is itself `#[cfg(feature = "ocr")]`. Without the
+// same gate the re-export is an unused import on every narrow leg, and CI builds with
+// `-D warnings`. ~keep
+#[cfg(feature = "ocr")]
+pub(crate) use sections::TESSERACT_LANGUAGE_CODES;
 
 // `layout_wastes_plain_output` is `pub`, not `pub(crate)`, unlike its siblings above: it backs
 // a CLI-level warning (`xberg-cli`'s `ExtractionOverrides::apply`), a downstream crate that
@@ -212,9 +217,24 @@ mod tests {
 
     #[test]
     fn test_validate_tesseract_psm_valid() {
-        for psm in 0..=13 {
+        for psm in 1..=13 {
             assert!(validate_tesseract_psm(psm).is_ok(), "PSM {} should be valid", psm);
         }
+    }
+
+    #[test]
+    fn should_reject_tesseract_psm_zero_because_osd_only_recognises_no_text() {
+        let error = validate_tesseract_psm(0).expect_err("PSM 0 is OSD-only and recognises no text");
+        let message = error.to_string();
+        assert!(
+            message.contains('0'),
+            "message should name the rejected value: {message}"
+        );
+        assert!(
+            message.contains("orientation"),
+            "message should say why PSM 0 cannot work: {message}"
+        );
+        assert!(message.contains('3'), "message should point at a usable PSM: {message}");
     }
 
     #[test]

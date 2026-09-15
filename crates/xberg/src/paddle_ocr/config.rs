@@ -101,11 +101,20 @@ pub struct PaddleOcrConfig {
     /// Model tier controlling detection/recognition model size and accuracy trade-off.
     ///
     /// For PP-OCRv5 (`model_version = "pp-ocrv5"`):
-    /// - `"mobile"` (default): Lightweight models (~4.5MB detection, ~16.5MB recognition), fast download and inference
+    /// - `"mobile"`: Lightweight models (~4.5MB detection, ~16.5MB recognition), fast download and inference
     /// - `"server"`: Large, high-accuracy models (~88MB detection, ~84MB recognition), best for GPU or complex documents
     ///
-    /// For PP-OCRv6 (`model_version = "pp-ocrv6"`): `"medium"` (default), `"small"`, or `"tiny"`.
-    /// A legacy `"mobile"`/`"server"` tier under v6 falls back to `"medium"`.
+    /// For PP-OCRv6 (`model_version = "pp-ocrv6"`, the default):
+    /// - `"small"`: ~9.9MB detection, full 18,708-char CJK+Latin+JA/KO recognition dictionary.
+    ///   A configured `"mobile"` resolves here (the v5 lightweight name).
+    /// - `"medium"`: ~62MB detection, same dictionary. Higher accuracy, substantially slower on
+    ///   CPU. A legacy `"server"` tier, or any unrecognised value, resolves here.
+    /// - `"tiny"` (default): ~1.8MB detection, but a reduced 6,904-char (~zh/en) dictionary — it cannot
+    ///   read the scripts the other two cover.
+    ///
+    /// Note PaddleOCR pages do not run concurrently: the ONNX session is held behind a mutex, so
+    /// the thread budget goes to intra-op parallelism and wall time scales with page count times
+    /// per-page inference. Tier choice therefore dominates throughput on multi-page documents.
     pub model_tier: String,
 
     /// Model generation: `"pp-ocrv6"` (default) or `"pp-ocrv5"`.
@@ -114,8 +123,7 @@ pub struct PaddleOcrConfig {
     /// tiers (see `model_tier`). Scripts outside the v6 unified coverage (Arabic, Cyrillic,
     /// Devanagari, Greek, Tamil, Telugu, Thai) transparently fall back to the PP-OCRv5
     /// per-script recognition models. Defaults to `"pp-ocrv6"`; the default `model_tier`
-    /// (`"mobile"`) resolves to the v6 `"medium"` tier. Select `"pp-ocrv5"` to pin the
-    /// legacy per-script/unified fleet.
+    /// is `"tiny"`. Select `"pp-ocrv5"` to pin the legacy per-script/unified fleet.
     pub model_version: String,
 
     /// Explicit inference engine choice.
@@ -172,7 +180,7 @@ impl PaddleOcrConfig {
             rec_batch_num: DEFAULT_RECOGNITION_BATCH_SIZE,
             padding: 10,
             drop_score: 0.5,
-            model_tier: "mobile".to_string(),
+            model_tier: "tiny".to_string(),
             model_version: "pp-ocrv6".to_string(),
             inference_backend: None,
         }
@@ -509,7 +517,7 @@ mod tests {
             "paddle cannot tell a table from prose, so this stays off until it can -- see backend tests"
         );
         assert_eq!(config.padding, 10);
-        assert_eq!(config.model_tier, "mobile");
+        assert_eq!(config.model_tier, "tiny");
         assert_eq!(config.model_version, "pp-ocrv6");
     }
 
@@ -523,7 +531,7 @@ mod tests {
         assert_eq!(config.det_limit_side_len, 1024);
         assert_eq!(config.rec_batch_num, 6);
         assert_eq!(config.padding, 10);
-        assert_eq!(config.model_tier, "mobile");
+        assert_eq!(config.model_tier, "tiny");
     }
 
     #[test]

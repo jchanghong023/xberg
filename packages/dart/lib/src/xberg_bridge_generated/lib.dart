@@ -10,7 +10,7 @@ part 'lib.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `try_convert_annotation_kind_from_core`, `try_convert_asset_category_from_core`, `try_convert_auth_config_from_core`, `try_convert_block_type_from_core`, `try_convert_boundary_reason_from_core`, `try_convert_browser_backend_from_core`, `try_convert_browser_mode_from_core`, `try_convert_browser_wait_from_core`, `try_convert_call_mode_from_core`, `try_convert_candle_device_preference_from_core`, `try_convert_candle_trocr_variant_from_core`, `try_convert_chunk_sizing_from_core`, `try_convert_chunk_type_from_core`, `try_convert_chunker_type_from_core`, `try_convert_chunking_reason_from_core`, `try_convert_code_content_mode_from_core`, `try_convert_code_data_node_kind_from_core`, `try_convert_confidence_semantics_from_core`, `try_convert_content_filter_kind_from_core`, `try_convert_content_layer_from_core`, `try_convert_crawl_strategy_kind_from_core`, `try_convert_credential_provider_config_from_core`, `try_convert_diff_line_from_core`, `try_convert_document_content_encoding_from_core`, `try_convert_element_type_from_core`, `try_convert_embedding_model_type_from_core`, `try_convert_embeddings_embedding_backend_from_core`, `try_convert_entity_category_from_core`, `try_convert_execution_provider_type_from_core`, `try_convert_extract_input_kind_from_core`, `try_convert_extraction_method_from_core`, `try_convert_form_field_type_from_core`, `try_convert_format_metadata_from_core`, `try_convert_formula_model_from_core`, `try_convert_glm_ocr_layout_mode_from_core`, `try_convert_glm_ocr_task_kind_from_core`, `try_convert_host_matcher_from_core`, `try_convert_html_theme_from_core`, `try_convert_image_kind_from_core`, `try_convert_image_output_format_from_core`, `try_convert_image_type_from_core`, `try_convert_inline_type_from_core`, `try_convert_jupyter_cell_rendering_from_core`, `try_convert_keyword_algorithm_from_core`, `try_convert_late_interaction_model_type_from_core`, `try_convert_layout_class_from_core`, `try_convert_layout_strategy_from_core`, `try_convert_link_type_from_core`, `try_convert_merge_mode_from_core`, `try_convert_mime_detection_policy_from_core`, `try_convert_ner_backend_kind_from_core`, `try_convert_no_chunking_reason_from_core`, `try_convert_node_content_from_core`, `try_convert_ocr_backend_type_from_core`, `try_convert_ocr_bounding_geometry_from_core`, `try_convert_ocr_element_level_from_core`, `try_convert_ocr_strategy_from_core`, `try_convert_output_format_from_core`, `try_convert_paddle_inference_backend_from_core`, `try_convert_paddle_language_from_core`, `try_convert_paddle_ocr_vl_task_kind_from_core`, `try_convert_page_orientation_handling_from_core`, `try_convert_page_unit_type_from_core`, `try_convert_pdf_annotation_type_from_core`, `try_convert_pdf_backend_from_core`, `try_convert_pii_category_from_core`, `try_convert_preset_category_from_core`, `try_convert_probe_status_from_core`, `try_convert_processing_stage_from_core`, `try_convert_psm_mode_from_core`, `try_convert_redaction_strategy_from_core`, `try_convert_reduction_level_from_core`, `try_convert_region_kind_from_core`, `try_convert_relationship_kind_from_core`, `try_convert_reranker_head_from_core`, `try_convert_reranker_model_type_from_core`, `try_convert_result_format_from_core`, `try_convert_revision_anchor_from_core`, `try_convert_revision_kind_from_core`, `try_convert_schema_compliance_from_core`, `try_convert_sparse_embedding_model_type_from_core`, `try_convert_structured_data_type_from_core`, `try_convert_summary_strategy_from_core`, `try_convert_table_chunking_mode_from_core`, `try_convert_table_model_from_core`, `try_convert_table_overlap_preference_from_core`, `try_convert_text_direction_from_core`, `try_convert_tier_strategy_from_core`, `try_convert_uri_kind_from_core`, `try_convert_url_extraction_mode_from_core`, `try_convert_vlm_fallback_policy_from_core`, `try_convert_whisper_model_from_core`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ChunkClassificationEnrichmentConfig`, `DocumentExtractorDartCallbacks`, `EmbeddingBackendDartCallbacks`, `OcrBackendDartCallbacks`, `PostProcessorDartCallbacks`, `RendererDartCallbacks`, `RerankerBackendDartCallbacks`, `TokenizerBackendDartCallbacks`, `ValidatorDartCallbacks`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `backend_type`, `can_handle`, `confidence_semantics`, `count_tokens`, `dimensions`, `embed`, `emits_structured_markdown`, `estimated_duration_ms`, `extract`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `page_orientation_handling`, `priority`, `priority`, `priority`, `process_document`, `process_image_file`, `process_image`, `process`, `processing_stage`, `render_result`, `rerank`, `should_process`, `should_validate`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `supported_languages`, `supported_mime_types`, `supports_document_processing`, `supports_language`, `supports_table_detection`, `validate`, `version`, `version`, `version`, `version`, `version`, `version`, `version`, `version`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `backend_type`, `can_handle`, `confidence_semantics`, `count_tokens`, `dimensions`, `embed`, `emits_structured_markdown`, `estimated_duration_ms`, `extract`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `page_orientation_handling`, `priority`, `priority`, `priority`, `process_document`, `process_image_file`, `process_image`, `process`, `processing_stage`, `render_result`, `rerank`, `should_process`, `should_validate`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `supported_languages`, `supported_mime_types`, `supports_document_processing`, `supports_language`, `supports_table_detection`, `validate`, `version`, `version`, `version`, `version`, `version`, `version`, `version`, `version`
 
 /// Extract content from a single bytes or URI input.
 Future<ExtractionResult> extract({
@@ -779,6 +779,10 @@ Future<PageInfo> createPageInfoFromJson({required String json}) =>
 Future<PageContent> createPageContentFromJson({required String json}) =>
     RustLib.instance.api.crateCreatePageContentFromJson(json: json);
 
+Future<PageOcrConfidence> createPageOcrConfidenceFromJson({
+  required String json,
+}) => RustLib.instance.api.crateCreatePageOcrConfidenceFromJson(json: json);
+
 Future<LayoutRegion> createLayoutRegionFromJson({required String json}) =>
     RustLib.instance.api.crateCreateLayoutRegionFromJson(json: json);
 
@@ -825,6 +829,9 @@ Future<DocumentSummary> createDocumentSummaryFromJson({required String json}) =>
 
 Future<Table> createTableFromJson({required String json}) =>
     RustLib.instance.api.crateCreateTableFromJson(json: json);
+
+Future<TableCellStyle> createTableCellStyleFromJson({required String json}) =>
+    RustLib.instance.api.crateCreateTableCellStyleFromJson(json: json);
 
 Future<TableCell> createTableCellFromJson({required String json}) =>
     RustLib.instance.api.crateCreateTableCellFromJson(json: json);
@@ -3863,6 +3870,13 @@ class ContentFilterConfig {
   /// When `true` (default), text that repeats verbatim across a supermajority
   /// of pages is classified as furniture and stripped.  Disable this if brand
   /// names or repeated headings are being incorrectly removed by the heuristic.
+  ///
+  /// This flag also gates a same-page rule: a body paragraph is removed when
+  /// its text is also carried by a table detected on the same page (catches
+  /// table content that PDF extraction renders both as a table and as body
+  /// text). The comparison preserves case and never touches headings, list
+  /// items, code blocks, formulas, or captions, so it cannot delete a body
+  /// sentence merely for repeating an earlier heading's words (GH#1623).
   ///
   /// Note: when a layout-detection model is active, the model may independently
   /// classify page-header / page-footer / footnote regions as furniture on a
@@ -9060,6 +9074,23 @@ class GridCell {
   /// Bounding box for this cell (if available).
   final BoundingBox? bbox;
 
+  /// Outline level (1-6) of the heading style this cell's text carries, when it has one.
+  ///
+  /// A DOCX banner row -- row 0, one cell spanning the grid, styled `Heading1`..`Heading6` --
+  /// is what Word's navigation pane and a `TOC` field treat as the document's outline, but as
+  /// a table cell it reached consumers as anonymous text (GH#1587). `content` is deliberately
+  /// left as the bare cell text: prefixing it with `#` would put a markdown heading inside a
+  /// table cell, which is invalid where it lands and changes text every existing consumer
+  /// already reads. This field is the signal instead, so a caller can decide for itself
+  /// whether a `heading 2` in a banner row is a section title or a column label.
+  final PlatformInt64? headingLevel;
+
+  /// Human-readable name of the paragraph style applied to this cell's text (`heading 2`).
+  ///
+  /// Carries the style even when it resolves to no outline level, so a caller can key on a
+  /// named style this crate does not map to a heading. See [`GridCell::heading_level`].
+  final String? styleName;
+
   const GridCell({
     required this.content,
     required this.row,
@@ -9068,6 +9099,8 @@ class GridCell {
     required this.colSpan,
     required this.isHeader,
     this.bbox,
+    this.headingLevel,
+    this.styleName,
   });
 
   @override
@@ -9078,7 +9111,9 @@ class GridCell {
       rowSpan.hashCode ^
       colSpan.hashCode ^
       isHeader.hashCode ^
-      bbox.hashCode;
+      bbox.hashCode ^
+      headingLevel.hashCode ^
+      styleName.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -9091,7 +9126,9 @@ class GridCell {
           rowSpan == other.rowSpan &&
           colSpan == other.colSpan &&
           isHeader == other.isHeader &&
-          bbox == other.bbox;
+          bbox == other.bbox &&
+          headingLevel == other.headingLevel &&
+          styleName == other.styleName;
 }
 
 /// Header/heading element metadata.
@@ -12664,6 +12701,19 @@ class OcrConfig {
   /// `ExtractionConfig::acceleration` before each `process_image` call.
   final AccelerationConfig? acceleration;
 
+  /// Security limits applied when decoding raw image bytes for OCR (GH#1554).
+  ///
+  /// Not user-configurable via config files — injected at runtime from
+  /// `ExtractionConfig::security_limits` before each `process_image` call, the same
+  /// pattern [`Self::acceleration`] uses. `ExtractionConfig::security_limits` is the
+  /// single source of truth: this field only ever holds a copy the caller placed here
+  /// immediately before dispatch, so the two cannot drift. A backend consulting a
+  /// `backend_options` override for this call may still let that override win, but in
+  /// the absence of one this field is what backends should fall back to instead of
+  /// `SecurityLimits::default()`. `None` means "use `SecurityLimits::default()`", never
+  /// "disable the check".
+  final SecurityLimits? securityLimits;
+
   /// Caller-supplied Tesseract `traineddata` bytes per language code.
   ///
   /// Primary use case is the WASM build, which has no filesystem and cannot
@@ -12700,6 +12750,7 @@ class OcrConfig {
     this.vlmConfig,
     this.vlmPrompt,
     this.acceleration,
+    this.securityLimits,
     this.tessdataBytes,
     this.tessdataPath,
   });
@@ -12721,6 +12772,7 @@ class OcrConfig {
       vlmConfig.hashCode ^
       vlmPrompt.hashCode ^
       acceleration.hashCode ^
+      securityLimits.hashCode ^
       tessdataBytes.hashCode ^
       tessdataPath.hashCode;
 
@@ -12744,6 +12796,7 @@ class OcrConfig {
           vlmConfig == other.vlmConfig &&
           vlmPrompt == other.vlmPrompt &&
           acceleration == other.acceleration &&
+          securityLimits == other.securityLimits &&
           tessdataBytes == other.tessdataBytes &&
           tessdataPath == other.tessdataPath;
 }
@@ -13171,8 +13224,10 @@ class OcrQualityThresholds {
   /// recorded municipal ordinance (10 prose pages, 6 scanned survey/architectural drawings)
   /// with Tesseract 5.5.3:
   ///
-  ///     prose      86.3 - 95.3
-  ///     drawings   18.5 - 64.3
+  /// ```text
+  /// prose      86.3 - 95.3
+  /// drawings   18.5 - 64.3
+  /// ```
   ///
   /// The default sits in that gap with ~11 points of margin on each side. Compare the
   /// short-word ratio, which separated the same two groups by 0.09 on a 0-1 scale.
@@ -13680,8 +13735,17 @@ class PaddleOcrConfig {
   /// - `"mobile"` (default): Lightweight models (~4.5MB detection, ~16.5MB recognition), fast download and inference
   /// - `"server"`: Large, high-accuracy models (~88MB detection, ~84MB recognition), best for GPU or complex documents
   ///
-  /// For PP-OCRv6 (`model_version = "pp-ocrv6"`): `"medium"` (default), `"small"`, or `"tiny"`.
-  /// A legacy `"mobile"`/`"server"` tier under v6 falls back to `"medium"`.
+  /// For PP-OCRv6 (`model_version = "pp-ocrv6"`, the default):
+  /// - `"small"`: ~9.9MB detection, full 18,708-char CJK+Latin+JA/KO recognition dictionary.
+  ///   The default `"mobile"` resolves here, so this is what an unconfigured extraction uses.
+  /// - `"medium"`: ~62MB detection, same dictionary. Higher accuracy, substantially slower on
+  ///   CPU. A legacy `"server"` tier, or any unrecognised value, resolves here.
+  /// - `"tiny"`: ~1.8MB detection, but a reduced 6,904-char (~zh/en) dictionary — it cannot
+  ///   read the scripts the other two cover.
+  ///
+  /// Note PaddleOCR pages do not run concurrently: the ONNX session is held behind a mutex, so
+  /// the thread budget goes to intra-op parallelism and wall time scales with page count times
+  /// per-page inference. Tier choice therefore dominates throughput on multi-page documents.
   final String modelTier;
 
   /// Model generation: `"pp-ocrv6"` (default) or `"pp-ocrv5"`.
@@ -13690,7 +13754,7 @@ class PaddleOcrConfig {
   /// tiers (see `model_tier`). Scripts outside the v6 unified coverage (Arabic, Cyrillic,
   /// Devanagari, Greek, Tamil, Telugu, Thai) transparently fall back to the PP-OCRv5
   /// per-script recognition models. Defaults to `"pp-ocrv6"`; the default `model_tier`
-  /// (`"mobile"`) resolves to the v6 `"medium"` tier. Select `"pp-ocrv5"` to pin the
+  /// (`"mobile"`) resolves to the v6 `"small"` tier. Select `"pp-ocrv5"` to pin the
   /// legacy per-script/unified fleet.
   final String modelVersion;
 
@@ -14025,6 +14089,9 @@ class PageContent {
   /// formats and for sheets with an empty name.
   final String? sheetName;
 
+  /// Aggregate OCR confidence for this page. `None` when the page was not OCR'd.
+  final PageOcrConfidence? ocrConfidence;
+
   const PageContent({
     required this.pageNumber,
     required this.content,
@@ -14037,6 +14104,7 @@ class PageContent {
     this.speakerNotes,
     this.sectionName,
     this.sheetName,
+    this.ocrConfidence,
   });
 
   @override
@@ -14051,7 +14119,8 @@ class PageContent {
       layoutRegions.hashCode ^
       speakerNotes.hashCode ^
       sectionName.hashCode ^
-      sheetName.hashCode;
+      sheetName.hashCode ^
+      ocrConfidence.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -14068,7 +14137,8 @@ class PageContent {
           layoutRegions == other.layoutRegions &&
           speakerNotes == other.speakerNotes &&
           sectionName == other.sectionName &&
-          sheetName == other.sheetName;
+          sheetName == other.sheetName &&
+          ocrConfidence == other.ocrConfidence;
 }
 
 /// Metadata for individual page/slide/sheet.
@@ -14194,6 +14264,50 @@ class PageInfo {
           hidden == other.hidden &&
           isBlank == other.isBlank &&
           hasVectorGraphics == other.hasVectorGraphics;
+}
+
+/// Aggregate OCR legibility score for a page, reported by the backend that produced its text.
+///
+/// This is distinct from [`OcrConfidence`], which scores a single detected element (a word or
+/// line) using detection/recognition confidence from the OCR engine itself. `PageOcrConfidence`
+/// is a page-level summary computed after noise filtering, intended for triage of which pages
+/// are worth a closer look, not for comparing OCR engines against each other.
+class PageOcrConfidence {
+  /// Aggregate legibility score in `0.0..=1.0`, or `None` when the backend that
+  /// produced this page does not report a calibrated legibility scale.
+  ///
+  /// Backends differ in what their confidence numbers mean (see `OcrConfidence`'s
+  /// per-backend normalization), and not every backend maps onto a 0.0-1.0 legibility
+  /// scale at all. When a backend has no such calibrated scale, this is `None` rather
+  /// than a misleading number, and scores must never be compared across backends.
+  final double? score;
+
+  /// Number of words the score was averaged over, AFTER noise filtering.
+  ///
+  /// A small `word_count` means the average is based on little evidence, so a high
+  /// `score` next to a small `word_count` is not representative of the whole page.
+  final PlatformInt64 wordCount;
+
+  /// Name of the OCR backend that produced the page text.
+  final String backend;
+
+  const PageOcrConfidence({
+    this.score,
+    required this.wordCount,
+    required this.backend,
+  });
+
+  @override
+  int get hashCode => score.hashCode ^ wordCount.hashCode ^ backend.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PageOcrConfidence &&
+          runtimeType == other.runtimeType &&
+          score == other.score &&
+          wordCount == other.wordCount &&
+          backend == other.backend;
 }
 
 /// How a backend copes with a page raster whose text is not upright.
@@ -14647,14 +14761,14 @@ class PdfConfig {
   /// Ignored when `ContentFilterConfig.include_headers` is `true`.
   /// Effective nonzero margins require per-page OCR so geometry can be filtered;
   /// document-capable OCR backends use their image-processing path in that case.
-  /// Default: 0.06 (6%)
+  /// Default: 0.0 (disabled; set explicitly to filter header content)
   final double? topMarginFraction;
 
   /// Bottom margin fraction (0.0–1.0) of page height to exclude footers/page numbers.
   /// Ignored when `ContentFilterConfig.include_footers` is `true`.
   /// Effective nonzero margins require per-page OCR so geometry can be filtered;
   /// document-capable OCR backends use their image-processing path in that case.
-  /// Default: 0.05 (5%)
+  /// Default: 0.0 (disabled; set explicitly to filter footer content)
   final double? bottomMarginFraction;
 
   /// Allow single-column pseudo tables in extraction results.
@@ -16728,6 +16842,7 @@ class SecurityLimits {
 /// - `cors_origins`: empty vector (allows all origins)
 /// - `max_request_body_bytes`: 104_857_600 (100 MB)
 /// - `max_multipart_field_bytes`: 104_857_600 (100 MB)
+/// - `job_timeout_secs`: 600 (10 minutes)
 class ServerConfig {
   /// Server host address (e.g., "127.0.0.1", "0.0.0.0")
   final String host;
@@ -16748,12 +16863,22 @@ class ServerConfig {
   /// Maximum size of multipart fields in bytes (default: 100 MB)
   final PlatformInt64 maxMultipartFieldBytes;
 
+  /// Fallback timeout, in seconds, for `POST /extract-async` jobs whose request does not
+  /// pin down `extraction_timeout_secs` (default: 600, 10 minutes).
+  ///
+  /// A per-request `extraction_timeout_secs: Some(n)` always overrides this value. An
+  /// explicit `extraction_timeout_secs: null` deliberately does NOT mean "run unbounded" —
+  /// it still falls back to this server-configured cap, because an unbounded job on a
+  /// shared server is a denial-of-service risk.
+  final PlatformInt64 jobTimeoutSecs;
+
   const ServerConfig({
     required this.host,
     required this.port,
     required this.corsOrigins,
     required this.maxRequestBodyBytes,
     required this.maxMultipartFieldBytes,
+    required this.jobTimeoutSecs,
   });
 
   @override
@@ -16762,7 +16887,8 @@ class ServerConfig {
       port.hashCode ^
       corsOrigins.hashCode ^
       maxRequestBodyBytes.hashCode ^
-      maxMultipartFieldBytes.hashCode;
+      maxMultipartFieldBytes.hashCode ^
+      jobTimeoutSecs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -16773,7 +16899,8 @@ class ServerConfig {
           port == other.port &&
           corsOrigins == other.corsOrigins &&
           maxRequestBodyBytes == other.maxRequestBodyBytes &&
-          maxMultipartFieldBytes == other.maxMultipartFieldBytes;
+          maxMultipartFieldBytes == other.maxMultipartFieldBytes &&
+          jobTimeoutSecs == other.jobTimeoutSecs;
 }
 
 /// A URL entry from a sitemap.
@@ -17377,6 +17504,19 @@ class Table {
   /// future extension, not implemented yet.
   final String? tableId;
 
+  /// Paragraph styles carried by individual cells, for the cells that have one.
+  ///
+  /// Sparse and flat on purpose. A DOCX banner row -- row 0, one cell spanning the grid,
+  /// styled `Heading1`..`Heading6` -- is what Word's navigation pane and a `TOC` field treat
+  /// as the document outline, but as a table cell it reached consumers as anonymous text
+  /// (GH#1587). `cells` keeps the bare text: prefixing it with `#` would put a markdown
+  /// heading inside a table cell, which is invalid where it lands and would change text every
+  /// existing consumer already reads. This list is the signal instead.
+  ///
+  /// Entries are only emitted for cells that actually carry a style, so an ordinary table
+  /// serialises exactly as it did before. Indices are into `cells`.
+  final List<TableCellStyle> cellStyles;
+
   /// Header cells for this fragment, i.e. the first row of `cells`.
   ///
   /// Populated even when this fragment's own header row was merged away or
@@ -17391,6 +17531,7 @@ class Table {
     required this.pageNumber,
     this.boundingBox,
     this.tableId,
+    required this.cellStyles,
     this.columns,
   });
 
@@ -17401,6 +17542,7 @@ class Table {
       pageNumber.hashCode ^
       boundingBox.hashCode ^
       tableId.hashCode ^
+      cellStyles.hashCode ^
       columns.hashCode;
 
   @override
@@ -17413,6 +17555,7 @@ class Table {
           pageNumber == other.pageNumber &&
           boundingBox == other.boundingBox &&
           tableId == other.tableId &&
+          cellStyles == other.cellStyles &&
           columns == other.columns;
 }
 
@@ -17455,6 +17598,45 @@ class TableCell {
           rowSpan == other.rowSpan &&
           colSpan == other.colSpan &&
           isHeader == other.isHeader;
+}
+
+/// The paragraph style a single table cell's text carries, located by grid position.
+///
+/// Flat rather than a nested `Vec<Vec<Option<..>>>`: the nested shape marshals badly across the
+/// FFI bindings, and the data is sparse anyway. See [`Table::cell_styles`].
+class TableCellStyle {
+  /// Zero-indexed row of the cell this style belongs to.
+  final PlatformInt64 row;
+
+  /// Zero-indexed column of the cell this style belongs to.
+  final PlatformInt64 col;
+
+  /// Outline level 1-6 when the style resolves to a heading, otherwise `None`.
+  final PlatformInt64? headingLevel;
+
+  /// Human-readable style name, e.g. `heading 2`.
+  final String? styleName;
+
+  const TableCellStyle({
+    required this.row,
+    required this.col,
+    this.headingLevel,
+    this.styleName,
+  });
+
+  @override
+  int get hashCode =>
+      row.hashCode ^ col.hashCode ^ headingLevel.hashCode ^ styleName.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TableCellStyle &&
+          runtimeType == other.runtimeType &&
+          row == other.row &&
+          col == other.col &&
+          headingLevel == other.headingLevel &&
+          styleName == other.styleName;
 }
 
 /// Controls how markdown tables are handled when they exceed the chunk size limit.
@@ -17617,13 +17799,24 @@ class TesseractConfig {
   /// "+"-joined ("eng+deu").
   final List<String> language;
 
-  /// Page Segmentation Mode (0-13).
+  /// Page Segmentation Mode (1-13).
   ///
-  /// Common values:
-  /// - 3: Fully automatic page segmentation (native default)
-  /// - 6: Assume a single uniform block of text (WASM default — avoids layout-analysis hang)
+  /// PSM 0 is rejected: Tesseract's `PSM_OSD_ONLY` performs orientation and script
+  /// detection with no character recognition, so it cannot satisfy a text-extraction
+  /// request and previously yielded an empty document (GH#1586).
+  ///
+  /// `None` (the default) means the caller made no explicit choice: the extraction
+  /// pipeline applies its own context-appropriate PSM (whole-image PSM 11, vertical-
+  /// language PSM 5, layout-region PSM 6, or the sparse-text retry's PSM 3) exactly as
+  /// it would with no `TesseractConfig` at all — see issue #1573. Setting any other
+  /// field on this struct no longer changes that behaviour.
+  ///
+  /// Common explicit values:
+  /// - 3: Fully automatic page segmentation (native engine default)
+  /// - 6: Assume a single uniform block of text (WASM engine default — avoids
+  ///   layout-analysis hang)
   /// - 11: Sparse text with no particular order
-  final PlatformInt64 psm;
+  final PlatformInt64? psm;
 
   /// Output format ("text" or "markdown")
   final String outputFormat;
@@ -17698,7 +17891,7 @@ class TesseractConfig {
 
   const TesseractConfig({
     required this.language,
-    required this.psm,
+    this.psm,
     required this.outputFormat,
     required this.oem,
     required this.minConfidence,
@@ -18640,12 +18833,20 @@ sealed class VlmFallbackPolicy with _$VlmFallbackPolicy {
   /// Try the classical OCR backend first. If the quality score is below
   /// `quality_threshold`, send the page to the VLM.
   ///
-  /// `quality_threshold` is in the `[0.0, 1.0]` range produced by
-  /// `text::quality::calculate_quality_score`. A value of `0.5` is a
-  /// reasonable starting point; calibrate with the Stage 0 benchmark harness.
+  /// `quality_threshold` is in the `[0.0, 1.0]` range, but it is **not** the same
+  /// quantity reported on `score` (GH#1584).
+  /// The accept decision blends text-shape quality with confidence, weighted 0.7/0.3
+  /// (`extractors::pdf::ocr::pipeline_stage_score`) -- when the backend's confidence is on
+  /// a known scale it contributes only 30% of the compared score, so a page can clear this
+  /// threshold on clean-looking text even while its own `PageOcrConfidence.score` reads
+  /// below it. Do not calibrate this value by reading `PageOcrConfidence.score` off a
+  /// sample page and expecting an equal `quality_threshold` to reproduce the same
+  /// accept/reject outcome. A value of `0.5` is a reasonable starting point; calibrate with
+  /// the Stage 0 benchmark harness.
   const factory VlmFallbackPolicy.onLowQuality({
-    /// Minimum acceptable quality score from the classical backend.
-    /// Pages scoring below this are retried with VLM.
+    /// Minimum acceptable quality score from the classical backend. Pages scoring below
+    /// this are retried with VLM -- see this variant's doc comment for what "scoring"
+    /// means here.
     required double qualityThreshold,
   }) = VlmFallbackPolicy_OnLowQuality;
 

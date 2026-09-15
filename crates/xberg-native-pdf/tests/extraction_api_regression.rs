@@ -59,6 +59,76 @@ static GLOBAL_FLAG_LOCK: Mutex<()> = Mutex::new(());
 /// global setter at `src/content/parser.rs` overrides the hard-coded
 /// `MAX_OPERATORS = 1_000_000` cap via `AtomicUsize`. All 6 runtime
 /// cap-check sites route through `effective_max_operators()`.
+/// Every production source file of the `extractors::text` module.
+///
+/// Test files are deliberately excluded, for the same reason as `DOCUMENT_SOURCES`.
+///
+/// `extractors/text.rs` was 673 KiB, over the 500 KiB file-safety limit, and is now the
+/// `extractors/text/` directory, so a single `include_str!` no longer sees the whole
+/// module. ~keep
+const TEXT_SOURCES: &[&str] = &[
+    include_str!("../src/extractors/text/mod.rs"),
+    include_str!("../src/extractors/text/adaptive_spacing.rs"),
+    include_str!("../src/extractors/text/advance.rs"),
+    include_str!("../src/extractors/text/clustering.rs"),
+    include_str!("../src/extractors/text/marked_content.rs"),
+    include_str!("../src/extractors/text/operators.rs"),
+    include_str!("../src/extractors/text/run.rs"),
+    include_str!("../src/extractors/text/setup.rs"),
+    include_str!("../src/extractors/text/span_merging.rs"),
+    include_str!("../src/extractors/text/span_ordering.rs"),
+    include_str!("../src/extractors/text/tj_arrays.rs"),
+    include_str!("../src/extractors/text/xobjects.rs"),
+];
+
+/// True when any source file of the `extractors::text` module contains `needle`.
+fn text_source_contains(needle: &str) -> bool {
+    TEXT_SOURCES.iter().any(|source| source.contains(needle))
+}
+
+/// Total occurrences of `needle` across every source file of `extractors::text`.
+///
+/// The module is a directory now, so a count has to sum the files rather than scan one. ~keep
+fn text_source_matches(needle: &str) -> usize {
+    TEXT_SOURCES.iter().map(|source| source.matches(needle).count()).sum()
+}
+
+/// Every production source file of the `document` module.
+///
+/// Test files are deliberately excluded: these assertions are about production
+/// code, and a match found only in a test would satisfy them falsely.
+///
+/// `document.rs` was one 1.2 MiB file, over this repository's 500 KiB file-safety
+/// limit, and is now the `document/` directory. A single `include_str!` no longer sees
+/// the whole module, so these source-level assertions scan all of it. Only the tests
+/// that previously read `document.rs` use this; the ones reading `extractors/text.rs`,
+/// `extractors/forms.rs` and `fonts/font_dict.rs` are untouched. ~keep
+const DOCUMENT_SOURCES: &[&str] = &[
+    include_str!("../src/document/mod.rs"),
+    include_str!("../src/document/annotations.rs"),
+    include_str!("../src/document/catalog.rs"),
+    include_str!("../src/document/columns.rs"),
+    include_str!("../src/document/extract_api.rs"),
+    include_str!("../src/document/fonts.rs"),
+    include_str!("../src/document/images.rs"),
+    include_str!("../src/document/objects.rs"),
+    include_str!("../src/document/open.rs"),
+    include_str!("../src/document/pages.rs"),
+    include_str!("../src/document/paths.rs"),
+    include_str!("../src/document/reading_order.rs"),
+    include_str!("../src/document/rect_api.rs"),
+    include_str!("../src/document/redaction.rs"),
+    include_str!("../src/document/span_postprocess.rs"),
+    include_str!("../src/document/spans_text.rs"),
+    include_str!("../src/document/tables.rs"),
+    include_str!("../src/document/text_assembly.rs"),
+];
+
+/// True when any source file of the `document` module contains `needle`.
+fn document_source_contains(needle: &str) -> bool {
+    DOCUMENT_SOURCES.iter().any(|source| source.contains(needle))
+}
+
 #[test]
 fn max_ops_per_stream_setter_round_trips() {
     let _guard = GLOBAL_FLAG_LOCK.lock().unwrap_or_else(|p| p.into_inner());
@@ -92,17 +162,16 @@ fn pdf_permissions_decode_p_flag_bits() {
 
 #[test]
 fn extract_text_gates_on_authentication() {
-    let source = include_str!("../src/document.rs");
     assert!(
-        source.contains("self.require_authenticated()?;"),
+        document_source_contains("self.require_authenticated()?;"),
         "extract_text must call require_authenticated guard",
     );
     assert!(
-        source.contains("fn require_authenticated"),
+        document_source_contains("fn require_authenticated"),
         "require_authenticated helper must exist",
     );
     assert!(
-        source.contains("pub fn permissions"),
+        document_source_contains("pub fn permissions"),
         "the public permissions() accessor must be defined",
     );
 }
@@ -113,13 +182,12 @@ fn extract_text_gates_on_authentication() {
 /// from genuinely-empty pages and route to OCR.
 #[test]
 fn has_text_layer_predicate_present() {
-    let source = include_str!("../src/document.rs");
     assert!(
-        source.contains("pub fn has_text_layer"),
+        document_source_contains("pub fn has_text_layer"),
         "has_text_layer method must be defined on PdfDocument",
     );
     assert!(
-        source.contains("may_contain_text"),
+        document_source_contains("may_contain_text"),
         "predicate must consult the content-stream probe (may_contain_text)",
     );
 }
@@ -158,17 +226,21 @@ fn preserve_unmapped_glyphs_setter_round_trips() {
 
 #[test]
 fn preserve_unmapped_glyphs_gates_all_filter_sites() {
-    let source = include_str!("../src/extractors/text.rs");
     // Verify the gate is applied at every FFFD filter site. Each
     // filter must read the flag; otherwise the issue is only partly
     // fixed. ~keep
-    let occurrences = source.matches("preserve_unmapped_glyphs()").count();
-    // 1 helper definition + 8 filter-site gates = at least 9 mentions.
-    // The bound is conservative — if more sites are added later that
-    // honor the flag, the count grows but the test stays valid. ~keep
+    let occurrences = text_source_matches("preserve_unmapped_glyphs()");
+    // 1 helper definition + 7 filter-site gates = 8 mentions in production code.
+    //
+    // This bound was ≥9 and counted `extractors/text.rs` whole — which, before that
+    // file was split into `extractors/text/`, contained its own inline `mod tests`.
+    // Six of the mentions it counted were in test code, so the check could not have
+    // failed when a production gate was removed: the test-file mentions alone kept it
+    // over the threshold. `TEXT_SOURCES` now excludes test files, and the bound is the
+    // real production count, so removing a gate fails this test as intended. ~keep
     assert!(
-        occurrences >= 9,
-        "expected ≥9 references to preserve_unmapped_glyphs (1 def + 8+ gates), found {}",
+        occurrences >= 8,
+        "expected ≥8 production references to preserve_unmapped_glyphs (1 def + 7 gates), found {}",
         occurrences,
     );
 }
@@ -181,17 +253,16 @@ fn preserve_unmapped_glyphs_gates_all_filter_sites() {
 /// API surface is in place and callable.
 #[test]
 fn structured_warnings_accessors_present() {
-    let source = include_str!("../src/document.rs");
     assert!(
-        source.contains("pub fn structured_warnings"),
+        document_source_contains("pub fn structured_warnings"),
         "PdfDocument::structured_warnings must be defined",
     );
     assert!(
-        source.contains("pub fn take_structured_warnings"),
+        document_source_contains("pub fn take_structured_warnings"),
         "PdfDocument::take_structured_warnings (drain variant) must be defined",
     );
     assert!(
-        source.contains("pub fn push_structured_warning"),
+        document_source_contains("pub fn push_structured_warning"),
         "PdfDocument::push_structured_warning (hook for diagnostic sources) must be defined",
     );
     // The per-document sink is wired through
@@ -200,8 +271,8 @@ fn structured_warnings_accessors_present() {
     // satisfies the contract: the document owns a thread-safe sink
     // that the structured_warnings accessors can drain through. ~keep
     assert!(
-        source.contains("warning_sink: crate::extractors::warnings::WarningSink")
-            || source.contains("structured_warnings: Mutex"),
+        document_source_contains("warning_sink: crate::extractors::warnings::WarningSink")
+            || document_source_contains("structured_warnings: Mutex"),
         "PdfDocument must own a WarningSink (or compatible Mutex<Vec<Warning>>) field",
     );
 }
@@ -696,13 +767,12 @@ fn global_warning_sink_drain_round_trips() {
 /// `di ff cult` for `difficult`.
 #[test]
 fn agl_ligature_codepoint_detection_present() {
-    let source = include_str!("../src/extractors/text.rs");
     assert!(
-        source.contains("pub(crate) fn starts_with_agl_ligature"),
+        text_source_contains("pub(crate) fn starts_with_agl_ligature"),
         "starts_with_agl_ligature helper must be defined",
     );
     assert!(
-        source.contains("U+FB00..U+FB06") || source.contains("'\\u{FB00}'..='\\u{FB06}'"),
+        text_source_contains("U+FB00..U+FB06") || text_source_contains("'\\u{FB00}'..='\\u{FB06}'"),
         "the helper must cover the full Latin Ligatures block",
     );
 }
@@ -713,9 +783,8 @@ fn agl_ligature_codepoint_detection_present() {
 /// font-name plumbing.
 #[test]
 fn font_size_boundary_lowers_space_threshold() {
-    let source = include_str!("../src/extractors/text.rs");
     assert!(
-        source.contains("word_margin_ratio *= 0.7"),
+        text_source_contains("word_margin_ratio *= 0.7"),
         "the size-boundary detector must reduce the threshold by 30%",
     );
 }

@@ -145,8 +145,10 @@ pub struct OcrQualityThresholds {
     /// recorded municipal ordinance (10 prose pages, 6 scanned survey/architectural drawings)
     /// with Tesseract 5.5.3:
     ///
-    ///     prose      86.3 - 95.3
-    ///     drawings   18.5 - 64.3
+    /// ```text
+    /// prose      86.3 - 95.3
+    /// drawings   18.5 - 64.3
+    /// ```
     ///
     /// The default sits in that gap with ~11 points of margin on each side. Compare the
     /// short-word ratio, which separated the same two groups by 0.09 on a 0-1 scale.
@@ -604,12 +606,20 @@ pub enum VlmFallbackPolicy {
     /// Try the classical OCR backend first. If the quality score is below
     /// `quality_threshold`, send the page to the VLM.
     ///
-    /// `quality_threshold` is in the `[0.0, 1.0]` range produced by
-    /// `text::quality::calculate_quality_score`. A value of `0.5` is a
-    /// reasonable starting point; calibrate with the Stage 0 benchmark harness.
+    /// `quality_threshold` is in the `[0.0, 1.0]` range, but it is **not** the same
+    /// quantity reported on [`crate::types::page::PageOcrConfidence::score`] (GH#1584).
+    /// The accept decision blends text-shape quality with confidence, weighted 0.7/0.3
+    /// (`extractors::pdf::ocr::pipeline_stage_score`) -- when the backend's confidence is on
+    /// a known scale it contributes only 30% of the compared score, so a page can clear this
+    /// threshold on clean-looking text even while its own `PageOcrConfidence.score` reads
+    /// below it. Do not calibrate this value by reading `PageOcrConfidence.score` off a
+    /// sample page and expecting an equal `quality_threshold` to reproduce the same
+    /// accept/reject outcome. A value of `0.5` is a reasonable starting point; calibrate with
+    /// the Stage 0 benchmark harness.
     OnLowQuality {
-        /// Minimum acceptable quality score from the classical backend.
-        /// Pages scoring below this are retried with VLM.
+        /// Minimum acceptable quality score from the classical backend. Pages scoring below
+        /// this are retried with VLM -- see this variant's doc comment for what "scoring"
+        /// means here.
         quality_threshold: f64,
     },
 
@@ -742,10 +752,13 @@ pub struct OcrConfig {
     #[serde(default = "default_ocr_enabled")]
     pub enabled: bool,
 
-    /// OCR backend: tesseract, paddleocr, paddle-ocr, sceptre, or vlm.
+    /// OCR backend: paddle-ocr, tesseract, paddleocr, sceptre, or vlm.
     /// Sceptre uses ONNX Runtime on desktop/server and tract on supported mobile builds.
     /// Browser WebAssembly uses the separate byte-fed Sceptre worker API.
-    #[serde(default = "default_tesseract_backend")]
+    ///
+    /// Defaults to `paddle-ocr` wherever that backend is compiled in (it reads CJK and Latin
+    /// script in one pass), and to `tesseract` otherwise.
+    #[serde(default = "default_ocr_backend")]
     pub backend: String,
 
     /// Language code(s) for OCR recognition. Defaults to `["eng"]`. For Tesseract,
@@ -874,6 +887,20 @@ pub struct OcrConfig {
     #[serde(skip)]
     pub acceleration: Option<super::acceleration::AccelerationConfig>,
 
+    /// Security limits applied when decoding raw image bytes for OCR (GH#1554).
+    ///
+    /// Not user-configurable via config files — injected at runtime from
+    /// `ExtractionConfig::security_limits` before each `process_image` call, the same
+    /// pattern [`Self::acceleration`] uses. `ExtractionConfig::security_limits` is the
+    /// single source of truth: this field only ever holds a copy the caller placed here
+    /// immediately before dispatch, so the two cannot drift. A backend consulting a
+    /// `backend_options` override for this call may still let that override win, but in
+    /// the absence of one this field is what backends should fall back to instead of
+    /// `SecurityLimits::default()`. `None` means "use `SecurityLimits::default()`", never
+    /// "disable the check". ~keep
+    #[serde(skip)]
+    pub security_limits: Option<crate::extractors::security::SecurityLimits>,
+
     /// Caller-supplied Tesseract `traineddata` bytes per language code.
     ///
     /// Primary use case is the WASM build, which has no filesystem and cannot
@@ -901,7 +928,7 @@ impl Default for OcrConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            backend: default_tesseract_backend(),
+            backend: default_ocr_backend(),
             language: vec!["eng".to_string()],
             tesseract_config: None,
             output_format: None,
@@ -915,6 +942,7 @@ impl Default for OcrConfig {
             vlm_config: None,
             vlm_prompt: None,
             acceleration: None,
+            security_limits: None,
             tessdata_bytes: None,
             tessdata_path: None,
         }
@@ -1018,6 +1046,7 @@ impl OcrConfig {
     #[cfg(any(
         feature = "ocr",
         feature = "ocr-wasm",
+        feature = "ocr-pipeline",
         paddle_ocr,
         all(feature = "liter-llm", not(target_arch = "wasm32")),
     ))]
@@ -1034,6 +1063,41 @@ impl OcrConfig {
         } else {
             langs
         }
+    }
+
+    /// Resolve the language Tesseract should use, reconciling [`Self::language`] with
+    /// `tesseract_config.language` (#1572).
+    ///
+    /// Both fields default to `["eng"]`, so neither can represent "unset" on its own. An
+    /// explicit (non-default) [`Self::language`] always wins, matching the convention already
+    /// used to decide whether to propagate a language into a synthesised pipeline stage (see
+    /// [`Self::effective_pipeline`]). Otherwise a non-empty `tesseract_config.language` wins,
+    /// so a caller who only configures `TesseractConfig` still gets their language. Both
+    /// native (`ocr::tesseract_backend`) and WASM (`ocr::tesseract_wasm_backend`) Tesseract
+    /// backends call this so they agree on which field wins.
+    #[cfg(any(
+        feature = "ocr",
+        feature = "ocr-wasm",
+        feature = "ocr-pipeline",
+        paddle_ocr,
+        all(feature = "liter-llm", not(target_arch = "wasm32")),
+    ))]
+    pub(crate) fn effective_tesseract_language(&self) -> Vec<String> {
+        // Callers pass ISO codes (`zh`, `en`, …) but Tesseract loads packs by their own names
+        // (`chi_sim`, `eng`, …); resolve to the pack name here so every consumer — the native
+        // backend, the WASM backend, image extraction and the tessdata downloader — agrees. ~keep
+        let resolved = if self.language != [DEFAULT_OCR_LANGUAGE.to_string()] {
+            self.effective_languages()
+        } else {
+            match &self.tesseract_config {
+                Some(tess) if !tess.language.is_empty() => tess.language.clone(),
+                _ => self.effective_languages(),
+            }
+        };
+        resolved
+            .iter()
+            .map(|code| crate::ocr::types::tesseract_language_name(code))
+            .collect()
     }
 
     /// Returns the effective quality thresholds, using configured values or defaults.
@@ -1054,12 +1118,13 @@ impl OcrConfig {
     ///      Returns `None` if `vlm_config` is not set (misconfiguration; surfaces at
     ///      call-time as a logged warning rather than a panic — [`validate`] catches it
     ///      at config-load time).
-    /// 3. If `paddle-ocr` is compiled in and the backend is the default (tesseract),
-    ///    auto-constructs `[tesseract @ 100, paddleocr @ 50]`.
-    /// 4. Otherwise returns `None` (single-backend mode).
+    /// 3. Otherwise returns `None` (single-backend mode).
     ///
-    /// Explicit non-default backend selections are honored as-is — a silent
-    /// paddleocr fallback would mask errors from the chosen backend.
+    /// No classical fallback is synthesised: the default backend is already the strongest
+    /// classical engine compiled in, and scoring a second, weaker engine against it would let
+    /// that engine's misreadings win on the fragments where the default legitimately finds
+    /// nothing — the Tesseract-vs-PaddleOCR sample run did exactly that. A caller who wants a
+    /// mix configures `pipeline` explicitly. ~keep
     #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
     pub(crate) fn effective_pipeline(&self) -> Option<OcrPipelineConfig> {
         if self.pipeline.is_some() {
@@ -1073,7 +1138,7 @@ impl OcrConfig {
                         "vlm_fallback=OnLowQuality is set but vlm_config is missing; \
                          falling through to single-backend mode"
                     );
-                    return self.effective_pipeline_classical();
+                    return None;
                 };
                 let mut thresholds = self.effective_thresholds();
                 thresholds.pipeline_min_quality = *quality_threshold;
@@ -1110,7 +1175,7 @@ impl OcrConfig {
                         "vlm_fallback=Always is set but vlm_config is missing; \
                          falling through to single-backend mode"
                     );
-                    return self.effective_pipeline_classical();
+                    return None;
                 };
                 let vlm_stage = OcrPipelineStage {
                     backend: "vlm".to_string(),
@@ -1129,55 +1194,7 @@ impl OcrConfig {
             VlmFallbackPolicy::Disabled => {}
         }
 
-        self.effective_pipeline_classical()
-    }
-
-    /// Classical pipeline synthesis: paddle-ocr auto-fallback or `None`.
-    ///
-    /// Extracted so the vlm_fallback paths can fall through cleanly without
-    /// duplicating the paddle-ocr conditional compilation block.
-    #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
-    fn effective_pipeline_classical(&self) -> Option<OcrPipelineConfig> {
-        #[cfg(paddle_ocr)]
-        {
-            if self.backend != default_tesseract_backend() {
-                return None;
-            }
-
-            let stages = vec![
-                OcrPipelineStage {
-                    backend: self.backend.clone(),
-                    priority: 100,
-                    language: if self.language.len() == 1 && self.language[0] == "eng" {
-                        None
-                    } else {
-                        Some(self.language.clone())
-                    },
-                    tesseract_config: self.tesseract_config.clone(),
-                    paddle_ocr_config: None,
-                    vlm_config: self.vlm_config.clone(),
-                    backend_options: self.backend_options.clone(),
-                },
-                OcrPipelineStage {
-                    backend: "paddleocr".to_string(),
-                    priority: 50,
-                    language: None,
-                    tesseract_config: None,
-                    paddle_ocr_config: self.paddle_ocr_config.clone(),
-                    vlm_config: None,
-                    backend_options: None,
-                },
-            ];
-            Some(OcrPipelineConfig {
-                stages,
-                quality_thresholds: self.effective_thresholds(),
-            })
-        }
-
-        #[cfg(not(paddle_ocr))]
-        {
-            None
-        }
+        None
     }
 
     /// Best-effort selection policy for the pipeline this config produces.
@@ -1185,8 +1202,8 @@ impl OcrConfig {
     /// A `vlm_fallback` policy synthesises a fallback pipeline whose later VLM stage
     /// is a deliberate override of an inadequate earlier stage, so its best-effort
     /// result should be the last non-empty stage rather than the highest-scoring one
-    /// (#1341). Explicit pipelines and the classical paddle auto-fallback keep the
-    /// score-based selection. Mirrors the branch structure of [`Self::effective_pipeline`].
+    /// (#1341). Explicit pipelines keep score-based selection. Mirrors the branch
+    /// structure of [`Self::effective_pipeline`].
     #[cfg(all(feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
     pub(crate) fn pipeline_selection(&self) -> OcrPipelineSelection {
         // Explicit pipelines keep score-based selection regardless of vlm_fallback
@@ -1230,7 +1247,9 @@ fn validate_tesseract_tuning(tesseract_config: Option<&crate::types::TesseractCo
     let Some(tesseract_config) = tesseract_config else {
         return Ok(());
     };
-    crate::core::config_validation::validate_tesseract_psm(tesseract_config.psm)?;
+    if let Some(psm) = tesseract_config.psm {
+        crate::core::config_validation::validate_tesseract_psm(psm)?;
+    }
     crate::core::config_validation::validate_tesseract_oem(tesseract_config.oem)?;
     if let Some(ref preprocessing) = tesseract_config.preprocessing {
         crate::core::config_validation::validate_image_preprocessing_config(preprocessing)?;
@@ -1242,8 +1261,23 @@ fn default_ocr_enabled() -> bool {
     true
 }
 
-fn default_tesseract_backend() -> String {
-    "tesseract".to_string()
+/// OCR backend used when the caller does not name one.
+///
+/// PaddleOCR is the default wherever it is compiled in: it reads CJK and Latin script in the
+/// same pass, where Tesseract mixes the two — an English manual came back with `一`, `二` and
+/// `，` sprinkled through its recognized text — and on the sample corpus it recognized text on
+/// 260 of 325 images against Tesseract's 221, with the known figure labels (`95TAG`, `100TAG`,
+/// `master`, `dev1`, `dev2`) all recovered where Tesseract found none. Builds without
+/// `paddle-ocr` keep Tesseract. ~keep
+fn default_ocr_backend() -> String {
+    #[cfg(paddle_ocr)]
+    {
+        "paddle-ocr".to_string()
+    }
+    #[cfg(not(paddle_ocr))]
+    {
+        "tesseract".to_string()
+    }
 }
 
 /// Default OCR language (Tesseract/ISO 639 naming): English.
@@ -1263,7 +1297,7 @@ mod tests {
 
     fn tesseract_config_with(psm: i32, oem: i32) -> crate::types::TesseractConfig {
         crate::types::TesseractConfig {
-            psm,
+            psm: Some(psm),
             oem,
             ..Default::default()
         }
@@ -1280,6 +1314,20 @@ mod tests {
     }
 
     #[test]
+    fn should_accept_ocr_config_when_tesseract_psm_is_unset() {
+        let config = OcrConfig {
+            tesseract_config: Some(crate::types::TesseractConfig {
+                psm: None,
+                oem: 1,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
     fn should_reject_ocr_config_when_tesseract_psm_is_above_range() {
         let config = OcrConfig {
             tesseract_config: Some(tesseract_config_with(14, 1)),
@@ -1288,11 +1336,35 @@ mod tests {
 
         let message = config
             .validate()
-            .expect_err("psm 14 is out of the 0-13 range")
+            .expect_err("psm 14 is out of the 1-13 range")
             .to_string();
         assert!(
             message.contains("PSM"),
             "error should name the PSM field; got: {message}"
+        );
+    }
+
+    /// GH#1586: PSM 0 is `PSM_OSD_ONLY`, so Tesseract recognises no characters and the
+    /// extraction completed successfully with an empty document. Rejecting it here is the
+    /// only place a caller finds out before losing the content. ~keep
+    #[test]
+    fn should_reject_ocr_config_when_tesseract_psm_is_osd_only() {
+        let config = OcrConfig {
+            tesseract_config: Some(tesseract_config_with(0, 1)),
+            ..Default::default()
+        };
+
+        let message = config
+            .validate()
+            .expect_err("psm 0 recognises no text and must not be accepted")
+            .to_string();
+        assert!(
+            message.contains("PSM 0") || message.contains("PSM value '0'"),
+            "error should name PSM 0 specifically; got: {message}"
+        );
+        assert!(
+            message.contains("orientation"),
+            "error should explain that PSM 0 is orientation detection only; got: {message}"
         );
     }
 
@@ -1359,10 +1431,21 @@ mod tests {
         );
     }
 
+    /// Backend a defaulted config resolves to: PaddleOCR where it is compiled in, Tesseract
+    /// otherwise. Mirrors `default_ocr_backend` so the assertions below hold under both feature
+    /// sets. ~keep
+    fn expected_default_backend() -> &'static str {
+        if cfg!(paddle_ocr) {
+            "paddle-ocr"
+        } else {
+            "tesseract"
+        }
+    }
+
     #[test]
     fn test_ocr_config_default() {
         let config = OcrConfig::default();
-        assert_eq!(config.backend, "tesseract");
+        assert_eq!(config.backend, expected_default_backend());
         assert_eq!(config.language, vec!["eng".to_string()]);
         assert!(config.tesseract_config.is_none());
         assert!(config.output_format.is_none());
@@ -1388,6 +1471,26 @@ mod tests {
         };
         assert_eq!(config.backend, "tesseract");
         assert_eq!(config.language, vec!["eng".to_string(), "deu".to_string()]);
+    }
+
+    /// GH#1621: `fao` (Faroese) is a real Tesseract-supported ISO 639-3 code, but
+    /// `OcrConfig::validate` rejected it because the general validator's allowlist
+    /// (`core::config_validation::sections::VALID_LANGUAGE_CODES`) omitted it while the
+    /// Tesseract-specific list (`ocr::validation::TESSERACT_SUPPORTED_LANGUAGE_CODES`)
+    /// already carried it. ~keep
+    #[test]
+    fn should_accept_fao_for_tesseract_backend_regression_gh_1621() {
+        let config = OcrConfig {
+            backend: "tesseract".to_string(),
+            language: vec!["fao".to_string()],
+            ..Default::default()
+        };
+        let result = config.validate();
+        assert!(
+            result.is_ok(),
+            "expected 'fao' to be accepted as a valid Tesseract language code, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1528,12 +1631,17 @@ mod tests {
 
     #[cfg(all(feature = "ocr", feature = "pdf"))]
     #[test]
-    fn test_effective_pipeline_explicit_paddleocr_no_autofallback() {
-        let config = OcrConfig {
-            backend: "paddleocr".to_string(),
-            ..Default::default()
-        };
-        assert!(config.effective_pipeline().is_none());
+    fn test_effective_pipeline_explicit_backend_no_synthesis() {
+        for backend in ["paddleocr", "tesseract", "sceptre"] {
+            let config = OcrConfig {
+                backend: backend.to_string(),
+                ..Default::default()
+            };
+            assert!(
+                config.effective_pipeline().is_none(),
+                "an explicitly selected backend ({backend}) must not gain a synthesised fallback"
+            );
+        }
     }
 
     #[cfg(feature = "ocr")]
@@ -1548,24 +1656,19 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("Invalid OCR backend"));
     }
 
+    /// A defaulted config OCRs with exactly one backend: the default is already the strongest
+    /// classical engine compiled in, so nothing is synthesised behind it. The old shape paired
+    /// a Tesseract default with a lower-priority PaddleOCR fallback; with PaddleOCR as the
+    /// default that pairing is gone, and an explicit backend is still honoured as-is.
     #[cfg(all(feature = "ocr", feature = "pdf"))]
     #[test]
-    fn test_effective_pipeline_default_tesseract_backend() {
+    fn test_effective_pipeline_default_backend_has_no_synthesis() {
         let config = OcrConfig::default();
-        let result = config.effective_pipeline();
-        #[cfg(paddle_ocr)]
-        {
-            let pipeline = result.unwrap();
-            assert_eq!(pipeline.stages.len(), 2);
-            assert_eq!(pipeline.stages[0].backend, "tesseract");
-            assert_eq!(pipeline.stages[0].priority, 100);
-            assert_eq!(pipeline.stages[1].backend, "paddleocr");
-            assert_eq!(pipeline.stages[1].priority, 50);
-        }
-        #[cfg(not(paddle_ocr))]
-        {
-            assert!(result.is_none());
-        }
+        assert_eq!(config.backend, expected_default_backend());
+        assert!(
+            config.effective_pipeline().is_none(),
+            "a defaulted config must run a single backend, not a synthesised pipeline"
+        );
     }
 
     #[cfg(all(feature = "ocr", feature = "pdf"))]
@@ -2003,7 +2106,7 @@ mod tests {
     fn test_ocr_config_deserialization_missing_optional_fields() {
         let json = r#"{}"#;
         let config: OcrConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.backend, "tesseract");
+        assert_eq!(config.backend, expected_default_backend());
         assert_eq!(config.language, vec!["eng".to_string()]);
         assert!(config.pipeline.is_none());
         assert!(config.quality_thresholds.is_none());
@@ -2290,24 +2393,12 @@ mod tests {
             backend_options: Some(serde_json::json!({"mode": "fast"})),
             ..Default::default()
         };
-        let pipeline = config
-            .effective_pipeline()
-            .expect("paddle-ocr feature must produce a pipeline");
-        assert_eq!(pipeline.stages.len(), 2);
-
-        let primary = &pipeline.stages[0];
-        assert_eq!(primary.backend, "tesseract");
-        let opts = primary
-            .backend_options
-            .as_ref()
-            .expect("primary stage must carry backend_options");
-        assert_eq!(opts["mode"], "fast");
-
-        let fallback = &pipeline.stages[1];
-        assert_eq!(fallback.backend, "paddleocr");
+        // The classical auto-fallback was removed: the default backend is already the
+        // strongest classical engine compiled in, so a defaulted config runs single-backend
+        // and never synthesises a pipeline — not even with backend_options set.
         assert!(
-            fallback.backend_options.is_none(),
-            "paddleocr stage must not inherit backend_options"
+            config.effective_pipeline().is_none(),
+            "a defaulted config must not gain a synthesised pipeline"
         );
     }
 

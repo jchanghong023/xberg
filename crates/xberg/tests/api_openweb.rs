@@ -301,11 +301,14 @@ mod slow_fixture_extractor {
     use xberg::plugins::{DocumentExtractor, Plugin};
     use xberg::{ExtractInput, ExtractedDocument, ExtractionConfig, Result};
 
-    /// A made-up `image/*` subtype: the `image/` prefix short-circuits
-    /// `validate_mime_type` without needing to be in the static supported-MIME
-    /// list, and the exact string is unique enough that registering an
-    /// extractor for it cannot shadow any real, built-in extractor.
-    pub(crate) const SLOW_FIXTURE_MIME: &str = "image/x-xberg-router-timeout-fixture-1273";
+    /// Must be a MIME type that `validate_mime_type` actually accepts. This was a made-up
+    /// `image/*` subtype until f58a0666a8 removed the `image/` prefix short-circuit, after
+    /// which the request was rejected before ever reaching extraction and the timeout under
+    /// test could not be exercised. `text/prs.fallenstein.rst` is a real supported type that
+    /// no other test in this file posts, so the fixture's `priority = i32::MAX` shadows the
+    /// built-in extractor only for the duration of this `#[serial]` test, and `FixtureGuard`
+    /// unregisters it on drop. ~keep
+    pub(crate) const SLOW_FIXTURE_MIME: &str = "text/prs.fallenstein.rst";
     const SLOW_FIXTURE_NAME: &str = "router-test-slow-fixture-1273";
 
     /// Sleeps for a fixed duration before returning, so a test can force a

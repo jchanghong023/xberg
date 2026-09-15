@@ -113,9 +113,16 @@ fn with_registration_update<T>(update: impl FnOnce() -> Result<T>) -> Result<T> 
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let _registration_update = RegistrationUpdate::begin();
+    // Read the lease count BEFORE the hook, not after. The hook is how a test learns this
+    // mutation has started, and its only caller then releases the parked pipeline that holds
+    // the lease. Loading afterwards let that release win the race under CI contention: the
+    // mutation observed a count of 0 and succeeded, failing an assertion that it be rejected.
+    // Sampling first fixes the outcome while the lease is still provably held. Production is
+    // unaffected -- the hook compiles away outside `cfg(test)`. ~keep
+    let registry_in_use = ACTIVE_PROCESSOR_SNAPSHOTS.load(Ordering::SeqCst) != 0;
     #[cfg(test)]
     run_after_registration_update_began_hook();
-    if ACTIVE_PROCESSOR_SNAPSHOTS.load(Ordering::SeqCst) != 0 {
+    if registry_in_use {
         return Err(crate::XbergError::Other(
             "post-processor registry is in use by an active extraction; retry the lifecycle mutation after extraction completes"
                 .to_string(),
@@ -645,7 +652,27 @@ mod tests {
             hook_count.fetch_add(1, Ordering::SeqCst);
         })));
 
-        let snapshot = initialize_processor_cache_for_async_pipeline().await.unwrap();
+        // `try_get_processor_snapshot` probes `PROCESSOR_CACHE` with a non-blocking `try_read`,
+        // which yields `None` while any other thread holds the write side -- and dozens of
+        // non-`#[serial]` tests in this binary run real extractions that take it. A single
+        // contended probe therefore diverts to the blocking path for reasons unrelated to the
+        // behaviour under test. Retrying keeps the assertion meaningful: a genuinely broken fast
+        // path fails every attempt, so this still fails outright rather than being weakened into
+        // a check no defect could trip. ~keep
+        const HANDOFF_ATTEMPTS: usize = 50;
+        const HANDOFF_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+        let mut warm_snapshot = None;
+        for _ in 0..HANDOFF_ATTEMPTS {
+            blocking_initializations.store(0, Ordering::SeqCst);
+            let candidate = initialize_processor_cache_for_async_pipeline().await.unwrap();
+            if blocking_initializations.load(Ordering::SeqCst) == 0 {
+                warm_snapshot = Some(candidate);
+                break;
+            }
+            tokio::time::sleep(HANDOFF_RETRY_DELAY).await;
+        }
+        let snapshot =
+            warm_snapshot.expect("the warm-cache fast path never won an uncontended probe across HANDOFF_ATTEMPTS");
         test_support::set_before_blocking_cache_initialization_hook(None);
         let names = snapshot
             .early
@@ -655,7 +682,6 @@ mod tests {
             .map(|processor| processor.name())
             .collect::<Vec<_>>();
 
-        assert_eq!(blocking_initializations.load(Ordering::SeqCst), 0);
         assert!(names.contains(&"quality-processing"));
         assert!(names.contains(&"summarization"));
     }

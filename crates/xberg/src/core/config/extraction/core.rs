@@ -207,11 +207,11 @@ pub struct ExtractionConfig {
     #[serde(default = "ExtractionConfig::default_max_embedded_file_bytes")]
     pub max_embedded_file_bytes: Option<u64>,
 
-    /// Content text format (default: Plain).
+    /// Content text format (default: `Markdown`).
     ///
     /// Controls the format of the extracted content:
-    /// - `Plain`: Raw extracted text (default)
-    /// - `Markdown`: Markdown formatted output
+    /// - `Plain`: Raw extracted text
+    /// - `Markdown`: Markdown formatted output (default)
     /// - `Djot`: Djot markup format (requires djot feature)
     /// - `Html`: HTML formatted output
     ///
@@ -566,7 +566,7 @@ impl Default for ExtractionConfig {
             transcription: None,
             use_layout_for_markdown: false,
             result_format: crate::types::ResultFormat::Unified,
-            output_format: OutputFormat::Plain,
+            output_format: OutputFormat::Markdown,
             escape_markdown: true,
             table_anchors: false,
             jupyter_cell_rendering: JupyterCellRendering::Both,
@@ -1055,11 +1055,12 @@ impl ExtractionConfig {
     /// image I/O and processing when results won't be used.
     /// Returns `true` when image binary data should be extracted.
     ///
-    /// True when `config.images.extract_images` is set, captioning is configured, or QR-code
-    /// detection is enabled. Captioning and QR-code detection both require image bytes
-    /// regardless of whether the caller also requested image extraction.
+    /// True unless the caller opted out via `config.images.extract_images = false`, or
+    /// when captioning is configured or QR-code detection is enabled (both need image
+    /// bytes regardless). Images are extracted — and therefore available to OCR —
+    /// by default; an absent `images` section means "use the defaults", not "no images".
     pub fn needs_image_data(&self) -> bool {
-        self.images.as_ref().is_some_and(|i| i.extract_images)
+        self.images.as_ref().map(|i| i.extract_images).unwrap_or(true)
             || self.captioning.is_some()
             || self.qr_codes == Some(true)
     }
@@ -1652,18 +1653,28 @@ mod tests {
     }
 
     #[test]
-    fn test_needs_image_data_includes_qr_codes() {
+    fn test_needs_image_data_defaults_on_and_includes_qr_codes() {
+        let config = ExtractionConfig::default();
+        assert!(config.needs_image_data(), "image data is requested by default");
+
         let config = ExtractionConfig {
+            images: Some(crate::core::config::ImageExtractionConfig {
+                extract_images: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(!config.needs_image_data(), "extract_images = false opts out");
+
+        let config = ExtractionConfig {
+            images: Some(crate::core::config::ImageExtractionConfig {
+                extract_images: false,
+                ..Default::default()
+            }),
             qr_codes: Some(true),
             ..Default::default()
         };
-        assert!(config.needs_image_data());
-
-        let config = ExtractionConfig {
-            qr_codes: Some(false),
-            ..Default::default()
-        };
-        assert!(!config.needs_image_data());
+        assert!(config.needs_image_data(), "QR detection still needs image bytes");
     }
 
     #[test]

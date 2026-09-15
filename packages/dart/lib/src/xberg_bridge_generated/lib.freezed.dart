@@ -1,6 +1,6 @@
 // GENERATED CODE - DO NOT MODIFY BY HAND
 // coverage:ignore-file
-// ignore_for_file: type=lint
+// ignore_for_file: type=lint, type=warning, deprecated_member_use, deprecated_member_use_from_same_package
 // ignore_for_file: unused_element, deprecated_member_use, deprecated_member_use_from_same_package, use_function_type_syntax_for_parameters, unnecessary_const, avoid_init_to_null, invalid_override_different_default_values_named, prefer_expression_function_bodies, annotate_overrides, invalid_annotation_target, unnecessary_question_mark
 
 part of 'lib.dart';
@@ -9,6 +9,7 @@ part of 'lib.dart';
 // FreezedGenerator
 // **************************************************************************
 
+// GENERATED CODE - DO NOT MODIFY BY HAND
 // dart format off
 T _$identity<T>(T value) => value;
 /// @nodoc
@@ -20,7 +21,7 @@ mixin _$AnnotationKind {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind);
 }
 
 
@@ -29,7 +30,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'AnnotationKind()';
+    return 'AnnotationKind()';
 }
 
 
@@ -245,7 +246,7 @@ class AnnotationKind_Bold extends AnnotationKind {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Bold);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Bold);
 }
 
 
@@ -254,7 +255,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'AnnotationKind.bold()';
+    return 'AnnotationKind.bold()';
 }
 
 
@@ -277,7 +278,7 @@ class AnnotationKind_Italic extends AnnotationKind {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Italic);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Italic);
 }
 
 
@@ -286,7 +287,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'AnnotationKind.italic()';
+    return 'AnnotationKind.italic()';
 }
 
 
@@ -309,7 +310,7 @@ class AnnotationKind_Underline extends AnnotationKind {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Underline);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Underline);
 }
 
 
@@ -318,7 +319,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'AnnotationKind.underline()';
+    return 'AnnotationKind.underline()';
 }
 
 
@@ -341,7 +342,7 @@ class AnnotationKind_Strikethrough extends AnnotationKind {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Strikethrough);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Strikethrough);
 }
 
 
@@ -350,7 +351,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'AnnotationKind.strikethrough()';
+    return 'AnnotationKind.strikethrough()';
 }
 
 
@@ -373,7 +374,7 @@ class AnnotationKind_Code extends AnnotationKind {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Code);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Code);
 }
 
 
@@ -382,7 +383,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'AnnotationKind.code()';
+    return 'AnnotationKind.code()';
 }
 
 
@@ -405,7 +406,7 @@ class AnnotationKind_Subscript extends AnnotationKind {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Subscript);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Subscript);
 }
 
 
@@ -414,7 +415,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'AnnotationKind.subscript()';
+    return 'AnnotationKind.subscript()';
 }
 
 
@@ -437,7 +438,7 @@ class AnnotationKind_Superscript extends AnnotationKind {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Superscript);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Superscript);
 }
 
 
@@ -446,7 +447,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'AnnotationKind.superscript()';
+    return 'AnnotationKind.superscript()';
 }
 
 
@@ -477,16 +478,18 @@ $AnnotationKind_LinkCopyWith<AnnotationKind_Link> get copyWith => _$AnnotationKi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Link&&(identical(other.url, url) || other.url == url)&&(identical(other.title, title) || other.title == title));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Link&&(identical(other.url, url) || other.url == url)&&(identical(other.title, title) || other.title == title));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,url,title);
+int get hashCode {
+    return Object.hash(runtimeType,url,title);
+}
 
 @override
 String toString() {
-  return 'AnnotationKind.link(url: $url, title: $title)';
+    return 'AnnotationKind.link(url: $url, title: $title)';
 }
 
 
@@ -539,7 +542,7 @@ class AnnotationKind_Highlight extends AnnotationKind {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Highlight);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Highlight);
 }
 
 
@@ -548,7 +551,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'AnnotationKind.highlight()';
+    return 'AnnotationKind.highlight()';
 }
 
 
@@ -577,16 +580,18 @@ $AnnotationKind_ColorCopyWith<AnnotationKind_Color> get copyWith => _$Annotation
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Color&&(identical(other.value, value) || other.value == value));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Color&&(identical(other.value, value) || other.value == value));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,value);
+int get hashCode {
+    return Object.hash(runtimeType,value);
+}
 
 @override
 String toString() {
-  return 'AnnotationKind.color(value: $value)';
+    return 'AnnotationKind.color(value: $value)';
 }
 
 
@@ -644,16 +649,18 @@ $AnnotationKind_FontSizeCopyWith<AnnotationKind_FontSize> get copyWith => _$Anno
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_FontSize&&(identical(other.value, value) || other.value == value));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_FontSize&&(identical(other.value, value) || other.value == value));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,value);
+int get hashCode {
+    return Object.hash(runtimeType,value);
+}
 
 @override
 String toString() {
-  return 'AnnotationKind.fontSize(value: $value)';
+    return 'AnnotationKind.fontSize(value: $value)';
 }
 
 
@@ -713,16 +720,18 @@ $AnnotationKind_CustomCopyWith<AnnotationKind_Custom> get copyWith => _$Annotati
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Custom&&(identical(other.name, name) || other.name == name)&&(identical(other.value, value) || other.value == value));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AnnotationKind_Custom&&(identical(other.name, name) || other.name == name)&&(identical(other.value, value) || other.value == value));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,name,value);
+int get hashCode {
+    return Object.hash(runtimeType,name,value);
+}
 
 @override
 String toString() {
-  return 'AnnotationKind.custom(name: $name, value: $value)';
+    return 'AnnotationKind.custom(name: $name, value: $value)';
 }
 
 
@@ -770,7 +779,7 @@ mixin _$AuthConfig {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AuthConfig);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AuthConfig);
 }
 
 
@@ -779,7 +788,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'AuthConfig()';
+    return 'AuthConfig()';
 }
 
 
@@ -949,16 +958,18 @@ $AuthConfig_BasicCopyWith<AuthConfig_Basic> get copyWith => _$AuthConfig_BasicCo
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AuthConfig_Basic&&(identical(other.username, username) || other.username == username)&&(identical(other.password, password) || other.password == password));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AuthConfig_Basic&&(identical(other.username, username) || other.username == username)&&(identical(other.password, password) || other.password == password));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,username,password);
+int get hashCode {
+    return Object.hash(runtimeType,username,password);
+}
 
 @override
 String toString() {
-  return 'AuthConfig.basic(username: $username, password: $password)';
+    return 'AuthConfig.basic(username: $username, password: $password)';
 }
 
 
@@ -1017,16 +1028,18 @@ $AuthConfig_BearerCopyWith<AuthConfig_Bearer> get copyWith => _$AuthConfig_Beare
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AuthConfig_Bearer&&(identical(other.token, token) || other.token == token));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AuthConfig_Bearer&&(identical(other.token, token) || other.token == token));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,token);
+int get hashCode {
+    return Object.hash(runtimeType,token);
+}
 
 @override
 String toString() {
-  return 'AuthConfig.bearer(token: $token)';
+    return 'AuthConfig.bearer(token: $token)';
 }
 
 
@@ -1086,16 +1099,18 @@ $AuthConfig_HeaderCopyWith<AuthConfig_Header> get copyWith => _$AuthConfig_Heade
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is AuthConfig_Header&&(identical(other.name, name) || other.name == name)&&(identical(other.value, value) || other.value == value));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is AuthConfig_Header&&(identical(other.name, name) || other.name == name)&&(identical(other.value, value) || other.value == value));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,name,value);
+int get hashCode {
+    return Object.hash(runtimeType,name,value);
+}
 
 @override
 String toString() {
-  return 'AuthConfig.header(name: $name, value: $value)';
+    return 'AuthConfig.header(name: $name, value: $value)';
 }
 
 
@@ -1143,7 +1158,7 @@ mixin _$ChunkSizing {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkSizing);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkSizing);
 }
 
 
@@ -1152,7 +1167,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'ChunkSizing()';
+    return 'ChunkSizing()';
 }
 
 
@@ -1308,7 +1323,7 @@ class ChunkSizing_Characters extends ChunkSizing {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkSizing_Characters);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkSizing_Characters);
 }
 
 
@@ -1317,7 +1332,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'ChunkSizing.characters()';
+    return 'ChunkSizing.characters()';
 }
 
 
@@ -1352,16 +1367,18 @@ $ChunkSizing_TokenizerCopyWith<ChunkSizing_Tokenizer> get copyWith => _$ChunkSiz
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkSizing_Tokenizer&&(identical(other.model, model) || other.model == model)&&(identical(other.cacheDir, cacheDir) || other.cacheDir == cacheDir));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkSizing_Tokenizer&&(identical(other.model, model) || other.model == model)&&(identical(other.cacheDir, cacheDir) || other.cacheDir == cacheDir));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,model,cacheDir);
+int get hashCode {
+    return Object.hash(runtimeType,model,cacheDir);
+}
 
 @override
 String toString() {
-  return 'ChunkSizing.tokenizer(model: $model, cacheDir: $cacheDir)';
+    return 'ChunkSizing.tokenizer(model: $model, cacheDir: $cacheDir)';
 }
 
 
@@ -1409,7 +1426,7 @@ mixin _$ChunkingReason {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkingReason);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkingReason);
 }
 
 
@@ -1418,7 +1435,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'ChunkingReason()';
+    return 'ChunkingReason()';
 }
 
 
@@ -1594,16 +1611,18 @@ $ChunkingReason_LargeFileCopyWith<ChunkingReason_LargeFile> get copyWith => _$Ch
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkingReason_LargeFile&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.thresholdBytes, thresholdBytes) || other.thresholdBytes == thresholdBytes));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkingReason_LargeFile&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.thresholdBytes, thresholdBytes) || other.thresholdBytes == thresholdBytes));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,sizeBytes,thresholdBytes);
+int get hashCode {
+    return Object.hash(runtimeType,sizeBytes,thresholdBytes);
+}
 
 @override
 String toString() {
-  return 'ChunkingReason.largeFile(sizeBytes: $sizeBytes, thresholdBytes: $thresholdBytes)';
+    return 'ChunkingReason.largeFile(sizeBytes: $sizeBytes, thresholdBytes: $thresholdBytes)';
 }
 
 
@@ -1664,16 +1683,18 @@ $ChunkingReason_ManyPagesCopyWith<ChunkingReason_ManyPages> get copyWith => _$Ch
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkingReason_ManyPages&&(identical(other.pageCount, pageCount) || other.pageCount == pageCount)&&(identical(other.threshold, threshold) || other.threshold == threshold));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkingReason_ManyPages&&(identical(other.pageCount, pageCount) || other.pageCount == pageCount)&&(identical(other.threshold, threshold) || other.threshold == threshold));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,pageCount,threshold);
+int get hashCode {
+    return Object.hash(runtimeType,pageCount,threshold);
+}
 
 @override
 String toString() {
-  return 'ChunkingReason.manyPages(pageCount: $pageCount, threshold: $threshold)';
+    return 'ChunkingReason.manyPages(pageCount: $pageCount, threshold: $threshold)';
 }
 
 
@@ -1734,16 +1755,18 @@ $ChunkingReason_OcrRequiredCopyWith<ChunkingReason_OcrRequired> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkingReason_OcrRequired&&(identical(other.pageCount, pageCount) || other.pageCount == pageCount)&&(identical(other.forceOcr, forceOcr) || other.forceOcr == forceOcr));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkingReason_OcrRequired&&(identical(other.pageCount, pageCount) || other.pageCount == pageCount)&&(identical(other.forceOcr, forceOcr) || other.forceOcr == forceOcr));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,pageCount,forceOcr);
+int get hashCode {
+    return Object.hash(runtimeType,pageCount,forceOcr);
+}
 
 @override
 String toString() {
-  return 'ChunkingReason.ocrRequired(pageCount: $pageCount, forceOcr: $forceOcr)';
+    return 'ChunkingReason.ocrRequired(pageCount: $pageCount, forceOcr: $forceOcr)';
 }
 
 
@@ -1804,16 +1827,18 @@ $ChunkingReason_LargeAndManyPagesCopyWith<ChunkingReason_LargeAndManyPages> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkingReason_LargeAndManyPages&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.pageCount, pageCount) || other.pageCount == pageCount));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ChunkingReason_LargeAndManyPages&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.pageCount, pageCount) || other.pageCount == pageCount));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,sizeBytes,pageCount);
+int get hashCode {
+    return Object.hash(runtimeType,sizeBytes,pageCount);
+}
 
 @override
 String toString() {
-  return 'ChunkingReason.largeAndManyPages(sizeBytes: $sizeBytes, pageCount: $pageCount)';
+    return 'ChunkingReason.largeAndManyPages(sizeBytes: $sizeBytes, pageCount: $pageCount)';
 }
 
 
@@ -1861,7 +1886,7 @@ mixin _$ConfidenceSemantics {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ConfidenceSemantics);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ConfidenceSemantics);
 }
 
 
@@ -1870,7 +1895,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'ConfidenceSemantics()';
+    return 'ConfidenceSemantics()';
 }
 
 
@@ -2038,16 +2063,18 @@ $ConfidenceSemantics_LegibilityCopyWith<ConfidenceSemantics_Legibility> get copy
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ConfidenceSemantics_Legibility&&(identical(other.scaleMax, scaleMax) || other.scaleMax == scaleMax));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ConfidenceSemantics_Legibility&&(identical(other.scaleMax, scaleMax) || other.scaleMax == scaleMax));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,scaleMax);
+int get hashCode {
+    return Object.hash(runtimeType,scaleMax);
+}
 
 @override
 String toString() {
-  return 'ConfidenceSemantics.legibility(scaleMax: $scaleMax)';
+    return 'ConfidenceSemantics.legibility(scaleMax: $scaleMax)';
 }
 
 
@@ -2099,7 +2126,7 @@ class ConfidenceSemantics_Uncalibrated extends ConfidenceSemantics {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ConfidenceSemantics_Uncalibrated);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ConfidenceSemantics_Uncalibrated);
 }
 
 
@@ -2108,7 +2135,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'ConfidenceSemantics.uncalibrated()';
+    return 'ConfidenceSemantics.uncalibrated()';
 }
 
 
@@ -2131,7 +2158,7 @@ class ConfidenceSemantics_None extends ConfidenceSemantics {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ConfidenceSemantics_None);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ConfidenceSemantics_None);
 }
 
 
@@ -2140,7 +2167,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'ConfidenceSemantics.none()';
+    return 'ConfidenceSemantics.none()';
 }
 
 
@@ -2158,7 +2185,7 @@ mixin _$CredentialProviderConfig {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is CredentialProviderConfig);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is CredentialProviderConfig);
 }
 
 
@@ -2167,7 +2194,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'CredentialProviderConfig()';
+    return 'CredentialProviderConfig()';
 }
 
 
@@ -2348,16 +2375,18 @@ $CredentialProviderConfig_AzureAdCopyWith<CredentialProviderConfig_AzureAd> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is CredentialProviderConfig_AzureAd&&(identical(other.tenantId, tenantId) || other.tenantId == tenantId)&&(identical(other.clientId, clientId) || other.clientId == clientId)&&(identical(other.clientSecret, clientSecret) || other.clientSecret == clientSecret)&&(identical(other.scope, scope) || other.scope == scope));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is CredentialProviderConfig_AzureAd&&(identical(other.tenantId, tenantId) || other.tenantId == tenantId)&&(identical(other.clientId, clientId) || other.clientId == clientId)&&(identical(other.clientSecret, clientSecret) || other.clientSecret == clientSecret)&&(identical(other.scope, scope) || other.scope == scope));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,tenantId,clientId,clientSecret,scope);
+int get hashCode {
+    return Object.hash(runtimeType,tenantId,clientId,clientSecret,scope);
+}
 
 @override
 String toString() {
-  return 'CredentialProviderConfig.azureAd(tenantId: $tenantId, clientId: $clientId, clientSecret: $clientSecret, scope: $scope)';
+    return 'CredentialProviderConfig.azureAd(tenantId: $tenantId, clientId: $clientId, clientSecret: $clientSecret, scope: $scope)';
 }
 
 
@@ -2421,16 +2450,18 @@ $CredentialProviderConfig_VertexOauth2CopyWith<CredentialProviderConfig_VertexOa
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is CredentialProviderConfig_VertexOauth2&&(identical(other.serviceAccountKeyFile, serviceAccountKeyFile) || other.serviceAccountKeyFile == serviceAccountKeyFile)&&(identical(other.scope, scope) || other.scope == scope));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is CredentialProviderConfig_VertexOauth2&&(identical(other.serviceAccountKeyFile, serviceAccountKeyFile) || other.serviceAccountKeyFile == serviceAccountKeyFile)&&(identical(other.scope, scope) || other.scope == scope));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,serviceAccountKeyFile,scope);
+int get hashCode {
+    return Object.hash(runtimeType,serviceAccountKeyFile,scope);
+}
 
 @override
 String toString() {
-  return 'CredentialProviderConfig.vertexOauth2(serviceAccountKeyFile: $serviceAccountKeyFile, scope: $scope)';
+    return 'CredentialProviderConfig.vertexOauth2(serviceAccountKeyFile: $serviceAccountKeyFile, scope: $scope)';
 }
 
 
@@ -2489,16 +2520,18 @@ $CredentialProviderConfig_VertexAdcCopyWith<CredentialProviderConfig_VertexAdc> 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is CredentialProviderConfig_VertexAdc&&(identical(other.scope, scope) || other.scope == scope));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is CredentialProviderConfig_VertexAdc&&(identical(other.scope, scope) || other.scope == scope));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,scope);
+int get hashCode {
+    return Object.hash(runtimeType,scope);
+}
 
 @override
 String toString() {
-  return 'CredentialProviderConfig.vertexAdc(scope: $scope)';
+    return 'CredentialProviderConfig.vertexAdc(scope: $scope)';
 }
 
 
@@ -2564,16 +2597,18 @@ $CredentialProviderConfig_BedrockWebIdentityCopyWith<CredentialProviderConfig_Be
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is CredentialProviderConfig_BedrockWebIdentity&&(identical(other.roleArn, roleArn) || other.roleArn == roleArn)&&(identical(other.tokenFile, tokenFile) || other.tokenFile == tokenFile)&&(identical(other.sessionName, sessionName) || other.sessionName == sessionName)&&(identical(other.region, region) || other.region == region));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is CredentialProviderConfig_BedrockWebIdentity&&(identical(other.roleArn, roleArn) || other.roleArn == roleArn)&&(identical(other.tokenFile, tokenFile) || other.tokenFile == tokenFile)&&(identical(other.sessionName, sessionName) || other.sessionName == sessionName)&&(identical(other.region, region) || other.region == region));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,roleArn,tokenFile,sessionName,region);
+int get hashCode {
+    return Object.hash(runtimeType,roleArn,tokenFile,sessionName,region);
+}
 
 @override
 String toString() {
-  return 'CredentialProviderConfig.bedrockWebIdentity(roleArn: $roleArn, tokenFile: $tokenFile, sessionName: $sessionName, region: $region)';
+    return 'CredentialProviderConfig.bedrockWebIdentity(roleArn: $roleArn, tokenFile: $tokenFile, sessionName: $sessionName, region: $region)';
 }
 
 
@@ -2628,16 +2663,21 @@ $DiffLineCopyWith<DiffLine> get copyWith => _$DiffLineCopyWithImpl<DiffLine>(thi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is DiffLine&&(identical(other.field0, field0) || other.field0 == field0));
+  final _this = this as DiffLine;
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is DiffLine&&(identical(other.field0, _this.field0) || other.field0 == _this.field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+  final _this = this as DiffLine;
+  return Object.hash(runtimeType,_this.field0);
+}
 
 @override
 String toString() {
-  return 'DiffLine(field0: $field0)';
+  final _this = this as DiffLine;
+  return 'DiffLine(field0: ${_this.field0})';
 }
 
 
@@ -2830,16 +2870,18 @@ $DiffLine_ContextCopyWith<DiffLine_Context> get copyWith => _$DiffLine_ContextCo
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is DiffLine_Context&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is DiffLine_Context&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'DiffLine.context(field0: $field0)';
+    return 'DiffLine.context(field0: $field0)';
 }
 
 
@@ -2896,16 +2938,18 @@ $DiffLine_AddedCopyWith<DiffLine_Added> get copyWith => _$DiffLine_AddedCopyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is DiffLine_Added&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is DiffLine_Added&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'DiffLine.added(field0: $field0)';
+    return 'DiffLine.added(field0: $field0)';
 }
 
 
@@ -2962,16 +3006,18 @@ $DiffLine_RemovedCopyWith<DiffLine_Removed> get copyWith => _$DiffLine_RemovedCo
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is DiffLine_Removed&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is DiffLine_Removed&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'DiffLine.removed(field0: $field0)';
+    return 'DiffLine.removed(field0: $field0)';
 }
 
 
@@ -3018,7 +3064,7 @@ mixin _$EmbeddingModelType {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EmbeddingModelType);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EmbeddingModelType);
 }
 
 
@@ -3027,7 +3073,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'EmbeddingModelType()';
+    return 'EmbeddingModelType()';
 }
 
 
@@ -3201,16 +3247,18 @@ $EmbeddingModelType_PresetCopyWith<EmbeddingModelType_Preset> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EmbeddingModelType_Preset&&(identical(other.name, name) || other.name == name));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EmbeddingModelType_Preset&&(identical(other.name, name) || other.name == name));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,name);
+int get hashCode {
+    return Object.hash(runtimeType,name);
+}
 
 @override
 String toString() {
-  return 'EmbeddingModelType.preset(name: $name)';
+    return 'EmbeddingModelType.preset(name: $name)';
 }
 
 
@@ -3270,16 +3318,18 @@ $EmbeddingModelType_CustomCopyWith<EmbeddingModelType_Custom> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EmbeddingModelType_Custom&&(identical(other.modelId, modelId) || other.modelId == modelId)&&(identical(other.dimensions, dimensions) || other.dimensions == dimensions));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EmbeddingModelType_Custom&&(identical(other.modelId, modelId) || other.modelId == modelId)&&(identical(other.dimensions, dimensions) || other.dimensions == dimensions));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,modelId,dimensions);
+int get hashCode {
+    return Object.hash(runtimeType,modelId,dimensions);
+}
 
 @override
 String toString() {
-  return 'EmbeddingModelType.custom(modelId: $modelId, dimensions: $dimensions)';
+    return 'EmbeddingModelType.custom(modelId: $modelId, dimensions: $dimensions)';
 }
 
 
@@ -3342,16 +3392,18 @@ $EmbeddingModelType_LlmCopyWith<EmbeddingModelType_Llm> get copyWith => _$Embedd
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EmbeddingModelType_Llm&&(identical(other.llm, llm) || other.llm == llm));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EmbeddingModelType_Llm&&(identical(other.llm, llm) || other.llm == llm));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,llm);
+int get hashCode {
+    return Object.hash(runtimeType,llm);
+}
 
 @override
 String toString() {
-  return 'EmbeddingModelType.llm(llm: $llm)';
+    return 'EmbeddingModelType.llm(llm: $llm)';
 }
 
 
@@ -3409,16 +3461,18 @@ $EmbeddingModelType_PluginCopyWith<EmbeddingModelType_Plugin> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EmbeddingModelType_Plugin&&(identical(other.name, name) || other.name == name));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EmbeddingModelType_Plugin&&(identical(other.name, name) || other.name == name));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,name);
+int get hashCode {
+    return Object.hash(runtimeType,name);
+}
 
 @override
 String toString() {
-  return 'EmbeddingModelType.plugin(name: $name)';
+    return 'EmbeddingModelType.plugin(name: $name)';
 }
 
 
@@ -3465,7 +3519,7 @@ mixin _$EntityCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory);
 }
 
 
@@ -3474,7 +3528,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'EntityCategory()';
+    return 'EntityCategory()';
 }
 
 
@@ -3684,7 +3738,7 @@ class EntityCategory_Person extends EntityCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Person);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Person);
 }
 
 
@@ -3693,7 +3747,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'EntityCategory.person()';
+    return 'EntityCategory.person()';
 }
 
 
@@ -3716,7 +3770,7 @@ class EntityCategory_Organization extends EntityCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Organization);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Organization);
 }
 
 
@@ -3725,7 +3779,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'EntityCategory.organization()';
+    return 'EntityCategory.organization()';
 }
 
 
@@ -3748,7 +3802,7 @@ class EntityCategory_Location extends EntityCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Location);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Location);
 }
 
 
@@ -3757,7 +3811,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'EntityCategory.location()';
+    return 'EntityCategory.location()';
 }
 
 
@@ -3780,7 +3834,7 @@ class EntityCategory_Date extends EntityCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Date);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Date);
 }
 
 
@@ -3789,7 +3843,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'EntityCategory.date()';
+    return 'EntityCategory.date()';
 }
 
 
@@ -3812,7 +3866,7 @@ class EntityCategory_Time extends EntityCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Time);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Time);
 }
 
 
@@ -3821,7 +3875,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'EntityCategory.time()';
+    return 'EntityCategory.time()';
 }
 
 
@@ -3844,7 +3898,7 @@ class EntityCategory_Money extends EntityCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Money);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Money);
 }
 
 
@@ -3853,7 +3907,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'EntityCategory.money()';
+    return 'EntityCategory.money()';
 }
 
 
@@ -3876,7 +3930,7 @@ class EntityCategory_Percent extends EntityCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Percent);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Percent);
 }
 
 
@@ -3885,7 +3939,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'EntityCategory.percent()';
+    return 'EntityCategory.percent()';
 }
 
 
@@ -3908,7 +3962,7 @@ class EntityCategory_Email extends EntityCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Email);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Email);
 }
 
 
@@ -3917,7 +3971,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'EntityCategory.email()';
+    return 'EntityCategory.email()';
 }
 
 
@@ -3940,7 +3994,7 @@ class EntityCategory_Phone extends EntityCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Phone);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Phone);
 }
 
 
@@ -3949,7 +4003,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'EntityCategory.phone()';
+    return 'EntityCategory.phone()';
 }
 
 
@@ -3972,7 +4026,7 @@ class EntityCategory_Url extends EntityCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Url);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Url);
 }
 
 
@@ -3981,7 +4035,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'EntityCategory.url()';
+    return 'EntityCategory.url()';
 }
 
 
@@ -4009,16 +4063,18 @@ $EntityCategory_CustomCopyWith<EntityCategory_Custom> get copyWith => _$EntityCa
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Custom&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is EntityCategory_Custom&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'EntityCategory.custom(field0: $field0)';
+    return 'EntityCategory.custom(field0: $field0)';
 }
 
 
@@ -4065,16 +4121,21 @@ mixin _$FormatMetadata {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata&&const DeepCollectionEquality().equals(other.field0, field0));
+  final _this = this as FormatMetadata;
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata&&const DeepCollectionEquality().equals(other.field0, _this.field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(field0));
+int get hashCode {
+  final _this = this as FormatMetadata;
+  return Object.hash(runtimeType,const DeepCollectionEquality().hash(_this.field0));
+}
 
 @override
 String toString() {
-  return 'FormatMetadata(field0: $field0)';
+  final _this = this as FormatMetadata;
+  return 'FormatMetadata(field0: ${_this.field0})';
 }
 
 
@@ -4349,16 +4410,18 @@ $FormatMetadata_PdfCopyWith<FormatMetadata_Pdf> get copyWith => _$FormatMetadata
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Pdf&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Pdf&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.pdf(field0: $field0)';
+    return 'FormatMetadata.pdf(field0: $field0)';
 }
 
 
@@ -4415,16 +4478,18 @@ $FormatMetadata_DocxCopyWith<FormatMetadata_Docx> get copyWith => _$FormatMetada
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Docx&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Docx&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.docx(field0: $field0)';
+    return 'FormatMetadata.docx(field0: $field0)';
 }
 
 
@@ -4481,16 +4546,18 @@ $FormatMetadata_ExcelCopyWith<FormatMetadata_Excel> get copyWith => _$FormatMeta
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Excel&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Excel&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.excel(field0: $field0)';
+    return 'FormatMetadata.excel(field0: $field0)';
 }
 
 
@@ -4547,16 +4614,18 @@ $FormatMetadata_EmailCopyWith<FormatMetadata_Email> get copyWith => _$FormatMeta
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Email&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Email&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.email(field0: $field0)';
+    return 'FormatMetadata.email(field0: $field0)';
 }
 
 
@@ -4613,16 +4682,18 @@ $FormatMetadata_PptxCopyWith<FormatMetadata_Pptx> get copyWith => _$FormatMetada
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Pptx&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Pptx&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.pptx(field0: $field0)';
+    return 'FormatMetadata.pptx(field0: $field0)';
 }
 
 
@@ -4679,16 +4750,18 @@ $FormatMetadata_ArchiveCopyWith<FormatMetadata_Archive> get copyWith => _$Format
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Archive&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Archive&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.archive(field0: $field0)';
+    return 'FormatMetadata.archive(field0: $field0)';
 }
 
 
@@ -4745,16 +4818,18 @@ $FormatMetadata_ImageCopyWith<FormatMetadata_Image> get copyWith => _$FormatMeta
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Image&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Image&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.image(field0: $field0)';
+    return 'FormatMetadata.image(field0: $field0)';
 }
 
 
@@ -4811,16 +4886,18 @@ $FormatMetadata_XmlCopyWith<FormatMetadata_Xml> get copyWith => _$FormatMetadata
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Xml&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Xml&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.xml(field0: $field0)';
+    return 'FormatMetadata.xml(field0: $field0)';
 }
 
 
@@ -4877,16 +4954,18 @@ $FormatMetadata_TextCopyWith<FormatMetadata_Text> get copyWith => _$FormatMetada
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Text&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Text&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.text(field0: $field0)';
+    return 'FormatMetadata.text(field0: $field0)';
 }
 
 
@@ -4943,16 +5022,18 @@ $FormatMetadata_HtmlCopyWith<FormatMetadata_Html> get copyWith => _$FormatMetada
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Html&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Html&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.html(field0: $field0)';
+    return 'FormatMetadata.html(field0: $field0)';
 }
 
 
@@ -5009,16 +5090,18 @@ $FormatMetadata_OcrCopyWith<FormatMetadata_Ocr> get copyWith => _$FormatMetadata
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Ocr&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Ocr&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.ocr(field0: $field0)';
+    return 'FormatMetadata.ocr(field0: $field0)';
 }
 
 
@@ -5075,16 +5158,18 @@ $FormatMetadata_CsvCopyWith<FormatMetadata_Csv> get copyWith => _$FormatMetadata
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Csv&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Csv&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.csv(field0: $field0)';
+    return 'FormatMetadata.csv(field0: $field0)';
 }
 
 
@@ -5141,16 +5226,18 @@ $FormatMetadata_BibtexCopyWith<FormatMetadata_Bibtex> get copyWith => _$FormatMe
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Bibtex&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Bibtex&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.bibtex(field0: $field0)';
+    return 'FormatMetadata.bibtex(field0: $field0)';
 }
 
 
@@ -5207,16 +5294,18 @@ $FormatMetadata_CitationCopyWith<FormatMetadata_Citation> get copyWith => _$Form
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Citation&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Citation&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.citation(field0: $field0)';
+    return 'FormatMetadata.citation(field0: $field0)';
 }
 
 
@@ -5273,16 +5362,18 @@ $FormatMetadata_FictionBookCopyWith<FormatMetadata_FictionBook> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_FictionBook&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_FictionBook&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.fictionBook(field0: $field0)';
+    return 'FormatMetadata.fictionBook(field0: $field0)';
 }
 
 
@@ -5339,16 +5430,18 @@ $FormatMetadata_DbfCopyWith<FormatMetadata_Dbf> get copyWith => _$FormatMetadata
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Dbf&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Dbf&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.dbf(field0: $field0)';
+    return 'FormatMetadata.dbf(field0: $field0)';
 }
 
 
@@ -5405,16 +5498,18 @@ $FormatMetadata_JatsCopyWith<FormatMetadata_Jats> get copyWith => _$FormatMetada
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Jats&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Jats&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.jats(field0: $field0)';
+    return 'FormatMetadata.jats(field0: $field0)';
 }
 
 
@@ -5471,16 +5566,18 @@ $FormatMetadata_EpubCopyWith<FormatMetadata_Epub> get copyWith => _$FormatMetada
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Epub&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Epub&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.epub(field0: $field0)';
+    return 'FormatMetadata.epub(field0: $field0)';
 }
 
 
@@ -5537,16 +5634,18 @@ $FormatMetadata_PstCopyWith<FormatMetadata_Pst> get copyWith => _$FormatMetadata
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Pst&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Pst&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.pst(field0: $field0)';
+    return 'FormatMetadata.pst(field0: $field0)';
 }
 
 
@@ -5603,16 +5702,18 @@ $FormatMetadata_AudioCopyWith<FormatMetadata_Audio> get copyWith => _$FormatMeta
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Audio&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Audio&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.audio(field0: $field0)';
+    return 'FormatMetadata.audio(field0: $field0)';
 }
 
 
@@ -5669,16 +5770,18 @@ $FormatMetadata_CodeCopyWith<FormatMetadata_Code> get copyWith => _$FormatMetada
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Code&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is FormatMetadata_Code&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'FormatMetadata.code(field0: $field0)';
+    return 'FormatMetadata.code(field0: $field0)';
 }
 
 
@@ -5730,16 +5833,21 @@ $HeuristicsErrorCopyWith<HeuristicsError> get copyWith => _$HeuristicsErrorCopyW
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is HeuristicsError&&(identical(other.field0, field0) || other.field0 == field0));
+  final _this = this as HeuristicsError;
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is HeuristicsError&&(identical(other.field0, _this.field0) || other.field0 == _this.field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+  final _this = this as HeuristicsError;
+  return Object.hash(runtimeType,_this.field0);
+}
 
 @override
 String toString() {
-  return 'HeuristicsError(field0: $field0)';
+  final _this = this as HeuristicsError;
+  return 'HeuristicsError(field0: ${_this.field0})';
 }
 
 
@@ -5926,16 +6034,18 @@ $HeuristicsError_ConfigErrorCopyWith<HeuristicsError_ConfigError> get copyWith =
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is HeuristicsError_ConfigError&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is HeuristicsError_ConfigError&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'HeuristicsError.configError(field0: $field0)';
+    return 'HeuristicsError.configError(field0: $field0)';
 }
 
 
@@ -5992,16 +6102,18 @@ $HeuristicsError_PdfAnalysisErrorCopyWith<HeuristicsError_PdfAnalysisError> get 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is HeuristicsError_PdfAnalysisError&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is HeuristicsError_PdfAnalysisError&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'HeuristicsError.pdfAnalysisError(field0: $field0)';
+    return 'HeuristicsError.pdfAnalysisError(field0: $field0)';
 }
 
 
@@ -6054,16 +6166,21 @@ $HostMatcherCopyWith<HostMatcher> get copyWith => _$HostMatcherCopyWithImpl<Host
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is HostMatcher&&(identical(other.value, value) || other.value == value));
+  final _this = this as HostMatcher;
+  return identical(this, other) || (other.runtimeType == runtimeType&&other is HostMatcher&&(identical(other.value, _this.value) || other.value == _this.value));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,value);
+int get hashCode {
+  final _this = this as HostMatcher;
+  return Object.hash(runtimeType,_this.value);
+}
 
 @override
 String toString() {
-  return 'HostMatcher(value: $value)';
+  final _this = this as HostMatcher;
+  return 'HostMatcher(value: ${_this.value})';
 }
 
 
@@ -6257,16 +6374,18 @@ $HostMatcher_ExactCopyWith<HostMatcher_Exact> get copyWith => _$HostMatcher_Exac
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is HostMatcher_Exact&&(identical(other.value, value) || other.value == value));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is HostMatcher_Exact&&(identical(other.value, value) || other.value == value));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,value);
+int get hashCode {
+    return Object.hash(runtimeType,value);
+}
 
 @override
 String toString() {
-  return 'HostMatcher.exact(value: $value)';
+    return 'HostMatcher.exact(value: $value)';
 }
 
 
@@ -6324,16 +6443,18 @@ $HostMatcher_SuffixCopyWith<HostMatcher_Suffix> get copyWith => _$HostMatcher_Su
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is HostMatcher_Suffix&&(identical(other.value, value) || other.value == value));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is HostMatcher_Suffix&&(identical(other.value, value) || other.value == value));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,value);
+int get hashCode {
+    return Object.hash(runtimeType,value);
+}
 
 @override
 String toString() {
-  return 'HostMatcher.suffix(value: $value)';
+    return 'HostMatcher.suffix(value: $value)';
 }
 
 
@@ -6392,16 +6513,18 @@ $HostMatcher_CidrCopyWith<HostMatcher_Cidr> get copyWith => _$HostMatcher_CidrCo
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is HostMatcher_Cidr&&(identical(other.value, value) || other.value == value));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is HostMatcher_Cidr&&(identical(other.value, value) || other.value == value));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,value);
+int get hashCode {
+    return Object.hash(runtimeType,value);
+}
 
 @override
 String toString() {
-  return 'HostMatcher.cidr(value: $value)';
+    return 'HostMatcher.cidr(value: $value)';
 }
 
 
@@ -6448,7 +6571,7 @@ mixin _$ImageOutputFormat {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ImageOutputFormat);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ImageOutputFormat);
 }
 
 
@@ -6457,7 +6580,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'ImageOutputFormat()';
+    return 'ImageOutputFormat()';
 }
 
 
@@ -6637,7 +6760,7 @@ class ImageOutputFormat_Native extends ImageOutputFormat {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ImageOutputFormat_Native);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ImageOutputFormat_Native);
 }
 
 
@@ -6646,7 +6769,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'ImageOutputFormat.native()';
+    return 'ImageOutputFormat.native()';
 }
 
 
@@ -6669,7 +6792,7 @@ class ImageOutputFormat_Png extends ImageOutputFormat {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ImageOutputFormat_Png);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ImageOutputFormat_Png);
 }
 
 
@@ -6678,7 +6801,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'ImageOutputFormat.png()';
+    return 'ImageOutputFormat.png()';
 }
 
 
@@ -6707,16 +6830,18 @@ $ImageOutputFormat_JpegCopyWith<ImageOutputFormat_Jpeg> get copyWith => _$ImageO
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ImageOutputFormat_Jpeg&&(identical(other.quality, quality) || other.quality == quality));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ImageOutputFormat_Jpeg&&(identical(other.quality, quality) || other.quality == quality));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,quality);
+int get hashCode {
+    return Object.hash(runtimeType,quality);
+}
 
 @override
 String toString() {
-  return 'ImageOutputFormat.jpeg(quality: $quality)';
+    return 'ImageOutputFormat.jpeg(quality: $quality)';
 }
 
 
@@ -6774,16 +6899,18 @@ $ImageOutputFormat_WebpCopyWith<ImageOutputFormat_Webp> get copyWith => _$ImageO
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ImageOutputFormat_Webp&&(identical(other.quality, quality) || other.quality == quality));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ImageOutputFormat_Webp&&(identical(other.quality, quality) || other.quality == quality));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,quality);
+int get hashCode {
+    return Object.hash(runtimeType,quality);
+}
 
 @override
 String toString() {
-  return 'ImageOutputFormat.webp(quality: $quality)';
+    return 'ImageOutputFormat.webp(quality: $quality)';
 }
 
 
@@ -6841,16 +6968,18 @@ $ImageOutputFormat_HeifCopyWith<ImageOutputFormat_Heif> get copyWith => _$ImageO
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ImageOutputFormat_Heif&&(identical(other.quality, quality) || other.quality == quality));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ImageOutputFormat_Heif&&(identical(other.quality, quality) || other.quality == quality));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,quality);
+int get hashCode {
+    return Object.hash(runtimeType,quality);
+}
 
 @override
 String toString() {
-  return 'ImageOutputFormat.heif(quality: $quality)';
+    return 'ImageOutputFormat.heif(quality: $quality)';
 }
 
 
@@ -6902,7 +7031,7 @@ class ImageOutputFormat_Svg extends ImageOutputFormat {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is ImageOutputFormat_Svg);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is ImageOutputFormat_Svg);
 }
 
 
@@ -6911,7 +7040,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'ImageOutputFormat.svg()';
+    return 'ImageOutputFormat.svg()';
 }
 
 
@@ -6929,7 +7058,7 @@ mixin _$LateInteractionModelType {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is LateInteractionModelType);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is LateInteractionModelType);
 }
 
 
@@ -6938,7 +7067,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'LateInteractionModelType()';
+    return 'LateInteractionModelType()';
 }
 
 
@@ -7106,16 +7235,18 @@ $LateInteractionModelType_PresetCopyWith<LateInteractionModelType_Preset> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is LateInteractionModelType_Preset&&(identical(other.name, name) || other.name == name));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is LateInteractionModelType_Preset&&(identical(other.name, name) || other.name == name));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,name);
+int get hashCode {
+    return Object.hash(runtimeType,name);
+}
 
 @override
 String toString() {
-  return 'LateInteractionModelType.preset(name: $name)';
+    return 'LateInteractionModelType.preset(name: $name)';
 }
 
 
@@ -7157,7 +7288,7 @@ as String,
 
 
 class LateInteractionModelType_Custom extends LateInteractionModelType {
-  const LateInteractionModelType_Custom({required this.modelId, required this.modelFile, required final  List<String> additionalFiles, required this.maxLength}): _additionalFiles = additionalFiles,super._();
+  const LateInteractionModelType_Custom({required this.modelId, required this.modelFile, required  List<String> additionalFiles, required this.maxLength}): _additionalFiles = additionalFiles,super._();
 
 
 /// HuggingFace model repository ID.
@@ -7187,16 +7318,18 @@ $LateInteractionModelType_CustomCopyWith<LateInteractionModelType_Custom> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is LateInteractionModelType_Custom&&(identical(other.modelId, modelId) || other.modelId == modelId)&&(identical(other.modelFile, modelFile) || other.modelFile == modelFile)&&const DeepCollectionEquality().equals(other._additionalFiles, _additionalFiles)&&(identical(other.maxLength, maxLength) || other.maxLength == maxLength));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is LateInteractionModelType_Custom&&(identical(other.modelId, modelId) || other.modelId == modelId)&&(identical(other.modelFile, modelFile) || other.modelFile == modelFile)&&const DeepCollectionEquality().equals(other.additionalFiles, _additionalFiles)&&(identical(other.maxLength, maxLength) || other.maxLength == maxLength));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,modelId,modelFile,const DeepCollectionEquality().hash(_additionalFiles),maxLength);
+int get hashCode {
+    return Object.hash(runtimeType,modelId,modelFile,const DeepCollectionEquality().hash(_additionalFiles),maxLength);
+}
 
 @override
 String toString() {
-  return 'LateInteractionModelType.custom(modelId: $modelId, modelFile: $modelFile, additionalFiles: $additionalFiles, maxLength: $maxLength)';
+    return 'LateInteractionModelType.custom(modelId: $modelId, modelFile: $modelFile, additionalFiles: $additionalFiles, maxLength: $maxLength)';
 }
 
 
@@ -7257,16 +7390,18 @@ $LateInteractionModelType_PluginCopyWith<LateInteractionModelType_Plugin> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is LateInteractionModelType_Plugin&&(identical(other.name, name) || other.name == name));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is LateInteractionModelType_Plugin&&(identical(other.name, name) || other.name == name));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,name);
+int get hashCode {
+    return Object.hash(runtimeType,name);
+}
 
 @override
 String toString() {
-  return 'LateInteractionModelType.plugin(name: $name)';
+    return 'LateInteractionModelType.plugin(name: $name)';
 }
 
 
@@ -7313,7 +7448,7 @@ mixin _$LoadError {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is LoadError);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is LoadError);
 }
 
 
@@ -7322,7 +7457,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'LoadError()';
+    return 'LoadError()';
 }
 
 
@@ -7507,16 +7642,18 @@ $LoadError_ParseCopyWith<LoadError_Parse> get copyWith => _$LoadError_ParseCopyW
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is LoadError_Parse&&(identical(other.path, path) || other.path == path));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is LoadError_Parse&&(identical(other.path, path) || other.path == path));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,path);
+int get hashCode {
+    return Object.hash(runtimeType,path);
+}
 
 @override
 String toString() {
-  return 'LoadError.parse(path: $path)';
+    return 'LoadError.parse(path: $path)';
 }
 
 
@@ -7574,16 +7711,18 @@ $LoadError_SchemaValidationCopyWith<LoadError_SchemaValidation> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is LoadError_SchemaValidation&&(identical(other.path, path) || other.path == path)&&(identical(other.errors, errors) || other.errors == errors));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is LoadError_SchemaValidation&&(identical(other.path, path) || other.path == path)&&(identical(other.errors, errors) || other.errors == errors));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,path,errors);
+int get hashCode {
+    return Object.hash(runtimeType,path,errors);
+}
 
 @override
 String toString() {
-  return 'LoadError.schemaValidation(path: $path, errors: $errors)';
+    return 'LoadError.schemaValidation(path: $path, errors: $errors)';
 }
 
 
@@ -7641,16 +7780,18 @@ $LoadError_DeserializeCopyWith<LoadError_Deserialize> get copyWith => _$LoadErro
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is LoadError_Deserialize&&(identical(other.path, path) || other.path == path));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is LoadError_Deserialize&&(identical(other.path, path) || other.path == path));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,path);
+int get hashCode {
+    return Object.hash(runtimeType,path);
+}
 
 @override
 String toString() {
-  return 'LoadError.deserialize(path: $path)';
+    return 'LoadError.deserialize(path: $path)';
 }
 
 
@@ -7709,16 +7850,18 @@ $LoadError_IdMismatchCopyWith<LoadError_IdMismatch> get copyWith => _$LoadError_
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is LoadError_IdMismatch&&(identical(other.path, path) || other.path == path)&&(identical(other.declared, declared) || other.declared == declared)&&(identical(other.expected, expected) || other.expected == expected));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is LoadError_IdMismatch&&(identical(other.path, path) || other.path == path)&&(identical(other.declared, declared) || other.declared == declared)&&(identical(other.expected, expected) || other.expected == expected));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,path,declared,expected);
+int get hashCode {
+    return Object.hash(runtimeType,path,declared,expected);
+}
 
 @override
 String toString() {
-  return 'LoadError.idMismatch(path: $path, declared: $declared, expected: $expected)';
+    return 'LoadError.idMismatch(path: $path, declared: $declared, expected: $expected)';
 }
 
 
@@ -7777,16 +7920,18 @@ $LoadError_BadMetaSchemaCopyWith<LoadError_BadMetaSchema> get copyWith => _$Load
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is LoadError_BadMetaSchema&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is LoadError_BadMetaSchema&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'LoadError.badMetaSchema(field0: $field0)';
+    return 'LoadError.badMetaSchema(field0: $field0)';
 }
 
 
@@ -7843,16 +7988,18 @@ $LoadError_IoCopyWith<LoadError_Io> get copyWith => _$LoadError_IoCopyWithImpl<L
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is LoadError_Io&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is LoadError_Io&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'LoadError.io(field0: $field0)';
+    return 'LoadError.io(field0: $field0)';
 }
 
 
@@ -7899,7 +8046,7 @@ mixin _$NoChunkingReason {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NoChunkingReason);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NoChunkingReason);
 }
 
 
@@ -7908,7 +8055,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NoChunkingReason()';
+    return 'NoChunkingReason()';
 }
 
 
@@ -8096,16 +8243,18 @@ $NoChunkingReason_SmallFileCopyWith<NoChunkingReason_SmallFile> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NoChunkingReason_SmallFile&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.thresholdBytes, thresholdBytes) || other.thresholdBytes == thresholdBytes));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NoChunkingReason_SmallFile&&(identical(other.sizeBytes, sizeBytes) || other.sizeBytes == sizeBytes)&&(identical(other.thresholdBytes, thresholdBytes) || other.thresholdBytes == thresholdBytes));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,sizeBytes,thresholdBytes);
+int get hashCode {
+    return Object.hash(runtimeType,sizeBytes,thresholdBytes);
+}
 
 @override
 String toString() {
-  return 'NoChunkingReason.smallFile(sizeBytes: $sizeBytes, thresholdBytes: $thresholdBytes)';
+    return 'NoChunkingReason.smallFile(sizeBytes: $sizeBytes, thresholdBytes: $thresholdBytes)';
 }
 
 
@@ -8166,16 +8315,18 @@ $NoChunkingReason_FewPagesCopyWith<NoChunkingReason_FewPages> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NoChunkingReason_FewPages&&(identical(other.pageCount, pageCount) || other.pageCount == pageCount)&&(identical(other.threshold, threshold) || other.threshold == threshold));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NoChunkingReason_FewPages&&(identical(other.pageCount, pageCount) || other.pageCount == pageCount)&&(identical(other.threshold, threshold) || other.threshold == threshold));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,pageCount,threshold);
+int get hashCode {
+    return Object.hash(runtimeType,pageCount,threshold);
+}
 
 @override
 String toString() {
-  return 'NoChunkingReason.fewPages(pageCount: $pageCount, threshold: $threshold)';
+    return 'NoChunkingReason.fewPages(pageCount: $pageCount, threshold: $threshold)';
 }
 
 
@@ -8236,16 +8387,18 @@ $NoChunkingReason_TextLayerDetectedCopyWith<NoChunkingReason_TextLayerDetected> 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NoChunkingReason_TextLayerDetected&&(identical(other.textCoverage, textCoverage) || other.textCoverage == textCoverage)&&(identical(other.avgCharsPerPage, avgCharsPerPage) || other.avgCharsPerPage == avgCharsPerPage));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NoChunkingReason_TextLayerDetected&&(identical(other.textCoverage, textCoverage) || other.textCoverage == textCoverage)&&(identical(other.avgCharsPerPage, avgCharsPerPage) || other.avgCharsPerPage == avgCharsPerPage));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,textCoverage,avgCharsPerPage);
+int get hashCode {
+    return Object.hash(runtimeType,textCoverage,avgCharsPerPage);
+}
 
 @override
 String toString() {
-  return 'NoChunkingReason.textLayerDetected(textCoverage: $textCoverage, avgCharsPerPage: $avgCharsPerPage)';
+    return 'NoChunkingReason.textLayerDetected(textCoverage: $textCoverage, avgCharsPerPage: $avgCharsPerPage)';
 }
 
 
@@ -8304,16 +8457,18 @@ $NoChunkingReason_FormatNotChunkableCopyWith<NoChunkingReason_FormatNotChunkable
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NoChunkingReason_FormatNotChunkable&&(identical(other.mimeType, mimeType) || other.mimeType == mimeType));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NoChunkingReason_FormatNotChunkable&&(identical(other.mimeType, mimeType) || other.mimeType == mimeType));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,mimeType);
+int get hashCode {
+    return Object.hash(runtimeType,mimeType);
+}
 
 @override
 String toString() {
-  return 'NoChunkingReason.formatNotChunkable(mimeType: $mimeType)';
+    return 'NoChunkingReason.formatNotChunkable(mimeType: $mimeType)';
 }
 
 
@@ -8365,7 +8520,7 @@ class NoChunkingReason_ChunkingDisabled extends NoChunkingReason {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NoChunkingReason_ChunkingDisabled);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NoChunkingReason_ChunkingDisabled);
 }
 
 
@@ -8374,7 +8529,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NoChunkingReason.chunkingDisabled()';
+    return 'NoChunkingReason.chunkingDisabled()';
 }
 
 
@@ -8397,7 +8552,7 @@ class NoChunkingReason_FastTextExtraction extends NoChunkingReason {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NoChunkingReason_FastTextExtraction);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NoChunkingReason_FastTextExtraction);
 }
 
 
@@ -8406,7 +8561,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NoChunkingReason.fastTextExtraction()';
+    return 'NoChunkingReason.fastTextExtraction()';
 }
 
 
@@ -8424,7 +8579,7 @@ mixin _$NodeContent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent);
 }
 
 
@@ -8433,7 +8588,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NodeContent()';
+    return 'NodeContent()';
 }
 
 
@@ -8709,16 +8864,18 @@ $NodeContent_TitleCopyWith<NodeContent_Title> get copyWith => _$NodeContent_Titl
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Title&&(identical(other.text, text) || other.text == text));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Title&&(identical(other.text, text) || other.text == text));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,text);
+int get hashCode {
+    return Object.hash(runtimeType,text);
+}
 
 @override
 String toString() {
-  return 'NodeContent.title(text: $text)';
+    return 'NodeContent.title(text: $text)';
 }
 
 
@@ -8778,16 +8935,18 @@ $NodeContent_HeadingCopyWith<NodeContent_Heading> get copyWith => _$NodeContent_
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Heading&&(identical(other.level, level) || other.level == level)&&(identical(other.text, text) || other.text == text));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Heading&&(identical(other.level, level) || other.level == level)&&(identical(other.text, text) || other.text == text));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,level,text);
+int get hashCode {
+    return Object.hash(runtimeType,level,text);
+}
 
 @override
 String toString() {
-  return 'NodeContent.heading(level: $level, text: $text)';
+    return 'NodeContent.heading(level: $level, text: $text)';
 }
 
 
@@ -8846,16 +9005,18 @@ $NodeContent_ParagraphCopyWith<NodeContent_Paragraph> get copyWith => _$NodeCont
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Paragraph&&(identical(other.text, text) || other.text == text));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Paragraph&&(identical(other.text, text) || other.text == text));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,text);
+int get hashCode {
+    return Object.hash(runtimeType,text);
+}
 
 @override
 String toString() {
-  return 'NodeContent.paragraph(text: $text)';
+    return 'NodeContent.paragraph(text: $text)';
 }
 
 
@@ -8913,16 +9074,18 @@ $NodeContent_ListCopyWith<NodeContent_List> get copyWith => _$NodeContent_ListCo
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_List&&(identical(other.ordered, ordered) || other.ordered == ordered));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_List&&(identical(other.ordered, ordered) || other.ordered == ordered));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,ordered);
+int get hashCode {
+    return Object.hash(runtimeType,ordered);
+}
 
 @override
 String toString() {
-  return 'NodeContent.list(ordered: $ordered)';
+    return 'NodeContent.list(ordered: $ordered)';
 }
 
 
@@ -8980,16 +9143,18 @@ $NodeContent_ListItemCopyWith<NodeContent_ListItem> get copyWith => _$NodeConten
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_ListItem&&(identical(other.text, text) || other.text == text));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_ListItem&&(identical(other.text, text) || other.text == text));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,text);
+int get hashCode {
+    return Object.hash(runtimeType,text);
+}
 
 @override
 String toString() {
-  return 'NodeContent.listItem(text: $text)';
+    return 'NodeContent.listItem(text: $text)';
 }
 
 
@@ -9047,16 +9212,18 @@ $NodeContent_TableCopyWith<NodeContent_Table> get copyWith => _$NodeContent_Tabl
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Table&&(identical(other.grid, grid) || other.grid == grid));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Table&&(identical(other.grid, grid) || other.grid == grid));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,grid);
+int get hashCode {
+    return Object.hash(runtimeType,grid);
+}
 
 @override
 String toString() {
-  return 'NodeContent.table(grid: $grid)';
+    return 'NodeContent.table(grid: $grid)';
 }
 
 
@@ -9118,16 +9285,18 @@ $NodeContent_ImageCopyWith<NodeContent_Image> get copyWith => _$NodeContent_Imag
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Image&&(identical(other.description, description) || other.description == description)&&(identical(other.imageIndex, imageIndex) || other.imageIndex == imageIndex)&&(identical(other.src, src) || other.src == src));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Image&&(identical(other.description, description) || other.description == description)&&(identical(other.imageIndex, imageIndex) || other.imageIndex == imageIndex)&&(identical(other.src, src) || other.src == src));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,description,imageIndex,src);
+int get hashCode {
+    return Object.hash(runtimeType,description,imageIndex,src);
+}
 
 @override
 String toString() {
-  return 'NodeContent.image(description: $description, imageIndex: $imageIndex, src: $src)';
+    return 'NodeContent.image(description: $description, imageIndex: $imageIndex, src: $src)';
 }
 
 
@@ -9189,16 +9358,18 @@ $NodeContent_CodeCopyWith<NodeContent_Code> get copyWith => _$NodeContent_CodeCo
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Code&&(identical(other.text, text) || other.text == text)&&(identical(other.language, language) || other.language == language));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Code&&(identical(other.text, text) || other.text == text)&&(identical(other.language, language) || other.language == language));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,text,language);
+int get hashCode {
+    return Object.hash(runtimeType,text,language);
+}
 
 @override
 String toString() {
-  return 'NodeContent.code(text: $text, language: $language)';
+    return 'NodeContent.code(text: $text, language: $language)';
 }
 
 
@@ -9251,7 +9422,7 @@ class NodeContent_Quote extends NodeContent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Quote);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Quote);
 }
 
 
@@ -9260,7 +9431,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NodeContent.quote()';
+    return 'NodeContent.quote()';
 }
 
 
@@ -9289,16 +9460,18 @@ $NodeContent_FormulaCopyWith<NodeContent_Formula> get copyWith => _$NodeContent_
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Formula&&(identical(other.text, text) || other.text == text));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Formula&&(identical(other.text, text) || other.text == text));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,text);
+int get hashCode {
+    return Object.hash(runtimeType,text);
+}
 
 @override
 String toString() {
-  return 'NodeContent.formula(text: $text)';
+    return 'NodeContent.formula(text: $text)';
 }
 
 
@@ -9356,16 +9529,18 @@ $NodeContent_FootnoteCopyWith<NodeContent_Footnote> get copyWith => _$NodeConten
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Footnote&&(identical(other.text, text) || other.text == text));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Footnote&&(identical(other.text, text) || other.text == text));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,text);
+int get hashCode {
+    return Object.hash(runtimeType,text);
+}
 
 @override
 String toString() {
-  return 'NodeContent.footnote(text: $text)';
+    return 'NodeContent.footnote(text: $text)';
 }
 
 
@@ -9423,16 +9598,18 @@ $NodeContent_CommentCopyWith<NodeContent_Comment> get copyWith => _$NodeContent_
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Comment&&(identical(other.text, text) || other.text == text));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Comment&&(identical(other.text, text) || other.text == text));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,text);
+int get hashCode {
+    return Object.hash(runtimeType,text);
+}
 
 @override
 String toString() {
-  return 'NodeContent.comment(text: $text)';
+    return 'NodeContent.comment(text: $text)';
 }
 
 
@@ -9494,16 +9671,18 @@ $NodeContent_GroupCopyWith<NodeContent_Group> get copyWith => _$NodeContent_Grou
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Group&&(identical(other.label, label) || other.label == label)&&(identical(other.headingLevel, headingLevel) || other.headingLevel == headingLevel)&&(identical(other.headingText, headingText) || other.headingText == headingText));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Group&&(identical(other.label, label) || other.label == label)&&(identical(other.headingLevel, headingLevel) || other.headingLevel == headingLevel)&&(identical(other.headingText, headingText) || other.headingText == headingText));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,label,headingLevel,headingText);
+int get hashCode {
+    return Object.hash(runtimeType,label,headingLevel,headingText);
+}
 
 @override
 String toString() {
-  return 'NodeContent.group(label: $label, headingLevel: $headingLevel, headingText: $headingText)';
+    return 'NodeContent.group(label: $label, headingLevel: $headingLevel, headingText: $headingText)';
 }
 
 
@@ -9557,7 +9736,7 @@ class NodeContent_PageBreak extends NodeContent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_PageBreak);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_PageBreak);
 }
 
 
@@ -9566,7 +9745,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NodeContent.pageBreak()';
+    return 'NodeContent.pageBreak()';
 }
 
 
@@ -9597,16 +9776,18 @@ $NodeContent_SlideCopyWith<NodeContent_Slide> get copyWith => _$NodeContent_Slid
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Slide&&(identical(other.number, number) || other.number == number)&&(identical(other.title, title) || other.title == title));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Slide&&(identical(other.number, number) || other.number == number)&&(identical(other.title, title) || other.title == title));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,number,title);
+int get hashCode {
+    return Object.hash(runtimeType,number,title);
+}
 
 @override
 String toString() {
-  return 'NodeContent.slide(number: $number, title: $title)';
+    return 'NodeContent.slide(number: $number, title: $title)';
 }
 
 
@@ -9659,7 +9840,7 @@ class NodeContent_DefinitionList extends NodeContent {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_DefinitionList);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_DefinitionList);
 }
 
 
@@ -9668,7 +9849,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'NodeContent.definitionList()';
+    return 'NodeContent.definitionList()';
 }
 
 
@@ -9699,16 +9880,18 @@ $NodeContent_DefinitionItemCopyWith<NodeContent_DefinitionItem> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_DefinitionItem&&(identical(other.term, term) || other.term == term)&&(identical(other.definition, definition) || other.definition == definition));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_DefinitionItem&&(identical(other.term, term) || other.term == term)&&(identical(other.definition, definition) || other.definition == definition));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,term,definition);
+int get hashCode {
+    return Object.hash(runtimeType,term,definition);
+}
 
 @override
 String toString() {
-  return 'NodeContent.definitionItem(term: $term, definition: $definition)';
+    return 'NodeContent.definitionItem(term: $term, definition: $definition)';
 }
 
 
@@ -9769,16 +9952,18 @@ $NodeContent_CitationCopyWith<NodeContent_Citation> get copyWith => _$NodeConten
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Citation&&(identical(other.key, key) || other.key == key)&&(identical(other.text, text) || other.text == text));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Citation&&(identical(other.key, key) || other.key == key)&&(identical(other.text, text) || other.text == text));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,key,text);
+int get hashCode {
+    return Object.hash(runtimeType,key,text);
+}
 
 @override
 String toString() {
-  return 'NodeContent.citation(key: $key, text: $text)';
+    return 'NodeContent.citation(key: $key, text: $text)';
 }
 
 
@@ -9839,16 +10024,18 @@ $NodeContent_AdmonitionCopyWith<NodeContent_Admonition> get copyWith => _$NodeCo
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Admonition&&(identical(other.kind, kind) || other.kind == kind)&&(identical(other.title, title) || other.title == title));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_Admonition&&(identical(other.kind, kind) || other.kind == kind)&&(identical(other.title, title) || other.title == title));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,kind,title);
+int get hashCode {
+    return Object.hash(runtimeType,kind,title);
+}
 
 @override
 String toString() {
-  return 'NodeContent.admonition(kind: $kind, title: $title)';
+    return 'NodeContent.admonition(kind: $kind, title: $title)';
 }
 
 
@@ -9909,16 +10096,18 @@ $NodeContent_RawBlockCopyWith<NodeContent_RawBlock> get copyWith => _$NodeConten
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_RawBlock&&(identical(other.format, format) || other.format == format)&&(identical(other.content, content) || other.content == content));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_RawBlock&&(identical(other.format, format) || other.format == format)&&(identical(other.content, content) || other.content == content));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,format,content);
+int get hashCode {
+    return Object.hash(runtimeType,format,content);
+}
 
 @override
 String toString() {
-  return 'NodeContent.rawBlock(format: $format, content: $content)';
+    return 'NodeContent.rawBlock(format: $format, content: $content)';
 }
 
 
@@ -9961,7 +10150,7 @@ as String,
 
 
 class NodeContent_MetadataBlock extends NodeContent {
-  const NodeContent_MetadataBlock({required final  List<KeyValueAttribute> entries}): _entries = entries,super._();
+  const NodeContent_MetadataBlock({required  List<KeyValueAttribute> entries}): _entries = entries,super._();
 
 
 /// Key-value pairs extracted from the metadata block.
@@ -9984,16 +10173,18 @@ $NodeContent_MetadataBlockCopyWith<NodeContent_MetadataBlock> get copyWith => _$
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_MetadataBlock&&const DeepCollectionEquality().equals(other._entries, _entries));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is NodeContent_MetadataBlock&&const DeepCollectionEquality().equals(other.entries, _entries));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(_entries));
+int get hashCode {
+    return Object.hash(runtimeType,const DeepCollectionEquality().hash(_entries));
+}
 
 @override
 String toString() {
-  return 'NodeContent.metadataBlock(entries: $entries)';
+    return 'NodeContent.metadataBlock(entries: $entries)';
 }
 
 
@@ -10040,7 +10231,7 @@ mixin _$OcrBoundingGeometry {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is OcrBoundingGeometry);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is OcrBoundingGeometry);
 }
 
 
@@ -10049,7 +10240,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'OcrBoundingGeometry()';
+    return 'OcrBoundingGeometry()';
 }
 
 
@@ -10217,16 +10408,18 @@ $OcrBoundingGeometry_RectangleCopyWith<OcrBoundingGeometry_Rectangle> get copyWi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is OcrBoundingGeometry_Rectangle&&(identical(other.left, left) || other.left == left)&&(identical(other.top, top) || other.top == top)&&(identical(other.width, width) || other.width == width)&&(identical(other.height, height) || other.height == height));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is OcrBoundingGeometry_Rectangle&&(identical(other.left, left) || other.left == left)&&(identical(other.top, top) || other.top == top)&&(identical(other.width, width) || other.width == width)&&(identical(other.height, height) || other.height == height));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,left,top,width,height);
+int get hashCode {
+    return Object.hash(runtimeType,left,top,width,height);
+}
 
 @override
 String toString() {
-  return 'OcrBoundingGeometry.rectangle(left: $left, top: $top, width: $width, height: $height)';
+    return 'OcrBoundingGeometry.rectangle(left: $left, top: $top, width: $width, height: $height)';
 }
 
 
@@ -10271,7 +10464,7 @@ as PlatformInt64,
 
 
 class OcrBoundingGeometry_Quadrilateral extends OcrBoundingGeometry {
-  const OcrBoundingGeometry_Quadrilateral({required final  List<OcrPoint> points}): _points = points,super._();
+  const OcrBoundingGeometry_Quadrilateral({required  List<OcrPoint> points}): _points = points,super._();
 
 
 /// Exactly four corner points in clockwise order.
@@ -10294,16 +10487,18 @@ $OcrBoundingGeometry_QuadrilateralCopyWith<OcrBoundingGeometry_Quadrilateral> ge
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is OcrBoundingGeometry_Quadrilateral&&const DeepCollectionEquality().equals(other._points, _points));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is OcrBoundingGeometry_Quadrilateral&&const DeepCollectionEquality().equals(other.points, _points));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,const DeepCollectionEquality().hash(_points));
+int get hashCode {
+    return Object.hash(runtimeType,const DeepCollectionEquality().hash(_points));
+}
 
 @override
 String toString() {
-  return 'OcrBoundingGeometry.quadrilateral(points: $points)';
+    return 'OcrBoundingGeometry.quadrilateral(points: $points)';
 }
 
 
@@ -10350,7 +10545,7 @@ mixin _$OcrStrategy {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is OcrStrategy);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is OcrStrategy);
 }
 
 
@@ -10359,7 +10554,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'OcrStrategy()';
+    return 'OcrStrategy()';
 }
 
 
@@ -10515,7 +10710,7 @@ class OcrStrategy_Auto extends OcrStrategy {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is OcrStrategy_Auto);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is OcrStrategy_Auto);
 }
 
 
@@ -10524,7 +10719,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'OcrStrategy.auto()';
+    return 'OcrStrategy.auto()';
 }
 
 
@@ -10555,16 +10750,18 @@ $OcrStrategy_ScannedPagesCopyWith<OcrStrategy_ScannedPages> get copyWith => _$Oc
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is OcrStrategy_ScannedPages&&(identical(other.minConfidence, minConfidence) || other.minConfidence == minConfidence));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is OcrStrategy_ScannedPages&&(identical(other.minConfidence, minConfidence) || other.minConfidence == minConfidence));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,minConfidence);
+int get hashCode {
+    return Object.hash(runtimeType,minConfidence);
+}
 
 @override
 String toString() {
-  return 'OcrStrategy.scannedPages(minConfidence: $minConfidence)';
+    return 'OcrStrategy.scannedPages(minConfidence: $minConfidence)';
 }
 
 
@@ -10611,7 +10808,7 @@ mixin _$OutputFormat {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat);
 }
 
 
@@ -10620,7 +10817,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'OutputFormat()';
+    return 'OutputFormat()';
 }
 
 
@@ -10806,7 +11003,7 @@ class OutputFormat_Plain extends OutputFormat {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat_Plain);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat_Plain);
 }
 
 
@@ -10815,7 +11012,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'OutputFormat.plain()';
+    return 'OutputFormat.plain()';
 }
 
 
@@ -10838,7 +11035,7 @@ class OutputFormat_Markdown extends OutputFormat {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat_Markdown);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat_Markdown);
 }
 
 
@@ -10847,7 +11044,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'OutputFormat.markdown()';
+    return 'OutputFormat.markdown()';
 }
 
 
@@ -10870,7 +11067,7 @@ class OutputFormat_Djot extends OutputFormat {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat_Djot);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat_Djot);
 }
 
 
@@ -10879,7 +11076,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'OutputFormat.djot()';
+    return 'OutputFormat.djot()';
 }
 
 
@@ -10902,7 +11099,7 @@ class OutputFormat_Html extends OutputFormat {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat_Html);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat_Html);
 }
 
 
@@ -10911,7 +11108,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'OutputFormat.html()';
+    return 'OutputFormat.html()';
 }
 
 
@@ -10934,7 +11131,7 @@ class OutputFormat_Json extends OutputFormat {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat_Json);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat_Json);
 }
 
 
@@ -10943,7 +11140,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'OutputFormat.json()';
+    return 'OutputFormat.json()';
 }
 
 
@@ -10966,7 +11163,7 @@ class OutputFormat_DocTags extends OutputFormat {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat_DocTags);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat_DocTags);
 }
 
 
@@ -10975,7 +11172,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'OutputFormat.docTags()';
+    return 'OutputFormat.docTags()';
 }
 
 
@@ -11003,16 +11200,18 @@ $OutputFormat_CustomCopyWith<OutputFormat_Custom> get copyWith => _$OutputFormat
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat_Custom&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is OutputFormat_Custom&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'OutputFormat.custom(field0: $field0)';
+    return 'OutputFormat.custom(field0: $field0)';
 }
 
 
@@ -11059,7 +11258,7 @@ mixin _$PiiCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory);
 }
 
 
@@ -11068,7 +11267,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'PiiCategory()';
+    return 'PiiCategory()';
 }
 
 
@@ -11290,7 +11489,7 @@ class PiiCategory_Email extends PiiCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Email);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Email);
 }
 
 
@@ -11299,7 +11498,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'PiiCategory.email()';
+    return 'PiiCategory.email()';
 }
 
 
@@ -11322,7 +11521,7 @@ class PiiCategory_Phone extends PiiCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Phone);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Phone);
 }
 
 
@@ -11331,7 +11530,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'PiiCategory.phone()';
+    return 'PiiCategory.phone()';
 }
 
 
@@ -11354,7 +11553,7 @@ class PiiCategory_Ssn extends PiiCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Ssn);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Ssn);
 }
 
 
@@ -11363,7 +11562,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'PiiCategory.ssn()';
+    return 'PiiCategory.ssn()';
 }
 
 
@@ -11386,7 +11585,7 @@ class PiiCategory_CreditCard extends PiiCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_CreditCard);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_CreditCard);
 }
 
 
@@ -11395,7 +11594,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'PiiCategory.creditCard()';
+    return 'PiiCategory.creditCard()';
 }
 
 
@@ -11418,7 +11617,7 @@ class PiiCategory_PostalCode extends PiiCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_PostalCode);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_PostalCode);
 }
 
 
@@ -11427,7 +11626,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'PiiCategory.postalCode()';
+    return 'PiiCategory.postalCode()';
 }
 
 
@@ -11450,7 +11649,7 @@ class PiiCategory_IpAddress extends PiiCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_IpAddress);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_IpAddress);
 }
 
 
@@ -11459,7 +11658,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'PiiCategory.ipAddress()';
+    return 'PiiCategory.ipAddress()';
 }
 
 
@@ -11482,7 +11681,7 @@ class PiiCategory_Iban extends PiiCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Iban);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Iban);
 }
 
 
@@ -11491,7 +11690,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'PiiCategory.iban()';
+    return 'PiiCategory.iban()';
 }
 
 
@@ -11514,7 +11713,7 @@ class PiiCategory_SwiftBic extends PiiCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_SwiftBic);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_SwiftBic);
 }
 
 
@@ -11523,7 +11722,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'PiiCategory.swiftBic()';
+    return 'PiiCategory.swiftBic()';
 }
 
 
@@ -11546,7 +11745,7 @@ class PiiCategory_DateOfBirth extends PiiCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_DateOfBirth);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_DateOfBirth);
 }
 
 
@@ -11555,7 +11754,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'PiiCategory.dateOfBirth()';
+    return 'PiiCategory.dateOfBirth()';
 }
 
 
@@ -11578,7 +11777,7 @@ class PiiCategory_Person extends PiiCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Person);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Person);
 }
 
 
@@ -11587,7 +11786,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'PiiCategory.person()';
+    return 'PiiCategory.person()';
 }
 
 
@@ -11610,7 +11809,7 @@ class PiiCategory_Organization extends PiiCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Organization);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Organization);
 }
 
 
@@ -11619,7 +11818,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'PiiCategory.organization()';
+    return 'PiiCategory.organization()';
 }
 
 
@@ -11642,7 +11841,7 @@ class PiiCategory_Location extends PiiCategory {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Location);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Location);
 }
 
 
@@ -11651,7 +11850,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'PiiCategory.location()';
+    return 'PiiCategory.location()';
 }
 
 
@@ -11679,16 +11878,18 @@ $PiiCategory_CustomCopyWith<PiiCategory_Custom> get copyWith => _$PiiCategory_Cu
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Custom&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is PiiCategory_Custom&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'PiiCategory.custom(field0: $field0)';
+    return 'PiiCategory.custom(field0: $field0)';
 }
 
 
@@ -11735,7 +11936,7 @@ mixin _$RerankerModelType {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RerankerModelType);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is RerankerModelType);
 }
 
 
@@ -11744,7 +11945,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'RerankerModelType()';
+    return 'RerankerModelType()';
 }
 
 
@@ -11918,16 +12119,18 @@ $RerankerModelType_PresetCopyWith<RerankerModelType_Preset> get copyWith => _$Re
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RerankerModelType_Preset&&(identical(other.name, name) || other.name == name));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is RerankerModelType_Preset&&(identical(other.name, name) || other.name == name));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,name);
+int get hashCode {
+    return Object.hash(runtimeType,name);
+}
 
 @override
 String toString() {
-  return 'RerankerModelType.preset(name: $name)';
+    return 'RerankerModelType.preset(name: $name)';
 }
 
 
@@ -11969,7 +12172,7 @@ as String,
 
 
 class RerankerModelType_Custom extends RerankerModelType {
-  const RerankerModelType_Custom({required this.modelId, required this.modelFile, required final  List<String> additionalFiles, required this.maxLength, required this.head}): _additionalFiles = additionalFiles,super._();
+  const RerankerModelType_Custom({required this.modelId, required this.modelFile, required  List<String> additionalFiles, required this.maxLength, required this.head}): _additionalFiles = additionalFiles,super._();
 
 
 /// HuggingFace model repository ID (e.g. "cross-encoder/ms-marco-MiniLM-L6-v2").
@@ -12019,16 +12222,18 @@ $RerankerModelType_CustomCopyWith<RerankerModelType_Custom> get copyWith => _$Re
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RerankerModelType_Custom&&(identical(other.modelId, modelId) || other.modelId == modelId)&&(identical(other.modelFile, modelFile) || other.modelFile == modelFile)&&const DeepCollectionEquality().equals(other._additionalFiles, _additionalFiles)&&(identical(other.maxLength, maxLength) || other.maxLength == maxLength)&&(identical(other.head, head) || other.head == head));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is RerankerModelType_Custom&&(identical(other.modelId, modelId) || other.modelId == modelId)&&(identical(other.modelFile, modelFile) || other.modelFile == modelFile)&&const DeepCollectionEquality().equals(other.additionalFiles, _additionalFiles)&&(identical(other.maxLength, maxLength) || other.maxLength == maxLength)&&(identical(other.head, head) || other.head == head));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,modelId,modelFile,const DeepCollectionEquality().hash(_additionalFiles),maxLength,head);
+int get hashCode {
+    return Object.hash(runtimeType,modelId,modelFile,const DeepCollectionEquality().hash(_additionalFiles),maxLength,head);
+}
 
 @override
 String toString() {
-  return 'RerankerModelType.custom(modelId: $modelId, modelFile: $modelFile, additionalFiles: $additionalFiles, maxLength: $maxLength, head: $head)';
+    return 'RerankerModelType.custom(modelId: $modelId, modelFile: $modelFile, additionalFiles: $additionalFiles, maxLength: $maxLength, head: $head)';
 }
 
 
@@ -12093,16 +12298,18 @@ $RerankerModelType_LlmCopyWith<RerankerModelType_Llm> get copyWith => _$Reranker
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RerankerModelType_Llm&&(identical(other.llm, llm) || other.llm == llm));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is RerankerModelType_Llm&&(identical(other.llm, llm) || other.llm == llm));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,llm);
+int get hashCode {
+    return Object.hash(runtimeType,llm);
+}
 
 @override
 String toString() {
-  return 'RerankerModelType.llm(llm: $llm)';
+    return 'RerankerModelType.llm(llm: $llm)';
 }
 
 
@@ -12160,16 +12367,18 @@ $RerankerModelType_PluginCopyWith<RerankerModelType_Plugin> get copyWith => _$Re
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RerankerModelType_Plugin&&(identical(other.name, name) || other.name == name));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is RerankerModelType_Plugin&&(identical(other.name, name) || other.name == name));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,name);
+int get hashCode {
+    return Object.hash(runtimeType,name);
+}
 
 @override
 String toString() {
-  return 'RerankerModelType.plugin(name: $name)';
+    return 'RerankerModelType.plugin(name: $name)';
 }
 
 
@@ -12216,7 +12425,7 @@ mixin _$RevisionAnchor {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RevisionAnchor);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is RevisionAnchor);
 }
 
 
@@ -12225,7 +12434,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'RevisionAnchor()';
+    return 'RevisionAnchor()';
 }
 
 
@@ -12405,16 +12614,18 @@ $RevisionAnchor_ParagraphCopyWith<RevisionAnchor_Paragraph> get copyWith => _$Re
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RevisionAnchor_Paragraph&&(identical(other.index, index) || other.index == index));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is RevisionAnchor_Paragraph&&(identical(other.index, index) || other.index == index));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,index);
+int get hashCode {
+    return Object.hash(runtimeType,index);
+}
 
 @override
 String toString() {
-  return 'RevisionAnchor.paragraph(index: $index)';
+    return 'RevisionAnchor.paragraph(index: $index)';
 }
 
 
@@ -12476,16 +12687,18 @@ $RevisionAnchor_TableCellCopyWith<RevisionAnchor_TableCell> get copyWith => _$Re
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RevisionAnchor_TableCell&&(identical(other.row, row) || other.row == row)&&(identical(other.col, col) || other.col == col)&&(identical(other.tableIndex, tableIndex) || other.tableIndex == tableIndex));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is RevisionAnchor_TableCell&&(identical(other.row, row) || other.row == row)&&(identical(other.col, col) || other.col == col)&&(identical(other.tableIndex, tableIndex) || other.tableIndex == tableIndex));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,row,col,tableIndex);
+int get hashCode {
+    return Object.hash(runtimeType,row,col,tableIndex);
+}
 
 @override
 String toString() {
-  return 'RevisionAnchor.tableCell(row: $row, col: $col, tableIndex: $tableIndex)';
+    return 'RevisionAnchor.tableCell(row: $row, col: $col, tableIndex: $tableIndex)';
 }
 
 
@@ -12545,16 +12758,18 @@ $RevisionAnchor_PageCopyWith<RevisionAnchor_Page> get copyWith => _$RevisionAnch
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RevisionAnchor_Page&&(identical(other.index, index) || other.index == index));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is RevisionAnchor_Page&&(identical(other.index, index) || other.index == index));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,index);
+int get hashCode {
+    return Object.hash(runtimeType,index);
+}
 
 @override
 String toString() {
-  return 'RevisionAnchor.page(index: $index)';
+    return 'RevisionAnchor.page(index: $index)';
 }
 
 
@@ -12612,16 +12827,18 @@ $RevisionAnchor_SlideCopyWith<RevisionAnchor_Slide> get copyWith => _$RevisionAn
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RevisionAnchor_Slide&&(identical(other.index, index) || other.index == index));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is RevisionAnchor_Slide&&(identical(other.index, index) || other.index == index));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,index);
+int get hashCode {
+    return Object.hash(runtimeType,index);
+}
 
 @override
 String toString() {
-  return 'RevisionAnchor.slide(index: $index)';
+    return 'RevisionAnchor.slide(index: $index)';
 }
 
 
@@ -12681,16 +12898,18 @@ $RevisionAnchor_SheetCopyWith<RevisionAnchor_Sheet> get copyWith => _$RevisionAn
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is RevisionAnchor_Sheet&&(identical(other.index, index) || other.index == index)&&(identical(other.name, name) || other.name == name));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is RevisionAnchor_Sheet&&(identical(other.index, index) || other.index == index)&&(identical(other.name, name) || other.name == name));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,index,name);
+int get hashCode {
+    return Object.hash(runtimeType,index,name);
+}
 
 @override
 String toString() {
-  return 'RevisionAnchor.sheet(index: $index, name: $name)';
+    return 'RevisionAnchor.sheet(index: $index, name: $name)';
 }
 
 
@@ -12738,7 +12957,7 @@ mixin _$SparseEmbeddingModelType {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is SparseEmbeddingModelType);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is SparseEmbeddingModelType);
 }
 
 
@@ -12747,7 +12966,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'SparseEmbeddingModelType()';
+    return 'SparseEmbeddingModelType()';
 }
 
 
@@ -12915,16 +13134,18 @@ $SparseEmbeddingModelType_PresetCopyWith<SparseEmbeddingModelType_Preset> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is SparseEmbeddingModelType_Preset&&(identical(other.name, name) || other.name == name));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is SparseEmbeddingModelType_Preset&&(identical(other.name, name) || other.name == name));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,name);
+int get hashCode {
+    return Object.hash(runtimeType,name);
+}
 
 @override
 String toString() {
-  return 'SparseEmbeddingModelType.preset(name: $name)';
+    return 'SparseEmbeddingModelType.preset(name: $name)';
 }
 
 
@@ -12966,7 +13187,7 @@ as String,
 
 
 class SparseEmbeddingModelType_Custom extends SparseEmbeddingModelType {
-  const SparseEmbeddingModelType_Custom({required this.modelId, required this.modelFile, required final  List<String> additionalFiles, required this.maxLength}): _additionalFiles = additionalFiles,super._();
+  const SparseEmbeddingModelType_Custom({required this.modelId, required this.modelFile, required  List<String> additionalFiles, required this.maxLength}): _additionalFiles = additionalFiles,super._();
 
 
 /// HuggingFace model repository ID.
@@ -12996,16 +13217,18 @@ $SparseEmbeddingModelType_CustomCopyWith<SparseEmbeddingModelType_Custom> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is SparseEmbeddingModelType_Custom&&(identical(other.modelId, modelId) || other.modelId == modelId)&&(identical(other.modelFile, modelFile) || other.modelFile == modelFile)&&const DeepCollectionEquality().equals(other._additionalFiles, _additionalFiles)&&(identical(other.maxLength, maxLength) || other.maxLength == maxLength));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is SparseEmbeddingModelType_Custom&&(identical(other.modelId, modelId) || other.modelId == modelId)&&(identical(other.modelFile, modelFile) || other.modelFile == modelFile)&&const DeepCollectionEquality().equals(other.additionalFiles, _additionalFiles)&&(identical(other.maxLength, maxLength) || other.maxLength == maxLength));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,modelId,modelFile,const DeepCollectionEquality().hash(_additionalFiles),maxLength);
+int get hashCode {
+    return Object.hash(runtimeType,modelId,modelFile,const DeepCollectionEquality().hash(_additionalFiles),maxLength);
+}
 
 @override
 String toString() {
-  return 'SparseEmbeddingModelType.custom(modelId: $modelId, modelFile: $modelFile, additionalFiles: $additionalFiles, maxLength: $maxLength)';
+    return 'SparseEmbeddingModelType.custom(modelId: $modelId, modelFile: $modelFile, additionalFiles: $additionalFiles, maxLength: $maxLength)';
 }
 
 
@@ -13066,16 +13289,18 @@ $SparseEmbeddingModelType_PluginCopyWith<SparseEmbeddingModelType_Plugin> get co
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is SparseEmbeddingModelType_Plugin&&(identical(other.name, name) || other.name == name));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is SparseEmbeddingModelType_Plugin&&(identical(other.name, name) || other.name == name));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,name);
+int get hashCode {
+    return Object.hash(runtimeType,name);
+}
 
 @override
 String toString() {
-  return 'SparseEmbeddingModelType.plugin(name: $name)';
+    return 'SparseEmbeddingModelType.plugin(name: $name)';
 }
 
 
@@ -13122,7 +13347,7 @@ mixin _$VlmFallbackPolicy {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is VlmFallbackPolicy);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is VlmFallbackPolicy);
 }
 
 
@@ -13131,7 +13356,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'VlmFallbackPolicy()';
+    return 'VlmFallbackPolicy()';
 }
 
 
@@ -13293,7 +13518,7 @@ class VlmFallbackPolicy_Disabled extends VlmFallbackPolicy {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is VlmFallbackPolicy_Disabled);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is VlmFallbackPolicy_Disabled);
 }
 
 
@@ -13302,7 +13527,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'VlmFallbackPolicy.disabled()';
+    return 'VlmFallbackPolicy.disabled()';
 }
 
 
@@ -13318,8 +13543,9 @@ class VlmFallbackPolicy_OnLowQuality extends VlmFallbackPolicy {
   const VlmFallbackPolicy_OnLowQuality({required this.qualityThreshold}): super._();
 
 
-/// Minimum acceptable quality score from the classical backend.
-/// Pages scoring below this are retried with VLM.
+/// Minimum acceptable quality score from the classical backend. Pages scoring below
+/// this are retried with VLM -- see this variant's doc comment for what "scoring"
+/// means here.
  final  double qualityThreshold;
 
 /// Create a copy of VlmFallbackPolicy
@@ -13332,16 +13558,18 @@ $VlmFallbackPolicy_OnLowQualityCopyWith<VlmFallbackPolicy_OnLowQuality> get copy
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is VlmFallbackPolicy_OnLowQuality&&(identical(other.qualityThreshold, qualityThreshold) || other.qualityThreshold == qualityThreshold));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is VlmFallbackPolicy_OnLowQuality&&(identical(other.qualityThreshold, qualityThreshold) || other.qualityThreshold == qualityThreshold));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,qualityThreshold);
+int get hashCode {
+    return Object.hash(runtimeType,qualityThreshold);
+}
 
 @override
 String toString() {
-  return 'VlmFallbackPolicy.onLowQuality(qualityThreshold: $qualityThreshold)';
+    return 'VlmFallbackPolicy.onLowQuality(qualityThreshold: $qualityThreshold)';
 }
 
 
@@ -13393,7 +13621,7 @@ class VlmFallbackPolicy_Always extends VlmFallbackPolicy {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is VlmFallbackPolicy_Always);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is VlmFallbackPolicy_Always);
 }
 
 
@@ -13402,7 +13630,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'VlmFallbackPolicy.always()';
+    return 'VlmFallbackPolicy.always()';
 }
 
 
@@ -13420,7 +13648,7 @@ mixin _$XbergError {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError);
 }
 
 
@@ -13429,7 +13657,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'XbergError()';
+    return 'XbergError()';
 }
 
 
@@ -13686,16 +13914,18 @@ $XbergError_IoCopyWith<XbergError_Io> get copyWith => _$XbergError_IoCopyWithImp
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Io&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Io&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'XbergError.io(field0: $field0)';
+    return 'XbergError.io(field0: $field0)';
 }
 
 
@@ -13752,16 +13982,18 @@ $XbergError_ParsingCopyWith<XbergError_Parsing> get copyWith => _$XbergError_Par
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Parsing&&(identical(other.message, message) || other.message == message));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Parsing&&(identical(other.message, message) || other.message == message));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,message);
+int get hashCode {
+    return Object.hash(runtimeType,message);
+}
 
 @override
 String toString() {
-  return 'XbergError.parsing(message: $message)';
+    return 'XbergError.parsing(message: $message)';
 }
 
 
@@ -13818,16 +14050,18 @@ $XbergError_OcrCopyWith<XbergError_Ocr> get copyWith => _$XbergError_OcrCopyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Ocr&&(identical(other.message, message) || other.message == message));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Ocr&&(identical(other.message, message) || other.message == message));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,message);
+int get hashCode {
+    return Object.hash(runtimeType,message);
+}
 
 @override
 String toString() {
-  return 'XbergError.ocr(message: $message)';
+    return 'XbergError.ocr(message: $message)';
 }
 
 
@@ -13884,16 +14118,18 @@ $XbergError_ValidationCopyWith<XbergError_Validation> get copyWith => _$XbergErr
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Validation&&(identical(other.message, message) || other.message == message));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Validation&&(identical(other.message, message) || other.message == message));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,message);
+int get hashCode {
+    return Object.hash(runtimeType,message);
+}
 
 @override
 String toString() {
-  return 'XbergError.validation(message: $message)';
+    return 'XbergError.validation(message: $message)';
 }
 
 
@@ -13950,16 +14186,18 @@ $XbergError_CacheCopyWith<XbergError_Cache> get copyWith => _$XbergError_CacheCo
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Cache&&(identical(other.message, message) || other.message == message));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Cache&&(identical(other.message, message) || other.message == message));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,message);
+int get hashCode {
+    return Object.hash(runtimeType,message);
+}
 
 @override
 String toString() {
-  return 'XbergError.cache(message: $message)';
+    return 'XbergError.cache(message: $message)';
 }
 
 
@@ -14016,16 +14254,18 @@ $XbergError_ImageProcessingCopyWith<XbergError_ImageProcessing> get copyWith => 
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_ImageProcessing&&(identical(other.message, message) || other.message == message));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_ImageProcessing&&(identical(other.message, message) || other.message == message));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,message);
+int get hashCode {
+    return Object.hash(runtimeType,message);
+}
 
 @override
 String toString() {
-  return 'XbergError.imageProcessing(message: $message)';
+    return 'XbergError.imageProcessing(message: $message)';
 }
 
 
@@ -14082,16 +14322,18 @@ $XbergError_SerializationCopyWith<XbergError_Serialization> get copyWith => _$Xb
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Serialization&&(identical(other.message, message) || other.message == message));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Serialization&&(identical(other.message, message) || other.message == message));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,message);
+int get hashCode {
+    return Object.hash(runtimeType,message);
+}
 
 @override
 String toString() {
-  return 'XbergError.serialization(message: $message)';
+    return 'XbergError.serialization(message: $message)';
 }
 
 
@@ -14148,16 +14390,18 @@ $XbergError_MissingDependencyCopyWith<XbergError_MissingDependency> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_MissingDependency&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_MissingDependency&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'XbergError.missingDependency(field0: $field0)';
+    return 'XbergError.missingDependency(field0: $field0)';
 }
 
 
@@ -14215,16 +14459,18 @@ $XbergError_PluginCopyWith<XbergError_Plugin> get copyWith => _$XbergError_Plugi
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Plugin&&(identical(other.message, message) || other.message == message)&&(identical(other.pluginName, pluginName) || other.pluginName == pluginName));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Plugin&&(identical(other.message, message) || other.message == message)&&(identical(other.pluginName, pluginName) || other.pluginName == pluginName));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,message,pluginName);
+int get hashCode {
+    return Object.hash(runtimeType,message,pluginName);
+}
 
 @override
 String toString() {
-  return 'XbergError.plugin(message: $message, pluginName: $pluginName)';
+    return 'XbergError.plugin(message: $message, pluginName: $pluginName)';
 }
 
 
@@ -14282,16 +14528,18 @@ $XbergError_LockPoisonedCopyWith<XbergError_LockPoisoned> get copyWith => _$Xber
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_LockPoisoned&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_LockPoisoned&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'XbergError.lockPoisoned(field0: $field0)';
+    return 'XbergError.lockPoisoned(field0: $field0)';
 }
 
 
@@ -14348,16 +14596,18 @@ $XbergError_UnsupportedFormatCopyWith<XbergError_UnsupportedFormat> get copyWith
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_UnsupportedFormat&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_UnsupportedFormat&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'XbergError.unsupportedFormat(field0: $field0)';
+    return 'XbergError.unsupportedFormat(field0: $field0)';
 }
 
 
@@ -14414,16 +14664,18 @@ $XbergError_EmbeddingCopyWith<XbergError_Embedding> get copyWith => _$XbergError
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Embedding&&(identical(other.message, message) || other.message == message));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Embedding&&(identical(other.message, message) || other.message == message));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,message);
+int get hashCode {
+    return Object.hash(runtimeType,message);
+}
 
 @override
 String toString() {
-  return 'XbergError.embedding(message: $message)';
+    return 'XbergError.embedding(message: $message)';
 }
 
 
@@ -14480,16 +14732,18 @@ $XbergError_RerankingCopyWith<XbergError_Reranking> get copyWith => _$XbergError
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Reranking&&(identical(other.message, message) || other.message == message));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Reranking&&(identical(other.message, message) || other.message == message));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,message);
+int get hashCode {
+    return Object.hash(runtimeType,message);
+}
 
 @override
 String toString() {
-  return 'XbergError.reranking(message: $message)';
+    return 'XbergError.reranking(message: $message)';
 }
 
 
@@ -14546,16 +14800,18 @@ $XbergError_TranscriptionCopyWith<XbergError_Transcription> get copyWith => _$Xb
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Transcription&&(identical(other.message, message) || other.message == message));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Transcription&&(identical(other.message, message) || other.message == message));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,message);
+int get hashCode {
+    return Object.hash(runtimeType,message);
+}
 
 @override
 String toString() {
-  return 'XbergError.transcription(message: $message)';
+    return 'XbergError.transcription(message: $message)';
 }
 
 
@@ -14613,16 +14869,18 @@ $XbergError_TimeoutCopyWith<XbergError_Timeout> get copyWith => _$XbergError_Tim
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Timeout&&(identical(other.elapsedMs, elapsedMs) || other.elapsedMs == elapsedMs)&&(identical(other.limitMs, limitMs) || other.limitMs == limitMs));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Timeout&&(identical(other.elapsedMs, elapsedMs) || other.elapsedMs == elapsedMs)&&(identical(other.limitMs, limitMs) || other.limitMs == limitMs));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,elapsedMs,limitMs);
+int get hashCode {
+    return Object.hash(runtimeType,elapsedMs,limitMs);
+}
 
 @override
 String toString() {
-  return 'XbergError.timeout(elapsedMs: $elapsedMs, limitMs: $limitMs)';
+    return 'XbergError.timeout(elapsedMs: $elapsedMs, limitMs: $limitMs)';
 }
 
 
@@ -14675,7 +14933,7 @@ class XbergError_Cancelled extends XbergError {
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Cancelled);
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Cancelled);
 }
 
 
@@ -14684,7 +14942,7 @@ int get hashCode => runtimeType.hashCode;
 
 @override
 String toString() {
-  return 'XbergError.cancelled()';
+    return 'XbergError.cancelled()';
 }
 
 
@@ -14712,16 +14970,18 @@ $XbergError_SecurityCopyWith<XbergError_Security> get copyWith => _$XbergError_S
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Security&&(identical(other.message, message) || other.message == message));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Security&&(identical(other.message, message) || other.message == message));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,message);
+int get hashCode {
+    return Object.hash(runtimeType,message);
+}
 
 @override
 String toString() {
-  return 'XbergError.security(message: $message)';
+    return 'XbergError.security(message: $message)';
 }
 
 
@@ -14778,16 +15038,18 @@ $XbergError_OtherCopyWith<XbergError_Other> get copyWith => _$XbergError_OtherCo
 
 @override
 bool operator ==(Object other) {
-  return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Other&&(identical(other.field0, field0) || other.field0 == field0));
+    return identical(this, other) || (other.runtimeType == runtimeType&&other is XbergError_Other&&(identical(other.field0, field0) || other.field0 == field0));
 }
 
 
 @override
-int get hashCode => Object.hash(runtimeType,field0);
+int get hashCode {
+    return Object.hash(runtimeType,field0);
+}
 
 @override
 String toString() {
-  return 'XbergError.other(field0: $field0)';
+    return 'XbergError.other(field0: $field0)';
 }
 
 

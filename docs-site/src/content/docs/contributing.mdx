@@ -51,7 +51,7 @@ You only need the toolchains for the areas you plan to work on.
 | Go       | 1.26+   | [Official installer](https://go.dev/dl/) |
 | Java     | 25+     | JDK (via [sdkman](https://sdkman.io/))   |
 | .NET     | 10+     | `dotnet`                                 |
-| PHP      | 8.1+    | `composer`                               |
+| PHP      | 8.2+    | `composer`                               |
 | Elixir   | 1.14+   | `mix` (OTP 25+)                          |
 
 For platform-specific build dependencies (compilers, OpenSSL, etc.), see the [Installation guide](/getting-started/installation/).
@@ -203,7 +203,7 @@ only the checks relevant to its changes.
 | `ci-rust.yaml` | Rust workspace builds and tests on Linux x86_64, Linux arm64, and macOS |
 | `ci-e2e.yaml` | Generated cross-language bindings and end-to-end suites |
 | `ci-docs.yaml` | Documentation build and deployment through the shared docs workflow |
-| `ci-mobile.yaml`, `ci-musl-*.yaml`, `ci-gpu.yaml` | Platform-specific mobile, musl, and GPU coverage |
+| `ci-mobile.yaml`, `ci-gpu.yaml` | Platform-specific mobile and GPU coverage |
 | `ci-docker.yaml`, `ci-integrations.yaml` | Container and integration-package coverage |
 | `publish*.yaml` | Release preparation and registry-specific publishing |
 | `benchmarks.yaml`, `profiling.yaml` | Manually dispatched performance and profiling runs |

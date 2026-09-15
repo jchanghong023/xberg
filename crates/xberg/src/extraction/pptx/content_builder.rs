@@ -11,6 +11,14 @@ pub(super) struct ContentBuilder {
     pub(super) plain: bool,
 }
 
+/// Indent unit for one level of list nesting.
+///
+/// The markdown writer emits an item's level as this many leading spaces per
+/// level, and the second-stage parser in [`crate::extractors::pptx`] reads the
+/// indentation back to rebuild the nesting — the two must agree, so the width is
+/// defined once, here, where it is written.
+pub(crate) const LIST_INDENT: &str = "  ";
+
 impl ContentBuilder {
     pub(super) fn new(plain: bool) -> Self {
         Self {
@@ -87,6 +95,7 @@ impl ContentBuilder {
                 speaker_notes,
                 section_name,
                 sheet_name: None,
+                ocr_confidence: None,
             });
         }
     }
@@ -139,8 +148,18 @@ impl ContentBuilder {
             let owned: Vec<Vec<String>> = rows.to_vec();
             self.content.push_str(&crate::extraction::cells_to_text(&owned));
         } else {
+            // A cell's `|` would end the cell mid-text when the Markdown is read
+            // back (`PptxExtractor::parse_markdown_table` splits on unescaped
+            // pipes), and a raw line break would split the row. Escape both,
+            // exactly what the internal renderer's `push_escaped_cell` does to
+            // its own tables.
+            let rows: Vec<Vec<String>> = rows
+                .iter()
+                .map(|row| row.iter().map(|cell| Self::escape_table_cell(cell)).collect())
+                .collect();
+
             let mut col_widths = vec![3usize; num_cols];
-            for row in rows {
+            for row in &rows {
                 for (i, cell) in row.iter().enumerate() {
                     col_widths[i] = col_widths[i].max(cell.len());
                 }
@@ -170,11 +189,38 @@ impl ContentBuilder {
         }
     }
 
+    /// Escape one table cell for Markdown: a `|` becomes `\|` so the reader
+    /// keeps it inside the cell, and a line break becomes the same `<br>`
+    /// stand-in the internal renderer uses
+    /// ([`crate::rendering::common::CELL_LINE_BREAK`]).
+    fn escape_table_cell(cell: &str) -> String {
+        if !cell.contains(['|', '\n', '\r']) {
+            return cell.to_string();
+        }
+        let mut out = String::with_capacity(cell.len());
+        let mut chars = cell.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '|' => out.push_str("\\|"),
+                '\r' => {
+                    // Consume the LF of a CRLF pair so it yields one break, not two.
+                    if chars.peek() == Some(&'\n') {
+                        chars.next();
+                    }
+                    out.push_str(crate::rendering::common::CELL_LINE_BREAK);
+                }
+                '\n' => out.push_str(crate::rendering::common::CELL_LINE_BREAK),
+                _ => out.push(ch),
+            }
+        }
+        out
+    }
+
     pub(super) fn add_list_item(&mut self, level: u32, is_ordered: bool, text: &str) {
         if !self.plain {
             let indent_count = level.saturating_sub(1) as usize;
             for _ in 0..indent_count {
-                self.content.push_str("  ");
+                self.content.push_str(LIST_INDENT);
             }
 
             let marker = if is_ordered { "1." } else { "-" };

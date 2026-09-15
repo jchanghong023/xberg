@@ -194,6 +194,7 @@ pub use processor::{
     unregister_post_processor,
 };
 pub(crate) use renderer::InternalRenderer;
+pub(crate) use renderer::ensure_renderers_initialized;
 pub use renderer::{Renderer, clear_renderers, list_renderers, register_renderer, unregister_renderer};
 pub use reranker::{
     RerankerBackend, clear_reranker_backends, list_reranker_backends, register_reranker_backend,

@@ -1,0 +1,153 @@
+name: Build Windows CLI
+
+on:
+  workflow_dispatch:
+
+# Read-only at the workflow level: only the release job writes (tag + release), so
+# the build steps -- and the third-party actions they run -- never hold a
+# write-scoped token.
+permissions:
+  contents: read
+
+concurrency:
+  group: build-windows-cli-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-windows-cli:
+    name: Build CLI binary (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Setup Rust
+        uses: xberg-io/actions/setup-rust@v1
+        with:
+          target: x86_64-pc-windows-msvc
+          cache-key-prefix: cli-native-v1
+
+      - name: Install system dependencies
+        uses: ./.github/actions/install-system-deps
+
+      - name: Setup ONNX Runtime
+        uses: ./.github/actions/setup-onnx-runtime
+        with:
+          ort-version: "1.24.2"
+
+      - name: Build and package Windows CLI
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File "$env:GITHUB_WORKSPACE/scripts/publish/cli/package-cli-windows.ps1" -Target x86_64-pc-windows-msvc
+
+      - name: Upload Windows CLI artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: xberg-cli-x86_64-pc-windows-msvc
+          path: xberg-cli-x86_64-pc-windows-msvc.zip
+          if-no-files-found: error
+          retention-days: 14
+
+  release-windows-cli:
+    name: Publish timestamped GitHub release
+    needs: build-windows-cli
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      TARGET: x86_64-pc-windows-msvc
+    steps:
+      - name: Download Windows CLI artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: xberg-cli-x86_64-pc-windows-msvc
+          path: .
+
+      - name: Generate timestamped release version
+        id: release
+        shell: pwsh
+        run: |
+          $chinaTimeZone = [TimeZoneInfo]::FindSystemTimeZoneById("China Standard Time")
+          $releaseTime = [TimeZoneInfo]::ConvertTimeFromUtc([DateTime]::UtcNow, $chinaTimeZone)
+          # The run number plus attempt makes the tag collision-free without an
+          # API probe whose expected 404 aborts PowerShell before it can branch.
+          $version = $releaseTime.ToString("yyyy.M.d-HHmm", [Globalization.CultureInfo]::InvariantCulture)
+          $version = "$version-run$env:GITHUB_RUN_NUMBER.$env:GITHUB_RUN_ATTEMPT"
+          $tag = "v$version"
+
+          "tag=$tag" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "release_time=$($releaseTime.ToString("yyyy-MM-dd HH:mm zzz"))" >> $env:GITHUB_OUTPUT
+
+      - name: Create timestamped GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_TIME: ${{ steps.release.outputs.release_time }}
+        run: |
+          set -euo pipefail
+          ASSET="xberg-cli-${TARGET}.zip"
+          STATIC_HEAD=$(cat <<'EOF'
+          ## 这是什么
+
+          **fork 仓库** [`jchanghong023/xberg`](https://github.com/jchanghong023/xberg) 的 Windows CLI 发布包。
+          基于上游 Xberg **1.1.6**，额外修了文档抽取里 Office 矢量图 / Markdown 预览相关的问题。
+
+          **下载后解压即可用**：`xberg.exe` + ONNX Runtime DLL。把解压目录加入 `PATH`，或直接运行 `xberg.exe`。
+
+          ```powershell
+          xberg.exe extract document.docx --content-format markdown --format text \
+            --extract-images true --output-dir .\imgs \
+            --config-json '{"images":{"output_format":{"type":"png"}}}'
+          ```
+
+          ## 相对上游的改动（本 fork）
+
+          | 改动 | 说明 |
+          |------|------|
+          | **EMF/WMF → PNG** | Windows 下用 GDI 把 Office 里的 EMF/WMF 光栅化成 PNG，Markdown 预览器可直接显示 |
+          | **图片 URL 同步** | re-encode 后重写 `content` 与 `formatted_content` 里的 `image_N.emf` → `.png`（含中文内容，UTF-8 安全） |
+          | **alt 路径清洗** | 去掉 `C:\Users\...` 这类文件系统路径型 alt 文本，避免泄露本机路径 |
+          | **Markdown 图片独立成段** | 图片标记作为独立段落写出，便于预览器渲染；OCR 文字在后续 `text` 围栏中保留版式 |
+          | **精简 OCR / 转写** | 打包版默认 OCR 为 PaddleOCR pp-ocrv6 tiny（模型随包离线可用）；Tesseract 仍编入作后备；音视频离线转写附带 Whisper tiny + layout 模型 |
+          | **批处理图片分目录** | batch 文本/Toon 输出把各文档图片写入 `doc_<N>/`，避免同名 `image_N` 互相覆盖 |
+
+          对应提交：
+          - `feat(images): rasterize EMF/WMF to PNG and sanitize path-like alt text`
+          EOF
+          )
+          BUILD_INFO=$(cat <<EOF
+          ## 构建信息
+
+          **Version:** ${RELEASE_VERSION}
+          **Commit:** ${GITHUB_SHA}
+          **Release time:** ${RELEASE_TIME}
+          **Target:** ${TARGET}
+          **Workflow run:** https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}
+          EOF
+          )
+          STATIC_TAIL=$(cat <<'EOF'
+          ## 注意
+
+          - 与上游 [xberg-io/xberg](https://github.com/xberg-io/xberg) 无关的第三方 fork；上游更新请自行 merge。
+          - 默认 OCR 使用包内 PaddleOCR pp-ocrv6 tiny 模型（约 13 MiB），可离线；如需 Tesseract 后备请自行安装。音视频转写使用包内 Whisper tiny，可离线。
+          - 本包来自自动化流水线，未做人工全量回归；破坏性整理/清理不在本 CLI 默认路径中。
+          EOF
+          )
+          NOTES="${STATIC_HEAD}"$'\n\n'"${BUILD_INFO}"$'\n\n'"${STATIC_TAIL}"
+
+          gh release create "$RELEASE_TAG" \
+            "$ASSET#Xberg Windows CLI (${TARGET})" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "$RELEASE_TAG (fork: EMF→PNG + Markdown 图文)" \
+            --latest \
+            --notes "$NOTES"

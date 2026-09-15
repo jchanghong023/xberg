@@ -27,7 +27,7 @@
 //!
 //! - Fast parallel processing with async/await
 //! - Priority-based extractor selection
-//! - Comprehensive MIME type detection (140 file extensions)
+//! - Comprehensive MIME type detection (146 file extensions)
 //! - Configurable caching and quality processing
 //! - Cross-language plugin support (Python, Node.js planned)
 
@@ -69,6 +69,15 @@ pub mod text;
 pub mod types;
 pub mod utils;
 
+/// Pure-arithmetic sub/superscript ("script run") decision rule, shared by PDF prose assembly
+/// and native table cells.
+///
+/// Gated on `pdf` alone, NOT on `table_core`'s wider `any(ocr, pdf, paddle_ocr)`: both consumers
+/// (`pdf::structure::pipeline`, `pdf::native::table`) are `pdf`-only, so the wider gate left every
+/// item here dead on an `ocr`-without-`pdf` leg -- which CI builds with `-D warnings`. ~keep
+#[cfg(feature = "pdf")]
+pub(crate) mod script_run;
+
 #[cfg(any(feature = "ocr", feature = "pdf", paddle_ocr))]
 pub mod table_core;
 
@@ -108,8 +117,22 @@ pub mod sparse_embeddings;
 #[cfg(any(feature = "late-interaction-presets", feature = "late-interaction"))]
 pub mod late_interaction;
 
-#[cfg(feature = "ocr-pipeline")]
-/// Image preprocessing and DPI utilities for OCR pipelines.
+/// Process-wide caches of loaded model engines.
+#[cfg(any(
+    feature = "embeddings",
+    feature = "static-embeddings",
+    feature = "reranker",
+    feature = "sparse-embeddings",
+    feature = "late-interaction"
+))]
+mod engine_cache;
+
+// `layout-detection` renders PDF pages itself and needs `image::dpi` to honour a configured
+// render DPI (#1577); it does not imply `ocr-pipeline`, so the module gate has to cover both or
+// `pdf + layout-detection` fails to compile. The submodules that genuinely need the OCR
+// dependency set stay gated inside `image/mod.rs`. ~keep
+#[cfg(any(feature = "ocr-pipeline", feature = "layout-detection"))]
+/// Image preprocessing and DPI utilities for OCR and layout pipelines.
 pub mod image;
 
 #[cfg(feature = "language-detection")]
@@ -413,6 +436,26 @@ pub fn embed_texts(texts: Vec<String>, config: &core::config::EmbeddingConfig) -
 ))]
 #[cfg_attr(alef, alef(skip))]
 pub use embeddings::embed_texts_async;
+
+/// Drop every resident model engine: dense, static, sparse and late-interaction
+/// embeddings and rerankers. Returns the number of engines removed.
+///
+/// A caller that still holds an engine keeps it alive until it drops its
+/// handle. The next call that needs a model loads it again. A build without
+/// any engine feature has nothing to drop and returns 0.
+#[cfg_attr(alef, alef(skip))]
+pub fn clear_engine_caches() -> usize {
+    let removed = 0;
+    #[cfg(any(feature = "embeddings", feature = "static-embeddings"))]
+    let removed = removed + embeddings::clear_engine_cache();
+    #[cfg(feature = "reranker")]
+    let removed = removed + reranking::clear_engine_cache();
+    #[cfg(feature = "sparse-embeddings")]
+    let removed = removed + sparse_embeddings::clear_engine_cache();
+    #[cfg(feature = "late-interaction")]
+    let removed = removed + late_interaction::clear_engine_cache();
+    removed
+}
 
 /// Get an embedding preset by name.
 ///

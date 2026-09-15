@@ -9,6 +9,10 @@ use super::validation::{
     resolve_all_installed_languages, resolve_tessdata_path, strip_control_characters, validate_language_and_traineddata,
 };
 use crate::core::config::ExtractionConfig;
+/// GH#1630/GH#1621: the explicit-hint-then-embedded-PNG-density-then-`None` precedence is
+/// defined once and shared with `extractors::image::normalize_image_bytes_for_ocr`.
+use crate::extraction::image::resolve_known_source_dpi;
+use crate::extractors::security::SecurityLimits;
 use crate::image::normalize_image_dpi_owned;
 use crate::ocr::cache::OcrCache;
 use crate::ocr::conversion::{TsvRow, iterator_word_to_element, tsv_row_to_element};
@@ -201,6 +205,27 @@ where
     tracing::debug!(stage, timestamp = format!("{timestamp:.3}"), "{}", details());
 }
 
+/// Word-count shortfall a markdown table rebuild is allowed relative to the content it would
+/// replace before the rebuild is rejected as content loss (GH#1599). Zero: table syntax (`|`,
+/// `---`) itself adds whitespace-separated tokens, so a rebuild that faithfully reformats
+/// existing prose into a table is never word-count-negative -- only a rebuild that actually
+/// dropped page content comes in under the original count.
+const TABLE_REBUILD_MIN_WORD_RETENTION: usize = 0;
+
+/// Whether a markdown table rebuild should replace `original_content`.
+///
+/// `build_content_with_inline_tables` reconstructs page content from a crude y-position
+/// clustering heuristic that is far less robust than the hOCR-derived content it replaces.
+/// Non-emptiness alone (the previous guard) cannot distinguish a legitimate rebuild from one
+/// that silently dropped most of the page -- see GH#1599, where OCR markdown output lost a
+/// large amount of content that plain output retained. Comparing absolute word counts catches
+/// that: a rebuild is adopted only when it does not lose material.
+fn should_adopt_table_rebuild(original_content: &str, rebuilt_content: &str) -> bool {
+    let original_word_count = original_content.split_whitespace().count();
+    let rebuilt_word_count = rebuilt_content.split_whitespace().count();
+    rebuilt_word_count + TABLE_REBUILD_MIN_WORD_RETENTION >= original_word_count
+}
+
 /// Build content with OCR tables inlined at their correct vertical positions.
 ///
 /// Parses TSV word positions to separate table words from non-table words,
@@ -383,6 +408,44 @@ fn flatten_hocr_elements_to_text(elements: &[crate::types::internal::InternalEle
         .join("\n\n")
 }
 
+/// Drop hOCR paragraph elements whose text was already claimed by a detected table (#1571).
+///
+/// `hocr_document` is parsed straight from the raw hOCR before table detection runs, so
+/// nothing ever removes a table's words from it once `tables` is computed: every consumer
+/// built from `internal_document` (the PDF mixed/OCR-only routes and the standalone image
+/// route) receives the table's text twice, once as ordinary paragraphs and once as the
+/// `OcrTable`. `build_content_with_inline_tables` already solves this for the rendered
+/// `content` string using a word-centre-in-bbox test; apply the same test here at the
+/// paragraph level, using the paragraph's own bbox centre, so `internal_document` agrees
+/// with `content` regardless of `output_format` (the string rebuild above is skipped for
+/// Plain/Djot output, but the duplication it was masking is not). ~keep
+fn filter_elements_covered_by_tables(
+    elements: Vec<crate::types::internal::InternalElement>,
+    tables: &[OcrTable],
+) -> Vec<crate::types::internal::InternalElement> {
+    let table_bboxes: Vec<_> = tables.iter().filter_map(|t| t.bounding_box.as_ref()).collect();
+    if table_bboxes.is_empty() {
+        return elements;
+    }
+
+    elements
+        .into_iter()
+        .filter(|element| {
+            let Some(bbox) = element.bbox.as_ref() else {
+                return true;
+            };
+            let center_x = (bbox.x0 + bbox.x1) / 2.0;
+            let center_y = (bbox.y0 + bbox.y1) / 2.0;
+            !table_bboxes.iter().any(|table_bbox| {
+                center_x >= table_bbox.left as f64
+                    && center_x <= table_bbox.right as f64
+                    && center_y >= table_bbox.top as f64
+                    && center_y <= table_bbox.bottom as f64
+            })
+        })
+        .collect()
+}
+
 /// Minimum confidence for accepting orientation detection results.
 ///
 /// Keep in sync with `doc_orientation::MIN_CONFIDENCE` (module is feature-gated,
@@ -441,10 +504,11 @@ struct PreparedOcrImage {
 /// Prepare the raster Tesseract will recognize, and report the resolution it should be told.
 ///
 /// `known_source_dpi` is the true resolution of `rgb_data` when the caller knows it (the PDF OCR
-/// route derives it from the render), and `None` when it genuinely does not (raw images handed in
-/// by a user). Both branches below honour it: the unpreprocessed branch reports it verbatim
-/// instead of the [`RAW_IMAGE_SOURCE_DPI`] assumption, and the preprocessed branch feeds it to
-/// DPI normalization so the resize scales from the real resolution.
+/// route derives it from the render, and [`resolve_known_source_dpi`] also reads it from PNG
+/// density metadata), and `None` when it genuinely does not (raw images handed in by a user).
+/// Both branches below honour it: the unpreprocessed branch reports it verbatim instead of the
+/// [`RAW_IMAGE_SOURCE_DPI`] assumption, and the preprocessed branch feeds it to DPI normalization
+/// so the resize scales from the real resolution.
 fn prepare_ocr_image(
     rgb_data: Vec<u8>,
     width: u32,
@@ -1143,6 +1207,19 @@ fn extract_elements_via_iterator(
     })
 }
 
+/// Resolve the `SecurityLimits` to apply when decoding an image for OCR.
+///
+/// `None` means no `ExtractionConfig` reached this call (internal/test call sites), not
+/// that limits should be waived — this falls back to the same default a configured caller
+/// gets when they never set `security_limits` explicitly (GH#1554: `load_image_for_ocr`
+/// previously hardcoded this default unconditionally, ignoring a caller's own configured,
+/// possibly higher, limit). ~keep
+fn security_limits_for_ocr(extraction_config: Option<&ExtractionConfig>) -> SecurityLimits {
+    extraction_config
+        .and_then(|config| config.security_limits.clone())
+        .unwrap_or_default()
+}
+
 /// Perform OCR on an image using Tesseract.
 ///
 /// This function handles the complete OCR pipeline:
@@ -1178,8 +1255,9 @@ pub(super) fn perform_ocr(
         )
     });
 
+    let security_limits = security_limits_for_ocr(extraction_config);
     let rgb_image = {
-        let img = crate::extraction::image::load_image_for_ocr(image_bytes)
+        let img = crate::extraction::image::load_image_for_ocr(image_bytes, &security_limits)
             .map_err(|e| OcrError::ImageProcessingFailed(e.to_string()))?;
         img.into_rgb8()
     };
@@ -1191,6 +1269,7 @@ pub(super) fn perform_ocr(
     });
 
     let images_config = extraction_config.and_then(|extraction_config| extraction_config.images.as_ref());
+    let known_source_dpi = resolve_known_source_dpi(config.source_dpi, image_bytes);
     let prepared_image = prepare_ocr_image(
         rgb_data,
         orig_width,
@@ -1198,7 +1277,7 @@ pub(super) fn perform_ocr(
         config.preprocessing.as_ref(),
         images_config,
         ci_debug_enabled,
-        config.source_dpi,
+        known_source_dpi,
     );
     #[cfg_attr(not(auto_rotate), allow(unused_mut))]
     let mut image_data = prepared_image.data;
@@ -1742,6 +1821,10 @@ pub(super) fn perform_ocr(
         }
     }
 
+    if let Some(document) = hocr_document.as_mut() {
+        document.elements = filter_elements_covered_by_tables(std::mem::take(&mut document.elements), &tables);
+    }
+
     let mut content = strip_control_characters(&raw_content).into_owned();
     let retained_text = (config.output_format == "text").then_some(content.as_str());
     let iterator_extraction =
@@ -1790,11 +1873,20 @@ pub(super) fn perform_ocr(
     {
         let rebuilt = build_content_with_inline_tables(tsv_data, &tables, config.table_min_confidence);
         if !rebuilt.is_empty() {
-            content = rebuilt;
-            metadata.insert(
-                "pre_formatted".to_string(),
-                serde_json::Value::String("markdown".to_string()),
-            );
+            if should_adopt_table_rebuild(&content, &rebuilt) {
+                content = rebuilt;
+                metadata.insert(
+                    "pre_formatted".to_string(),
+                    serde_json::Value::String("markdown".to_string()),
+                );
+            } else {
+                tracing::warn!(
+                    target: "xberg::ocr::tables",
+                    original_word_count = content.split_whitespace().count(),
+                    rebuilt_word_count = rebuilt.split_whitespace().count(),
+                    "OCR markdown table rebuild dropped content relative to the original; keeping original content"
+                );
+            }
         }
     }
 
@@ -2074,6 +2166,29 @@ mod tests {
     }
 
     #[test]
+    fn should_reject_table_rebuild_that_drops_words_relative_to_original() {
+        let original = "Site inspections this quarter covered fourteen locations across \
+            the northern basin and several access roads remain washed out following spring runoff";
+        let rebuilt = "| Site | inspections |";
+
+        assert!(
+            !should_adopt_table_rebuild(original, rebuilt),
+            "a rebuild with far fewer words than the original must not replace it"
+        );
+    }
+
+    #[test]
+    fn should_adopt_table_rebuild_that_retains_or_exceeds_original_word_count() {
+        let original = "Name Age\nAlice 30\nBob 40";
+        let rebuilt = "| Name | Age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 40 |";
+
+        assert!(
+            should_adopt_table_rebuild(original, rebuilt),
+            "a rebuild that faithfully reformats the same content into a table must still be adopted"
+        );
+    }
+
+    #[test]
     fn should_publish_only_retained_hocr_word_confidence_metadata() {
         let hocr = r#"<div class="ocr_page" title="ppageno 0">
             <p class="ocr_par">
@@ -2104,6 +2219,33 @@ mod tests {
         assert_eq!(metadata.get("p10_word_conf"), Some(&serde_json::json!(20)));
         assert_eq!(metadata.get("low_conf_word_count"), Some(&serde_json::json!(1)));
         assert_eq!(metadata.len(), 5);
+    }
+
+    /// GH#1554 regression: `perform_ocr` must use the caller's `ExtractionConfig.security_limits`
+    /// rather than always decoding under `SecurityLimits::default()`, which silently refused
+    /// ordinary high-DPI scans a caller had explicitly configured a higher limit to permit.
+    #[test]
+    fn should_use_configured_security_limits_when_extraction_config_present() {
+        let config = ExtractionConfig {
+            security_limits: Some(SecurityLimits {
+                max_content_size: 200 * 1024 * 1024,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let resolved = security_limits_for_ocr(Some(&config));
+
+        assert_eq!(resolved.max_content_size, 200 * 1024 * 1024);
+    }
+
+    /// `None` (no `ExtractionConfig` reached the call) must fall back to
+    /// `SecurityLimits::default()`, not to an unbounded/disabled check.
+    #[test]
+    fn should_fall_back_to_default_security_limits_when_extraction_config_absent() {
+        let resolved = security_limits_for_ocr(None);
+
+        assert_eq!(resolved.max_content_size, SecurityLimits::default().max_content_size);
     }
 
     #[test]
@@ -2466,6 +2608,87 @@ mod tests {
         assert!(
             !flattened.contains('#'),
             "flattened OCR text must contain no markdown heading syntax: {flattened:?}"
+        );
+    }
+
+    fn paragraph_with_bbox(text: &str, x0: f64, y0: f64, x1: f64, y1: f64) -> crate::types::internal::InternalElement {
+        let mut elem = crate::types::internal::InternalElement::text(ElementKind::Paragraph, text, 0);
+        elem.bbox = Some(crate::types::extraction::BoundingBox { x0, y0, x1, y1 });
+        elem
+    }
+
+    fn table_at(left: u32, top: u32, right: u32, bottom: u32) -> OcrTable {
+        OcrTable {
+            cells: vec![vec!["cell".to_string()]],
+            markdown: "| cell |".to_string(),
+            page_number: 1,
+            bounding_box: Some(OcrTableBoundingBox {
+                left,
+                top,
+                right,
+                bottom,
+            }),
+        }
+    }
+
+    #[test]
+    fn filter_elements_covered_by_tables_drops_paragraph_inside_table_bbox() {
+        // A paragraph whose bbox is fully inside (so its centre is inside) a detected
+        // table's bbox must be removed -- this is the #1571 duplication itself: the
+        // paragraph's words are also the table's cells.
+        let elements = vec![paragraph_with_bbox("Apple 50 10 00", 10.0, 10.0, 90.0, 30.0)];
+        let tables = vec![table_at(0, 0, 100, 100)];
+
+        let filtered = filter_elements_covered_by_tables(elements, &tables);
+
+        assert!(
+            filtered.is_empty(),
+            "paragraph centred inside the table bbox must be dropped"
+        );
+    }
+
+    #[test]
+    fn filter_elements_covered_by_tables_keeps_paragraph_adjacent_to_table() {
+        // Precision guard (#1571): a paragraph that merely overlaps a table's bbox edge,
+        // with its centre outside the bbox, must survive -- the word-centre rule must not
+        // over-delete prose that sits next to (not inside) a table.
+        let elements = vec![
+            paragraph_with_bbox("Vehicle Maintenance Guide", 10.0, 0.0, 90.0, 15.0),
+            paragraph_with_bbox("Apple 50 10 00", 10.0, 50.0, 90.0, 70.0),
+        ];
+        let tables = vec![table_at(0, 40, 100, 140)];
+
+        let filtered = filter_elements_covered_by_tables(elements, &tables);
+
+        assert_eq!(
+            filtered.len(),
+            1,
+            "only the paragraph centred inside the table bbox should be dropped"
+        );
+        assert_eq!(filtered[0].text, "Vehicle Maintenance Guide");
+    }
+
+    #[test]
+    fn filter_elements_covered_by_tables_is_noop_without_tables() {
+        let elements = vec![paragraph_with_bbox("Apple 50 10 00", 10.0, 10.0, 90.0, 30.0)];
+
+        let filtered = filter_elements_covered_by_tables(elements, &[]);
+
+        assert_eq!(filtered.len(), 1, "no tables detected means nothing should be filtered");
+    }
+
+    #[test]
+    fn filter_elements_covered_by_tables_keeps_elements_without_bbox() {
+        let mut elem = crate::types::internal::InternalElement::text(ElementKind::Paragraph, "no geometry", 0);
+        elem.bbox = None;
+        let tables = vec![table_at(0, 0, 100, 100)];
+
+        let filtered = filter_elements_covered_by_tables(vec![elem], &tables);
+
+        assert_eq!(
+            filtered.len(),
+            1,
+            "an element with no bbox cannot be tested against a table and must survive"
         );
     }
 
@@ -3246,8 +3469,9 @@ mod tests {
         assert!(metadata.dimension_clamped);
     }
 
-    /// Pixel width of a US Letter page (612pt wide) rendered at the 150 DPI the PDF OCR route
-    /// asks `render_page_with_safeguards` for.
+    /// Pixel width of a US Letter page (612pt wide) rendered at 150 DPI -- an arbitrary
+    /// non-72, non-target render resolution exercising `known_source_dpi`, not tied to
+    /// whatever DPI the PDF OCR route actually renders at (`effective_pdf_render_dpi`, #1577).
     const LETTER_AT_150_DPI_WIDTH_PX: u32 = 1275;
     /// Pixel height of the same page (792pt tall) at 150 DPI.
     const LETTER_AT_150_DPI_HEIGHT_PX: u32 = 1650;
@@ -3368,6 +3592,216 @@ mod tests {
 
         assert_eq!(prepared.source_dpi, 150);
         assert!(!prepared.apply_pix_preprocessing);
+    }
+
+    // GH#1630: standalone image OCR discarded PNG `pHYs` density and always assumed 72 DPI,
+    // resampling a genuine 300 DPI scan even when the requested `target_dpi` was already 300.
+    mod png_source_dpi {
+        use super::*;
+
+        /// Standard PNG CRC-32 (polynomial 0xEDB88320), needed to splice a well-formed `pHYs`
+        /// chunk into a real encoded PNG.
+        fn png_crc32(data: &[u8]) -> u32 {
+            let mut crc: u32 = 0xFFFF_FFFF;
+            for &byte in data {
+                crc ^= u32::from(byte);
+                for _ in 0..8 {
+                    let mask = (crc & 1).wrapping_neg();
+                    crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+                }
+            }
+            !crc
+        }
+
+        fn png_chunk(chunk_type: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut body = Vec::with_capacity(4 + data.len());
+            body.extend_from_slice(chunk_type);
+            body.extend_from_slice(data);
+            let mut out = Vec::with_capacity(8 + body.len());
+            out.extend_from_slice(&(u32::try_from(data.len()).unwrap()).to_be_bytes());
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&png_crc32(&body).to_be_bytes());
+            out
+        }
+
+        fn encode_png(width: u32, height: u32) -> Vec<u8> {
+            let img = image::RgbImage::from_pixel(width, height, image::Rgb([255, 255, 255]));
+            let mut png = Vec::new();
+            {
+                use image::ImageEncoder;
+                image::codecs::png::PngEncoder::new(&mut png)
+                    .write_image(img.as_raw(), width, height, image::ExtendedColorType::Rgb8)
+                    .expect("encode PNG");
+            }
+            png
+        }
+
+        /// Splice a `pHYs` chunk expressing `ppu` pixels-per-metre (both axes, unit = meter)
+        /// into a real encoded PNG, immediately after IHDR (signature 8 bytes + IHDR chunk 25
+        /// bytes) and always before IDAT.
+        fn png_with_phys_density(width: u32, height: u32, ppu: u32) -> Vec<u8> {
+            const SIGNATURE_AND_IHDR_LEN: usize = 8 + 25;
+            let mut phys_data = Vec::with_capacity(9);
+            phys_data.extend_from_slice(&ppu.to_be_bytes());
+            phys_data.extend_from_slice(&ppu.to_be_bytes());
+            phys_data.push(1); // unit = meter
+            let phys_chunk = png_chunk(b"pHYs", &phys_data);
+
+            let png = encode_png(width, height);
+            let mut out = Vec::with_capacity(png.len() + phys_chunk.len());
+            out.extend_from_slice(&png[..SIGNATURE_AND_IHDR_LEN]);
+            out.extend_from_slice(&phys_chunk);
+            out.extend_from_slice(&png[SIGNATURE_AND_IHDR_LEN..]);
+            out
+        }
+
+        /// 11811 px/m is the reporter's fixture value: 11811 * 0.0254 = 299.9994 DPI, not an
+        /// exact 300 — every assertion below tolerates that rather than requiring an exact
+        /// integer match.
+        const REPORTER_FIXTURE_PPU: u32 = 11_811;
+        const EXPECTED_DPI_FROM_REPORTER_FIXTURE: f64 = 299.999_4;
+        const DPI_TOLERANCE: f64 = 0.001;
+        const TEST_IMAGE_SIDE: u32 = 4;
+
+        fn rgb_fixture() -> Vec<u8> {
+            vec![255u8; TEST_IMAGE_SIDE as usize * TEST_IMAGE_SIDE as usize * RGB_CHANNEL_COUNT]
+        }
+
+        fn preprocessing_targeting(target_dpi: i32) -> crate::types::ImagePreprocessingConfig {
+            crate::types::ImagePreprocessingConfig {
+                target_dpi,
+                ..Default::default()
+            }
+        }
+
+        fn images_config_without_auto_adjust() -> crate::core::config::ImageExtractionConfig {
+            crate::core::config::ImageExtractionConfig {
+                auto_adjust_dpi: false,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn should_prefer_explicit_source_dpi_over_embedded_png_density() {
+            let png = png_with_phys_density(TEST_IMAGE_SIDE, TEST_IMAGE_SIDE, REPORTER_FIXTURE_PPU);
+
+            let resolved = resolve_known_source_dpi(Some(150.0), &png);
+
+            assert_eq!(
+                resolved,
+                Some(150.0),
+                "a caller-supplied source_dpi hint must win over embedded PNG metadata"
+            );
+        }
+
+        #[test]
+        fn should_decode_source_density_from_embedded_png_metadata() {
+            let png = png_with_phys_density(TEST_IMAGE_SIDE, TEST_IMAGE_SIDE, REPORTER_FIXTURE_PPU);
+
+            let resolved = resolve_known_source_dpi(None, &png).expect("pHYs density must be detected");
+
+            assert!(
+                (resolved - EXPECTED_DPI_FROM_REPORTER_FIXTURE).abs() < DPI_TOLERANCE,
+                "expected ~{EXPECTED_DPI_FROM_REPORTER_FIXTURE} DPI, got {resolved}"
+            );
+        }
+
+        #[test]
+        fn should_resolve_none_when_neither_explicit_hint_nor_embedded_density_exist() {
+            let png = encode_png(TEST_IMAGE_SIDE, TEST_IMAGE_SIDE);
+
+            assert_eq!(
+                resolve_known_source_dpi(None, &png),
+                None,
+                "a PNG without density metadata must not fabricate a source DPI"
+            );
+        }
+
+        /// No resize when the requested target already matches the embedded source density: the
+        /// GH#1630 reporter's own repro (`target_dpi=300` against a genuine 300 DPI scan).
+        #[test]
+        fn should_skip_resize_when_target_dpi_matches_known_png_density() {
+            let png = png_with_phys_density(TEST_IMAGE_SIDE, TEST_IMAGE_SIDE, REPORTER_FIXTURE_PPU);
+            let known_source_dpi = resolve_known_source_dpi(None, &png);
+            let images_config = images_config_without_auto_adjust();
+            let preprocessing = preprocessing_targeting(300);
+
+            let prepared = prepare_ocr_image(
+                rgb_fixture(),
+                TEST_IMAGE_SIDE,
+                TEST_IMAGE_SIDE,
+                Some(&preprocessing),
+                Some(&images_config),
+                false,
+                known_source_dpi,
+            );
+
+            assert_eq!(prepared.width, TEST_IMAGE_SIDE);
+            assert_eq!(prepared.height, TEST_IMAGE_SIDE);
+            let metadata = prepared
+                .image_preprocessing
+                .expect("preprocessing metadata is recorded");
+            assert!(
+                metadata.skipped_resize,
+                "a 300 target against a ~300 detected source must not resize"
+            );
+        }
+
+        /// A different target DPI still resizes correctly once the true source density is known,
+        /// rather than scaling from the wrong 72 assumption.
+        #[test]
+        fn should_resize_correctly_for_a_different_target_dpi() {
+            let png = png_with_phys_density(TEST_IMAGE_SIDE, TEST_IMAGE_SIDE, REPORTER_FIXTURE_PPU);
+            let known_source_dpi = resolve_known_source_dpi(None, &png);
+            let images_config = images_config_without_auto_adjust();
+            let preprocessing = preprocessing_targeting(150);
+
+            let prepared = prepare_ocr_image(
+                rgb_fixture(),
+                TEST_IMAGE_SIDE,
+                TEST_IMAGE_SIDE,
+                Some(&preprocessing),
+                Some(&images_config),
+                false,
+                known_source_dpi,
+            );
+
+            assert_eq!(
+                prepared.width, 2,
+                "halving from a ~300 DPI source to a 150 DPI target halves the raster"
+            );
+            assert_eq!(prepared.height, 2);
+        }
+
+        /// Control: a PNG carrying no density metadata must keep defaulting to 72 DPI, exactly
+        /// as before this fix.
+        #[test]
+        fn should_default_to_72_dpi_when_png_has_no_density_metadata() {
+            let png = encode_png(TEST_IMAGE_SIDE, TEST_IMAGE_SIDE);
+            let known_source_dpi = resolve_known_source_dpi(None, &png);
+            assert_eq!(known_source_dpi, None);
+
+            let images_config = images_config_without_auto_adjust();
+            let preprocessing = preprocessing_targeting(300);
+            let prepared = prepare_ocr_image(
+                rgb_fixture(),
+                TEST_IMAGE_SIDE,
+                TEST_IMAGE_SIDE,
+                Some(&preprocessing),
+                Some(&images_config),
+                false,
+                known_source_dpi,
+            );
+
+            let metadata = prepared
+                .image_preprocessing
+                .expect("preprocessing metadata is recorded");
+            assert_eq!(
+                metadata.original_dpi,
+                crate::types::ImageDpi::from((f64::from(RAW_IMAGE_SOURCE_DPI), f64::from(RAW_IMAGE_SOURCE_DPI))),
+                "no embedded metadata must leave the historical 72 assumption unchanged"
+            );
+        }
     }
 
     #[test]

@@ -109,3 +109,10 @@ fn download_file(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error
 
     Ok(())
 }
+
+// `tesseract_language_name` and its tests live in [`crate::ocr::types`]: the
+// mapping serves every Tesseract backend and the config layer, which compile
+// under wider feature combinations than this `feature = "ocr"` module. It maps
+// caller-facing codes (`zh`, `en`) to the `traineddata` pack names Tesseract
+// actually ships (`chi_sim`, `eng`) — without it the download path requests
+// e.g. `zh.traineddata`, gets a 404, and image OCR silently degrades. ~keep

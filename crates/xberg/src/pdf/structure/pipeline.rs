@@ -1,5 +1,10 @@
 //! Main PDF-to-Markdown pipeline orchestrator (native backend).
 
+// TODO(xberg-io/xberg#1567): 4 cyclomatic-complexity and 25 size/complexity findings
+// in this file, currently excluded via the quality-debt baseline in alef.toml. Splitting
+// these needs compiler-in-the-loop verification, not a mechanical pass. Delete this
+// note and the file's baseline entry together once it goes green. Help wanted.
+
 use std::borrow::Cow;
 
 use crate::pdf::bookmarks::PdfOutlineEntry;
@@ -18,8 +23,8 @@ use super::constants::{FULL_LINE_FRACTION, MIN_BLOCKS_FOR_FONT_HEADING, MIN_HEAD
 use super::lines::{is_cjk_char, segments_need_space};
 use super::paragraphs::{merge_continuation_paragraphs, split_embedded_list_items};
 use super::text_repair::{
-    apply_to_all_segments, clean_duplicate_punctuation, collapse_spaced_hyphens,
-    expand_ligatures_with_space_absorption, normalize_text_encoding, normalize_unicode_text,
+    MIN_LIGATURE_WITNESS_WORD_LEN, WordWitnesses, apply_to_all_segments, clean_duplicate_punctuation,
+    collapse_spaced_hyphens, expand_ligatures_with_space_absorption, normalize_text_encoding, normalize_unicode_text,
     repair_contextual_ligatures, repair_ligature_spaces,
 };
 use super::types::{LayoutHint, PdfParagraph};
@@ -54,6 +59,20 @@ const SPARSE_FONT_TIER_TOLERANCE: f32 = 0.5;
 const SPARSE_REPEATED_TIER_HEADING_LEVEL: u8 = 2;
 
 type HeadingMap = Vec<(f32, Option<u8>)>;
+
+/// Lowercased `(left, right)` word pairs the document itself writes as a single
+/// hyphenated token elsewhere in the text, gathered once per document (#1543).
+/// Threaded alongside [`HeadingMap`] as a document-scoped shared reference. ~keep
+pub(super) type HyphenWitnesses = ahash::AHashSet<(String, String)>;
+
+/// Document-scoped text-repair evidence, collected once per document by
+/// [`collect_hyphen_witnesses`] and [`collect_word_witnesses`] and threaded through
+/// paragraph assembly as a single shared reference, alongside [`HeadingMap`]. ~keep
+#[derive(Default)]
+struct TextRepairWitnesses {
+    hyphens: HyphenWitnesses,
+    words: WordWitnesses,
+}
 
 fn sparse_multi_page_heading_map(
     all_page_segments: &[Vec<SegmentData>],
@@ -654,8 +673,8 @@ struct PageInput {
     heuristic_segments: Vec<SegmentData>,
     /// Layout hints for this page, if layout detection was run.
     page_hints: Option<Vec<LayoutHint>>,
-    /// Bounding boxes of tables that were successfully extracted for this page.
-    table_bboxes: Vec<crate::types::BoundingBox>,
+    /// Footprint and cell text of tables successfully extracted for this page.
+    table_bboxes: Vec<TableCoverage>,
     /// Whether native semantic classification should be preserved while layout
     /// hints continue to control reading order and record region provenance.
     preserve_native_semantics: bool,
@@ -694,6 +713,7 @@ fn process_single_page(
     input: PageInput,
     heading_map: &[(f32, Option<u8>)],
     doc_body_font_size: Option<f32>,
+    witnesses: &TextRepairWitnesses,
 ) -> Vec<PdfParagraph> {
     let PageInput {
         page_index: i,
@@ -718,7 +738,7 @@ fn process_single_page(
     #[cfg(not(feature = "layout-detection"))]
     let _ = use_layout_reading_order;
     if let Some(mut paragraphs) = struct_paragraphs {
-        apply_text_repair_to_structure_tree_paragraphs(&mut paragraphs, true);
+        apply_text_repair_to_structure_tree_paragraphs(&mut paragraphs, true, witnesses);
         if needs_classify {
             tracing::debug!(
                 page = i,
@@ -778,19 +798,20 @@ fn process_single_page(
                         include_footnotes,
                         page_width_pts,
                         apply_layout_overrides: !preserve_native_semantics,
+                        witnesses,
                     },
                 )
             } else {
-                let mut paragraphs = segments_to_paragraphs(page_segments, heading_map, &paragraph_gap_ys);
+                let mut paragraphs = segments_to_paragraphs(page_segments, heading_map, &paragraph_gap_ys, witnesses);
                 let classification_hints = regular_layout_hints(hints);
                 super::layout_classify::annotate_layout_classes(&mut paragraphs, &classification_hints, 0.5, 0.2);
                 paragraphs
             }
         } else {
-            segments_to_paragraphs(page_segments, heading_map, &paragraph_gap_ys)
+            segments_to_paragraphs(page_segments, heading_map, &paragraph_gap_ys, witnesses)
         };
         #[cfg(not(feature = "layout-detection"))]
-        let mut paragraphs = segments_to_paragraphs(page_segments, heading_map, &paragraph_gap_ys);
+        let mut paragraphs = segments_to_paragraphs(page_segments, heading_map, &paragraph_gap_ys, witnesses);
         tracing::debug!(
             page = i,
             paragraphs = paragraphs.len(),
@@ -988,10 +1009,11 @@ fn segments_to_paragraphs(
     segments: Vec<SegmentData>,
     heading_map: &[(f32, Option<u8>)],
     paragraph_gap_ys: &[f32],
+    witnesses: &TextRepairWitnesses,
 ) -> Vec<PdfParagraph> {
     let segments = order_segments_in_reading_frames(segments);
     let mut paragraphs = blocks_to_paragraphs(segments, heading_map, paragraph_gap_ys);
-    apply_text_repair_to_structure_tree_paragraphs(&mut paragraphs, true);
+    apply_text_repair_to_structure_tree_paragraphs(&mut paragraphs, true, witnesses);
     reattach_detached_list_markers(&mut paragraphs, DetachedMarkerFrame::Native);
     merge_continuation_paragraphs(&mut paragraphs);
     synchronize_paragraph_text_metadata(&mut paragraphs);
@@ -1478,6 +1500,7 @@ struct LayoutParagraphContext<'a> {
     include_footnotes: bool,
     page_width_pts: Option<f32>,
     apply_layout_overrides: bool,
+    witnesses: &'a TextRepairWitnesses,
 }
 
 #[cfg(feature = "layout-detection")]
@@ -1503,11 +1526,21 @@ fn process_layout_segment_groups(
         context.page_width_pts,
     );
     if matches!(groups.as_slice(), [group] if group.hint_indices.is_empty() && group.region_path.is_none()) {
-        return segments_to_paragraphs(segments, context.heading_map, context.paragraph_gap_ys);
+        return segments_to_paragraphs(
+            segments,
+            context.heading_map,
+            context.paragraph_gap_ys,
+            context.witnesses,
+        );
     }
     if !context.apply_layout_overrides {
         let group_bounds = layout_group_bounds(&groups, &segments);
-        let mut paragraphs = segments_to_paragraphs(segments, context.heading_map, context.paragraph_gap_ys);
+        let mut paragraphs = segments_to_paragraphs(
+            segments,
+            context.heading_map,
+            context.paragraph_gap_ys,
+            context.witnesses,
+        );
         assign_native_paragraph_layout(&mut paragraphs, &groups, &group_bounds);
         let classification_hints = regular_layout_hints(hints);
         super::layout_classify::annotate_layout_classes(&mut paragraphs, &classification_hints, 0.5, 0.2);
@@ -1527,7 +1560,8 @@ fn process_layout_segment_groups(
             continue;
         }
         let gap_ys = compute_paragraph_gap_ys(&group_segments);
-        let mut group_paragraphs = segments_to_paragraphs(group_segments, context.heading_map, &gap_ys);
+        let mut group_paragraphs =
+            segments_to_paragraphs(group_segments, context.heading_map, &gap_ys, context.witnesses);
         let group_hints = group
             .hint_indices
             .into_iter()
@@ -1563,7 +1597,12 @@ fn process_layout_segment_groups(
             "layout region plan omitted segments; appending an unsorted fallback group"
         );
         let gap_ys = compute_paragraph_gap_ys(&leftovers);
-        paragraphs.extend(segments_to_paragraphs(leftovers, context.heading_map, &gap_ys));
+        paragraphs.extend(segments_to_paragraphs(
+            leftovers,
+            context.heading_map,
+            &gap_ys,
+            context.witnesses,
+        ));
     }
     paragraphs
 }
@@ -1703,6 +1742,12 @@ const PARAGRAPH_GAP_HEIGHT_FACTOR: f32 = 1.5;
 /// finds is lost.
 const PARAGRAPH_BREAK_LEADING_MULTIPLE: f32 = 1.5;
 const INLINE_STYLE_BASELINE_TOLERANCE: f32 = 0.5;
+/// How many already-accumulated segments back to look for a sub/superscript's base.
+///
+/// ~keep GH#1617: two is enough on the reproducer (`dB` then `L`); four covers a row with a couple
+/// more cells to the right of the base without letting the search wander off the current row.
+/// GH#1628 reuses this window for the word-level table path, which searches the same segment list.
+pub(crate) const SCRIPT_RUN_BASE_LOOKBACK: usize = 4;
 const INLINE_STYLE_MAX_FORWARD_GAP_FONT_FACTOR: f32 = 1.0;
 const INLINE_FONT_SIZE_MAX_FORWARD_GAP_FONT_FACTOR: f32 = 1.5;
 const INLINE_STYLE_MAX_OVERLAP_FONT_FACTOR: f32 = 0.15;
@@ -1720,6 +1765,12 @@ const INLINE_STYLE_MAX_OVERLAP_FONT_FACTOR: f32 = 0.15;
 /// because the next word did not fit -- without also treating a long heading
 /// followed by a much shorter, unrelated line as a wrap. See #1467.
 const HEADING_WRAP_RIGHT_EDGE_TOLERANCE_FONT_FACTOR: f32 = 2.0;
+/// How closely a wrapped heading's continuation must resume at the same left edge
+/// as the line it continues, in font-sizes. Measured on GH#1615's reproducer the
+/// two align exactly (both x 83.64) while the body line that must NOT merge sits
+/// 35.4pt away at the margin, so the separation is wide and the tolerance only has
+/// to absorb sub-pixel drift. ~keep
+const HEADING_HANGING_INDENT_LEFT_EDGE_TOLERANCE_FONT_FACTOR: f32 = 0.5;
 
 /// Detect paragraph-break y-positions from horizontal whitespace bands.
 ///
@@ -1862,6 +1913,46 @@ fn paragraph_gap_axis(segment: &SegmentData) -> f32 {
 ///
 /// Groups consecutive segments by font changes, bold changes, list markers, and
 /// paragraph gap positions. Each group is then classified via `finalize_paragraph`.
+/// The text of the whole visual line each segment belongs to, indexed alongside
+/// `lines`.
+///
+/// The numbered-heading break terms test a predicate against a line's opening
+/// token, but this loop walks SEGMENTS, and a heading set with a hanging number
+/// arrives as two of them on one baseline -- `"3.1.7"` and
+/// `"Innovatie/ontwikkelingen"`. Neither segment alone starts with a section
+/// number the way the assembled line does, so the terms never fired and the
+/// heading was left to the ordinary paragraph-gap rule, which needs a gap wider
+/// than ordinary line pitch. `merge_continuation_paragraphs::starts_numbered_section`
+/// already re-joins a paragraph's first line for exactly this reason; this is the
+/// same re-join on the grouper side, so the two passes agree. See #1609. ~keep
+fn visual_line_texts(lines: &[SegmentData]) -> Vec<String> {
+    let mut texts = vec![String::new(); lines.len()];
+    let mut start = 0usize;
+    while start < lines.len() {
+        let mut end = start + 1;
+        // Same-visual-line test as `starts_new_line` below: consecutive, so the two
+        // cannot disagree about where a line ends. ~keep
+        while end < lines.len()
+            && lines[end].has_same_rotation(&lines[end - 1])
+            && (lines[end].upright_baseline() - lines[end - 1].upright_baseline()).abs()
+                <= INLINE_STYLE_BASELINE_TOLERANCE
+        {
+            end += 1;
+        }
+        let joined = lines[start..end]
+            .iter()
+            .map(|segment| segment.text.trim())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ");
+        for slot in &mut texts[start..end] {
+            slot.clone_from(&joined);
+        }
+        start = end;
+    }
+    texts
+}
+
 fn blocks_to_paragraphs(
     lines: Vec<SegmentData>,
     heading_map: &[(f32, Option<u8>)],
@@ -1872,23 +1963,37 @@ fn blocks_to_paragraphs(
     }
 
     let gap_info = super::classify::precompute_gap_info(heading_map);
+    let visual_line_texts = visual_line_texts(&lines);
 
     let mut paragraphs: Vec<PdfParagraph> = Vec::new();
     let mut current_lines: Vec<&SegmentData> = Vec::new();
     let mut current_is_single_visual_line = true;
+    let mut prev_idx = 0usize;
 
     for (line_idx, line) in lines.iter().enumerate() {
         let should_break = if current_lines.is_empty() {
             false
         } else {
             let prev = current_lines.last().unwrap();
+            // The look-back exists because a subscript is not always adjacent to its base in segment
+            // order. Its baseline is below the row's, and the upstream row-band sort keys on top-y,
+            // so a cell further right on the row can be emitted between the two: on GH#1617's
+            // reproducer `WA` (x 211.08) arrives after `dB` (x 253.30) and is compared against it
+            // rather than against `L` (x 206.78), which it actually abuts. Reuniting them in the
+            // ORDER the page prints would need per-glyph positions; suppressing the break is what
+            // keeps the subscript from becoming an element of its own, which is the defect. ~keep
             let font_change = (line.font_size - prev.font_size).abs() > 1.5
                 && !is_inline_style_transition(
                     current_is_single_visual_line,
                     prev,
                     line,
                     INLINE_FONT_SIZE_MAX_FORWARD_GAP_FONT_FACTOR,
-                );
+                )
+                && !current_lines
+                    .iter()
+                    .rev()
+                    .take(SCRIPT_RUN_BASE_LOOKBACK)
+                    .any(|candidate| is_script_run_of(candidate, line));
             let role_change = line.assigned_role != prev.assigned_role;
             let bold_change = line.is_bold != prev.is_bold
                 && !is_inline_style_transition(
@@ -1916,7 +2021,8 @@ fn blocks_to_paragraphs(
             // (not the looser `starts_with_section_number`) is used deliberately so
             // prose beginning with a bare year — "2024 was een druk jaar" — does not
             // break its paragraph. See #1386. ~keep
-            let starts_section = starts_new_line && super::classify::is_numbered_section_heading(&line.text);
+            let starts_section =
+                starts_new_line && super::classify::is_numbered_section_heading(&visual_line_texts[line_idx]);
             // A numbered section heading also always ENDS the element it opens: without
             // this term nothing else distinguishes a heading from the body text that
             // follows it when both share font size, weight, role and line spacing --
@@ -1930,10 +2036,28 @@ fn blocks_to_paragraphs(
             // `heading_wraps_onto` exempts a heading that is itself still wrapping onto
             // its next physical line rather than handing off to unrelated content. See
             // #1467. ~keep
+            // GH#1634: `current_is_single_visual_line` also switches the closing
+            // term off once a genuine heading wrap has been absorbed, so a
+            // two-line heading was never closed and pulled the whole body in
+            // after it. A numbered heading that spans exactly one wrap is still
+            // a heading and must still close. ~keep
+            let heading_absorbed_one_wrap = !current_is_single_visual_line
+                && visual_line_count(&current_lines) == 2
+                && current_lines
+                    .first()
+                    .is_some_and(|first| super::classify::is_numbered_section_heading(first.text.trim()));
+            // For a wrapped heading `prev` is the continuation line, whose own
+            // text carries no number -- so the numbered-heading test has to look
+            // at the paragraph's first segment instead, which
+            // `heading_absorbed_one_wrap` already does. ~keep
             let follows_section = starts_new_line
-                && current_lines.len() == 1
-                && super::classify::is_numbered_section_heading(&prev.text)
-                && !heading_wraps_onto(prev, line);
+                && ((current_is_single_visual_line
+                    && super::classify::is_numbered_section_heading(&visual_line_texts[prev_idx]))
+                    || heading_absorbed_one_wrap)
+                && !heading_wraps_onto(prev, line)
+                && !current_lines
+                    .first()
+                    .is_some_and(|heading_start| heading_continuation_is_hanging_indent(heading_start, prev, line));
             let crossed_gap = paragraph_gap_ys.iter().any(|&gap_y| {
                 let previous_baseline = prev.upright_baseline();
                 let current_baseline = line.upright_baseline();
@@ -1966,6 +2090,7 @@ fn blocks_to_paragraphs(
                 && (line.upright_baseline() - first.upright_baseline()).abs() <= INLINE_STYLE_BASELINE_TOLERANCE;
         }
         current_lines.push(line);
+        prev_idx = line_idx;
     }
 
     if !current_lines.is_empty()
@@ -1995,11 +2120,7 @@ fn is_inline_style_transition(
     next: &SegmentData,
     max_forward_gap_font_factor: f32,
 ) -> bool {
-    if !current_is_single_visual_line
-        || previous.is_monospace
-        || next.is_monospace
-        || previous.assigned_role != next.assigned_role
-    {
+    if previous.is_monospace || next.is_monospace || previous.assigned_role != next.assigned_role {
         return false;
     }
     if !previous.has_same_rotation(next) {
@@ -2020,17 +2141,78 @@ fn is_inline_style_transition(
     {
         return false;
     }
-    if (next.upright_baseline() - previous.upright_baseline()).abs() > INLINE_STYLE_BASELINE_TOLERANCE {
-        return false;
-    }
-
     let font_size = previous.font_size.max(next.font_size);
+    let baseline_delta = (next.upright_baseline() - previous.upright_baseline()).abs();
     let (previous_start, previous_end) = previous.upright_advance_extent();
     let (next_start, _) = next.upright_advance_extent();
     let advance_gap = next_start - previous_end;
+
+    // A sub/superscript is judged against the run it abuts, NOT against the paragraph's first
+    // segment, so it is deliberately decided ahead of `current_is_single_visual_line`. That flag
+    // answers "has this paragraph wrapped yet", and by the time a subscript appears on a product
+    // card's fourth row the answer is yes -- which is why the reproducer stayed torn while every
+    // unit test of the pair in isolation passed. The predicate below is tight enough to stand on
+    // its own: same rotation, same role, non-monospace, a materially smaller font, a baseline
+    // offset of a fraction of it, and a start inside or abutting the previous run. See GH#1617.
+    //
+    // Containment rather than `INLINE_STYLE_MAX_OVERLAP_FONT_FACTOR` is what reaches the four pairs
+    // whose base glyph is not a span of its own: the row arrives as one `TJ` whose kerning spreads
+    // its glyphs across the column, so the script starts *within* the previous run's extent, not a
+    // few tenths of a point behind its end. ~keep
+    if is_script_run_of(previous, next) {
+        return true;
+    }
+
+    if !current_is_single_visual_line || baseline_delta > INLINE_STYLE_BASELINE_TOLERANCE {
+        return false;
+    }
     next_start >= previous_start
         && advance_gap >= -(font_size * INLINE_STYLE_MAX_OVERLAP_FONT_FACTOR)
         && advance_gap <= font_size * max_forward_gap_font_factor
+}
+
+/// Whether two runs on nearly the same baseline differ the way a sub/superscript differs from its
+/// base: measurably smaller, and raised or lowered by a small fraction of the base's font size.
+///
+/// Deliberately requires a *non-zero* offset. A run at the identical baseline is already handled by
+/// `INLINE_STYLE_BASELINE_TOLERANCE`, so this predicate only ever relaxes a comparison the existing
+/// gate rejects outright -- it cannot change the outcome of any pair that passes today. ~keep
+fn is_script_run_offset(previous: &SegmentData, next: &SegmentData, baseline_delta: f32, font_size: f32) -> bool {
+    let smaller_font_size = previous.font_size.min(next.font_size);
+    crate::script_run::is_script_run_baseline_offset(baseline_delta, font_size, smaller_font_size)
+}
+
+/// Whether `next` reads as a sub/superscript attached to `previous`: same rotation and role,
+/// neither monospace, a materially smaller font raised or lowered by a fraction of it, and a start
+/// inside or abutting `previous`'s advance extent.
+pub(crate) fn is_script_run_of(previous: &SegmentData, next: &SegmentData) -> bool {
+    if previous.is_monospace || next.is_monospace || previous.assigned_role != next.assigned_role {
+        return false;
+    }
+    if !previous.has_same_rotation(next) {
+        return false;
+    }
+    if !previous.font_size.is_finite()
+        || !next.font_size.is_finite()
+        || previous.font_size <= 0.0
+        || next.font_size <= 0.0
+        || !previous.upright_baseline().is_finite()
+        || !next.upright_baseline().is_finite()
+        || !previous.x.is_finite()
+        || !next.x.is_finite()
+        || !previous.width.is_finite()
+        || !next.width.is_finite()
+        || previous.width < 0.0
+        || next.width < 0.0
+    {
+        return false;
+    }
+    let font_size = previous.font_size.max(next.font_size);
+    let baseline_delta = (next.upright_baseline() - previous.upright_baseline()).abs();
+    let (previous_start, previous_end) = previous.upright_advance_extent();
+    let (next_start, _) = next.upright_advance_extent();
+    is_script_run_offset(previous, next, baseline_delta, font_size)
+        && crate::script_run::is_script_run_forward_gap(previous_start, previous_end, next_start, font_size)
 }
 
 /// Whether `line` reads as the wrapped continuation of the numbered-heading
@@ -2062,12 +2244,153 @@ pub(super) fn heading_wraps_onto(prev: &SegmentData, line: &SegmentData) -> bool
     (prev_end - line_end).abs() <= tolerance
 }
 
+/// Whether the numbered-heading line `prev` reaches far enough right to have run
+/// out of room, which is the "fills its column" half of the wrap rule that
+/// [`heading_wraps_onto`]'s doc comment states but its code never measured.
+///
+/// `next_right_edge` is the widest right edge among the lines that would be merged
+/// onto it. A heading that stops well short of that width did not wrap, it ended.
+/// Measured: GH#1605's wrapped heading stops 58.7pt short of its own continuation
+/// but only ~19pt short of the widest line beneath it, while GH#1609's COMPLETE
+/// heading stops hundreds of points short of the body prose it was being welded
+/// into. A lowercase opening alone cannot tell those apart -- both continue in
+/// lowercase -- which is why it must not be the whole test. See #1609. ~keep
+/// Whether `line` is the continuation of a numbered heading set with a HANGING
+/// INDENT: the number at the left margin, the title starting to its right, and a
+/// title too long for one line resuming at the title's own left edge.
+///
+/// Two things must hold, and the second alone is not enough. `heading_start` is the
+/// first segment of the heading's visual line and `prev` its last, so
+/// `prev` starting to the right of `heading_start` is what establishes that this
+/// heading HAS a hanging indent at all. Only then does `line` sharing `prev`'s left
+/// edge mean "the title continues" rather than "the next line happens to be at the
+/// same margin".
+///
+/// Measured on GH#1615's reproducer, where the wrap and the body that must NOT merge
+/// are identical on every other signal this grouper checks -- same font, same weight,
+/// same line pitch:
+///
+/// ```text
+/// 5.7.3                                     x 48.24            the number, at the margin
+/// Roof terminal combined duct vertical and  x 83.64  y 774.96  the title, indented 35.4pt
+/// twin pipe duct vertical                   x 83.64  y 762.24  the wrap -- aligns with the title
+/// Appliance category: C33                   x 48.24  y 745.08  the body -- returns to the margin
+/// ```
+///
+/// This is why the right-edge test in [`heading_wraps_onto`] cannot stand alone: a
+/// wrap's LAST line is short by definition -- being short is what makes it the last
+/// line -- so its right edge never matches the line it continues, and every two-line
+/// heading looked like a heading handing off to unrelated content.
+///
+/// The hanging-indent requirement is what keeps #1467 working: there the heading is a
+/// single segment at the margin and the callout beneath it is at the same margin, so
+/// `heading_start` and `prev` coincide, no indent is established, and the pair still
+/// splits. `starts_section` is evaluated independently of all this, so a following
+/// line that is itself a numbered heading breaks regardless. ~keep
+/// Number of distinct visual lines (baselines) among `segments`.
+///
+/// Used to tell a numbered heading that has absorbed exactly one wrap from a
+/// paragraph that is genuinely several lines long. See GH#1634. ~keep
+pub(super) fn visual_line_count(segments: &[&SegmentData]) -> usize {
+    let mut count = 0usize;
+    let mut last_baseline: Option<f32> = None;
+    for segment in segments {
+        let baseline = segment.upright_baseline();
+        if !baseline.is_finite() {
+            continue;
+        }
+        let is_new_line =
+            last_baseline.is_none_or(|previous| (baseline - previous).abs() > INLINE_STYLE_BASELINE_TOLERANCE);
+        if is_new_line {
+            count += 1;
+            last_baseline = Some(baseline);
+        }
+    }
+    count
+}
+
+pub(super) fn heading_continuation_is_hanging_indent(
+    heading_start: &SegmentData,
+    prev: &SegmentData,
+    line: &SegmentData,
+) -> bool {
+    if !prev.has_same_rotation(line) || !prev.has_same_rotation(heading_start) {
+        return false;
+    }
+    if !prev.font_size.is_finite() || !line.font_size.is_finite() {
+        return false;
+    }
+    let (heading_left, _) = heading_start.upright_advance_extent();
+    let (prev_left, _) = prev.upright_advance_extent();
+    let (line_left, _) = line.upright_advance_extent();
+    if !heading_left.is_finite() || !prev_left.is_finite() || !line_left.is_finite() {
+        return false;
+    }
+    let tolerance =
+        HEADING_HANGING_INDENT_LEFT_EDGE_TOLERANCE_FONT_FACTOR * prev.font_size.max(line.font_size).max(1.0);
+    if prev_left - heading_left <= tolerance || (prev_left - line_left).abs() > tolerance {
+        return false;
+    }
+    // GH#1634: left edges alone cannot tell a wrapped heading from a body
+    // indented to the title's edge -- number in the margin, title and body
+    // alike at one edge, which is how contracts, tenders and many installation
+    // manuals are set. A line only wraps when the line before it ran out of
+    // room, so require that too: a heading that stops well short of the
+    // following line's width did not wrap, it ended. ~keep
+    let (_, line_end) = line.upright_advance_extent();
+    line_end.is_finite() && heading_fills_column(prev, line_end)
+}
+
+pub(super) fn heading_fills_column(prev: &SegmentData, next_right_edge: f32) -> bool {
+    if !prev.font_size.is_finite() || !next_right_edge.is_finite() {
+        return false;
+    }
+    let (_, prev_end) = prev.upright_advance_extent();
+    if !prev_end.is_finite() {
+        return false;
+    }
+    let tolerance = HEADING_WRAP_RIGHT_EDGE_TOLERANCE_FONT_FACTOR * prev.font_size.max(1.0);
+    prev_end >= next_right_edge - tolerance
+}
+
 /// Reconstruct PdfLine objects from a flat list of SegmentData, grouping by baseline_y.
 ///
 /// This preserves inline formatting information (is_bold, is_italic, is_monospace)
 /// at the segment level so that the assembly layer can emit properly annotated markdown
 /// with bold/italic emphasis.
 fn reconstruct_pdf_lines(segments: &[&SegmentData]) -> Vec<super::types::PdfLine> {
+    const MAX_LINE_TOLERANCE_PT: f32 = 3.0;
+    const LINE_TOLERANCE_SCALE_FACTOR: f32 = 0.25;
+
+    fn finish_line(mut segments: Vec<SegmentData>, baseline_y: f32) -> super::types::PdfLine {
+        let contains_rtl = segments.iter().any(|segment| {
+            segment
+                .text
+                .chars()
+                .any(|character| xberg_native_pdf::text::is_rtl_text(character as u32))
+        });
+        if !contains_rtl {
+            segments.sort_by(|a, b| a.upright_advance_extent().0.total_cmp(&b.upright_advance_extent().0));
+        }
+
+        let dominant_font_size = segments.iter().map(|s| s.font_size).fold(0.0, |a, b| {
+            if a > 0.0 && b > a / 2.0 && b < a * 2.0 {
+                (a + b) / 2.0
+            } else {
+                a.max(b)
+            }
+        });
+        let is_bold = segments.iter().filter(|s| s.is_bold).count() > segments.len() / 2;
+        let is_monospace = segments.iter().all(|s| s.is_monospace);
+        super::types::PdfLine {
+            segments,
+            baseline_y,
+            dominant_font_size,
+            is_bold,
+            is_monospace,
+        }
+    }
+
     if segments.is_empty() {
         return Vec::new();
     }
@@ -2075,54 +2398,30 @@ fn reconstruct_pdf_lines(segments: &[&SegmentData]) -> Vec<super::types::PdfLine
     let mut lines: Vec<super::types::PdfLine> = Vec::new();
     let mut current_baseline = segments[0].upright_baseline();
     let mut current_rotation = segments[0].rotation_degrees;
+    let mut current_scale = segments[0].font_size.max(segments[0].height).abs();
     let mut current_segments: Vec<SegmentData> = Vec::new();
 
     for seg in segments {
         let same_rotation = (seg.rotation_degrees - current_rotation).abs() <= f32::EPSILON;
         let segment_baseline = seg.upright_baseline();
-        if !same_rotation || (segment_baseline - current_baseline).abs() > 0.5 {
+        let segment_scale = seg.font_size.max(seg.height).abs();
+        let baseline_tolerance =
+            (current_scale.max(segment_scale) * LINE_TOLERANCE_SCALE_FACTOR).min(MAX_LINE_TOLERANCE_PT);
+        if !same_rotation || (segment_baseline - current_baseline).abs() > baseline_tolerance {
             if !current_segments.is_empty() {
-                let dominant_font_size = current_segments.iter().map(|s| s.font_size).fold(0.0, |a, b| {
-                    if a > 0.0 && b > a / 2.0 && b < a * 2.0 {
-                        (a + b) / 2.0
-                    } else {
-                        a.max(b)
-                    }
-                });
-                let is_bold = current_segments.iter().filter(|s| s.is_bold).count() > current_segments.len() / 2;
-                let is_monospace = current_segments.iter().all(|s| s.is_monospace);
-                lines.push(super::types::PdfLine {
-                    segments: current_segments.clone(),
-                    baseline_y: current_baseline,
-                    dominant_font_size,
-                    is_bold,
-                    is_monospace,
-                });
+                lines.push(finish_line(std::mem::take(&mut current_segments), current_baseline));
             }
             current_baseline = segment_baseline;
             current_rotation = seg.rotation_degrees;
-            current_segments.clear();
+            current_scale = segment_scale;
+        } else {
+            current_scale = current_scale.max(segment_scale);
         }
         current_segments.push((*seg).clone());
     }
 
     if !current_segments.is_empty() {
-        let dominant_font_size = current_segments.iter().map(|s| s.font_size).fold(0.0, |a, b| {
-            if a > 0.0 && b > a / 2.0 && b < a * 2.0 {
-                (a + b) / 2.0
-            } else {
-                a.max(b)
-            }
-        });
-        let is_bold = current_segments.iter().filter(|s| s.is_bold).count() > current_segments.len() / 2;
-        let is_monospace = current_segments.iter().all(|s| s.is_monospace);
-        lines.push(super::types::PdfLine {
-            segments: current_segments,
-            baseline_y: current_baseline,
-            dominant_font_size,
-            is_bold,
-            is_monospace,
-        });
+        lines.push(finish_line(current_segments, current_baseline));
     }
 
     lines
@@ -2252,6 +2551,14 @@ fn finalize_paragraph(
         && (word_count > 20
             || super::layout_classify::is_separator_text(trimmed)
             || page_number_like
+            // A heading is not a sentence. This gate had no shape test, so a block whose font
+            // clustered above body became a heading on word count alone -- and 20 words is a whole
+            // sentence. On a scanned page that promoted ordinary prose and split the paragraph in
+            // two, the promoted line becoming a heading and its continuation staying body text.
+            // The bold branch below already refuses a block that ends in a period; this is the same
+            // judgement, plus the case where the line runs on past an interior full stop. GH#1599.
+            // ~keep
+            || super::classify::reads_as_body_content(trimmed, word_count)
             || (SUPPRESS_LOWERCASE_START_HEADINGS && super::classify::starts_with_lowercase_or_continuation(trimmed)))
     {
         heading_level = None;
@@ -3095,6 +3402,10 @@ pub(crate) fn extract_document_structure_from_segments(
             })
         })
         .collect();
+    let witnesses = TextRepairWitnesses {
+        hyphens: collect_hyphen_witnesses(&all_page_segments),
+        words: collect_word_witnesses(&all_page_segments),
+    };
     let page_inputs: Vec<PageInput> = (0..page_count)
         .map(|i| {
             let heuristic_segments = std::mem::take(&mut all_page_segments[i]);
@@ -3133,12 +3444,12 @@ pub(crate) fn extract_document_structure_from_segments(
     #[cfg(not(target_arch = "wasm32"))]
     let mut all_page_paragraphs: Vec<Vec<PdfParagraph>> = page_inputs
         .into_par_iter()
-        .map(|input| process_single_page(input, &heading_map, doc_body_font_size))
+        .map(|input| process_single_page(input, &heading_map, doc_body_font_size, &witnesses))
         .collect();
     #[cfg(target_arch = "wasm32")]
     let mut all_page_paragraphs: Vec<Vec<PdfParagraph>> = page_inputs
         .into_iter()
-        .map(|input| process_single_page(input, &heading_map, doc_body_font_size))
+        .map(|input| process_single_page(input, &heading_map, doc_body_font_size, &witnesses))
         .collect();
 
     refine_heading_hierarchy(&mut all_page_paragraphs);
@@ -3162,7 +3473,7 @@ pub(crate) fn extract_document_structure_from_segments(
         retain_page_furniture_safely(page);
     }
     if strip_repeating_text {
-        deduplicate_paragraphs(&mut all_page_paragraphs);
+        deduplicate_paragraphs(&mut all_page_paragraphs, &extracted_table_bboxes_by_page);
     }
     compact_final_heading_hierarchy(&mut all_page_paragraphs);
     promote_repeated_body_size_bold_headings(&mut all_page_paragraphs, doc_body_font_size);
@@ -3189,7 +3500,13 @@ pub(crate) fn extract_document_structure_from_segments(
     );
 
     let effective_image_positions = if inject_placeholders { image_positions } else { &[] };
-    let mut doc = assemble_internal_document(all_page_paragraphs, &emitted_tables, images, effective_image_positions);
+    let mut doc = assemble_internal_document(
+        all_page_paragraphs,
+        &emitted_tables,
+        images,
+        effective_image_positions,
+        &witnesses.hyphens,
+    );
 
     for elem in &mut doc.elements {
         if elem.text.is_empty() {
@@ -3863,37 +4180,97 @@ fn deduplicate_identical_tables(tables: &mut Vec<crate::types::Table>) {
     });
 }
 
-fn table_bboxes_by_page(tables: &[crate::types::Table]) -> ahash::AHashMap<usize, Vec<crate::types::BoundingBox>> {
-    let mut bboxes_by_page: ahash::AHashMap<usize, Vec<crate::types::BoundingBox>> = ahash::AHashMap::new();
-    for table in tables {
-        if let Some(bbox) = table.bounding_box {
-            bboxes_by_page
-                .entry(table.page_number.saturating_sub(1) as usize)
-                .or_default()
-                .push(bbox);
-        }
-    }
-    bboxes_by_page
+/// A table's footprint on a page together with the text its grid actually carries.
+///
+/// The two are recorded side by side because suppression needs both: geometry alone
+/// cannot tell whether the grid REPRESENTS a run it happens to cover. See
+/// [`filter_segments_by_table_bboxes`]. ~keep
+#[derive(Clone)]
+struct TableCoverage {
+    bbox: crate::types::BoundingBox,
+    /// Every cell's alphanumeric glyphs, lowercased and concatenated in row-major order.
+    /// Built once per table so the per-segment test is a substring search.
+    cell_text: String,
 }
 
-/// Filter out segments that overlap >=50% with any table bounding box.
+/// Reduce text to lowercase alphanumerics, dropping whitespace and punctuation entirely.
 ///
-/// Segments with zero area or empty text are always kept.
-fn filter_segments_by_table_bboxes(
-    segments: Vec<SegmentData>,
-    table_bboxes: &[crate::types::BoundingBox],
-) -> Vec<SegmentData> {
-    if table_bboxes.is_empty() {
+/// Cell assembly does not preserve a printed run's boundaries: one visual line commonly spans
+/// several cells, and a wrapped cell inserts separators a printed run does not have. GH#1616's
+/// first fix compared whitespace-collapsed text, so any run the grid split across cells failed to
+/// match and was emitted a second time as prose -- on `issue-912` that cost 81 of 263 words,
+/// dropping precision from 0.984 to 0.692 while recall stayed flat, which is the signature of
+/// duplication rather than loss. Concatenating glyphs makes the test indifferent to where the grid
+/// chose to put its boundaries, which is the only thing it was ever wrong about. ~keep
+fn normalize_for_table_coverage(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn table_bboxes_by_page(tables: &[crate::types::Table]) -> ahash::AHashMap<usize, Vec<TableCoverage>> {
+    let mut coverage_by_page: ahash::AHashMap<usize, Vec<TableCoverage>> = ahash::AHashMap::new();
+    for table in tables {
+        if let Some(bbox) = table.bounding_box {
+            // `cells` is authoritative when populated, but a table can reach here
+            // carrying only rendered `markdown` (layout-sourced tables, and the
+            // overlap-preference merge, both produce that shape). Falling back to the
+            // markdown keeps suppression working for those instead of silently
+            // disabling it, which would emit their contents twice. ~keep
+            let cell_text = if table.cells.iter().any(|row| !row.is_empty()) {
+                table
+                    .cells
+                    .iter()
+                    .flat_map(|row| row.iter())
+                    .map(|cell| normalize_for_table_coverage(cell))
+                    .collect::<String>()
+            } else {
+                normalize_for_table_coverage(&table.markdown)
+            };
+            coverage_by_page
+                .entry(table.page_number.saturating_sub(1) as usize)
+                .or_default()
+                .push(TableCoverage { bbox, cell_text });
+        }
+    }
+    coverage_by_page
+}
+
+/// Filter out segments a table both COVERS and CARRIES.
+///
+/// Suppression exists so text a table already renders is not emitted a second time as
+/// prose. Geometry alone was the whole test, and that is unsound: a reconstructed grid
+/// need not span every printed column inside its own bounding box, and the runs in the
+/// columns it left out were dropped from the prose flow without ever reaching a cell.
+/// They were deleted from the document -- not in a cell, not in an element, nowhere.
+/// Measured on GH#1616: a four-column fault-finding grid was reconstructed with two
+/// columns over a bbox spanning all four, and 26 words vanished across two pages.
+///
+/// The text test restores the invariant that a bounding box cannot delete content the
+/// grid does not represent: a covered run is dropped only when some cell actually
+/// carries it. Matching is on [`normalize_for_table_coverage`]'s glyph concatenation, so
+/// it is indifferent to where cell assembly put its boundaries -- a printed run split
+/// across two cells, or a visual line spanning several, still matches. Requiring the
+/// grid's own whitespace instead suppressed almost nothing and re-emitted whole tables
+/// as prose (GH#1616 again, from the other side).
+///
+/// Segments with zero area or empty text are always kept. ~keep
+fn filter_segments_by_table_bboxes(segments: Vec<SegmentData>, tables: &[TableCoverage]) -> Vec<SegmentData> {
+    if tables.is_empty() {
         return segments;
     }
     segments
         .into_iter()
         .filter(|seg| {
             let seg_area = seg.width * seg.height;
-            if seg_area <= 0.0 || seg.text.trim().is_empty() {
+            let seg_text = seg.text.trim();
+            if seg_area <= 0.0 || seg_text.is_empty() {
                 return true;
             }
-            !table_bboxes.iter().any(|bb| {
+            let normalized = normalize_for_table_coverage(seg_text);
+            !tables.iter().any(|table| {
+                let bb = &table.bbox;
                 let inter_left = seg.x.max(bb.x0 as f32);
                 let inter_right = (seg.x + seg.width).min(bb.x1 as f32);
                 let inter_bottom = seg.y.max(bb.y0 as f32);
@@ -3902,7 +4279,7 @@ fn filter_segments_by_table_bboxes(
                     return false;
                 }
                 let inter_area = (inter_right - inter_left) * (inter_top - inter_bottom);
-                inter_area / seg_area >= 0.5
+                inter_area / seg_area >= 0.5 && table.cell_text.contains(&normalized)
             })
         })
         .collect()
@@ -3911,9 +4288,9 @@ fn filter_segments_by_table_bboxes(
 /// Apply all 5 text repair passes in a single traversal over a segment's text.
 ///
 /// Returns `Cow::Borrowed` if nothing changed, `Cow::Owned` otherwise.
-fn fused_text_repairs(text: &str) -> Cow<'_, str> {
+fn fused_text_repairs<'a>(text: &'a str, word_witnesses: &WordWitnesses) -> Cow<'a, str> {
     let t1 = normalize_text_encoding(text);
-    let t2 = repair_ligature_spaces(&t1);
+    let t2 = repair_ligature_spaces(&t1, word_witnesses);
     let t3 = expand_ligatures_with_space_absorption(&t2);
     let t3b = collapse_spaced_hyphens(&t3);
     let t4 = normalize_unicode_text(&t3b);
@@ -4840,7 +5217,12 @@ fn document_content_width(all_pages: &[Vec<PdfParagraph>]) -> f32 {
 }
 
 /// Apply the structure pipeline's cross-page repeating-text policy to pages that
-/// were already classified by another source, such as OCR layout detection. ~keep
+/// were already classified by another source, such as OCR layout detection.
+///
+/// This path has no table data available, so the same-page dedup pass below
+/// never has a table to match against and is a no-op here -- consistent with
+/// GH#1623's fix, which restricts that pass to paragraphs a detected table
+/// actually carries. ~keep
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 pub(crate) fn strip_repeating_text_from_pages(pages: &mut [Vec<PdfParagraph>], page_heights: &[f32]) {
     mark_cross_page_repeating_text(pages, page_heights);
@@ -4848,17 +5230,26 @@ pub(crate) fn strip_repeating_text_from_pages(pages: &mut [Vec<PdfParagraph>], p
     for page in pages.iter_mut() {
         retain_page_furniture_safely(page);
     }
-    deduplicate_paragraphs(pages);
+    deduplicate_paragraphs(pages, &ahash::AHashMap::new());
 }
 
 /// Filter page furniture paragraphs with a safety valve.
 ///
 /// Removes paragraphs marked as page furniture (headers/footers) by layout
-/// detection. If removing ALL furniture-marked paragraphs would leave zero
-/// content, the furniture markings are cleared instead — better to include
-/// headers/footers than to produce empty output. This handles layout models
-/// misclassifying body text as page furniture on non-standard document types
-/// (e.g., legal transcripts, cover pages).
+/// detection. If every paragraph on the page is marked, the furniture markings
+/// are cleared instead — better to include headers/footers than to produce
+/// empty output. That is the cover-page / legal-transcript case: a detector
+/// that finds no body text at all must not be trusted to delete the page.
+///
+/// The valve deliberately does **not** fire on a page where furniture merely
+/// dominates the *paragraph* text. Furniture share is a bad proxy for "the page
+/// is empty": a page whose body is a table or a figure carries almost no
+/// paragraph text, so its running footer and folio alone clear any share bar —
+/// the old 30% rule then cleared the page's markings and printed the running
+/// footer as body copy. A 357-page manual re-emitted its running footer on each
+/// of the 25 pages whose body was tabular or graphical. Marks that a
+/// share-based valve would have restored are evidence-backed anyway: cross-page
+/// repetition and page-number sequencing put them there.
 fn retain_page_furniture_safely(paragraphs: &mut Vec<PdfParagraph>) {
     let total = paragraphs.len();
     let furniture_count = paragraphs.iter().filter(|p| p.is_page_furniture).count();
@@ -4874,23 +5265,8 @@ fn retain_page_furniture_safely(paragraphs: &mut Vec<PdfParagraph>) {
         return;
     }
 
-    let total_alphanum: usize = paragraphs.iter().map(paragraph_alphanum_len).sum();
-
-    if total_alphanum > 0 {
-        let furniture_alphanum: usize = paragraphs
-            .iter()
-            .filter(|p| p.is_page_furniture)
-            .map(paragraph_alphanum_len)
-            .sum();
-
-        if furniture_alphanum * 100 > total_alphanum * 30 {
-            for para in paragraphs.iter_mut() {
-                para.is_page_furniture = false;
-            }
-            return;
-        }
-    }
-
+    // Furniture shorter than this is a running head/footer, folio or stamp
+    // rather than prose a detector mistook for one (GH#1411).
     const MIN_SUBSTANTIVE_CHARS: usize = 80;
 
     paragraphs.retain(|p| {
@@ -4916,15 +5292,15 @@ fn paragraph_alphanum_len(para: &PdfParagraph) -> usize {
 /// trailing hyphens and implicit breaks (no hyphen, full line) are handled.
 /// When false (structure tree path with x=0, width=0), only explicit trailing
 /// hyphens are rejoined to avoid false positives.
-fn dehyphenate_paragraphs(paragraphs: &mut [PdfParagraph], has_positions: bool) {
+fn dehyphenate_paragraphs(paragraphs: &mut [PdfParagraph], has_positions: bool, hyphen_witnesses: &HyphenWitnesses) {
     for para in paragraphs.iter_mut() {
         if para.is_code_block || para.lines.len() < 2 {
             continue;
         }
         if has_positions {
-            dehyphenate_paragraph_lines(para);
+            dehyphenate_paragraph_lines(para, hyphen_witnesses);
         } else {
-            dehyphenate_hyphen_only(para);
+            dehyphenate_hyphen_only(para, hyphen_witnesses);
         }
     }
 }
@@ -4948,16 +5324,134 @@ const PRESERVED_LEXICAL_COMPOUNDS: &[(&str, &str)] = &[
     ("well", "known"),
 ];
 
-fn should_preserve_lexical_hyphen(trailing_word: &str, leading_word: &str) -> bool {
+/// Minimum letters required on each side of a mid-run hyphen before
+/// [`collect_hyphen_witnesses`] records it, to avoid single-letter noise
+/// (initials, bullet dashes) minting spurious witness pairs.
+const MIN_HYPHEN_WITNESS_WORD_LEN: usize = 2;
+
+/// Collect `(left, right)` word pairs the document itself writes as a single
+/// hyphenated token, so a genuine authored hyphen at a line break can be told
+/// apart from a hyphen that merely happens to fall at a line-wrap boundary (#1543).
+///
+/// Only a hyphen that is NOT the last character of its segment's text can witness a
+/// real compound: a line-wrap hyphen is, by construction, the final character before
+/// the break, so restricting the scan to strictly mid-run hyphens avoids witnessing
+/// the very artifact this collector exists to judge. Must run before any page's
+/// segments are moved out of `all_page_segments` (see call site in
+/// `extract_document_structure_from_segments`), since a witness on one page can be
+/// the sole evidence for a break on another. ~keep
+fn collect_hyphen_witnesses(all_page_segments: &[Vec<SegmentData>]) -> HyphenWitnesses {
+    let mut witnesses = HyphenWitnesses::default();
+    for segment in all_page_segments.iter().flatten() {
+        let characters: Vec<char> = segment.text.chars().collect();
+        if characters.len() < 3 {
+            continue;
+        }
+        for position in 1..characters.len() - 1 {
+            if characters[position] != '-' {
+                continue;
+            }
+            let left: String = characters[..position]
+                .iter()
+                .rev()
+                .take_while(|character| character.is_alphabetic())
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            let right: String = characters[position + 1..]
+                .iter()
+                .take_while(|character| character.is_alphabetic())
+                .collect();
+            let left_len = left.chars().count();
+            let right_len = right.chars().count();
+            if left_len < MIN_HYPHEN_WITNESS_WORD_LEN || right_len < MIN_HYPHEN_WITNESS_WORD_LEN {
+                continue;
+            }
+            witnesses.insert((left.to_ascii_lowercase(), right.to_ascii_lowercase()));
+        }
+    }
+    witnesses
+}
+
+/// Collect standalone alphabetic words the document itself writes elsewhere, so
+/// [`repair_ligature_spaces`] can tell a genuine word boundary apart from a
+/// decomposed-ligature gap that looks identical at the string layer (#1591).
+///
+/// A token that is itself one half of a ligature-space candidate pattern (ends in
+/// `f` right before whitespace, or starts with `i`/`l`/`f` right after it) is not
+/// independent evidence for that occurrence: the very space under judgment put it
+/// there, so counting it would make every candidate witness itself and disable the
+/// repair (see the `f irst` false-negative this guards against). The same word
+/// witnessed elsewhere in the document, in a position that is not itself a
+/// candidate, is unaffected and still counts. Must run before any page's segments
+/// are moved out of `all_page_segments` (see call site in
+/// `extract_document_structure_from_segments`), mirroring
+/// [`collect_hyphen_witnesses`]. ~keep
+fn collect_word_witnesses(all_page_segments: &[Vec<SegmentData>]) -> WordWitnesses {
+    let mut witnesses = WordWitnesses::default();
+    for segment in all_page_segments.iter().flatten() {
+        let cores: Vec<&str> = segment
+            .text
+            .split_whitespace()
+            .map(|token| token.trim_matches(|c: char| !c.is_alphabetic()))
+            .collect();
+        for index in 0..cores.len() {
+            let core = cores[index];
+            if core.chars().count() < MIN_LIGATURE_WITNESS_WORD_LEN {
+                continue;
+            }
+            let is_left_of_candidate = core.ends_with('f')
+                && cores
+                    .get(index + 1)
+                    .and_then(|next| next.chars().next())
+                    .is_some_and(|c| matches!(c, 'i' | 'l' | 'f'));
+            let is_right_of_candidate = index > 0
+                && cores[index - 1].ends_with('f')
+                && core.chars().next().is_some_and(|c| matches!(c, 'i' | 'l' | 'f'));
+            if is_left_of_candidate || is_right_of_candidate {
+                continue;
+            }
+            witnesses.insert(core.to_ascii_lowercase());
+        }
+    }
+    witnesses
+}
+
+pub(super) fn should_preserve_lexical_hyphen(
+    trailing_word: &str,
+    leading_word: &str,
+    hyphen_witnesses: &HyphenWitnesses,
+) -> bool {
     let trim_non_lexical = |ch: char| !ch.is_alphanumeric() && ch != '-';
     let left = trailing_word.trim_matches(trim_non_lexical);
     let right = leading_word.trim_matches(trim_non_lexical);
 
-    PRESERVED_LEXICAL_COMPOUNDS
+    let matches_static_compound = PRESERVED_LEXICAL_COMPOUNDS
         .iter()
         .any(|&(expected_left, expected_right)| {
             left.eq_ignore_ascii_case(expected_left) && right.eq_ignore_ascii_case(expected_right)
-        })
+        });
+    matches_static_compound || hyphen_witnesses.contains(&(left.to_ascii_lowercase(), right.to_ascii_lowercase()))
+}
+
+/// Whether adjacent extraction runs actually cross a visual line boundary.
+///
+/// `PdfLine` boundaries can also be introduced by inline style/run splitting. A
+/// suspended hyphen such as `vracht- en` may therefore appear at the end of one
+/// logical line and the start of the next while both runs still share a baseline.
+/// Dehyphenation is only licensed when the runs use the same reading frame and
+/// their upright baselines differ by more than the inline-style tolerance.
+fn spans_visual_line_break(trailing: &SegmentData, leading: &SegmentData) -> bool {
+    if !trailing.has_same_rotation(leading) {
+        return false;
+    }
+
+    let trailing_baseline = trailing.upright_baseline();
+    let leading_baseline = leading.upright_baseline();
+    trailing_baseline.is_finite()
+        && leading_baseline.is_finite()
+        && (trailing_baseline - leading_baseline).abs() > INLINE_STYLE_BASELINE_TOLERANCE
 }
 
 /// Core dehyphenation with position-based full-line detection.
@@ -4965,7 +5459,7 @@ fn should_preserve_lexical_hyphen(trailing_word: &str, leading_word: &str) -> bo
 /// For each line boundary, checks whether the line extends close to the right
 /// margin. If so, attempts to rejoin the trailing word of one line with the
 /// leading word of the next.
-fn dehyphenate_paragraph_lines(para: &mut PdfParagraph) {
+fn dehyphenate_paragraph_lines(para: &mut PdfParagraph, hyphen_witnesses: &HyphenWitnesses) {
     let max_right_edge = para
         .lines
         .iter()
@@ -4974,7 +5468,7 @@ fn dehyphenate_paragraph_lines(para: &mut PdfParagraph) {
         .fold(0.0_f32, f32::max);
 
     if max_right_edge <= 0.0 {
-        dehyphenate_hyphen_only(para);
+        dehyphenate_hyphen_only(para, hyphen_witnesses);
         return;
     }
 
@@ -4984,6 +5478,14 @@ fn dehyphenate_paragraph_lines(para: &mut PdfParagraph) {
     for i in 0..(n - 1) {
         let trailing_right = para.lines[i].segments.last().map(|s| s.x + s.width).unwrap_or(0.0);
         if trailing_right < threshold {
+            continue;
+        }
+
+        let crosses_visual_line = match (para.lines[i].segments.last(), para.lines[i + 1].segments.first()) {
+            (Some(trailing), Some(leading)) => spans_visual_line_break(trailing, leading),
+            _ => false,
+        };
+        if !crosses_visual_line {
             continue;
         }
 
@@ -5015,7 +5517,7 @@ fn dehyphenate_paragraph_lines(para: &mut PdfParagraph) {
             continue;
         }
 
-        let preserved_hyphen = if should_preserve_lexical_hyphen(trailing_word, leading_word) {
+        let preserved_hyphen = if should_preserve_lexical_hyphen(trailing_word, leading_word, hyphen_witnesses) {
             "-"
         } else {
             ""
@@ -5046,9 +5548,17 @@ fn dehyphenate_paragraph_lines(para: &mut PdfParagraph) {
 ///
 /// Only joins lines when the trailing segment ends with an explicit hyphen.
 /// Used for structure tree pages where x/width may be zero.
-fn dehyphenate_hyphen_only(para: &mut PdfParagraph) {
+fn dehyphenate_hyphen_only(para: &mut PdfParagraph, hyphen_witnesses: &HyphenWitnesses) {
     let n = para.lines.len();
     for i in 0..(n - 1) {
+        let crosses_visual_line = match (para.lines[i].segments.last(), para.lines[i + 1].segments.first()) {
+            (Some(trailing), Some(leading)) => spans_visual_line_break(trailing, leading),
+            _ => false,
+        };
+        if !crosses_visual_line {
+            continue;
+        }
+
         let trailing_text = match para.lines[i].segments.last() {
             Some(s) if s.text.ends_with('-') => s.text.clone(),
             _ => continue,
@@ -5072,7 +5582,7 @@ fn dehyphenate_hyphen_only(para: &mut PdfParagraph) {
             continue;
         }
 
-        let preserved_hyphen = if should_preserve_lexical_hyphen(trailing_word, leading_word) {
+        let preserved_hyphen = if should_preserve_lexical_hyphen(trailing_word, leading_word, hyphen_witnesses) {
             "-"
         } else {
             ""
@@ -5125,14 +5635,22 @@ fn has_font_size_variation(paragraphs: &[PdfParagraph]) -> bool {
 /// Two-pass approach:
 /// 1. Consecutive duplicates: remove back-to-back identical paragraphs
 ///    (catches bold/shadow rendering artifacts).
-/// 2. Non-consecutive duplicates: remove body-text paragraphs whose
-///    normalized text was already seen on the same page (catches table
-///    content rendered as both table and body text).
+/// 2. Non-consecutive duplicates: remove a body-text paragraph whose text is
+///    also carried by a table detected on the same page (catches table
+///    content rendered as both table and body text). A paragraph that no
+///    detected table's cells carry is never touched by this pass, even if it
+///    repeats another paragraph verbatim -- GH#1623 found a body sentence
+///    deleted for matching an earlier title's words, with no table involved
+///    at all. The comparison also preserves case, so a title-cased heading
+///    cannot match a body fragment that differs only in case. ~keep
 ///
 /// Only deduplicates body text — headings, list items, code blocks,
 /// formulas, and captions are preserved even if duplicated.
-fn deduplicate_paragraphs(all_pages: &mut [Vec<PdfParagraph>]) {
-    for page in all_pages.iter_mut() {
+fn deduplicate_paragraphs(
+    all_pages: &mut [Vec<PdfParagraph>],
+    table_coverage_by_page: &ahash::AHashMap<usize, Vec<TableCoverage>>,
+) {
+    for (page_index, page) in all_pages.iter_mut().enumerate() {
         if page.len() < 2 {
             continue;
         }
@@ -5148,14 +5666,25 @@ fn deduplicate_paragraphs(all_pages: &mut [Vec<PdfParagraph>]) {
             }
         }
 
+        let Some(page_tables) = table_coverage_by_page
+            .get(&page_index)
+            .filter(|tables| !tables.is_empty())
+        else {
+            continue;
+        };
+
         let mut seen = ahash::AHashSet::new();
         let mut to_remove = Vec::new();
         for (idx, para) in page.iter().enumerate() {
             if !is_dedup_candidate(para) {
                 continue;
             }
-            let text = paragraph_text_normalized(para);
+            let text = paragraph_text_whitespace_collapsed(para);
             if text.len() < 15 {
+                continue;
+            }
+            let glyphs = normalize_for_table_coverage(&text);
+            if glyphs.is_empty() || !page_tables.iter().any(|table| table.cell_text.contains(&glyphs)) {
                 continue;
             }
             if !seen.insert((para.layout_region_path, text)) {
@@ -5358,6 +5887,18 @@ fn paragraph_text_normalized(para: &PdfParagraph) -> String {
         .to_lowercase()
 }
 
+/// Case-preserving counterpart to [`paragraph_text_normalized`].
+///
+/// Used by the same-page table-duplicate check so a title-cased heading
+/// cannot match a body sentence fragment that differs only in case
+/// (GH#1623). ~keep
+fn paragraph_text_whitespace_collapsed(para: &PdfParagraph) -> String {
+    paragraph_text_raw(para)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// Check if a paragraph is a candidate for non-consecutive deduplication.
 fn is_dedup_candidate(p: &PdfParagraph) -> bool {
     p.heading_level.is_none()
@@ -5489,9 +6030,13 @@ fn run_in_list_fragment(source: &PdfParagraph, text: String, is_list_item: bool)
     }
 }
 
-fn apply_text_repair_to_structure_tree_paragraphs(paragraphs: &mut Vec<PdfParagraph>, has_positions: bool) {
-    apply_to_all_segments(paragraphs, fused_text_repairs);
-    dehyphenate_paragraphs(paragraphs, has_positions);
+fn apply_text_repair_to_structure_tree_paragraphs(
+    paragraphs: &mut Vec<PdfParagraph>,
+    has_positions: bool,
+    witnesses: &TextRepairWitnesses,
+) {
+    apply_to_all_segments(paragraphs, |text| fused_text_repairs(text, &witnesses.words));
+    dehyphenate_paragraphs(paragraphs, has_positions, &witnesses.hyphens);
     split_embedded_list_items(paragraphs);
     synchronize_paragraph_text_metadata(paragraphs);
 }
@@ -6677,7 +7222,7 @@ mod tests {
     fn emitted_table_still_suppresses_covered_text() {
         use crate::core::config::layout::TableOverlapPreference;
 
-        let native_tables = vec![ov_table(1, (0.0, 0.0, 100.0, 100.0), "| value |")];
+        let native_tables = vec![ov_table(1, (0.0, 0.0, 100.0, 100.0), "| duplicated table text |")];
         let emitted_tables = prepare_emitted_tables(&native_tables, Vec::new(), TableOverlapPreference::Content);
         let bboxes_by_page = table_bboxes_by_page(&emitted_tables);
         let segment = SegmentData {
@@ -6990,7 +7535,7 @@ mod tests {
             body_line_seg("1.6 Ventilatie", 658.0),
         ];
 
-        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &[]);
+        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &[], &TextRepairWitnesses::default());
 
         assert_eq!(
             paragraphs.len(),
@@ -7010,7 +7555,7 @@ mod tests {
             body_line_seg("2024 was een druk jaar", 686.0),
         ];
 
-        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &[]);
+        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &[], &TextRepairWitnesses::default());
 
         assert_eq!(
             paragraphs.len(),
@@ -7071,7 +7616,12 @@ mod tests {
             ..column_seg("gebruiker van het toestel indien genegeerd", 72.0, 190.0, 636.0)
         };
 
-        let paragraphs = segments_to_paragraphs(vec![heading, callout, body1, body2, body3], &[(12.0, None)], &[]);
+        let paragraphs = segments_to_paragraphs(
+            vec![heading, callout, body1, body2, body3],
+            &[(12.0, None)],
+            &[],
+            &TextRepairWitnesses::default(),
+        );
 
         assert_eq!(
             paragraphs.len(),
@@ -7088,6 +7638,271 @@ mod tests {
             "VOORZICHTIG / BELANGRIJK Procedures die niet worden opgevolgd kunnen letsel \
              of schade veroorzaken aan de installatie of de gebruiker van het toestel indien genegeerd",
             "the callout and following body text must survive as a separate element from the heading"
+        );
+    }
+
+    /// GH#1608: `ARTIKEL 1.` shares font, size, weight and leading with the part
+    /// header above it, so the numbered-heading predicate is the only boundary
+    /// signal available -- and it could not see a heading whose number is not the
+    /// first token. Asserted through `segments_to_paragraphs`, which runs the
+    /// grouper AND the continuation merge, because a split made by one is
+    /// routinely undone by the other.
+    #[test]
+    fn keyword_numbered_heading_splits_from_the_part_header_above_it() {
+        let part_header = SegmentData {
+            is_bold: true,
+            font_size: 12.0,
+            height: 12.0,
+            y: 700.0 - 12.0,
+            ..column_seg("ALGEMENE BEPALINGEN", 262.0, 71.0, 700.0)
+        };
+        let heading = SegmentData {
+            is_bold: true,
+            font_size: 12.0,
+            height: 12.0,
+            y: 683.0 - 12.0,
+            ..column_seg(
+                "ARTIKEL 1. TOEPASSELIJKHEID VAN DE INKOOPVOORWAARDEN",
+                72.0,
+                330.0,
+                683.0,
+            )
+        };
+
+        let paragraphs = segments_to_paragraphs(
+            vec![part_header, heading],
+            &[(12.0, None)],
+            &[],
+            &TextRepairWitnesses::default(),
+        );
+
+        assert_eq!(
+            paragraphs.len(),
+            2,
+            "the keyword-numbered heading must open its own element"
+        );
+        assert_eq!(paragraph_segment_text(&paragraphs[0]), "ALGEMENE BEPALINGEN");
+        assert_eq!(
+            paragraph_segment_text(&paragraphs[1]),
+            "ARTIKEL 1. TOEPASSELIJKHEID VAN DE INKOOPVOORWAARDEN"
+        );
+    }
+
+    /// GH#1615. A numbered heading whose title does not fit on one line is set with
+    /// a hanging indent: the number at the margin, the title to its right, and the
+    /// overflow resuming at the TITLE's left edge. `follows_section` closed the
+    /// element after the first line anyway, because `heading_wraps_onto` compares
+    /// RIGHT edges and a wrap's last line is short by definition.
+    ///
+    /// Geometry from the reporter's page 1, verbatim (PDF user space):
+    ///
+    /// ```text
+    /// 5.7.3                                     x 48.24
+    /// Roof terminal combined duct vertical and  x 83.64  y 774.96
+    /// twin pipe duct vertical                   x 83.64  y 762.24
+    /// ```
+    #[test]
+    fn a_wrapped_numbered_heading_keeps_its_second_line() {
+        let segments = vec![
+            SegmentData {
+                is_bold: true,
+                font_size: 11.04,
+                ..column_seg("5.7.3", 48.24, 30.0, 774.96)
+            },
+            SegmentData {
+                is_bold: true,
+                font_size: 11.04,
+                ..column_seg("Roof terminal combined duct vertical and", 83.64, 211.0, 774.96)
+            },
+            SegmentData {
+                is_bold: true,
+                font_size: 11.04,
+                ..column_seg("twin pipe duct vertical", 83.64, 114.0, 762.24)
+            },
+        ];
+        let paragraphs = blocks_to_paragraphs(segments, &[], &[]);
+        assert_eq!(paragraphs.len(), 1, "the heading and its own wrap are one element");
+        assert_eq!(
+            paragraph_segment_text(&paragraphs[0]),
+            "5.7.3 Roof terminal combined duct vertical and twin pipe duct vertical"
+        );
+    }
+
+    /// GH#1615's own control, page 3 of the same reproducer. Identical heading,
+    /// identical fonts, identical line pitch -- the ONLY difference is that the
+    /// following line starts at the margin (x 48.24) rather than the title's left
+    /// edge (x 83.64), because it is body text and not a wrap. It must still split.
+    #[test]
+    fn a_numbered_heading_followed_by_margin_aligned_body_still_splits() {
+        let segments = vec![
+            SegmentData {
+                is_bold: true,
+                font_size: 11.04,
+                ..column_seg("5.7.5", 48.24, 30.0, 774.96)
+            },
+            SegmentData {
+                is_bold: true,
+                font_size: 11.04,
+                ..column_seg("Roof terminal combined duct vertical and", 83.64, 211.0, 774.96)
+            },
+            SegmentData {
+                is_bold: true,
+                font_size: 11.04,
+                ..column_seg("The appliance category is C33 for this duct.", 48.24, 216.0, 762.24)
+            },
+        ];
+        let paragraphs = blocks_to_paragraphs(segments, &[], &[]);
+        assert_eq!(paragraphs.len(), 2, "body text at the margin is not the heading's wrap");
+        assert_eq!(
+            paragraph_segment_text(&paragraphs[0]),
+            "5.7.5 Roof terminal combined duct vertical and"
+        );
+    }
+
+    /// GH#1608 page 9: with the predicate blind to the keyword form, a run of
+    /// such headings has no break signal at all and collapses into one element --
+    /// the exact failure the `starts_section` term exists to prevent.
+    #[test]
+    fn a_run_of_keyword_numbered_headings_does_not_collapse() {
+        let lines = [
+            "ARTIKEL 1. TOEPASSELIJKHEID",
+            "ARTIKEL 2. TOTSTANDKOMING",
+            "ARTIKEL 3. PRIJZEN",
+        ];
+        let segments = lines
+            .iter()
+            .enumerate()
+            .map(|(index, text)| {
+                let baseline = 700.0 - 17.0 * index as f32;
+                SegmentData {
+                    is_bold: true,
+                    font_size: 12.0,
+                    height: 12.0,
+                    y: baseline - 12.0,
+                    ..column_seg(text, 72.0, 180.0, baseline)
+                }
+            })
+            .collect();
+
+        let paragraphs = segments_to_paragraphs(segments, &[(12.0, None)], &[], &TextRepairWitnesses::default());
+
+        assert_eq!(paragraphs.len(), 3, "each heading in the run must be its own element");
+        for (index, expected) in lines.iter().enumerate() {
+            assert_eq!(paragraph_segment_text(&paragraphs[index]), *expected);
+        }
+    }
+
+    /// The negative control for the two tests above: prose that opens with the
+    /// same keyword and the same number must NOT gain a paragraph break, or the
+    /// widening would shred body text wherever a sentence starts `Artikel 12 ...`.
+    #[test]
+    fn prose_opening_with_a_keyword_and_a_number_keeps_its_paragraph() {
+        let first = SegmentData {
+            font_size: 12.0,
+            height: 12.0,
+            y: 700.0 - 12.0,
+            ..column_seg("Artikel 12 van de wet is van toepassing", 72.0, 240.0, 700.0)
+        };
+        let second = SegmentData {
+            font_size: 12.0,
+            height: 12.0,
+            y: 683.0 - 12.0,
+            ..column_seg("en dus geldt het volgende voor deze overeenkomst", 72.0, 250.0, 683.0)
+        };
+
+        let paragraphs = segments_to_paragraphs(
+            vec![first, second],
+            &[(12.0, None)],
+            &[],
+            &TextRepairWitnesses::default(),
+        );
+
+        assert_eq!(
+            paragraphs.len(),
+            1,
+            "prose beginning with a keyword and a number is not a heading"
+        );
+    }
+
+    /// GH#1609: the numbered-heading break terms tested a predicate against a single
+    /// SEGMENT, so a heading set with a hanging number -- `"3.1.7"` and its title on
+    /// one baseline, two spans -- never looked like a numbered heading and was left to
+    /// the ordinary paragraph-gap rule, which needs more than ordinary line pitch. The
+    /// heading was welded into the body beneath it.
+    #[test]
+    fn hanging_number_heading_is_a_paragraph_boundary() {
+        let number = SegmentData {
+            font_size: 9.0,
+            height: 9.0,
+            y: 700.0 - 9.0,
+            ..column_seg("3.1.7", 104.42, 20.0, 700.0)
+        };
+        let title = SegmentData {
+            font_size: 9.0,
+            height: 9.0,
+            y: 700.0 - 9.0,
+            ..column_seg("Innovatie/ontwikkelingen", 161.06, 100.0, 700.0)
+        };
+        let body = SegmentData {
+            font_size: 9.0,
+            height: 9.0,
+            y: 688.0 - 9.0,
+            ..column_seg(
+                "innovatie ontwikkelingen toekomstige verwachten gebied product",
+                104.42,
+                380.0,
+                688.0,
+            )
+        };
+
+        let paragraphs = segments_to_paragraphs(
+            vec![number, title, body],
+            &[(9.0, None)],
+            &[],
+            &TextRepairWitnesses::default(),
+        );
+
+        assert_eq!(
+            paragraphs.len(),
+            2,
+            "a hanging-number heading must open its own element"
+        );
+        assert_eq!(paragraph_segment_text(&paragraphs[0]), "3.1.7 Innovatie/ontwikkelingen");
+    }
+
+    /// The single-span control for the test above: same strings, same baselines, one
+    /// span. It passed before the fix and must keep passing after it.
+    #[test]
+    fn single_span_numbered_heading_is_still_a_paragraph_boundary() {
+        let heading = SegmentData {
+            font_size: 9.0,
+            height: 9.0,
+            y: 700.0 - 9.0,
+            ..column_seg("3.1.7 Innovatie/ontwikkelingen", 104.42, 156.64, 700.0)
+        };
+        let body = SegmentData {
+            font_size: 9.0,
+            height: 9.0,
+            y: 688.0 - 9.0,
+            ..column_seg(
+                "innovatie ontwikkelingen toekomstige verwachten gebied product",
+                104.42,
+                380.0,
+                688.0,
+            )
+        };
+
+        let paragraphs = segments_to_paragraphs(
+            vec![heading, body],
+            &[(9.0, None)],
+            &[],
+            &TextRepairWitnesses::default(),
+        );
+
+        assert_eq!(
+            paragraphs.len(),
+            2,
+            "a single-span numbered heading must open its own element"
         );
     }
 
@@ -7110,7 +7925,12 @@ mod tests {
         );
         let heading_continuation = column_seg("Rechterkantlijn Van Deze Kolom", 72.0, 450.0, 684.0);
 
-        let paragraphs = segments_to_paragraphs(vec![heading_start, heading_continuation], &[(11.0, None)], &[]);
+        let paragraphs = segments_to_paragraphs(
+            vec![heading_start, heading_continuation],
+            &[(11.0, None)],
+            &[],
+            &TextRepairWitnesses::default(),
+        );
 
         assert_eq!(
             paragraphs.len(),
@@ -7131,7 +7951,7 @@ mod tests {
             body_line_seg("before adjourning the meeting for the day", 672.0),
         ];
 
-        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &[]);
+        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &[], &TextRepairWitnesses::default());
 
         assert_eq!(
             paragraphs.len(),
@@ -7146,6 +7966,119 @@ mod tests {
     }
 
     /// Helper: one segment of a hanging-indent column, 11pt on an 11pt line.
+    /// GH#1616: a reconstructed grid need not span every printed column inside its own
+    /// bounding box. The runs in the columns it left out were dropped from the prose flow
+    /// and never reached a cell, so they were deleted from the document.
+    ///
+    /// The shape measured on the reporter's page 51: a four-column fault-finding grid
+    /// (cause / `Nee` / `Ja` / remedy) reconstructed with two columns over a bbox spanning
+    /// all four, x 48.00 .. 555.24.
+    #[test]
+    fn a_table_bbox_does_not_delete_text_its_grid_leaves_out() {
+        let coverage = vec![TableCoverage {
+            bbox: crate::types::BoundingBox {
+                x0: 48.0,
+                y0: 312.48,
+                x1: 555.24,
+                y1: 405.28,
+            },
+            cell_text: table_cell_text(&[
+                "Ja  Ja",
+                "Controleer de ontsteekpenafstand. Controleer de afstelling, zie § 7.10 Gas-luchtregeling.",
+            ]),
+        }];
+        let segments = vec![
+            column_seg("Ja", 300.0, 12.0, 380.0),
+            column_seg("Controleer de ontsteekpenafstand.", 340.0, 180.0, 380.0),
+            column_seg("Onjuiste ontsteekafstand.", 52.0, 140.0, 380.0),
+            column_seg("Nee", 250.0, 20.0, 366.0),
+            column_seg("Zwakke vonk.", 52.0, 70.0, 340.0),
+        ];
+
+        let kept: Vec<String> = filter_segments_by_table_bboxes(segments, &coverage)
+            .into_iter()
+            .map(|seg| seg.text)
+            .collect();
+
+        assert_eq!(
+            kept,
+            vec![
+                "Onjuiste ontsteekafstand.".to_string(),
+                "Nee".to_string(),
+                "Zwakke vonk.".to_string(),
+            ],
+            "runs the grid does not carry must survive; the two it does carry are suppressed"
+        );
+    }
+
+    /// GH#1616's first fix compared whitespace-collapsed text, which a grid's own cell boundaries
+    /// defeat: one printed line commonly spans several cells and a wrapped cell inserts separators
+    /// the printed run does not have. On `issue-912` the table's own rows came back a second time
+    /// as prose -- 81 extra word instances in 263, precision 0.984 -> 0.692 with recall unmoved.
+    ///
+    /// Geometry here is taken from that page: a ledger row rendered as one run, reconstructed into
+    /// two cells that split it mid-list and add a stray separator comma.
+    #[test]
+    fn should_suppress_a_printed_run_the_grid_split_across_two_cells() {
+        let coverage = vec![TableCoverage {
+            bbox: crate::types::BoundingBox {
+                x0: 48.0,
+                y0: 300.0,
+                x1: 560.0,
+                y1: 400.0,
+            },
+            cell_text: table_cell_text(&["Chq. No. 085900 BILL NO.133, 132,", "139, ,138, 143, 140,"]),
+        }];
+        let segments = vec![
+            column_seg(
+                "Chq. No. 085900 BILL NO.133, 132, 139,138, 143, 140,",
+                60.0,
+                400.0,
+                350.0,
+            ),
+            column_seg("Being payment against a bill the grid omits", 60.0, 400.0, 320.0),
+        ];
+
+        let kept: Vec<String> = filter_segments_by_table_bboxes(segments, &coverage)
+            .into_iter()
+            .map(|seg| seg.text)
+            .collect();
+
+        assert_eq!(
+            kept,
+            vec!["Being payment against a bill the grid omits".to_string()],
+            "a run the grid carries across a cell boundary must not be emitted again as prose"
+        );
+    }
+
+    /// The other half of the same invariant, and the reason the geometric test cannot
+    /// simply be dropped: text a table DOES carry must still be suppressed, or every
+    /// table's contents are emitted twice.
+    #[test]
+    fn a_table_still_suppresses_the_prose_copy_of_its_own_cells() {
+        let coverage = vec![TableCoverage {
+            bbox: crate::types::BoundingBox {
+                x0: 48.0,
+                y0: 300.0,
+                x1: 500.0,
+                y1: 400.0,
+            },
+            cell_text: table_cell_text(&["Mogelijke oorzaken:", "Oplossing:"]),
+        }];
+        let segments = vec![
+            column_seg("Mogelijke oorzaken:", 52.0, 100.0, 380.0),
+            column_seg("Oplossing:", 300.0, 60.0, 380.0),
+        ];
+        assert!(
+            filter_segments_by_table_bboxes(segments, &coverage).is_empty(),
+            "a covered run the grid carries is still suppressed"
+        );
+    }
+
+    fn table_cell_text(cells: &[&str]) -> String {
+        cells.iter().map(|cell| normalize_for_table_coverage(cell)).collect()
+    }
+
     fn column_seg(text: &str, x: f32, width: f32, baseline_y: f32) -> SegmentData {
         SegmentData {
             text: text.to_string(),
@@ -7189,7 +8122,7 @@ mod tests {
         ];
         let gap_ys = compute_paragraph_gap_ys(&segments);
 
-        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &gap_ys);
+        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &gap_ys, &TextRepairWitnesses::default());
 
         assert_eq!(
             paragraphs.len(),
@@ -7234,7 +8167,7 @@ mod tests {
         ];
         let gap_ys = compute_paragraph_gap_ys(&segments);
 
-        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &gap_ys);
+        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &gap_ys, &TextRepairWitnesses::default());
 
         assert_eq!(
             paragraphs.iter().filter(|paragraph| paragraph.is_list_item).count(),
@@ -7289,7 +8222,7 @@ mod tests {
         ];
         let gap_ys = compute_paragraph_gap_ys(&segments);
 
-        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &gap_ys);
+        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &gap_ys, &TextRepairWitnesses::default());
 
         assert_eq!(
             paragraphs.len(),
@@ -7436,7 +8369,7 @@ mod tests {
         ];
         let gap_ys = compute_paragraph_gap_ys(&segments);
 
-        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &gap_ys);
+        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &gap_ys, &TextRepairWitnesses::default());
 
         assert_eq!(paragraphs.len(), 2, "baseline agreement is what licenses reattachment");
         assert!(
@@ -7472,6 +8405,39 @@ mod tests {
     }
 
     #[test]
+    fn issue_1560_reconstructs_jittered_table_fragments_as_one_x_ordered_line() {
+        let mut article = inline_seg("700004", 68.279, 623.481, false);
+        article.font_size = 8.6;
+        article.height = 8.6;
+        article.width = 35.0;
+        let mut position = inline_seg("2", 50.0, 622.401, false);
+        position.font_size = 8.6;
+        position.height = 8.6;
+        position.width = 5.0;
+        let mut description = inline_seg("Fastening screw", 124.9, 622.401, false);
+        description.font_size = 8.6;
+        description.height = 8.6;
+        description.width = 60.0;
+        let mut next_row = inline_seg("3", 50.0, 610.0, false);
+        next_row.font_size = 8.6;
+        next_row.height = 8.6;
+
+        let segments = [&article, &position, &description, &next_row];
+        let lines = reconstruct_pdf_lines(&segments);
+
+        assert_eq!(lines.len(), 2, "ordinary row leading must still split lines");
+        assert_eq!(
+            lines[0]
+                .segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>(),
+            ["2", "700004", "Fastening screw"]
+        );
+        assert_eq!(lines[1].segments[0].text, "3");
+    }
+
+    #[test]
     fn inline_bold_runs_stay_in_one_paragraph() {
         let segments = vec![
             inline_seg("plain", 10.0, 100.0, false),
@@ -7487,7 +8453,13 @@ mod tests {
         assert!(paragraphs[0].lines[0].segments[1].is_bold);
         assert_eq!(paragraph_text(&paragraphs[0]), "plain bold tail");
 
-        let document = crate::pdf::structure::assembly::assemble_internal_document(vec![paragraphs], &[], None, &[]);
+        let document = crate::pdf::structure::assembly::assemble_internal_document(
+            vec![paragraphs],
+            &[],
+            None,
+            &[],
+            &Default::default(),
+        );
         let element = &document.elements[0];
         let bold = element
             .annotations
@@ -7536,6 +8508,96 @@ mod tests {
         assert_eq!(paragraphs.len(), 2);
         assert_eq!(paragraph_text(&paragraphs[0]), "Heading");
         assert_eq!(paragraph_text(&paragraphs[1]), "body");
+    }
+
+    /// Geometry taken from GH#1617's reproducer, where the base symbol is a span of its own.
+    #[test]
+    fn should_keep_a_subscript_with_a_base_symbol_that_is_its_own_span() {
+        let mut base = inline_seg("P", 206.76, 662.768, false);
+        base.width = 5.18;
+        base.font_size = 11.59;
+        base.height = 11.59;
+        let mut subscript = inline_seg("rated", 211.92, 661.700, false);
+        subscript.width = 12.99;
+        subscript.font_size = 8.51;
+        subscript.height = 8.51;
+
+        let paragraphs = blocks_to_paragraphs(vec![base, subscript], &[], &[]);
+
+        assert_eq!(paragraphs.len(), 1, "a subscript must not become its own element");
+        assert_eq!(paragraph_text(&paragraphs[0]), "P rated");
+    }
+
+    /// GH#1617's other four pairs: the base glyph sits inside a single `TJ` row span whose kerning
+    /// spreads it across the column, so the subscript starts *within* the previous run's extent.
+    #[test]
+    fn should_keep_a_subscript_that_starts_inside_its_row_span() {
+        let mut row = inline_seg("Geluidsniveau L dB", 59.28, 586.208, false);
+        row.width = 340.0;
+        row.font_size = 11.59;
+        row.height = 11.59;
+        let mut subscript = inline_seg("WA", 211.08, 585.579, false);
+        subscript.width = 8.4;
+        subscript.font_size = 7.34;
+        subscript.height = 7.34;
+
+        let paragraphs = blocks_to_paragraphs(vec![row, subscript], &[], &[]);
+
+        assert_eq!(
+            paragraphs.len(),
+            1,
+            "a subscript inside its row span must not become its own element"
+        );
+        assert_eq!(paragraph_text(&paragraphs[0]), "Geluidsniveau L dB WA");
+    }
+
+    /// The predicate must not swallow a genuine wrapped line: a smaller run one full leading below
+    /// its predecessor is a new line, not a subscript.
+    #[test]
+    fn should_still_split_a_smaller_run_a_full_leading_below_its_predecessor() {
+        let mut heading = inline_seg("Nominale warmteafgifte", 59.28, 662.768, false);
+        heading.width = 129.06;
+        heading.font_size = 11.59;
+        heading.height = 11.59;
+        let mut body = inline_seg("rated", 59.28, 648.860, false);
+        body.width = 12.99;
+        body.font_size = 8.51;
+        body.height = 8.51;
+
+        let paragraphs = blocks_to_paragraphs(vec![heading, body], &[], &[]);
+
+        assert_eq!(
+            paragraphs.len(),
+            2,
+            "a full-leading drop is a line break, not a subscript"
+        );
+    }
+
+    /// A run after a subscript sits back on the paragraph's own baseline; the subscript must not
+    /// latch `current_is_single_visual_line` off and split it.
+    #[test]
+    fn should_keep_the_run_following_a_subscript_on_the_same_line() {
+        let mut base = inline_seg("P", 206.76, 662.768, false);
+        base.width = 5.18;
+        base.font_size = 11.59;
+        base.height = 11.59;
+        let mut subscript = inline_seg("rated", 211.92, 661.700, false);
+        subscript.width = 12.99;
+        subscript.font_size = 8.51;
+        subscript.height = 8.51;
+        let mut unit = inline_seg("kW", 225.40, 662.768, false);
+        unit.width = 13.37;
+        unit.font_size = 11.59;
+        unit.height = 11.59;
+
+        let paragraphs = blocks_to_paragraphs(vec![base, subscript, unit], &[], &[]);
+
+        assert_eq!(
+            paragraphs.len(),
+            1,
+            "the unit after a subscript must stay on the same line"
+        );
+        assert_eq!(paragraph_text(&paragraphs[0]), "P rated kW");
     }
 
     #[test]
@@ -7799,6 +8861,37 @@ mod tests {
         paragraph
     }
 
+    /// GH#1611: a two-word numbered heading fell below the bold-heading word-count
+    /// floor, so it was never promoted. It stayed a plain bold paragraph, and a RUN of
+    /// them coalesced into a single bold line in the rendered markdown while the
+    /// element stream still showed them apart. The keyword form cleared the floor only
+    /// by contributing a third word -- nothing else about the two lines differed.
+    #[test]
+    fn a_two_word_numbered_heading_is_a_bold_heading_candidate() {
+        let keyword = body_size_paragraph_with_bbox("ARTIKEL 3. PRIJZEN", true, None, (72.0, 700.0, 260.0, 712.0));
+        let bare = body_size_paragraph_with_bbox("3. PRIJZEN", true, None, (72.0, 700.0, 200.0, 712.0));
+
+        assert!(
+            is_body_size_bold_heading_candidate(&keyword, 12.0),
+            "the three-word keyword form was already a candidate"
+        );
+        assert!(
+            is_body_size_bold_heading_candidate(&bare, 12.0),
+            "a numbered section heading carries its own evidence and must not need a third word"
+        );
+    }
+
+    /// The floor this exempts is still load-bearing for everything else: a short bold
+    /// fragment with no numbering is emphasis or a label, not a heading.
+    #[test]
+    fn a_two_word_unnumbered_bold_fragment_is_not_a_heading_candidate() {
+        let fragment = body_size_paragraph_with_bbox("Note well", true, None, (72.0, 700.0, 160.0, 712.0));
+        assert!(
+            !is_body_size_bold_heading_candidate(&fragment, 12.0),
+            "an unnumbered two-word bold fragment must stay below the heading floor"
+        );
+    }
+
     fn heading_page(heading: &str, heading_size: f32, body: &str) -> Vec<SegmentData> {
         let mut heading_segment = seg_heuristic(heading, heading_size, 700.0);
         heading_segment.is_bold = true;
@@ -7969,7 +9062,8 @@ mod tests {
         ]];
 
         compact_final_heading_hierarchy(&mut pages);
-        let document = crate::pdf::structure::assembly::assemble_internal_document(pages, &[], None, &[]);
+        let document =
+            crate::pdf::structure::assembly::assemble_internal_document(pages, &[], None, &[], &Default::default());
         let markdown = crate::rendering::render_markdown(&document);
         let headings = markdown
             .lines()
@@ -8226,6 +9320,7 @@ where new shares are issued;";
             },
             &[],
             None,
+            &TextRepairWitnesses::default(),
         )
     }
 
@@ -8257,6 +9352,7 @@ where new shares are issued;";
                 },
                 &[],
                 None,
+                &TextRepairWitnesses::default(),
             )
         };
 
@@ -8337,6 +9433,7 @@ where new shares are issued;";
                 },
                 &[],
                 None,
+                &TextRepairWitnesses::default(),
             )];
             reorder_pages_by_layout_region(&mut pages);
             pages[0].iter().map(paragraph_text).collect::<Vec<_>>()
@@ -8354,11 +9451,14 @@ where new shares are issued;";
         assert_eq!(
             process(
                 Some(400.0),
-                vec![crate::types::BoundingBox {
-                    x0: 0.0,
-                    y0: 0.0,
-                    x1: 50.0,
-                    y1: 50.0,
+                vec![TableCoverage {
+                    bbox: crate::types::BoundingBox {
+                        x0: 0.0,
+                        y0: 0.0,
+                        x1: 50.0,
+                        y1: 50.0,
+                    },
+                    cell_text: String::new(),
                 }],
                 true,
             ),
@@ -8411,6 +9511,7 @@ where new shares are issued;";
             },
             &[],
             None,
+            &TextRepairWitnesses::default(),
         );
 
         assert_eq!(output.len(), 1);
@@ -8448,6 +9549,7 @@ where new shares are issued;";
             },
             &[],
             None,
+            &TextRepairWitnesses::default(),
         );
 
         assert_eq!(output.len(), 1);
@@ -8486,6 +9588,7 @@ where new shares are issued;";
             },
             &[],
             None,
+            &TextRepairWitnesses::default(),
         );
 
         assert_eq!(output.len(), 1);
@@ -8509,7 +9612,7 @@ where new shares are issued;";
         );
         assert_eq!(output[0].word_count, 2);
 
-        let document = assemble_internal_document(vec![output], &[], None, &[]);
+        let document = assemble_internal_document(vec![output], &[], None, &[], &Default::default());
         let element = &document.elements[0];
         assert_eq!(element.text, "Introduction, body");
         assert_eq!(element.annotations.len(), 1);
@@ -8537,7 +9640,7 @@ where new shares are issued;";
         ]);
         assert_eq!(paragraph_text(&compound[0]), "A cost-effective design");
 
-        let document = assemble_internal_document(vec![compound], &[], None, &[]);
+        let document = assemble_internal_document(vec![compound], &[], None, &[], &Default::default());
         assert_eq!(document.elements[0].text, "A cost-effective design");
 
         let code = process_heuristic_segments(vec![
@@ -8577,6 +9680,7 @@ where new shares are issued;";
             },
             &[],
             None,
+            &TextRepairWitnesses::default(),
         );
 
         assert_eq!(output.len(), 3);
@@ -8624,6 +9728,7 @@ where new shares are issued;";
             },
             &[],
             Some(12.0),
+            &TextRepairWitnesses::default(),
         );
 
         assert_eq!(output.len(), 2);
@@ -8634,7 +9739,9 @@ where new shares are issued;";
 
     /// Full-width line at x=10, width=490 → right edge 500.
     fn full_line_seg(text: &str) -> SegmentData {
-        seg(text, 10.0, 490.0)
+        let mut segment = seg(text, 10.0, 490.0);
+        segment.baseline_y = 20.0;
+        segment
     }
 
     /// Short line at x=10, width=100 → right edge 110 (well below 500*0.85=425).
@@ -8648,7 +9755,7 @@ where new shares are issued;";
             line(vec![full_line_seg("some soft-")]),
             line(vec![seg("ware is great", 10.0, 200.0)]),
         ]);
-        dehyphenate_paragraph_lines(&mut p);
+        dehyphenate_paragraph_lines(&mut p, &HyphenWitnesses::default());
         assert_eq!(p.lines[0].segments[0].text, "some software");
         assert_eq!(p.lines[1].segments[0].text, "is great");
     }
@@ -8659,7 +9766,7 @@ where new shares are issued;";
             line(vec![full_line_seg("the soft")]),
             line(vec![seg("ware is great", 10.0, 200.0)]),
         ]);
-        dehyphenate_paragraph_lines(&mut p);
+        dehyphenate_paragraph_lines(&mut p, &HyphenWitnesses::default());
         assert_eq!(p.lines[0].segments[0].text, "the soft");
         assert_eq!(p.lines[1].segments[0].text, "ware is great");
     }
@@ -8672,7 +9779,7 @@ where new shares are issued;";
         ]);
         let original_trailing = p.lines[0].segments[0].text.clone();
         let original_leading = p.lines[1].segments[0].text.clone();
-        dehyphenate_paragraph_lines(&mut p);
+        dehyphenate_paragraph_lines(&mut p, &HyphenWitnesses::default());
         assert_eq!(p.lines[0].segments[0].text, original_trailing);
         assert_eq!(p.lines[1].segments[0].text, original_leading);
     }
@@ -8685,7 +9792,7 @@ where new shares are issued;";
         ]);
         p.is_code_block = true;
         let mut paragraphs = vec![p];
-        dehyphenate_paragraphs(&mut paragraphs, true);
+        dehyphenate_paragraphs(&mut paragraphs, true, &HyphenWitnesses::default());
         assert_eq!(paragraphs[0].lines[0].segments[0].text, "some soft-");
     }
 
@@ -8695,7 +9802,7 @@ where new shares are issued;";
             line(vec![full_line_seg("some text")]),
             line(vec![seg("Next sentence here", 10.0, 200.0)]),
         ]);
-        dehyphenate_paragraph_lines(&mut p);
+        dehyphenate_paragraph_lines(&mut p, &HyphenWitnesses::default());
         assert_eq!(p.lines[0].segments[0].text, "some text");
         assert_eq!(p.lines[1].segments[0].text, "Next sentence here");
     }
@@ -8706,7 +9813,7 @@ where new shares are issued;";
             line(vec![full_line_seg("some \u{4E00}-")]),
             line(vec![seg("text here", 10.0, 200.0)]),
         ]);
-        dehyphenate_paragraph_lines(&mut p);
+        dehyphenate_paragraph_lines(&mut p, &HyphenWitnesses::default());
         assert_eq!(p.lines[0].segments[0].text, "some \u{4E00}-");
     }
 
@@ -8716,7 +9823,7 @@ where new shares are issued;";
             line(vec![full_line_seg("advanced soft")]),
             line(vec![seg("ware development", 10.0, 200.0)]),
         ]);
-        dehyphenate_paragraph_lines(&mut p);
+        dehyphenate_paragraph_lines(&mut p, &HyphenWitnesses::default());
         assert_eq!(p.lines[0].segments[0].text, "advanced soft");
         assert_eq!(p.lines[1].segments[0].text, "ware development");
     }
@@ -8727,7 +9834,7 @@ where new shares are issued;";
             line(vec![full_line_seg("modern hard")]),
             line(vec![seg("ware components", 10.0, 200.0)]),
         ]);
-        dehyphenate_paragraph_lines(&mut p);
+        dehyphenate_paragraph_lines(&mut p, &HyphenWitnesses::default());
         assert_eq!(p.lines[0].segments[0].text, "modern hard");
         assert_eq!(p.lines[1].segments[0].text, "ware components");
     }
@@ -8738,20 +9845,78 @@ where new shares are issued;";
             line(vec![full_line_seg("the soft")]),
             line(vec![seg("ware, which is great", 10.0, 200.0)]),
         ]);
-        dehyphenate_paragraph_lines(&mut p);
+        dehyphenate_paragraph_lines(&mut p, &HyphenWitnesses::default());
         assert_eq!(p.lines[0].segments[0].text, "the soft");
         assert_eq!(p.lines[1].segments[0].text, "ware, which is great");
     }
 
     #[test]
     fn test_hyphen_only_fallback() {
-        let mut p = para(vec![
-            line(vec![seg("some soft-", 0.0, 0.0)]),
-            line(vec![seg("ware is great", 0.0, 0.0)]),
-        ]);
-        dehyphenate_hyphen_only(&mut p);
+        let mut trailing = seg("some soft-", 0.0, 0.0);
+        trailing.baseline_y = 20.0;
+        let mut p = para(vec![line(vec![trailing]), line(vec![seg("ware is great", 0.0, 0.0)])]);
+        dehyphenate_hyphen_only(&mut p, &HyphenWitnesses::default());
         assert_eq!(p.lines[0].segments[0].text, "some software");
         assert_eq!(p.lines[1].segments[0].text, "is great");
+    }
+
+    #[test]
+    fn suspended_hyphens_on_one_baseline_are_preserved() {
+        for (left, right) in [
+            ("vracht-", "en verzendkosten"),
+            ("In-", "en uitvoer"),
+            ("onderhouds-", "en installatiewerkzaamheden"),
+            ("Verkoop-", "en Leveringvoorwaarden"),
+        ] {
+            let mut trailing = full_line_seg(left);
+            trailing.baseline_y = 100.0;
+            let mut leading = seg(right, 480.0, 80.0);
+            leading.baseline_y = 100.0;
+            let mut paragraph = para(vec![line(vec![trailing]), line(vec![leading])]);
+
+            dehyphenate_paragraph_lines(&mut paragraph, &HyphenWitnesses::default());
+
+            assert_eq!(paragraph_text(&paragraph), format!("{left} {right}"));
+        }
+    }
+
+    #[test]
+    fn suspended_and_wrapped_hyphens_in_one_paragraph_are_distinguished() {
+        let mut suspended = full_line_seg("De bijbehorende montage-");
+        suspended.baseline_y = 100.0;
+        let mut wrapped = full_line_seg("en installatie-");
+        wrapped.baseline_y = 100.0;
+        let mut continuation = seg("handleiding wordt op aanvraag toegezonden.", 10.0, 220.0);
+        continuation.baseline_y = 80.0;
+        let mut paragraph = para(vec![
+            line(vec![suspended]),
+            line(vec![wrapped]),
+            line(vec![continuation]),
+        ]);
+
+        dehyphenate_paragraph_lines(&mut paragraph, &HyphenWitnesses::default());
+
+        assert_eq!(
+            paragraph_text(&paragraph),
+            "De bijbehorende montage- en installatiehandleiding wordt op aanvraag toegezonden."
+        );
+    }
+
+    #[test]
+    fn dehyphenation_requires_finite_baselines_in_the_same_reading_frame() {
+        let cases = [(f32::NAN, 0.0, 0.0), (20.0, 0.0, 90.0)];
+        for (trailing_baseline, leading_baseline, leading_rotation) in cases {
+            let mut trailing = full_line_seg("some soft-");
+            trailing.baseline_y = trailing_baseline;
+            let mut leading = seg("ware remains", 10.0, 100.0);
+            leading.baseline_y = leading_baseline;
+            leading.rotation_degrees = leading_rotation;
+            let mut paragraph = para(vec![line(vec![trailing]), line(vec![leading])]);
+
+            dehyphenate_paragraph_lines(&mut paragraph, &HyphenWitnesses::default());
+
+            assert_eq!(paragraph_text(&paragraph), "some soft- ware remains");
+        }
     }
 
     #[test]
@@ -8760,14 +9925,14 @@ where new shares are issued;";
             line(vec![seg("some well-", 0.0, 0.0)]),
             line(vec![seg("Known thing", 0.0, 0.0)]),
         ]);
-        dehyphenate_hyphen_only(&mut p);
+        dehyphenate_hyphen_only(&mut p, &HyphenWitnesses::default());
         assert_eq!(p.lines[0].segments[0].text, "some well-");
     }
 
     #[test]
     fn test_single_line_paragraph_skipped() {
         let mut paragraphs = vec![para(vec![line(vec![full_line_seg("single line")])])];
-        dehyphenate_paragraphs(&mut paragraphs, true);
+        dehyphenate_paragraphs(&mut paragraphs, true, &HyphenWitnesses::default());
         assert_eq!(paragraphs[0].lines[0].segments[0].text, "single line");
     }
 
@@ -8777,9 +9942,190 @@ where new shares are issued;";
             line(vec![seg("first part", 10.0, 200.0), seg("soft", 220.0, 280.0)]),
             line(vec![seg("ware next words", 10.0, 200.0)]),
         ]);
-        dehyphenate_paragraph_lines(&mut p);
+        dehyphenate_paragraph_lines(&mut p, &HyphenWitnesses::default());
         assert_eq!(p.lines[0].segments[1].text, "soft");
         assert_eq!(p.lines[1].segments[0].text, "ware next words");
+    }
+
+    /// Regression for #1543: a hyphen appearing mid-run (not at the end of a segment's
+    /// text) witnesses a genuine authored compound, because a line-wrap hyphen is by
+    /// construction the LAST character of its segment.
+    ///
+    /// Neutralisation that must break this test: stop scanning for interior hyphens (e.g.
+    /// only ever inspect the final character of each segment) in `collect_hyphen_witnesses`.
+    #[test]
+    fn collect_hyphen_witnesses_finds_a_mid_run_compound() {
+        let pages = vec![vec![seg("the price-determining factors apply", 0.0, 0.0)]];
+
+        let witnesses = collect_hyphen_witnesses(&pages);
+
+        assert!(
+            witnesses.contains(&("price".to_string(), "determining".to_string())),
+            "a mid-run hyphen must witness its own compound: got {witnesses:?}"
+        );
+    }
+
+    /// The load-bearing negative for #1543: a hyphen at the END of a segment's text is,
+    /// by construction, a line-wrap candidate rather than evidence of an authored
+    /// compound. If this hyphen were witnessed, the collector would preserve every
+    /// trailing hyphen it exists to judge, defeating the whole mechanism.
+    ///
+    /// Neutralisation that must break this test: delete the end-of-run guard (the
+    /// `1..characters.len() - 1` range excluding the last index) in
+    /// `collect_hyphen_witnesses`.
+    #[test]
+    fn collect_hyphen_witnesses_ignores_a_hyphen_at_the_end_of_a_run() {
+        let pages = vec![vec![seg("are based on the price-", 0.0, 0.0)]];
+
+        let witnesses = collect_hyphen_witnesses(&pages);
+
+        assert!(
+            witnesses.is_empty(),
+            "a trailing hyphen must never become a witness: got {witnesses:?}"
+        );
+    }
+
+    /// A pair witnessed only by the document's own mid-line usage -- absent from the
+    /// static `PRESERVED_LEXICAL_COMPOUNDS` list -- must still license preservation.
+    ///
+    /// Neutralisation that must break this test: make `should_preserve_lexical_hyphen`
+    /// ignore its `hyphen_witnesses` argument and consult only the static list.
+    #[test]
+    fn should_preserve_lexical_hyphen_true_for_a_witnessed_pair_not_in_the_static_list() {
+        let mut witnesses = HyphenWitnesses::default();
+        witnesses.insert(("price".to_string(), "determining".to_string()));
+
+        assert!(should_preserve_lexical_hyphen("price", "determining", &witnesses));
+    }
+
+    /// The soft-hyphenation control: `auto` + `matic` (from a line broken as `auto-` /
+    /// `matic`) is a genuine mid-word wrap with no witness and no static-list entry, so
+    /// the hyphen must still be dropped on rejoin.
+    ///
+    /// Neutralisation that must break this test: widen the static list or witness lookup
+    /// to a prefix/suffix match instead of the exact-pair comparison.
+    #[test]
+    fn should_preserve_lexical_hyphen_false_for_genuine_soft_hyphenation() {
+        let witnesses = HyphenWitnesses::default();
+
+        assert!(!should_preserve_lexical_hyphen("auto", "matic", &witnesses));
+    }
+
+    /// Char-boundary regression: a non-ASCII word sitting next to a mid-run hyphen must
+    /// not panic. This repo has a documented history of char-boundary panics from byte
+    /// slicing a `&str`; `collect_hyphen_witnesses` must only ever slice by `char`.
+    ///
+    /// Neutralisation that must break this test: rewrite the left/right run extraction
+    /// with byte-offset string slicing (e.g. `&text[..byte_index]`) instead of the
+    /// char-safe `Vec<char>` scan.
+    #[test]
+    fn collect_hyphen_witnesses_does_not_panic_on_non_ascii_word_boundaries() {
+        let pages = vec![vec![seg("café-terrasse is open déjà-vu style", 0.0, 0.0)]];
+
+        let witnesses = collect_hyphen_witnesses(&pages);
+
+        assert!(
+            witnesses.contains(&("café".to_string(), "terrasse".to_string())),
+            "a non-ASCII word must still be witnessed: got {witnesses:?}"
+        );
+    }
+
+    /// GH#1591: a word attested standalone elsewhere in the document is collected as
+    /// a witness, even though its OTHER occurrence sits directly in front of a
+    /// ligature-space candidate pattern ("bedrijf is") that must not weld it.
+    #[test]
+    fn collect_word_witnesses_finds_a_standalone_occurrence_elsewhere() {
+        let pages = vec![vec![
+            seg("bedrijf is gesloten", 0.0, 0.0),
+            seg("het bedrijf verkocht apparatuur", 0.0, 0.0),
+        ]];
+
+        let witnesses = collect_word_witnesses(&pages);
+
+        assert!(
+            witnesses.contains("bedrijf"),
+            "bedrijf must be witnessed by its ordinary-prose occurrence: got {witnesses:?}"
+        );
+    }
+
+    /// The load-bearing negative for #1591: a fragment that appears ONLY as one half
+    /// of a ligature-space candidate pattern must never witness itself, or every
+    /// genuine decomposed ligature (e.g. `f irst`) would become unrepairable the
+    /// moment its own halves are long enough to pass the length guard.
+    ///
+    /// Neutralisation that must break this test: collect witnesses via a naive
+    /// `split_whitespace()` over every segment with no candidate-pattern exclusion.
+    #[test]
+    fn collect_word_witnesses_does_not_witness_its_own_candidate_halves() {
+        let pages = vec![vec![seg("f irst eff iciently", 0.0, 0.0)]];
+
+        let witnesses = collect_word_witnesses(&pages);
+
+        assert!(
+            !witnesses.contains("irst") && !witnesses.contains("eff") && !witnesses.contains("iciently"),
+            "a candidate pattern's own fragments must not self-witness: got {witnesses:?}"
+        );
+    }
+
+    /// A word used twice, once as a candidate's left half and once in an ordinary
+    /// position, is still witnessed via its non-candidate occurrence -- the exclusion
+    /// applies per-occurrence, not to the word everywhere it appears in the document.
+    #[test]
+    fn collect_word_witnesses_witnesses_a_word_used_twice_once_as_a_candidate() {
+        let pages = vec![vec![seg("relief for relief workers arrived", 0.0, 0.0)]];
+
+        let witnesses = collect_word_witnesses(&pages);
+
+        assert!(
+            witnesses.contains("relief"),
+            "the second, non-candidate occurrence of relief must still witness it: got {witnesses:?}"
+        );
+    }
+
+    /// Length guard mirroring `MIN_HYPHEN_WITNESS_WORD_LEN`: a single-letter fragment
+    /// must never count as its own witness.
+    #[test]
+    fn collect_word_witnesses_ignores_single_letter_fragments() {
+        let pages = vec![vec![seg("a b c", 0.0, 0.0)]];
+
+        let witnesses = collect_word_witnesses(&pages);
+
+        assert!(
+            witnesses.is_empty(),
+            "single-letter tokens must never be witnesses: got {witnesses:?}"
+        );
+    }
+
+    /// End-to-end (#1591): `apply_text_repair_to_structure_tree_paragraphs` must
+    /// forward the document's word witnesses into `repair_ligature_spaces`, not just
+    /// its hyphen witnesses.
+    ///
+    /// Neutralisation that must break this test: pass `WordWitnesses::default()` to
+    /// `fused_text_repairs` instead of `witnesses.words` in
+    /// `apply_text_repair_to_structure_tree_paragraphs`.
+    #[test]
+    fn segments_to_paragraphs_preserves_a_witnessed_ligature_space_boundary() {
+        let segments = vec![seg("bedrijf is gesloten", 0.0, 200.0)];
+        let witnesses = TextRepairWitnesses {
+            hyphens: HyphenWitnesses::default(),
+            words: ["bedrijf".to_string()].into_iter().collect(),
+        };
+
+        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &[], &witnesses);
+
+        assert_eq!(paragraph_segment_text(&paragraphs[0]), "bedrijf is gesloten");
+    }
+
+    /// The same end-to-end path with no witnesses at all welds the real word
+    /// boundary, documenting the fix's known false positive at the pipeline level
+    /// (not just in the pure `repair_ligature_spaces` unit tests).
+    #[test]
+    fn segments_to_paragraphs_welds_an_unwitnessed_ligature_space_boundary() {
+        let segments = vec![seg("bedrijf is gesloten", 0.0, 200.0)];
+
+        let paragraphs = segments_to_paragraphs(segments, &[(11.0, None)], &[], &TextRepairWitnesses::default());
+
+        assert_eq!(paragraph_segment_text(&paragraphs[0]), "bedrijfis gesloten");
     }
 
     fn para_with_font_size(font_size: f32) -> PdfParagraph {
@@ -8975,23 +10321,104 @@ where new shares are issued;";
     }
 
     #[test]
+    fn should_delete_running_furniture_on_a_page_whose_body_is_tabular() {
+        // Regression: a page whose body is a table or a figure carries almost no
+        // paragraph text, so its running footer, folio and date dominate the
+        // page's paragraph characters. The old share-based valve (clear markings
+        // when furniture exceeded 30% of the page's paragraph text) fired on
+        // those pages and re-emitted the running footer as body copy — one per
+        // page across 25 pages of a 357-page manual.
+        let body = para(vec![line(vec![full_line_seg("RAM and ROM 220")])]);
+        let mut footer = para(vec![line(vec![full_line_seg("Tessent Cell Library Manual, v2017.4")])]);
+        footer.is_page_furniture = true;
+        let mut folio = para(vec![line(vec![full_line_seg("220")])]);
+        folio.is_page_furniture = true;
+        let mut date = para(vec![line(vec![full_line_seg("December 2017")])]);
+        date.is_page_furniture = true;
+
+        let mut paragraphs = vec![body, footer, folio, date];
+        retain_page_furniture_safely(&mut paragraphs);
+
+        assert_eq!(
+            paragraphs.iter().map(paragraph_text_raw).collect::<Vec<_>>(),
+            ["RAM and ROM 220"],
+            "the body paragraph must survive its page's running footer, folio and date"
+        );
+    }
+
+    #[test]
+    fn should_keep_every_marking_when_the_page_has_no_unmarked_paragraph() {
+        // The valve's cover-page case: a detector that marks every paragraph on
+        // the page leaves no body text to protect, so the markings are cleared
+        // rather than emptying the page.
+        let mut paragraphs = vec![
+            furniture_para_with_class(LayoutHintClass::PageHeader),
+            furniture_para_with_class(LayoutHintClass::PageFooter),
+        ];
+        retain_page_furniture_safely(&mut paragraphs);
+
+        assert_eq!(paragraphs.len(), 2, "an all-furniture page must keep its text");
+        assert!(paragraphs.iter().all(|p| !p.is_page_furniture));
+    }
+
+    /// Builds a single-page table-coverage map whose one table's cell text
+    /// contains `text`, for tests of the table-gated same-page dedup pass.
+    fn table_coverage_with_text(page_index: usize, text: &str) -> ahash::AHashMap<usize, Vec<TableCoverage>> {
+        let mut map = ahash::AHashMap::new();
+        map.insert(
+            page_index,
+            vec![TableCoverage {
+                bbox: crate::types::BoundingBox {
+                    x0: 0.0,
+                    y0: 0.0,
+                    x1: 1.0,
+                    y1: 1.0,
+                },
+                cell_text: normalize_for_table_coverage(text),
+            }],
+        );
+        map
+    }
+
+    #[test]
     fn test_deduplicate_paragraphs_removes_consecutive_duplicates() {
         let p1 = para(vec![line(vec![full_line_seg("Brand loses market share")])]);
         let p2 = para(vec![line(vec![full_line_seg("Brand loses market share")])]);
         let p3 = para(vec![line(vec![full_line_seg("Different content here")])]);
         let mut pages = vec![vec![p1, p2, p3]];
-        deduplicate_paragraphs(&mut pages);
+        deduplicate_paragraphs(&mut pages, &ahash::AHashMap::new());
         assert_eq!(pages[0].len(), 2, "consecutive duplicate should be removed");
     }
 
     #[test]
-    fn test_deduplicate_paragraphs_removes_non_consecutive_body_duplicates() {
+    fn test_deduplicate_paragraphs_removes_non_consecutive_body_duplicates_backed_by_a_table() {
         let p1 = para(vec![line(vec![full_line_seg("Brand loses market share in volume")])]);
         let p2 = para(vec![line(vec![full_line_seg("Some intervening paragraph")])]);
         let p3 = para(vec![line(vec![full_line_seg("Brand loses market share in volume")])]);
         let mut pages = vec![vec![p1, p2, p3]];
-        deduplicate_paragraphs(&mut pages);
-        assert_eq!(pages[0].len(), 2, "non-consecutive body duplicate should be removed");
+        let tables = table_coverage_with_text(0, "Brand loses market share in volume");
+        deduplicate_paragraphs(&mut pages, &tables);
+        assert_eq!(
+            pages[0].len(),
+            2,
+            "a non-consecutive body duplicate that a detected table also carries should be removed"
+        );
+    }
+
+    #[test]
+    fn test_deduplicate_paragraphs_preserves_non_consecutive_body_duplicates_without_a_table() {
+        // GH#1623: the same-page pass must never remove a repeated body
+        // paragraph unless a detected table carries the text too.
+        let p1 = para(vec![line(vec![full_line_seg("Brand loses market share in volume")])]);
+        let p2 = para(vec![line(vec![full_line_seg("Some intervening paragraph")])]);
+        let p3 = para(vec![line(vec![full_line_seg("Brand loses market share in volume")])]);
+        let mut pages = vec![vec![p1, p2, p3]];
+        deduplicate_paragraphs(&mut pages, &ahash::AHashMap::new());
+        assert_eq!(
+            pages[0].len(),
+            3,
+            "a non-consecutive body duplicate with no matching table must be preserved"
+        );
     }
 
     #[test]
@@ -9002,11 +10429,42 @@ where new shares are issued;";
         let mut h2 = para(vec![line(vec![full_line_seg("Brand loses market share in volume")])]);
         h2.heading_level = Some(2);
         let mut pages = vec![vec![h, filler, h2]];
-        deduplicate_paragraphs(&mut pages);
+        let tables = table_coverage_with_text(0, "Brand loses market share in volume");
+        deduplicate_paragraphs(&mut pages, &tables);
         assert_eq!(
             pages[0].len(),
             3,
             "non-consecutive heading duplicates must be preserved"
+        );
+    }
+
+    #[test]
+    fn should_preserve_body_paragraph_matching_earlier_title_in_different_case() {
+        // Regression test for GH#1623: on pdf/pdfa_045.pdf page 1, a bold body
+        // clause repeats the words of an earlier title line in a different
+        // case, with unrelated content between them on the page (so only the
+        // non-consecutive pass, not the consecutive-artifact pass, is in
+        // play). That pass compared lowercased text with no check that
+        // either copy was table content, so the body clause was silently
+        // deleted. Backing the page with a table whose cells carry the same
+        // words proves the fix is the case-sensitive comparison, not merely
+        // the absence of table data.
+        let title = para(vec![line(vec![full_line_seg(
+            "The Penguin History Of Britain The Struggle For Mastery",
+        )])]);
+        let filler = para(vec![line(vec![full_line_seg(
+            "Recognizing the habit ways to get this ebook",
+        )])]);
+        let body = para(vec![line(vec![full_line_seg(
+            "the penguin history of britain the struggle for mastery",
+        )])]);
+        let mut pages = vec![vec![title, filler, body]];
+        let tables = table_coverage_with_text(0, "The Penguin History Of Britain The Struggle For Mastery");
+        deduplicate_paragraphs(&mut pages, &tables);
+        assert_eq!(
+            pages[0].len(),
+            3,
+            "a body paragraph must survive matching an earlier title that differs only in case"
         );
     }
 
@@ -9074,7 +10532,7 @@ where new shares are issued;";
         merge_spatial_footnote_markers(&mut paragraphs);
         retain_page_furniture_safely(&mut paragraphs);
         let mut pages = vec![paragraphs];
-        deduplicate_paragraphs(&mut pages);
+        deduplicate_paragraphs(&mut pages, &ahash::AHashMap::new());
 
         assert_eq!(
             pages[0].iter().map(paragraph_text_raw).collect::<Vec<_>>(),
@@ -9716,6 +11174,7 @@ where new shares are issued;";
             },
             &heading_map,
             Some(12.0),
+            &TextRepairWitnesses::default(),
         );
         let level_for = |text: &str| {
             classified
@@ -10550,6 +12009,7 @@ where new shares are issued;";
             },
             &[],
             None,
+            &TextRepairWitnesses::default(),
         );
         assert_eq!(
             output.len(),
@@ -10605,6 +12065,7 @@ where new shares are issued;";
             },
             &[],
             None,
+            &TextRepairWitnesses::default(),
         );
         assert_eq!(
             output.len(),

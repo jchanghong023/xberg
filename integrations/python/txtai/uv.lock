@@ -1868,7 +1868,7 @@ wheels = [
 
 [[package]]
 name = "txtai-xberg"
-version = "1.1.0"
+version = "1.1.3"
 source = { editable = "." }
 dependencies = [
     { name = "xberg" },
@@ -1890,7 +1890,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "txtai", marker = "extra == 'txtai'", specifier = ">=9.7,<10" },
-    { name = "xberg", specifier = ">=1.0.14,<2" },
+    { name = "xberg", specifier = ">=1.1.3,<2" },
 ]
 provides-extras = ["txtai"]
 
@@ -1944,13 +1944,15 @@ wheels = [
 
 [[package]]
 name = "xberg"
-version = "1.0.14"
+version = "1.1.3"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/c2/cf/fb1c39f102a3f73a6accfa7e23efb3e4b9ad85a310e70b23473744a9688f/xberg-1.0.14.tar.gz", hash = "sha256:23cd60fd2a80f9d6850609b8712c21a236582b94710af9556281b626614a7b03", size = 326143, upload-time = "2026-08-05T09:19:30.039Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/38/40/c1487244a3cc21eee07dc42e82fedd8521de5e80d041d5d9e5b0126a3d79/xberg-1.1.3.tar.gz", hash = "sha256:5dcdb7cb519a4841af4430a4b3c4264c607cb4f2cb13de2db4eb0e99ee7f0fc5", size = 385539, upload-time = "2026-09-09T09:05:23.989Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/77/c5/9d7ba27694ce21d7e45160bf541ebe34db898935f69c6dab89b195fc7882/xberg-1.0.14-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:38bdc0463cff2726962f982918fe1a84bc6f0b612f86a1880132284218d40bb5", size = 41721789, upload-time = "2026-08-05T09:19:13.683Z" },
-    { url = "https://files.pythonhosted.org/packages/f1/0b/03968e2b7f3d55f481529f57eacc32b0dd7f9730b967298cd9dba4931f72/xberg-1.0.14-cp310-abi3-macosx_11_0_x86_64.whl", hash = "sha256:dba2be5dfbeb937209b7b43a7f2db941000a3f86703dc187c1ed01a95602c5b4", size = 33975512, upload-time = "2026-08-05T09:19:17.394Z" },
-    { url = "https://files.pythonhosted.org/packages/43/d5/2c60a32309e760cee7d0340d36917b1e050d1c30a51e1d6847fe715f56f9/xberg-1.0.14-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:6f5a2cce5c64c5bae2f1b0173a3974ff97dcdec9b17dad3ee0a0f47f2890e37d", size = 54764549, upload-time = "2026-08-05T09:19:20.738Z" },
-    { url = "https://files.pythonhosted.org/packages/df/24/2c04f910f82e9fd86cd23b68abc5468d83a228e31016498ddcaba7024de0/xberg-1.0.14-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:b5fa6133ba23d4662c72a21a964589ff8c6c2c6a28647883a087e8f302da62c4", size = 61194734, upload-time = "2026-08-05T09:19:24.238Z" },
-    { url = "https://files.pythonhosted.org/packages/31/df/d45a3e8a568dab4b0738d8832f7624ad345f93862f5e69d9065db5a1e398/xberg-1.0.14-cp310-abi3-win_amd64.whl", hash = "sha256:fa2d3fb15ab06d7ae91810d5d0be883ebca03a2ce6f009e3810295668a3d302f", size = 45322578, upload-time = "2026-08-05T09:19:27.888Z" },
+    { url = "https://files.pythonhosted.org/packages/eb/1d/1ff7c7062a8dc26f7c339613ad52f29378756fe75e1db1a899f2afdf2020/xberg-1.1.3-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:1758631452c788991960deaf256ee9eaa5d71c2119a1abaee14b95d8dfa39700", size = 43640227, upload-time = "2026-09-09T09:04:42.06Z" },
+    { url = "https://files.pythonhosted.org/packages/a8/da/d1750230b7cee75e1c92c639ffc1859c4bebc40fc31ea273d7e0676c63b9/xberg-1.1.3-cp310-abi3-macosx_11_0_x86_64.whl", hash = "sha256:16f58fd7098f35424503237bf3c97a0230a667da2d3451cc128bfbc42ad51cdc", size = 35887791, upload-time = "2026-09-09T09:04:47.335Z" },
+    { url = "https://files.pythonhosted.org/packages/bb/1e/796eeae6c70efc577f040cc2e781a07fbd9989b235db25fa517bb95be1c1/xberg-1.1.3-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:6449a65038cf20b5e7bb4bc4083ea6f53086e6a942ed49df90b954e681b27b61", size = 56877635, upload-time = "2026-09-09T09:04:53.399Z" },
+    { url = "https://files.pythonhosted.org/packages/ac/de/d1f244efb4f647bd865a030e345bb2e7a450ffc11313363118bd8c3512a1/xberg-1.1.3-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:92cc9ace3478f1e9ccf4bde6e70f7f954ec3e2e6a982f5d9129ac444563a632e", size = 63548054, upload-time = "2026-09-09T09:05:00.514Z" },
+    { url = "https://files.pythonhosted.org/packages/d6/06/1c40517248e0b9afca96de2d476e29362f45f07efc3084170e25711ad340/xberg-1.1.3-cp310-abi3-musllinux_1_2_aarch64.whl", hash = "sha256:5fa8ecbf2ca9cbdb87391a5774e629b2402133194916c0093b3e0bcc0c76136d", size = 57435299, upload-time = "2026-09-09T09:05:07.47Z" },
+    { url = "https://files.pythonhosted.org/packages/e0/e8/7c17a6be66280696f7ddd3f48372e59e68ad8675d9c9b3e12a67d376f87d/xberg-1.1.3-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:905aa386a1881ae075dbb59c589c709e7f3378f15a12a3b605c05877aacdd836", size = 63460968, upload-time = "2026-09-09T09:05:14.38Z" },
+    { url = "https://files.pythonhosted.org/packages/19/af/b94bba714bff5e82456b947a49a9480dafb2b3614d1bb1636d054fb72903/xberg-1.1.3-cp310-abi3-win_amd64.whl", hash = "sha256:ba066caf015e3ad3df54a47b2cd06833efdb478c849750d7675973574bf5bb5f", size = 47095321, upload-time = "2026-09-09T09:05:20.899Z" },
 ]

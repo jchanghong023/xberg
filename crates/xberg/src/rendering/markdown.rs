@@ -8,7 +8,7 @@ use crate::types::annotations::PdfAnnotation;
 use crate::types::internal::InternalDocument;
 
 use super::common::{annotation_display_text, annotation_type_label};
-use super::comrak_bridge::build_comrak_ast;
+use super::comrak_bridge::{ImageBlockStyle, build_comrak_ast};
 
 /// Single-pass replacement of multiple two-char escape sequences of the form `\X`
 /// where X is one of `_`, `[`, `]`, `(`, `)`.
@@ -131,7 +131,7 @@ static ARXIV_WATERMARK_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
 pub(crate) fn render_markdown(doc: &InternalDocument) -> String {
     tracing::debug!(element_count = doc.elements.len(), "markdown rendering starting");
     let arena = Arena::new();
-    let root = build_comrak_ast(doc, &arena);
+    let root = build_comrak_ast(doc, &arena, ImageBlockStyle::Fence);
 
     if root.first_child().is_none() {
         tracing::debug!("markdown rendering: empty AST, returning empty string");

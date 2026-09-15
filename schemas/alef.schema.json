@@ -281,75 +281,6 @@
         }
       ]
     },
-    "BuildCommandConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "before": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StringOrVec"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Command(s) to run before the main build commands; aborts on failure."
-        },
-        "build": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StringOrVec"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Command(s) to build in debug mode."
-        },
-        "build_release": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StringOrVec"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Command(s) to build in release mode."
-        },
-        "dependency_precondition": {
-          "description": "Shell command that must exit 0 for the build to be attempted, checking that this project's\ndependencies were fetched. Where `precondition` asks whether the machine can build this\nlanguage at all, this asks whether the checkout is prepared — an unmet dependency\nprecondition is fixable here and now, so it fails the run instead of being skipped\nsilently. Set `dependency_remediation` alongside it with the command that fixes it.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "dependency_remediation": {
-          "description": "The command a user runs to satisfy `dependency_precondition`, e.g.\n`cd packages/elixir && mix deps.get`. Required whenever `dependency_precondition` is set.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "precondition": {
-          "description": "Shell command that must exit 0 for build to run; skip with warning on failure.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "timeout_seconds": {
-          "description": "Ceiling in seconds for this language's post-build `RunCommand` step (e.g. Swift's\n`cargo build --release` for the swift-bridge crate). `None` keeps alef's built-in\nceiling (`RUN_COMMAND_TIMEOUT` in `cli::pipeline::commands::build`, 1800s). Raise this\nwhen a cold release build in a large workspace legitimately runs longer than that --\nalef #364 hit exactly this for a Swift `cargo build --release` that was making\ncontinuous progress past 30 minutes. Only governs a post-build `RunCommand` step; the\n`build`/`build_release` commands above run unbounded, same as before this field existed.",
-          "format": "uint64",
-          "minimum": 0,
-          "type": [
-            "integer",
-            "null"
-          ]
-        }
-      },
-      "type": "object"
-    },
     "CSharpConfig": {
       "additionalProperties": false,
       "properties": {
@@ -1263,53 +1194,6 @@
         "authors",
         "repository-code"
       ],
-      "type": "object"
-    },
-    "CleanConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "argv_clean": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/ArgvRunConfig"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Argv-only alternative to `clean`. See [`ArgvRunConfig`]. When both `clean` and\n`argv_clean` are set, the caller runs `argv_clean` and ignores `clean`."
-        },
-        "before": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StringOrVec"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Command(s) to run before the main clean commands; aborts on failure."
-        },
-        "clean": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StringOrVec"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Command(s) to clean build artifacts for this language.\n\nMutually exclusive with `argv_clean` in practice, for the same reason as\n`TestAppRunConfig::run`/`argv_run`: `alef.toml` overrides always set this field, and a\ndefault that must embed a config-supplied path (a custom package output directory) as a\nliteral argument sets `argv_clean` instead."
-        },
-        "precondition": {
-          "description": "Shell command that must exit 0 for clean to run; skip with warning on failure.",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
       "type": "object"
     },
     "ClientConstructorConfig": {
@@ -2378,7 +2262,7 @@
             "$ref": "#/$defs/CallConfig"
           },
           "default": {},
-          "description": "Named additional call configurations for multi-function testing.\nFixtures reference these via the `call` field, e.g. `\"call\": \"embed\"`.",
+          "description": "Named additional call configurations for multi-function testing.\nFixtures reference these via the `call` field, e.g. `\"call\": \"embed\"`.\n\n`BTreeMap` so call selection (`select_best_matching_call`, which returns the first\nsatisfying entry) and any other iteration over this map is deterministic across process\nruns without every consumer having to sort a copy first. ~keep",
           "type": "object"
         },
         "env": {
@@ -2386,7 +2270,7 @@
             "type": "string"
           },
           "default": {},
-          "description": "Environment variables every generated e2e suite's setup must set\nbefore the binding's engine is constructed. Keyed by env-var name;\nvalues are passed through verbatim.\n\nEach per-language test-harness emitter consumes this map at\nsuite-setup time (conftest.py for Python, spec_helper.rb for Ruby,\nTestMain for Go, bootstrap.php for PHP, test_helper.exs for Elixir,\nglobalSetup.ts for WASM, assembly fixture for C#, XCTestCase\nclassSetUp for Swift, etc.). The injection point sits next to where\n`MOCK_SERVER_URL` is exported so the binding's first call already\nsees the configured environment.\n\nMotivating use case: a binding may require an environment flag to\nallow loopback mock-server calls in e2e tests while keeping production\nURL validation strict by default. The map is intentionally generic so\nconsumers can pass any binding-side env-var (feature flags,\nobservability toggles, etc.) the same way.\n\nExample:\n```toml\n[crates.e2e.env]\nALLOW_PRIVATE_NETWORK = \"true\"\n```",
+          "description": "Environment variables every generated e2e suite's setup must set\nbefore the binding's engine is constructed. Keyed by env-var name;\nvalues are passed through verbatim.\n\nEach per-language test-harness emitter consumes this map at\nsuite-setup time (conftest.py for Python, spec_helper.rb for Ruby,\nTestMain for Go, bootstrap.php for PHP, test_helper.exs for Elixir,\nglobalSetup.ts for WASM, assembly fixture for C#, XCTestCase\nclassSetUp for Swift, etc.). The injection point sits next to where\n`MOCK_SERVER_URL` is exported so the binding's first call already\nsees the configured environment.\n\nMotivating use case: a binding may require an environment flag to\nallow loopback mock-server calls in e2e tests while keeping production\nURL validation strict by default. The map is intentionally generic so\nconsumers can pass any binding-side env-var (feature flags,\nobservability toggles, etc.) the same way.\n\nExample:\n```toml\n[crates.e2e.env]\nALLOW_PRIVATE_NETWORK = \"true\"\n```\n\n`BTreeMap` so every emitter that forwards these into generated setup code (Go's\n`TestMain`, Python's `conftest.py`, `.cargo/config.toml`, etc.) iterates in key order\nwithout each one having to sort a copy first. ~keep",
           "type": "object"
         },
         "error_field_aliases": {
@@ -2667,7 +2551,7 @@
         },
         "nif_targets": {
           "default": [],
-          "description": "Rust target triples for which precompiled NIFs are uploaded to the\nGitHub release. `RustlerPrecompiled` reads this list to know which\narchives to download at install time. Must agree with the consumer's\nCI build matrix and the `generate-elixir-checksums` action's targets\ninput. When empty, falls back to the historical default of\n`aarch64-apple-darwin, aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu, x86_64-pc-windows-gnu`.",
+          "description": "Rust target triples for which precompiled NIFs are uploaded to the\nGitHub release. `RustlerPrecompiled` reads this list to know which\narchives to download at install time. Must agree with the consumer's\nCI build matrix and the `generate-elixir-checksums` action's targets\ninput. When empty, falls back to [`DEFAULT_NIF_TARGETS`]:\n`aarch64-apple-darwin, aarch64-unknown-linux-gnu, x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc`.\nWindows is msvc, not gnu -- `RustlerPrecompiled` resolves the msvc triple at install time\nand rejects any triple this list omits.",
           "items": {
             "type": "string"
           },
@@ -4182,60 +4066,6 @@
         }
       ]
     },
-    "LintConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "before": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StringOrVec"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Command(s) to run before the main lint commands; aborts on failure."
-        },
-        "check": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StringOrVec"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "format": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StringOrVec"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "precondition": {
-          "description": "Shell command that must exit 0 for lint to run; skip with warning on failure.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "typecheck": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StringOrVec"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "type": "object"
-    },
     "ManifestExtras": {
       "additionalProperties": false,
       "description": "Extra dependencies declared for a language-native manifest. `dependencies` and\n`dev_dependencies` mirror the runtime / dev-test distinction present in\nnpm, Composer, Bundler, pubspec, Mix, etc. Languages without that distinction\n(Go, Zig, Kotlin `testImplementation`) collapse both buckets into one at the\nemitter level.",
@@ -5591,13 +5421,6 @@
             "null"
           ]
         },
-        "build_commands": {
-          "additionalProperties": {
-            "$ref": "#/$defs/BuildCommandConfig"
-          },
-          "default": {},
-          "type": "object"
-        },
         "cargo_lints": {
           "$ref": "#/$defs/CargoLintsConfig",
           "default": {
@@ -5605,13 +5428,6 @@
             "rust": {}
           },
           "description": "Raw `[lints.rust]` / `[lints.clippy]` tables spliced into every generated\nRust binding-crate `Cargo.toml` for this crate — across every backend that\nemits a standalone Rust crate (ffi, jni, node, python, php, wasm, ruby,\nelixir, R, swift, dart). Mirrors [`Self::crate_attributes`]'s placement and\nrationale: `[lints]\\nworkspace = true` cannot be used for this because it is\nall-or-nothing and would also pull in `unsafe_code = \"deny\"`, which breaks\nany FFI crate with legitimate `unsafe` blocks. This is a pure passthrough —\nalef does not validate or interpret lint names, and neither table is emitted\nwhen empty (the default), so output is byte-identical to a crate that does\nnot set this field.\n\nA handful of backends (dart, swift, elixir) already emit their own\n`unexpected_cfgs` check-cfg allowlist into `[lints.rust]`; entries configured\nhere compose with that rather than replacing it, and lose on a key collision\nsince the backend's own entry encodes a compile-correctness requirement.\n\nExample — opt a crate's generated bindings into the workspace's deny-by-default\nlint policy:\n```toml\n[[crates]]\nname = \"sample-core\"\n\n[crates.cargo_lints.rust]\nunused_must_use = \"deny\"\n\n[crates.cargo_lints.clippy]\nprint_stdout = \"deny\"\nprint_stderr = \"deny\"\ndbg_macro = \"deny\"\n```"
-        },
-        "clean": {
-          "additionalProperties": {
-            "$ref": "#/$defs/CleanConfig"
-          },
-          "default": {},
-          "type": "object"
         },
         "core_import": {
           "default": null,
@@ -5894,13 +5710,6 @@
             "null"
           ]
         },
-        "lint": {
-          "additionalProperties": {
-            "$ref": "#/$defs/LintConfig"
-          },
-          "default": {},
-          "type": "object"
-        },
         "name": {
           "description": "Crate name (e.g. `\"sample_project\"`). Must be unique within the workspace.",
           "type": "string"
@@ -6042,13 +5851,6 @@
           },
           "type": "array"
         },
-        "setup": {
-          "additionalProperties": {
-            "$ref": "#/$defs/SetupConfig"
-          },
-          "default": {},
-          "type": "object"
-        },
         "skip_core_import": {
           "default": false,
           "description": "When true, skip adding `use {core_import};` to generated bindings.",
@@ -6102,6 +5904,7 @@
             "$ref": "#/$defs/TestConfig"
           },
           "default": {},
+          "description": "The only remaining per-command override table in `alef.toml`; see\n[`super::workspace::WorkspaceConfig::test`] for why `test.e2e` alone stays configurable.",
           "type": "object"
         },
         "trait_bridges": {
@@ -6118,13 +5921,6 @@
             "type": "string"
           },
           "type": "array"
-        },
-        "update": {
-          "additionalProperties": {
-            "$ref": "#/$defs/UpdateConfig"
-          },
-          "default": {},
-          "type": "object"
         },
         "verify": {
           "$ref": "#/$defs/VerifyConfig",
@@ -6267,6 +6063,14 @@
           "description": "Named shortcuts over this registration with pinned parameter values.\nEach variant emits as an additional method on the service owner whose\nsignature drops the pinned params and whose body forwards to this base\nregistration with the pinned values substituted in.",
           "items": {
             "$ref": "#/$defs/RegistrationVariantSpec"
+          },
+          "type": "array"
+        },
+        "wrapper_options": {
+          "default": [],
+          "description": "Chaining methods on the wrapper type that every variant of this registration exposes as\nan extra optional parameter.\n\nOnly meaningful when the base registration takes a wrapper-typed metadata param with a\nstatic constructor (the `wrapper_call` shape). Each entry names a method on that wrapper\ntaking exactly one argument and returning the wrapper, e.g. `RouteBuilder::cors`. A\nvariant then gains an optional param of that argument's type and, when the caller passes\none, chains the method onto the constructed wrapper before delegating.\n\nExists because a verb shortcut that can only pin constructor args is strictly weaker than\nthe base registration it wraps: everything the builder can express after construction --\nper-route CORS, compression, timeouts -- becomes unreachable through the shortcut, and a\nbinding whose only route API is the shortcut cannot express it at all.\n\n```toml\n[[crates.services.registrations]]\nmethod = \"route\"\nwrapper_options = [\"cors\", \"compression\"]\n```",
+          "items": {
+            "type": "string"
           },
           "type": "array"
         }
@@ -6816,56 +6620,6 @@
       "required": [
         "owner_type"
       ],
-      "type": "object"
-    },
-    "SetupConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "before": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StringOrVec"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Command(s) to run before the main setup commands; aborts on failure."
-        },
-        "install": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StringOrVec"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Command(s) to install dependencies for this language."
-        },
-        "precondition": {
-          "description": "Shell command that must exit 0 for setup to run; skip with warning on failure.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "timeout_seconds": {
-          "default": 1800,
-          "description": "Timeout in seconds for the complete setup (precondition + before + install).",
-          "format": "uint64",
-          "minimum": 0,
-          "type": "integer"
-        },
-        "workdir": {
-          "default": null,
-          "description": "Optional working directory (relative to repo root) for setup commands.\n\nWhen set, install commands run from `base_dir.join(workdir)` instead of\n`base_dir`. Required for languages whose manifest does not live at the\nworkspace root (Swift's `Package.swift`, Kotlin-Android's `gradlew`,\nDart's `pubspec.yaml`, Zig's `build.zig`). Defaults to `None` (run from\nrepo root).",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
       "type": "object"
     },
     "SnippetCapabilities": {
@@ -7545,7 +7299,7 @@
         },
         "register_fn": {
           "default": null,
-          "description": "Name of the registration function to generate\n(e.g., `\"register_ocr_backend\"`).\nOptional — when set, a `#[pyfunction]` registration function is generated.\nWhen absent, only the wrapper struct and trait impl are emitted (per-call bridge pattern).",
+          "description": "Name of the registration function to generate\n(e.g., `\"register_ocr_backend\"`).\nOptional — when set, a host-language registration function is generated. If\n`registry_getter` is absent, this is also the core host function name.\nWhen absent, only the wrapper struct and trait impl are emitted (per-call bridge pattern).",
           "type": [
             "string",
             "null"
@@ -7553,7 +7307,7 @@
         },
         "registry_getter": {
           "default": null,
-          "description": "Rust path to the registry getter function\n(e.g., `\"sample_core::plugins::registry::get_ocr_backend_registry\"`).\nOptional — when set, the generated registration function inserts the bridge into a registry.",
+          "description": "Rust path to the registry getter function\n(e.g., `\"sample_core::plugins::registry::get_ocr_backend_registry\"`).\nOptional — when set, the generated registration function inserts the bridge into a registry.\nWhen omitted, supporting backends call the core host function named by `register_fn`\ndirectly, allowing the core to own validation, lifecycle, and locking.",
           "type": [
             "string",
             "null"
@@ -7660,52 +7414,6 @@
           "default": true,
           "description": "Whether poly's built-in ignore patterns apply.\n\nEmitted as `use_default_ignores` in the generated `[lint.uncomment]`\ntable.",
           "type": "boolean"
-        }
-      },
-      "type": "object"
-    },
-    "UpdateConfig": {
-      "additionalProperties": false,
-      "properties": {
-        "before": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StringOrVec"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Command(s) to run before the main update commands; aborts on failure."
-        },
-        "precondition": {
-          "description": "Shell command that must exit 0 for update to run; skip with warning on failure.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "update": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StringOrVec"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Command(s) for safe dependency updates (compatible versions only)."
-        },
-        "upgrade": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/StringOrVec"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "description": "Command(s) for aggressive updates (including incompatible/major bumps)."
         }
       },
       "type": "object"
@@ -7991,14 +7699,6 @@
           "description": "Opt in to letting a clean, newer-than-pin alef build rewrite the `alef_version` pin above\nautomatically during `alef all`/`alef generate`/`alef scaffold`. Defaults to `false`:\nversion-pin synchronization stays an explicit release operation unless a project turns\nthis on. See [`crate::cli::version_pin::maybe_update_alef_toml_version_pin`] for the full\nset of additional safety conditions this toggle does not bypass (the pin must still be\npresent, parse as semver, be strictly older than the running CLI, and the running build\nmust be stamped clean) -- turning this on does not make an unsafe rewrite safe, it only\nallows the already-guarded rewrite to run unattended. ~keep",
           "type": "boolean"
         },
-        "build_commands": {
-          "additionalProperties": {
-            "$ref": "#/$defs/BuildCommandConfig"
-          },
-          "default": {},
-          "description": "Default build pipeline keyed by language code.",
-          "type": "object"
-        },
         "citation": {
           "anyOf": [
             {
@@ -8010,14 +7710,6 @@
           ],
           "default": null,
           "description": "Optional CITATION.cff metadata. When present, `alef sync-versions` writes\na fully rendered `CITATION.cff` at the repo root using these fields plus\nthe canonical workspace version. When absent, a hand-authored\nCITATION.cff (if any) only has its `version:` line updated."
-        },
-        "clean": {
-          "additionalProperties": {
-            "$ref": "#/$defs/CleanConfig"
-          },
-          "default": {},
-          "description": "Default clean pipeline keyed by language code.",
-          "type": "object"
         },
         "client_constructors": {
           "additionalProperties": {
@@ -8225,14 +7917,6 @@
           },
           "type": "array"
         },
-        "lint": {
-          "additionalProperties": {
-            "$ref": "#/$defs/LintConfig"
-          },
-          "default": {},
-          "description": "Default lint pipeline keyed by language code (`\"python\"`, `\"node\"`, …).\nMerged field-wise with per-crate `[crates.lint.<lang>]`.",
-          "type": "object"
-        },
         "node": {
           "anyOf": [
             {
@@ -8250,7 +7934,7 @@
             "type": "string"
           },
           "default": {},
-          "description": "Workspace-wide opaque types — types from external crates that alef can't\nextract. Map of type name → fully-qualified Rust path. These get opaque\nwrapper structs across all language backends, in every crate that\nreferences them.",
+          "description": "Workspace-wide opaque types — types from external crates that alef can't\nextract. Map of type name → fully-qualified Rust path. These get opaque\nwrapper structs across all language backends, in every crate that\nreferences them.\n\n`BTreeMap` so every emit site that iterates it (module registration, opaque\nwrapper generation) produces the same generated-crate ordering across runs\nwithout each consumer having to sort it independently. ~keep",
           "type": "object"
         },
         "output_template": {
@@ -8372,14 +8056,6 @@
           "default": null,
           "description": "Default package metadata for generated manifests and README context.\nPer-crate `[scaffold]` values override this field-by-field."
         },
-        "setup": {
-          "additionalProperties": {
-            "$ref": "#/$defs/SetupConfig"
-          },
-          "default": {},
-          "description": "Default setup pipeline keyed by language code.",
-          "type": "object"
-        },
         "swift": {
           "anyOf": [
             {
@@ -8417,7 +8093,7 @@
             "$ref": "#/$defs/TestConfig"
           },
           "default": {},
-          "description": "Default test pipeline keyed by language code.",
+          "description": "Default test pipeline keyed by language code.\n\nThe only remaining per-command override table in `alef.toml`: 0.82.0 removed\n`lint`/`setup`/`update`/`clean`/`build_commands` (alef now owns those commands\nend to end), but `test.e2e` has no code default in any language but Dart, so a\nconsumer-supplied e2e command stays configurable here.",
           "type": "object"
         },
         "tools": {
@@ -8428,14 +8104,6 @@
             "rust_dev_tools": null
           },
           "description": "Global package-manager and dev-tool preferences. Inherited by every\ncrate; cannot be overridden per-crate today."
-        },
-        "update": {
-          "additionalProperties": {
-            "$ref": "#/$defs/UpdateConfig"
-          },
-          "default": {},
-          "description": "Default update pipeline keyed by language code.",
-          "type": "object"
         },
         "wasm": {
           "anyOf": [
@@ -8556,7 +8224,7 @@
       "type": "object"
     }
   },
-  "$id": "https://github.com/xberg-io/alef/releases/download/v0.79.4/alef.schema.json",
+  "$id": "https://github.com/xberg-io/alef/releases/download/v0.85.17/alef.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "description": "JSON Schema for the JSON representation of alef.toml.",
@@ -8573,9 +8241,7 @@
       "default": {
         "alef_version": null,
         "auto_update_alef_version": false,
-        "build_commands": {},
         "citation": null,
-        "clean": {},
         "client_constructors": {},
         "csharp": null,
         "dart": null,
@@ -8614,7 +8280,6 @@
         "kotlin": null,
         "kotlin_android": null,
         "languages": [],
-        "lint": {},
         "node": null,
         "opaque_types": {},
         "output_template": {
@@ -8658,7 +8323,6 @@
         "r": null,
         "ruby": null,
         "scaffold": null,
-        "setup": {},
         "swift": null,
         "sync": null,
         "targets": {},
@@ -8668,7 +8332,6 @@
           "python_package_manager": null,
           "rust_dev_tools": null
         },
-        "update": {},
         "wasm": null,
         "zig": null
       },
@@ -8680,6 +8343,6 @@
   ],
   "title": "Alef configuration",
   "type": "object",
-  "version": "0.79.4",
-  "x-alef-version": "0.79.4"
+  "version": "0.85.17",
+  "x-alef-version": "0.85.17"
 }

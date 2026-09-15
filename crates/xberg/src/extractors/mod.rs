@@ -127,6 +127,8 @@ pub mod dbf;
 
 #[cfg(feature = "office")]
 pub mod docx;
+#[cfg(feature = "office")]
+pub mod visio;
 
 #[cfg(feature = "office")]
 pub mod epub;
@@ -245,6 +247,8 @@ pub use doc::DocExtractor;
 
 #[cfg(feature = "office")]
 pub use docx::DocxExtractor;
+#[cfg(feature = "office")]
+pub use visio::VisioExtractor;
 
 #[cfg(feature = "office")]
 pub use epub::EpubExtractor;
@@ -402,6 +406,7 @@ pub(crate) fn register_default_extractors() -> Result<()> {
         registry.register_internal(Arc::new(TypstExtractor::new()))?;
         registry.register_internal(Arc::new(DocExtractor::new()))?;
         registry.register_internal(Arc::new(DocxExtractor::new()))?;
+        registry.register_internal(Arc::new(VisioExtractor::new()))?;
         registry.register_internal(Arc::new(PptExtractor::new()))?;
         registry.register_internal(Arc::new(PptxExtractor::new()))?;
         registry.register_internal(Arc::new(OdtExtractor::new()))?;
@@ -487,6 +492,12 @@ mod tests {
         assert!(extractor_names.contains(&"djot-extractor".to_string()));
         assert!(extractor_names.contains(&"csv-extractor".to_string()));
         assert!(extractor_names.contains(&"doctags-extractor".to_string()));
+
+        #[cfg(feature = "sqlite")]
+        {
+            expected_count += 1;
+            assert!(extractor_names.contains(&"sqlite-extractor".to_string()));
+        }
 
         #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
         {
@@ -600,6 +611,12 @@ mod tests {
             assert!(extractor_names.contains(&"tar-extractor".to_string()));
             assert!(extractor_names.contains(&"7z-extractor".to_string()));
             assert!(extractor_names.contains(&"gzip-extractor".to_string()));
+        }
+
+        #[cfg(feature = "office")]
+        {
+            expected_count += 1;
+            assert!(extractor_names.contains(&"visio-extractor".to_string()));
         }
 
         #[cfg(feature = "transcription")]

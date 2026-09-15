@@ -56,7 +56,7 @@ jobs:
     name: Build FFI (${{ matrix.target }})
     if: github.repository == 'xberg-io/xberg' && github.actor != 'dependabot[bot]' && github.event.pull_request.draft != true
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 180
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -148,7 +148,7 @@ jobs:
     if: github.repository == 'xberg-io/xberg' && github.actor != 'dependabot[bot]' && github.event.pull_request.draft != true
     needs: [build-ffi]
     runs-on: ${{ matrix.runs-on }}
-    timeout-minutes: 180
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       matrix:
@@ -194,7 +194,10 @@ jobs:
             runs-on: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - lang: dart
-            dart-version: "3.11"
+            # packages/dart's freezed ^4.0.1 resolves to freezed >=4.0.0, which
+            # needs SDK >=3.13.0; pub version-solving fails before any test runs
+            # otherwise. The floor moves with whichever freezed pub picks. ~keep
+            dart-version: "3.13"
             runs-on: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
           - lang: kotlin-android
@@ -451,15 +454,18 @@ jobs:
         env:
           RUSTFLAGS: ""
 
-      - name: Pre-build mock-server for Go e2e
-        if: matrix.lang == 'go'
+      # wasm needs this for the same reason go does: e2e/wasm/globalSetup.ts spawns
+      # e2e/rust/target/release/mock-server unconditionally and states it "must be
+      # pre-built", where ruby and elixir cargo-build it themselves when missing. Without
+      # it the leg dies in globalSetup with ENOENT before any test runs. Kept here rather
+      # than in alef.toml's `before` hook because alef.toml is a generation input: editing
+      # it invalidates the crate's inputs hash and fails `alef verify`. ~keep
+      - name: Pre-build mock-server for Go and wasm e2e
+        if: matrix.lang == 'go' || matrix.lang == 'wasm'
         shell: bash
         run: |
-          echo "Pre-building mock-server for Go e2e tests..."
+          echo "Pre-building mock-server for ${{ matrix.lang }} e2e tests..."
           cargo build --release --manifest-path e2e/rust/Cargo.toml --bin mock-server
-          mkdir -p /tmp/xberg-e2e
-          cp e2e/rust/target/release/mock-server /tmp/xberg-e2e/mock-server
-          echo "XBERG_E2E_MOCK_SERVER_BIN=/tmp/xberg-e2e/mock-server" >> "$GITHUB_ENV"
 
       - name: Compile Ruby native extension
         if: matrix.lang == 'ruby'

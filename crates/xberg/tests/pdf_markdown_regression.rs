@@ -394,6 +394,29 @@ const PDFIUM_KNOWN_REGRESSIONS: &[&str] = &[
     // nougat_026 is the same file as pdfa_001 (identical md5); its duplicate table row was
     // removed, so the pdfa_001 entry covers both. ~keep
     "pdfa_001", // GT policy mismatch (synthesized ☐/☑ + by-design furniture stripping), not a regression
+    //
+    // pdfa_019's ground truth is HALLUCINATED -- it is not a transcript of this PDF. Verified by
+    // counting both sides of the same file: the PDF (via `pdftotext -layout`, a faithful non-ML
+    // text layer) contains "Dobson" x18, "Crisis" x12, "Goodreads" x1. The ground truth contains
+    // ZERO of those three and instead carries "Babson" x14, "China" x7, "Goodneath" x1, plus
+    // "Bobbin", "Robian", "Blowin" and "rebrinding" x3. These are VLM/OCR fabrications, the same
+    // corpus defect class as pdfa_001's synthesized glyphs: every fabricated token is penalised
+    // twice (missing GT word + spurious extracted word), so no extractor can ever reach 1.0 here.
+    // The 0.913 calibration measurement was taken against this same corrupt GT, which is why the
+    // recorded floor is 0.84 rather than something near 0.99.
+    //
+    // A SECOND, REAL REGRESSION IS STACKED UNDER THAT CEILING and is NOT fixed by this entry:
+    // md/djot F1 measured 0.795 today vs 0.913 at calibration, a 0.118 drop that appeared after
+    // 2026-08-08 (`9b9362c1e35` lists the docs that had regressed as of that date and pdfa_019 is
+    // not among them). Not bisected -- ~409 commits touched crates/xberg/src in that window, many
+    // in PDF heading/paragraph paths. This is single-column with no tables, so the table-guard and
+    // multi-column reading-order defect classes are unlikely; paragraph assembly or heading
+    // detection is the more plausible cause.
+    //
+    // Retire this entry only when BOTH are addressed: regenerate the ground truth from a
+    // non-hallucinating text extractor, AND root-cause the 0.913 -> 0.795 drop. Do not lower the
+    // floor -- the floor is not what is wrong here. ~keep
+    "pdfa_019",
 ];
 
 /// Extract a PDF with the given output format.

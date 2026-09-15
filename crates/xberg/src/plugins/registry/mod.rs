@@ -173,6 +173,31 @@ pub(crate) mod test_support {
     /// fail. Either way, guard holders must therefore either register everything a concurrent
     /// unguarded consumer could need, or (better) avoid mutating the global registry at all and
     /// use a local `DocumentExtractorRegistry::new()` (or equivalent) instead.
+    /// Maximum attempts before a registry clear is treated as genuinely stuck.
+    const REGISTRY_CLEAR_ATTEMPTS: usize = 100;
+
+    /// Delay between attempts, long enough for a concurrent extraction to drop its snapshot lease.
+    const REGISTRY_CLEAR_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+    /// Run a registry clear, retrying while it reports the registry is in use.
+    ///
+    /// `with_registration_update` refuses a lifecycle mutation whenever a processor snapshot lease
+    /// is live, and documents that refusal as *retryable*. These guards serialize only against each
+    /// other, so they cannot assume exclusivity: any non-`#[serial]` test in this binary may be
+    /// mid-extraction and holding a lease. `.expect()`ing the refusal turned that ordinary race
+    /// into a teardown failure attributed to whichever unrelated test happened to be running. ~keep
+    fn retry_registry_clear(clear: impl Fn() -> crate::Result<()>) -> crate::Result<()> {
+        for _ in 0..REGISTRY_CLEAR_ATTEMPTS {
+            match clear() {
+                Err(crate::XbergError::Other(message)) if message.contains("retry the lifecycle mutation") => {
+                    std::thread::sleep(REGISTRY_CLEAR_RETRY_DELAY);
+                }
+                other => return other,
+            }
+        }
+        clear()
+    }
+
     macro_rules! registry_guard {
         ($guard:ident, $lock:ident, $clear:path, $what:literal) => {
             /// Holds this registry's lock for the lifetime of a test and leaves the registry
@@ -187,7 +212,7 @@ pub(crate) mod test_support {
                     // `()`, so there is no inconsistent state to protect against and recovering
                     // is correct.
                     let lock = $lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    $clear().expect(concat!($what, " registry setup must succeed"));
+                    retry_registry_clear($clear).expect(concat!($what, " registry setup must succeed"));
                     Self(lock)
                 }
             }
@@ -196,7 +221,13 @@ pub(crate) mod test_support {
                 fn drop(&mut self) {
                     // Runs before the inner `MutexGuard` field is dropped, so teardown still
                     // holds the lock and cannot race the next test's setup.
-                    let cleared = $clear();
+                    // While already unwinding, take a single attempt: the retry's sleeps would
+                    // only delay the real failure that is being reported. ~keep
+                    let cleared = if std::thread::panicking() {
+                        $clear()
+                    } else {
+                        retry_registry_clear($clear)
+                    };
                     // Panicking inside `drop` while the thread is already unwinding aborts the
                     // process and hides the assertion failure that caused it, so only surface a
                     // teardown error when the test itself passed.

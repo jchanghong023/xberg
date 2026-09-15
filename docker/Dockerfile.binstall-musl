@@ -69,6 +69,7 @@ COPY crates/xberg-paddle-ocr/ crates/xberg-paddle-ocr/
 COPY crates/xberg-candle-ocr/ crates/xberg-candle-ocr/
 COPY crates/xberg-pdfium-render/ crates/xberg-pdfium-render/
 COPY crates/xberg-native-pdf/ crates/xberg-native-pdf/
+COPY crates/xberg-windows-metafile/ crates/xberg-windows-metafile/
 COPY crates/xberg-libheif/ crates/xberg-libheif/
 COPY crates/xberg-libwpd/ crates/xberg-libwpd/
 

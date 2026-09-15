@@ -49,6 +49,8 @@ mod parser;
 use ahash::AHashMap;
 use bytes::Bytes;
 
+pub(crate) use content_builder::LIST_INDENT;
+
 use crate::core::diagnostics::push_warning;
 use crate::error::Result;
 use crate::types::builder::{self, DocumentStructureBuilder};
@@ -135,21 +137,22 @@ fn enforce_slide_limit(slide_count: usize, max_pages: Option<usize>) -> Result<(
     Ok(crate::extractors::security::enforce_page_count(slide_count, max_pages)?)
 }
 
-/// Join text runs with smart spacing: inserts a space between adjacent runs
-/// only when the previous run doesn't end with whitespace and the next run
-/// doesn't start with whitespace.
-fn join_runs_with_spacing(runs: &[Run], extract: impl Fn(&Run) -> String) -> String {
+/// Join a paragraph's runs into its text.
+///
+/// A run is a formatting span, not a word: PowerPoint splits runs wherever the
+/// formatting changes, including inside a word (`Impl` + `ements`, `M` + `b` +
+/// `ist` on the decks this runs on). The run texts already carry their own
+/// spacing, so the paragraph text is their concatenation — inserting a space at
+/// every run boundary broke those words, which then also showed up as
+/// fragmented identifiers.
+///
+/// Measured on the two decks in `_expectations.json`: concatenating reproduces
+/// python-pptx's paragraph text for 199 of 200 multi-run paragraphs, while
+/// inserting a boundary space mismatches 181.
+fn join_runs(runs: &[Run], extract: impl Fn(&Run) -> String) -> String {
     let mut result = String::new();
     for run in runs {
-        let text = extract(run);
-        if !result.is_empty() && !text.is_empty() {
-            let ends_ws = result.ends_with(|c: char| c.is_whitespace());
-            let starts_ws = text.starts_with(|c: char| c.is_whitespace());
-            if !ends_ws && !starts_ws {
-                result.push(' ');
-            }
-        }
-        result.push_str(&text);
+        result.push_str(&extract(run));
     }
     result
 }
@@ -330,6 +333,14 @@ fn extract_pptx_from_container<R: std::io::Read + std::io::Seek>(
 
                 let (image_kind, kind_confidence) =
                     crate::extraction::image_kind::classify(data, format.as_ref(), width, height, None, None, false);
+                // The slide's rels name the part this picture came from; the markdown builder
+                // bakes that same target into the placeholder, which is how the placeholder is
+                // matched back to its image.
+                let source_path = slide
+                    .images
+                    .iter()
+                    .find(|rel| rel.id == img_ref.id)
+                    .map(|rel| rel.target.clone());
 
                 extracted_images.push(ExtractedImage {
                     data: Bytes::from(data.clone()),
@@ -344,7 +355,7 @@ fn extract_pptx_from_container<R: std::io::Read + std::io::Seek>(
                     description,
                     ocr_result: None,
                     bounding_box: bbox,
-                    source_path: None,
+                    source_path,
                     image_kind: Some(image_kind),
                     kind_confidence: Some(kind_confidence),
                     cluster_id: None,
@@ -507,7 +518,7 @@ fn build_slide_structure(
             if let SlideElement::Text(text, _) = &slide.elements[idx]
                 && text.is_title
             {
-                let plain = join_runs_with_spacing(&text.runs, Run::extract);
+                let plain = join_runs(&text.runs, Run::extract);
                 if !plain.trim().is_empty() {
                     return Some(plain.trim().to_string());
                 }
@@ -517,7 +528,7 @@ fn build_slide_structure(
         .or_else(|| {
             sorted_indices.iter().find_map(|&idx| {
                 if let SlideElement::Text(text, _) = &slide.elements[idx] {
-                    let plain = join_runs_with_spacing(&text.runs, Run::extract);
+                    let plain = join_runs(&text.runs, Run::extract);
                     let normalized = plain.replace('\n', " ");
                     if normalized.len() < 100 && !normalized.trim().is_empty() {
                         return Some(normalized.trim().to_string());
@@ -568,7 +579,7 @@ fn build_slide_structure(
                     .map(|row| {
                         row.cells
                             .iter()
-                            .map(|cell| join_runs_with_spacing(&cell.runs, Run::extract))
+                            .map(|cell| join_runs(&cell.runs, Run::extract))
                             .collect()
                     })
                     .collect();
@@ -695,7 +706,7 @@ fn collect_slide_formulas(slide: &elements::Slide, out: &mut Vec<(String, bool)>
 
 /// Split a run sequence into its text and the LaTeX of its math runs.
 fn runs_to_text_and_math(runs: &[Run]) -> (String, Vec<String>) {
-    let text = join_runs_with_spacing(runs, |run| {
+    let text = join_runs(runs, |run| {
         if run.math_latex.is_some() {
             String::new()
         } else {
@@ -745,7 +756,7 @@ impl elements::Slide {
                 if let SlideElement::Text(text, _) = &self.elements[idx]
                     && text.is_title
                 {
-                    let plain = join_runs_with_spacing(&text.runs, Run::extract);
+                    let plain = join_runs(&text.runs, Run::extract);
                     if !plain.trim().is_empty() {
                         return Some(idx);
                     }
@@ -755,7 +766,7 @@ impl elements::Slide {
             .or_else(|| {
                 element_indices.iter().find_map(|&idx| {
                     if let SlideElement::Text(text, _) = &self.elements[idx] {
-                        let plain = join_runs_with_spacing(&text.runs, Run::extract);
+                        let plain = join_runs(&text.runs, Run::extract);
                         let normalized = plain.replace('\n', " ");
                         if normalized.len() < 100 && !normalized.trim().is_empty() {
                             return Some(idx);
@@ -769,9 +780,9 @@ impl elements::Slide {
             && let SlideElement::Text(text, _) = &self.elements[tidx]
         {
             let text_content: String = if config.plain {
-                join_runs_with_spacing(&text.runs, Run::extract)
+                join_runs(&text.runs, Run::extract)
             } else {
-                join_runs_with_spacing(&text.runs, Run::render_as_md)
+                join_runs(&text.runs, Run::render_as_md)
             };
             let normalized = text_content.replace('\n', " ");
             builder.add_title(normalized.trim());
@@ -785,9 +796,9 @@ impl elements::Slide {
             match &self.elements[idx] {
                 SlideElement::Text(text, _) => {
                     let text_content: String = if config.plain {
-                        join_runs_with_spacing(&text.runs, Run::extract)
+                        join_runs(&text.runs, Run::extract)
                     } else {
-                        join_runs_with_spacing(&text.runs, Run::render_as_md)
+                        join_runs(&text.runs, Run::render_as_md)
                     };
 
                     builder.add_text(&text_content);
@@ -800,7 +811,7 @@ impl elements::Slide {
                         .map(|row| {
                             row.cells
                                 .iter()
-                                .map(|cell| join_runs_with_spacing(&cell.runs, extract_fn))
+                                .map(|cell| join_runs(&cell.runs, extract_fn))
                                 .collect()
                         })
                         .collect();
@@ -809,7 +820,7 @@ impl elements::Slide {
                 SlideElement::List(list, _) => {
                     let extract_fn: fn(&Run) -> String = if config.plain { Run::extract } else { Run::render_as_md };
                     for item in &list.items {
-                        let item_text = join_runs_with_spacing(&item.runs, extract_fn);
+                        let item_text = join_runs(&item.runs, extract_fn);
                         if item.has_bullet {
                             builder.add_list_item(item.level, item.is_ordered, &item_text);
                         } else {

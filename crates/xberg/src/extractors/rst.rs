@@ -12,6 +12,11 @@
 //! - Inline markup (emphasis, strong, code, links)
 //! - Images and references
 
+// TODO(xberg-io/xberg#1567): 4 cyclomatic-complexity and 20 size/complexity findings
+// in this file, currently excluded via the quality-debt baseline in alef.toml. Splitting
+// these needs compiler-in-the-loop verification, not a mechanical pass. Delete this
+// note and the file's baseline entry together once it goes green. Help wanted.
+
 #[cfg(feature = "office")]
 use crate::Result;
 #[cfg(feature = "office")]

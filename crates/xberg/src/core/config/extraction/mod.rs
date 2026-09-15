@@ -40,8 +40,15 @@ mod tests {
 
     #[test]
     fn test_needs_image_processing() {
+        let config = ExtractionConfig::default();
+        assert!(config.needs_image_processing(), "images are processed by default");
+
         let mut config = ExtractionConfig::default();
-        assert!(!config.needs_image_processing());
+        config.images = Some(crate::core::config::ImageExtractionConfig {
+            extract_images: false,
+            ..Default::default()
+        });
+        assert!(!config.needs_image_processing(), "no images, no OCR, no layout");
 
         config.ocr = Some(OcrConfig::default());
         assert!(config.needs_image_processing());

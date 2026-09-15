@@ -109,11 +109,19 @@ fn parse_group(node: &Node, xml_str: &str) -> Result<Vec<SlideElement>> {
             }
         }
         "graphicFrame" => {
-            if let Some(content) = parse_graphic_frame(node)? {
-                match content {
-                    GraphicFrameContent::Table(table) => elements.push(SlideElement::Table(table, position)),
-                    GraphicFrameContent::Chart(chart) => elements.push(SlideElement::Chart(chart, position)),
-                    GraphicFrameContent::SmartArt(diagram) => elements.push(SlideElement::SmartArt(diagram, position)),
+            match parse_graphic_frame(node)? {
+                Some(GraphicFrameContent::Table(table)) => elements.push(SlideElement::Table(table, position)),
+                Some(GraphicFrameContent::Chart(chart)) => elements.push(SlideElement::Chart(chart, position)),
+                Some(GraphicFrameContent::SmartArt(diagram)) => elements.push(SlideElement::SmartArt(diagram, position)),
+                None => {
+                    // OLE object frames (`…/graphicData` uri `…/ole`) carry their rendered
+                    // preview as a DrawingML blip inside the `mc:Fallback` branch; the
+                    // `mc:Choice` VML branch only names the embedding. Emit that preview so
+                    // the raster (frequently EMF/WMF) is extracted — and, for EMF/WMF,
+                    // rasterized and OCR'd — instead of the whole object vanishing.
+                    if let Some(image_reference) = ole_preview_image(node) {
+                        elements.push(SlideElement::Image(image_reference, position));
+                    }
                 }
             }
         }
@@ -168,32 +176,46 @@ fn parse_alternate_content_shapes(node: &Node, xml_str: &str) -> Result<Vec<Slid
     Ok(Vec::new())
 }
 
+/// The `p:ph` placeholder type a shape declares, if any.
+fn placeholder_type<'a>(sp_node: &Node<'a, '_>) -> Option<&'a str> {
+    let nv_sp_pr = sp_node
+        .children()
+        .find(|n| n.tag_name().namespace() == Some(PRESENTATIONML_NAMESPACE) && n.tag_name().name().starts_with("nv"));
+    let nv_pr = nv_sp_pr?
+        .children()
+        .find(|n| n.tag_name().name() == "nvPr" && n.tag_name().namespace() == Some(PRESENTATIONML_NAMESPACE))?;
+    let ph = nv_pr
+        .children()
+        .find(|n| n.tag_name().name() == "ph" && n.tag_name().namespace() == Some(PRESENTATIONML_NAMESPACE))?;
+    ph.attribute("type")
+}
+
 /// Check whether a shape node contains a title placeholder.
 ///
 /// OOXML placeholder types for titles:
 /// - `type="title"` (general title, idx 0 in most slide layouts)
 /// - `type="ctrTitle"` (centered title, used on title slides)
 fn is_title_placeholder(sp_node: &Node) -> bool {
-    let nv_sp_pr = sp_node
-        .children()
-        .find(|n| n.tag_name().namespace() == Some(PRESENTATIONML_NAMESPACE) && n.tag_name().name().starts_with("nv"));
-    if let Some(nv_sp_pr) = nv_sp_pr {
-        let nv_pr = nv_sp_pr
-            .children()
-            .find(|n| n.tag_name().name() == "nvPr" && n.tag_name().namespace() == Some(PRESENTATIONML_NAMESPACE));
-        if let Some(nv_pr) = nv_pr {
-            let ph = nv_pr
-                .children()
-                .find(|n| n.tag_name().name() == "ph" && n.tag_name().namespace() == Some(PRESENTATIONML_NAMESPACE));
-            if let Some(ph) = ph {
-                return matches!(ph.attribute("type"), Some("title") | Some("ctrTitle"));
-            }
-        }
-    }
-    false
+    matches!(placeholder_type(sp_node), Some("title") | Some("ctrTitle"))
 }
 
+/// Placeholder types that hold slide furniture rather than slide content.
+///
+/// OOXML defines `sldNum` (the slide-number field), `ftr` (the footer text) and
+/// `dt` (the date/time field) as the three header/footer placeholders, and a deck
+/// written by PowerPoint's own footer puts them on every slide. One deck in this
+/// corpus declares its slide-number shape as `type="dt"` and holds a literal
+/// `Page ` run followed by an `a:fld type="slidenum"` field, which reached the
+/// body as `Page 4` on all 38 slides. The placeholder type is what separates
+/// that furniture from a content shape that happens to show a number, so the
+/// shape is dropped here instead of filtering field runs by their value.
+const FURNITURE_PLACEHOLDER_TYPES: &[&str] = &["sldNum", "ftr", "dt"];
+
 fn parse_sp(sp_node: &Node, xml_str: &str) -> Result<Option<ParsedContent>> {
+    if placeholder_type(sp_node).is_some_and(|kind| FURNITURE_PLACEHOLDER_TYPES.contains(&kind)) {
+        return Ok(None);
+    }
+
     let tx_body_node = match sp_node
         .children()
         .find(|n| n.tag_name().name() == "txBody" && n.tag_name().namespace() == Some(PRESENTATIONML_NAMESPACE))
@@ -297,6 +319,32 @@ fn parse_graphic_frame(node: &Node) -> Result<Option<GraphicFrameContent>> {
     }
 
     Ok(None)
+}
+
+/// The preview image of an OLE object `p:graphicFrame`, taken from the DrawingML
+/// `a:blip` inside its `mc:Fallback` branch.
+///
+/// PowerPoint represents an embedded OLE object twice: `mc:Choice` is a VML shape
+/// naming the embedding relation (`r:id`), while `mc:Fallback` is a full `p:pic`
+/// whose `a:blip/@r:embed` points at a cached raster/EMF preview of the object.
+/// Only the fallback carries an image, so the blip is looked up across the whole
+/// frame — including `p:oleObj` descendants — rather than at a fixed depth.
+/// Returns `None` when the frame has no picture preview at all.
+fn ole_preview_image(node: &Node) -> Option<ImageReference> {
+    let blip_node = node.descendants().find(|n| {
+        n.is_element()
+            && n.tag_name().name() == "blip"
+            && n.tag_name().namespace() == Some(DRAWINGML_NAMESPACE)
+            && (n.attribute((RELATIONSHIPS_NAMESPACE, "embed")).is_some() || n.attribute("r:embed").is_some())
+    })?;
+    let embed_attr = blip_node
+        .attribute((RELATIONSHIPS_NAMESPACE, "embed"))
+        .or_else(|| blip_node.attribute("r:embed"))?;
+    Some(ImageReference {
+        id: embed_attr.to_string(),
+        target: String::new(),
+        description: None,
+    })
 }
 
 /// Parse the text content of a chart part (e.g. `ppt/charts/chart1.xml`).
@@ -466,6 +514,14 @@ fn parse_list(tx_body_node: &Node, xml_str: &str) -> Result<ListElement> {
         let (level, is_ordered, has_bullet) = parse_list_properties(&p_node)?;
 
         let runs = parse_paragraph(&p_node, true, xml_str)?;
+
+        // An empty bulleted paragraph is a stray marker, not an item: the markdown
+        // writer emitted its `- ` and the second-stage parser then read the bare
+        // marker as the paragraph `-`, which the renderer escapes to a lone `\-` line.
+        // A bullet with no text and no math carries nothing to keep.
+        if runs.iter().all(|run| run.text.trim().is_empty() && run.math_latex.is_none()) {
+            continue;
+        }
 
         items.push(ListItem {
             level,

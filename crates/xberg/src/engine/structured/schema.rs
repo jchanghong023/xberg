@@ -192,6 +192,13 @@ mod tests {
             loop {
                 match listener.accept() {
                     Ok((mut stream, _)) => {
+                        // On BSD-derived systems (macOS) an accepted socket INHERITS O_NONBLOCK
+                        // from its listener; on Linux it does not. Without this the read below
+                        // returns EAGAIN immediately instead of honouring the timeout, so the
+                        // server thread panics and the test fails only on macOS. ~keep
+                        stream
+                            .set_nonblocking(false)
+                            .expect("make accepted schema stream blocking");
                         stream
                             .set_read_timeout(Some(SCHEMA_SERVER_TIMEOUT))
                             .expect("set schema request timeout");

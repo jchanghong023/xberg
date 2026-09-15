@@ -209,8 +209,32 @@ const VALID_LANGUAGE_CODES: &[&str] = &[
     "chs",
 ];
 
+/// Canonical set of Tesseract-supported ISO 639-3 traineddata language codes.
+///
+/// This is the single source of truth for which codes Tesseract can OCR with. It lives here,
+/// feature-independent, rather than in `ocr::validation` (which is gated behind `feature = "ocr"`
+/// and would otherwise not exist for a build that compiles `OcrConfig` without the `ocr` feature).
+/// `ocr::validation::TESSERACT_SUPPORTED_LANGUAGE_CODES` builds its lookup set from this exact
+/// array instead of maintaining a second hardcoded copy — two independently maintained allowlists
+/// silently drifted apart before (GH#1621: `fao` was Tesseract-supported but missing here), and a
+/// single array that both call sites read from makes that drift impossible. ~keep
+pub(crate) const TESSERACT_LANGUAGE_CODES: &[&str] = &[
+    "afr", "amh", "ara", "asm", "aze", "aze_cyrl", "bel", "ben", "bod", "bos", "bre", "bul", "cat", "ceb", "ces",
+    "chi_sim", "chi_tra", "chr", "cos", "cym", "dan", "deu", "div", "dzo", "ell", "eng", "enm", "epo", "equ", "est",
+    "eus", "fao", "fas", "fil", "fin", "fra", "frk", "frm", "fry", "gla", "gle", "glg", "grc", "guj", "hat", "heb",
+    "hin", "hrv", "hun", "hye", "iku", "ind", "isl", "ita", "ita_old", "jav", "jpn", "kan", "kat", "kat_old", "kaz",
+    "khm", "kir", "kmr", "kor", "lao", "lat", "lav", "lit", "ltz", "mal", "mar", "mkd", "mlt", "mon", "mri", "msa",
+    "mya", "nep", "nld", "nor", "oci", "ori", "osd", "pan", "pol", "por", "pus", "que", "ron", "rus", "san", "sin",
+    "slk", "slv", "snd", "spa", "spa_old", "sqi", "srp", "srp_latn", "sun", "swa", "swe", "syr", "tam", "tat", "tel",
+    "tgk", "tha", "tir", "ton", "tur", "uig", "ukr", "urd", "uzb", "uzb_cyrl", "vie", "yid", "yor",
+];
+
 /// Valid tesseract PSM (Page Segmentation Mode) values.
-const VALID_TESSERACT_PSM: &[i32] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
+///
+/// 0 is deliberately absent. Tesseract's PSM 0 is `PSM_OSD_ONLY` -- orientation and script
+/// detection with no character recognition at all -- so it cannot serve a text-extraction
+/// request. Accepting it produced an empty document with a success exit code (GH#1586). ~keep
+const VALID_TESSERACT_PSM: &[i32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
 
 /// Valid tesseract OEM (OCR Engine Mode) values.
 const VALID_TESSERACT_OEM: &[i32] = &[0, 1, 2, 3];
@@ -327,19 +351,35 @@ pub(crate) fn validate_token_reduction_level(level: &str) -> Result<()> {
 /// assert!(validate_ocr_backend("invalid").is_err());
 /// ```
 pub(crate) fn validate_ocr_backend(backend: &str) -> Result<()> {
-    let backend = backend.to_lowercase();
-    if VALID_OCR_BACKENDS.contains(&backend.as_str()) {
+    let normalized = backend.to_lowercase();
+    if VALID_OCR_BACKENDS.contains(&normalized.as_str()) || is_registered_ocr_backend(backend) {
         Ok(())
     } else {
         Err(XbergError::Validation {
             message: format!(
-                "Invalid OCR backend '{}'. Valid options are: {}",
-                backend,
+                "Invalid OCR backend '{}'. Valid options are: {}, or the name of a backend \
+                 registered through `register_ocr_backend`",
+                normalized,
                 VALID_OCR_BACKENDS.join(", ")
             ),
             source: None,
         })
     }
+}
+
+/// Whether `backend` names a plugin backend registered through `register_ocr_backend`.
+///
+/// `VALID_OCR_BACKENDS` lists only the built-ins, so consulting it alone rejected every
+/// third-party backend. That became reachable once `ExtractionConfig::validate` was wired into
+/// `extract`/`extract_batch`, which made the plugin OCR backend feature unusable: a registered
+/// custom backend was refused before extraction ever started. Matched case-insensitively so a
+/// registered name behaves like the built-in list. ~keep
+fn is_registered_ocr_backend(backend: &str) -> bool {
+    crate::plugins::registry::get_ocr_backend_registry()
+        .read()
+        .list()
+        .iter()
+        .any(|name| name.eq_ignore_ascii_case(backend))
 }
 
 /// Validate a language code (ISO 639-1 or 639-3 format).
@@ -375,7 +415,11 @@ pub(crate) fn validate_language_code(code: &str) -> Result<()> {
         return Ok(());
     }
 
-    if VALID_LANGUAGE_CODES.contains(&code_lower.as_str()) || VALID_LANGUAGE_CODES.contains(&code_normalized.as_str()) {
+    if VALID_LANGUAGE_CODES.contains(&code_lower.as_str())
+        || VALID_LANGUAGE_CODES.contains(&code_normalized.as_str())
+        || TESSERACT_LANGUAGE_CODES.contains(&code_lower.as_str())
+        || TESSERACT_LANGUAGE_CODES.contains(&code_normalized.as_str())
+    {
         return Ok(());
     }
 
@@ -394,7 +438,7 @@ pub(crate) fn validate_language_code(code: &str) -> Result<()> {
 ///
 /// # Arguments
 ///
-/// * `psm` - The PSM value to validate (0-13)
+/// * `psm` - The PSM value to validate (1-13; 0 is OSD-only and is rejected)
 ///
 /// # Returns
 ///
@@ -410,20 +454,25 @@ pub(crate) fn validate_language_code(code: &str) -> Result<()> {
 /// assert!(validate_tesseract_psm(3).is_ok());  // Fully automatic
 /// assert!(validate_tesseract_psm(6).is_ok());  // Single block of text
 /// assert!(validate_tesseract_psm(14).is_err()); // Out of range
+/// assert!(validate_tesseract_psm(0).is_err());  // OSD-only: recognises no text
 /// ```
 pub(crate) fn validate_tesseract_psm(psm: i32) -> Result<()> {
     if VALID_TESSERACT_PSM.contains(&psm) {
-        Ok(())
-    } else {
-        Err(XbergError::Validation {
-            message: format!(
-                "Invalid tesseract PSM value '{}'. Valid range is 0-13. \
-                 Common values: 3 (auto), 6 (single block), 11 (sparse text).",
-                psm
-            ),
-            source: None,
-        })
+        return Ok(());
     }
+    let message = if psm == 0 {
+        "Invalid tesseract PSM value '0'. PSM 0 is orientation and script detection (OSD) only: \
+         it performs no character recognition, so extraction returns no text. \
+         Use 3 (auto), 6 (single block), or 11 (sparse text); omit `psm` to let the pipeline choose."
+            .to_string()
+    } else {
+        format!(
+            "Invalid tesseract PSM value '{}'. Valid range is 1-13. \
+             Common values: 3 (auto), 6 (single block), 11 (sparse text).",
+            psm
+        )
+    };
+    Err(XbergError::Validation { message, source: None })
 }
 
 /// Validate a tesseract OCR Engine Mode (OEM).

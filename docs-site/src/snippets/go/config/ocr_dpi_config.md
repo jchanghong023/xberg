@@ -11,7 +11,7 @@ func main() {
 	targetDpi := int32(300)
 	config := xberg.ExtractionConfig{
 		Ocr: &xberg.OcrConfig{
-			Backend: "tesseract",
+			Backend: xberg.Ptr("tesseract"),
 			TesseractConfig: &xberg.TesseractConfig{
 				Preprocessing: &xberg.ImagePreprocessingConfig{
 					TargetDpi: &targetDpi,

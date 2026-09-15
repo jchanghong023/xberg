@@ -376,10 +376,27 @@ pub(crate) fn extract_all_from_native_document(
         .as_ref()
         .is_some_and(|options| options.extract_annotations);
     let force_annotation_page_tracking = annotation_fallback_requested && config.pages.is_none();
+    let hierarchy_enabled = config
+        .pdf_options
+        .as_ref()
+        .is_some_and(|options| options.hierarchy.as_ref().is_some_and(|hierarchy| hierarchy.enabled));
+    // ~keep A `PageHierarchy` can only be hung off a `PageContent` (`pages.rs`'s
+    // `assign_hierarchy_to_pages`), and `page_contents` is produced only when
+    // `pages.extract_pages` is set. `PageConfig::default()` leaves that `false`, so
+    // `pdf_options.hierarchy.enabled` was a silent no-op unless the caller also set an
+    // unrelated flag nothing in the hierarchy config points at: headings were detected, then
+    // dropped for want of a page to attach them to (CI E2E `test_pdf_hierarchy_config`).
+    // Asking for the hierarchy is the opt-in for the per-page tracking it requires.
+    let force_hierarchy_page_tracking =
+        hierarchy_enabled && !config.pages.as_ref().is_some_and(|pages| pages.extract_pages);
     let mut tracked_config;
-    let text_config = if force_annotation_page_tracking {
+    let text_config = if force_annotation_page_tracking || force_hierarchy_page_tracking {
         tracked_config = config.clone();
-        tracked_config.pages = Some(crate::core::config::PageConfig::default());
+        let mut page_config = tracked_config.pages.take().unwrap_or_default();
+        if force_hierarchy_page_tracking {
+            page_config.extract_pages = true;
+        }
+        tracked_config.pages = Some(page_config);
         &tracked_config
     } else {
         config
@@ -432,10 +449,6 @@ pub(crate) fn extract_all_from_native_document(
         .as_ref()
         .map(|options| options.ocr_inline_images)
         .unwrap_or(false);
-    let hierarchy_enabled = config
-        .pdf_options
-        .as_ref()
-        .is_some_and(|options| options.hierarchy.as_ref().is_some_and(|hierarchy| hierarchy.enabled));
     let needs_structured = needs_structured_extraction(
         hierarchy_enabled,
         &config.output_format,
@@ -1061,6 +1074,7 @@ mod tests {
                 speaker_notes: None,
                 section_name: None,
                 sheet_name: None,
+                ocr_confidence: None,
                 image_preprocessing: None,
             },
             PageContent {
@@ -1074,6 +1088,7 @@ mod tests {
                 speaker_notes: None,
                 section_name: None,
                 sheet_name: None,
+                ocr_confidence: None,
                 image_preprocessing: None,
             },
         ]);

@@ -1496,6 +1496,7 @@ async fn result_from_scrape_page(
         content,
         scrape.markdown.is_some(),
         &content_type,
+        &scrape.html,
         links_to_uris(scrape.links.iter().map(|link| (&link.url, &link.text))),
         config,
     )
@@ -1534,6 +1535,7 @@ async fn result_from_crawl_page(
         content,
         page.markdown.is_some(),
         &content_type,
+        &page.html,
         links_to_uris(page.links.iter().map(|link| (&link.url, &link.text))),
         config,
     )
@@ -1559,17 +1561,36 @@ async fn run_url_page_pipeline(
     content: String,
     is_markdown: bool,
     content_type: &str,
+    source_html: &str,
     uris: Vec<ExtractedUri>,
     config: &ExtractionConfig,
 ) -> Result<ExtractedDocument> {
+    #[cfg(not(feature = "html"))]
+    let _ = source_html;
     let source_mime_type = normalized_content_type(content_type);
     let extraction_mime_type = if is_markdown {
         "text/markdown".to_string()
     } else {
         source_mime_type.clone()
     };
+    #[cfg(feature = "html")]
+    let is_html_source = source_mime_type.starts_with("text/html");
     let mut result = extract_bytes(content.as_bytes(), &extraction_mime_type, config).await?;
     result.mime_type = source_mime_type.into();
+
+    // ~keep The line above restamps the result `text/html`, so a consumer reading
+    // `metadata.format.html` is entitled to find it. But when crawlberg supplied pre-rendered
+    // markdown the extraction ran as `text/markdown`, so the HTML extractor never ran and no
+    // HtmlMetadata was ever produced -- leaving `format: None` contradicting the MIME type
+    // (CI E2E `test_metadata_access`). Recover it from the page HTML instead.
+    #[cfg(feature = "html")]
+    if is_html_source
+        && result.metadata.format.is_none()
+        && !source_html.is_empty()
+        && let Some(html_metadata) = crate::extraction::html::extract_html_metadata_only(source_html)
+    {
+        result.metadata.format = Some(crate::types::FormatMetadata::Html(Box::new(html_metadata)));
+    }
     match result.uris.as_mut() {
         Some(existing) => existing.extend(uris),
         None if !uris.is_empty() => result.uris = Some(uris),

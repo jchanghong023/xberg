@@ -194,13 +194,21 @@ async fn test_mime_type_image_prefix_validation() {
         "image/bmp",
         "image/tiff",
         "image/svg+xml",
-        "image/x-custom-format",
     ];
 
     for mime_type in image_types {
         let result = validate_mime_type(mime_type);
         assert!(result.is_ok(), "Should validate image MIME type: {}", mime_type);
     }
+
+    // `validate_mime_type` used to accept any `image/` prefix unconditionally. Since
+    // f58a0666a8 it parses the type and requires exact membership in SUPPORTED_MIME_TYPES,
+    // so an unregistered vendor subtype is now rejected rather than waved through. Asserted
+    // here so the narrowed contract stays covered instead of being dropped from the list. ~keep
+    assert!(
+        validate_mime_type("image/x-custom-format").is_err(),
+        "an unregistered image subtype must not validate via a bare image/ prefix"
+    );
 }
 
 /// Test unknown/unsupported MIME type handling.
@@ -398,14 +406,14 @@ async fn test_filename_special_characters() {
 #[tokio::test]
 async fn test_pandoc_formats_mime_detection() {
     let pandoc_formats = vec![
-        ("test.rst", "text/x-rst"),
+        ("test.rst", "text/prs.fallenstein.rst"),
         ("test.tex", "application/x-latex"),
         ("test.latex", "application/x-latex"),
         ("test.rtf", "application/rtf"),
         ("test.odt", "application/vnd.oasis.opendocument.text"),
         ("test.epub", "application/epub+zip"),
-        ("test.org", "text/x-org"),
-        ("test.typst", "application/x-typst"),
+        ("test.org", "text/org"),
+        ("test.typst", "text/vnd.typst"),
         ("test.commonmark", "text/x-commonmark"),
     ];
 

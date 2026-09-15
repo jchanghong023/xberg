@@ -320,7 +320,7 @@ async fn run_captioning_prepass(
 #[cfg_attr(alef, alef(skip))]
 pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) -> Result<ExtractedDocument> {
     doc.ocr_text_only = config.images.as_ref().map(|i| i.ocr_text_only).unwrap_or(false);
-    doc.append_ocr_text = config.images.as_ref().map(|i| i.append_ocr_text).unwrap_or(false);
+    doc.append_ocr_text = config.images.as_ref().map(|i| i.append_ocr_text).unwrap_or(true);
     doc.escape_markdown = config.escape_markdown;
     doc.include_watermarks = config
         .content_filter
@@ -337,9 +337,12 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
     }
 
     #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
-    let image_ocr_enabled = config.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true);
+    // `disable_ocr` and `ocr.enabled = false` are hard switches: an explicit opt-out must
+    // never get image OCR, however `images.run_ocr_on_images` (on by default) is set. ~keep
+    let image_ocr_enabled = config.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true)
+        && !config.effective_disable_ocr();
     #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
-    if image_ocr_enabled && config.ocr.is_some() && !doc.images.is_empty() {
+    if image_ocr_enabled && !doc.images.is_empty() {
         let image_positions = image_ocr_positions(&doc);
         // Clone only selected images so skipped entries keep their positions and a
         // batch-level OCR failure cannot discard the original extracted images.
@@ -441,24 +444,35 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
     let mut result =
         crate::extraction::derive::derive_extraction_result(doc, include_structure, config.output_format.clone());
     result.internal_document = doc_for_elements;
-    captioning_carry_over.apply(&mut result);
 
     // #286: record the text the preserved element tree stands for, so the divergence check
     // below can tell whether post-processing has since made the tree a stale second copy of
     // the document text. See `discard_diverged_internal_document`.
     let internal_document_source_content = result.internal_document.is_some().then(|| result.content.clone());
 
+    // The styled prerender is part of the rendering the snapshot stands for: assigning it
+    // after the snapshot made `discard_diverged_formatted_content` read it as "a processor
+    // rewrote the rendering", so a content-only rewrite (a post-processor, the captioning
+    // carry-over) was silently overwritten by HTML rendered before that rewrite — and the
+    // sync pipeline, which assigns it before its snapshot, disagreed. ~keep
     #[cfg(feature = "html")]
     if let Some(html) = styled_html_prerender {
         result.formatted_content = Some(html);
     }
 
     // #331: same idea for the rendered output format, which `apply_output_format` swaps into
-    // `content` at the very end. See `discard_diverged_formatted_content`.
+    // `content` at the very end. See `discard_diverged_formatted_content`. Snapshotted before
+    // the captioning carry-over applies: the carry-over is itself a content rewrite by a
+    // processor, so the rendering made from the pre-rewrite text is stale the moment the
+    // rewrite lands and must be discarded like any other post-processing divergence — under
+    // the Markdown default it would otherwise overwrite the authored content at the final
+    // swap.
     let formatted_content_source = result
         .formatted_content
         .as_ref()
         .map(|formatted| (result.content.clone(), formatted.clone()));
+
+    captioning_carry_over.apply(&mut result);
 
     #[cfg(feature = "image-encode")]
     if let Some(ref image_cfg) = config.images {
@@ -574,9 +588,10 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
 
     #[cfg(feature = "heuristics")]
     {
-        use crate::heuristics::confidence::{ConfidenceSignals, ConfidenceWeights, SchemaCompliance, score_confidence};
+        use crate::heuristics::confidence::{ConfidenceSignals, ConfidenceWeights, score_confidence};
         let text_coverage = measure_text_coverage(&result);
-        let signals = ConfidenceSignals::from_extraction_result(&result, SchemaCompliance::AllValid, text_coverage);
+        let schema_compliance = structured_extraction_compliance(config, &result);
+        let signals = ConfidenceSignals::from_extraction_result(&result, schema_compliance, text_coverage);
         result.extraction_confidence = Some(score_confidence(signals, ConfidenceWeights::default()));
     }
 
@@ -620,7 +635,7 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
 #[cfg_attr(alef, alef(skip))]
 pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -> Result<ExtractedDocument> {
     doc.ocr_text_only = config.images.as_ref().map(|i| i.ocr_text_only).unwrap_or(false);
-    doc.append_ocr_text = config.images.as_ref().map(|i| i.append_ocr_text).unwrap_or(false);
+    doc.append_ocr_text = config.images.as_ref().map(|i| i.append_ocr_text).unwrap_or(true);
     doc.escape_markdown = config.escape_markdown;
     doc.include_watermarks = config
         .content_filter
@@ -736,9 +751,10 @@ pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -
 
     #[cfg(feature = "heuristics")]
     {
-        use crate::heuristics::confidence::{ConfidenceSignals, ConfidenceWeights, SchemaCompliance, score_confidence};
+        use crate::heuristics::confidence::{ConfidenceSignals, ConfidenceWeights, score_confidence};
         let text_coverage = measure_text_coverage(&result);
-        let signals = ConfidenceSignals::from_extraction_result(&result, SchemaCompliance::AllValid, text_coverage);
+        let schema_compliance = structured_extraction_compliance(config, &result);
+        let signals = ConfidenceSignals::from_extraction_result(&result, schema_compliance, text_coverage);
         result.extraction_confidence = Some(score_confidence(signals, ConfidenceWeights::default()));
     }
 
@@ -766,6 +782,29 @@ fn populate_document_counts(result: &mut ExtractedDocument) {
         tables: result.tables.len(),
         images: result.images.as_ref().map_or(0, Vec::len),
     };
+}
+
+/// Determine the [`SchemaCompliance`](crate::heuristics::confidence::SchemaCompliance) signal
+/// to feed into confidence scoring for a completed pipeline run (GH#1624).
+///
+/// Reuses the existing three variants instead of adding a fourth: `AllValid` covers both "no
+/// schema was requested" (nothing to violate) and "the requested schema produced output";
+/// `AllInvalid` covers every case where structured extraction was requested but the pipeline
+/// still has no `structured_output` -- an LLM failure, the `liter-llm` feature being absent, or
+/// wasm's unsupported-stage warning all leave that field `None`. Before this fix the pipeline
+/// passed `AllValid` unconditionally, so a failed or skipped structured extraction scored as
+/// if it had fully validated. ~keep
+#[cfg(feature = "heuristics")]
+fn structured_extraction_compliance(
+    config: &ExtractionConfig,
+    result: &ExtractedDocument,
+) -> crate::heuristics::confidence::SchemaCompliance {
+    use crate::heuristics::confidence::SchemaCompliance;
+    if config.structured_extraction.is_some() && result.structured_output.is_none() {
+        SchemaCompliance::AllInvalid
+    } else {
+        SchemaCompliance::AllValid
+    }
 }
 
 /// Measure the fraction of pages with usable (non-blank) text, for
@@ -834,15 +873,30 @@ fn apply_output_format_pass_with_security_limits(
     let target = config.output_format;
     let default_security_limits = crate::extractors::security::SecurityLimits::default();
     let security_limits = security_limits.unwrap_or(&default_security_limits);
-    for image in result.images.iter_mut().flatten() {
+    // Track format renames so pre-rendered Markdown image URLs (already baked into
+    // `content` with the source extension, e.g. `image_0.emf`) can be rewritten after
+    // EMF/WMF → PNG re-encode. Without this, files on disk are PNG while the Markdown
+    // still points at `.emf`. Each entry carries the image's position in `result.images`
+    // — the same number the renderers bake into `image_N.ext` — so a sibling image whose
+    // re-encode failed (still on disk under the old extension) keeps its reference.
+    let mut format_renames: Vec<(u32, String, String)> = Vec::new();
+    for (position, image) in result.images.iter_mut().flatten().enumerate() {
+        let previous_format = image.format.to_string();
         match re_encode(
             image,
             target,
             security_limits,
+            config,
             #[cfg(feature = "svg")]
             &config.svg,
         ) {
-            Ok(_) => {}
+            Ok(true) => {
+                let next_format = image.format.to_string();
+                if !previous_format.eq_ignore_ascii_case(&next_format) {
+                    format_renames.push((position as u32, previous_format, next_format));
+                }
+            }
+            Ok(false) => {}
             Err(warning) => {
                 result.processing_warnings.push(crate::types::ProcessingWarning {
                     source: std::borrow::Cow::Borrowed("image_encoder"),
@@ -851,6 +905,72 @@ fn apply_output_format_pass_with_security_limits(
             }
         }
     }
+    rewrite_content_image_extensions(&mut result.content, &format_renames);
+    // `apply_output_format` later swaps `formatted_content` into `content`. Rewrite
+    // that pre-render too, or Markdown still points at `.emf` after EMF→PNG re-encode.
+    if let Some(formatted) = result.formatted_content.as_mut() {
+        rewrite_content_image_extensions(formatted, &format_renames);
+    }
+    // Per-page content is rendered from the element tree before this pass runs and
+    // `apply_output_format` never touches it, so a page would keep pointing at the
+    // pre-encode extension while `content` and the files on disk use the new one.
+    if let Some(pages) = result.pages.as_mut() {
+        for page in pages.iter_mut() {
+            rewrite_content_image_extensions(&mut page.content, &format_renames);
+        }
+    }
+}
+
+/// Replace `image_N.oldext` URLs in pre-rendered content after a re-encode rename.
+///
+/// `format_renames` entries are `(image position, old format, new format)`; only the
+/// reference of an image that actually changed format is rewritten. A sibling image
+/// whose re-encode failed keeps its old extension on disk, so its reference must keep
+/// it too.
+///
+/// Walks on UTF-8 char boundaries via `find`; never indexes the string by raw byte
+/// offset (Chinese content makes unaligned slices panic).
+fn rewrite_content_image_extensions(content: &mut String, format_renames: &[(u32, String, String)]) {
+    if format_renames.is_empty() || content.is_empty() {
+        return;
+    }
+    let mut result = String::with_capacity(content.len());
+    let mut rest = content.as_str();
+    while let Some(pos) = rest.find("image_") {
+        result.push_str(&rest[..pos]);
+        let after_prefix = &rest[pos + "image_".len()..];
+        let digit_len = after_prefix.bytes().take_while(u8::is_ascii_digit).count();
+        let after_digits = &after_prefix[digit_len..];
+        // The renderers bake `image_<position>.<format>` from the image's position in
+        // `doc.images`, so the digits are the lookup key the rename was recorded under.
+        let replacement = if digit_len > 0 {
+            let index = after_prefix[..digit_len].parse::<u32>().ok();
+            index.and_then(|index| {
+                format_renames.iter().find(|(renamed, old_format, _)| {
+                    *renamed == index && after_digits.starts_with(&format!(".{old_format}"))
+                })
+            })
+        } else {
+            None
+        };
+        match replacement {
+            Some((_, old_format, new_format)) => {
+                result.push_str("image_");
+                result.push_str(&after_prefix[..digit_len]);
+                result.push('.');
+                result.push_str(new_format);
+                rest = &after_digits[old_format.len() + 1..];
+            }
+            None => {
+                // Keep the literal `image_` + digits; continue after the prefix we already consumed.
+                result.push_str("image_");
+                result.push_str(&after_prefix[..digit_len]);
+                rest = after_digits;
+            }
+        }
+    }
+    result.push_str(rest);
+    *content = result;
 }
 
 /// Populate `ExtractedImage::data_base64` when the caller opts in via
@@ -1053,7 +1173,7 @@ fn append_embedded_image_ocr_text(doc: &mut InternalDocument) {
 }
 
 /// Returns `true` if `text` is exactly a markdown image reference (`![alt](url)`).
-fn is_markdown_image_reference(text: &str) -> bool {
+pub(crate) fn is_markdown_image_reference(text: &str) -> bool {
     let t = text.trim();
     if !t.starts_with("![") {
         return false;
@@ -1106,6 +1226,7 @@ mod issue_214_text_coverage_tests {
             speaker_notes: None,
             section_name: None,
             sheet_name: None,
+            ocr_confidence: None,
         }
     }
 

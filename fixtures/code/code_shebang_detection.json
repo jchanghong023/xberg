@@ -9,6 +9,10 @@
 		"side_effects": "server"
 	},
 	"tags": ["code", "shebang", "tree-sitter"],
+	"skip": {
+		"languages": ["wasm"],
+		"reason": "tree-sitter is intentionally excluded from the `wasm-target` feature (crates/xberg/Cargo.toml): the 371-grammar static pack pushes the browser .wasm past jsDelivr's 50 MB per-file limit. Without it, shebang-based code-language detection never fires, so xberg-wasm mime-sniffs the script as text/plain instead of text/x-source-code. WASM has no code intelligence by design; this is not a fixture or binding bug."
+	},
 	"call": "extract",
 	"input": {
 		"mock_responses": [

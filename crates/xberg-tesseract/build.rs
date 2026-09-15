@@ -721,6 +721,27 @@ mod build_tesseract {
                 cmakelists
             };
 
+            // ~keep `check_leptonica_tiff_support()` compiles AND RUNS a probe against the
+            // leptonica just built, purely to decide whether to set `DISABLE_TIFF` -- which this
+            // build already passes as `ON` unconditionally, because leptonica is configured
+            // `ENABLE_TIFF=OFF` right above. So the probe cannot change the outcome; it can only
+            // fail. On a multi-config generator its `try_run` cannot resolve the imported
+            // leptonica target ("IMPORTED_LOCATION not set for imported target \"leptonica\"
+            // configuration Debug/Release/MinSizeRel/RelWithDebInfo") and hard-fails the whole
+            // configure. That is what took out every Windows CI leg: the runner image stopped
+            // exposing VSINSTALLDIR, the `msvc_target && VSINSTALLDIR` guard above stopped
+            // selecting single-config `NMake Makefiles`, and cmake fell back to the Visual Studio
+            // generator. Gate the probe on the answer not already being known.
+            let tiff_probe_call = "\ncheck_leptonica_tiff_support()\n";
+            assert!(
+                cmakelists.contains(tiff_probe_call),
+                "tesseract CMakeLists.txt no longer contains the check_leptonica_tiff_support() call this build patches"
+            );
+            let cmakelists = cmakelists.replace(
+                tiff_probe_call,
+                "\nif(NOT DISABLE_TIFF)\n  check_leptonica_tiff_support()\nendif()\n",
+            );
+
             std::fs::write(&cmakelists_path, cmakelists).expect("Failed to write CMakeLists.txt");
 
             let mut tesseract_config = Config::new(

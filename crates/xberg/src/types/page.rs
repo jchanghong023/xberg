@@ -2,7 +2,7 @@
 //!
 //! This module defines types for representing paginated document structures.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::sync::Arc;
 
 use super::extraction::BoundingBox;
@@ -69,7 +69,7 @@ pub struct PageBoundary {
 ///
 /// Captures per-page information including dimensions, content counts,
 /// and visibility state (for presentations).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct PageDimensions {
     /// Page width in points or pixels.
     pub width: f64,
@@ -84,15 +84,8 @@ enum PageDimensionsWire {
     Named { width: f64, height: f64 },
 }
 
-impl Serialize for PageDimensions {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (self.width, self.height).serialize(serializer)
-    }
-}
-
+// ~keep Deserialize stays hand-written (not derived) so a legacy positional `[width, height]`
+// array from pre-migration callers still parses; only Serialize now emits the named object.
 impl<'de> Deserialize<'de> for PageDimensions {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -108,13 +101,13 @@ impl<'de> Deserialize<'de> for PageDimensions {
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for PageDimensions {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        use utoipa::openapi::schema::{ArrayBuilder, ArrayItems, Object, Type};
+        use utoipa::openapi::schema::{Object, ObjectBuilder, Type};
 
-        ArrayBuilder::new()
-            .items(ArrayItems::False)
-            .prefix_items([Object::with_type(Type::Number), Object::with_type(Type::Number)])
-            .min_items(Some(2))
-            .max_items(Some(2))
+        ObjectBuilder::new()
+            .property("width", Object::with_type(Type::Number))
+            .required("width")
+            .property("height", Object::with_type(Type::Number))
+            .required("height")
             .into()
     }
 }
@@ -267,6 +260,38 @@ pub struct PageContent {
     /// formats and for sheets with an empty name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sheet_name: Option<String>,
+
+    /// Aggregate OCR confidence for this page. `None` when the page was not OCR'd.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ocr_confidence: Option<PageOcrConfidence>,
+}
+
+/// Aggregate OCR legibility score for a page, reported by the backend that produced its text.
+///
+/// This is distinct from [`OcrConfidence`], which scores a single detected element (a word or
+/// line) using detection/recognition confidence from the OCR engine itself. `PageOcrConfidence`
+/// is a page-level summary computed after noise filtering, intended for triage of which pages
+/// are worth a closer look, not for comparing OCR engines against each other.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct PageOcrConfidence {
+    /// Aggregate legibility score in `0.0..=1.0`, or `None` when the backend that
+    /// produced this page does not report a calibrated legibility scale.
+    ///
+    /// Backends differ in what their confidence numbers mean (see `OcrConfidence`'s
+    /// per-backend normalization), and not every backend maps onto a 0.0-1.0 legibility
+    /// scale at all. When a backend has no such calibrated scale, this is `None` rather
+    /// than a misleading number, and scores must never be compared across backends.
+    pub score: Option<f64>,
+
+    /// Number of words the score was averaged over, AFTER noise filtering.
+    ///
+    /// A small `word_count` means the average is based on little evidence, so a high
+    /// `score` next to a small `word_count` is not representative of the whole page.
+    pub word_count: u32,
+
+    /// Name of the OCR backend that produced the page text.
+    pub backend: String,
 }
 
 /// A detected layout region on a page.
@@ -315,7 +340,7 @@ pub struct PageHierarchy {
 ///
 /// Represents a block of text with semantic heading information extracted from
 /// font size clustering and hierarchical analysis.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct HierarchicalBoundingBox {
     /// Left coordinate.
     pub left: f32,
@@ -339,15 +364,9 @@ enum HierarchicalBoundingBoxWire {
     },
 }
 
-impl Serialize for HierarchicalBoundingBox {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (self.left, self.top, self.right, self.bottom).serialize(serializer)
-    }
-}
-
+// ~keep Deserialize stays hand-written (not derived) so a legacy positional
+// `[left, top, right, bottom]` array from pre-migration callers still parses; only Serialize
+// now emits the named object.
 impl<'de> Deserialize<'de> for HierarchicalBoundingBox {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -373,18 +392,17 @@ impl<'de> Deserialize<'de> for HierarchicalBoundingBox {
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for HierarchicalBoundingBox {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        use utoipa::openapi::schema::{ArrayBuilder, ArrayItems, Object, Type};
+        use utoipa::openapi::schema::{Object, ObjectBuilder, Type};
 
-        ArrayBuilder::new()
-            .items(ArrayItems::False)
-            .prefix_items([
-                Object::with_type(Type::Number),
-                Object::with_type(Type::Number),
-                Object::with_type(Type::Number),
-                Object::with_type(Type::Number),
-            ])
-            .min_items(Some(4))
-            .max_items(Some(4))
+        ObjectBuilder::new()
+            .property("left", Object::with_type(Type::Number))
+            .required("left")
+            .property("top", Object::with_type(Type::Number))
+            .required("top")
+            .property("right", Object::with_type(Type::Number))
+            .required("right")
+            .property("bottom", Object::with_type(Type::Number))
+            .required("bottom")
             .into()
     }
 }
@@ -444,44 +462,75 @@ fn is_default_bool(v: &bool) -> bool {
 
 #[cfg(test)]
 mod binding_value_serde_tests {
-    use super::{HierarchicalBlock, HierarchicalBoundingBox, PageDimensions, PageInfo};
+    use super::{HierarchicalBlock, HierarchicalBoundingBox, PageContent, PageDimensions, PageInfo, PageOcrConfidence};
     use serde_json::json;
 
     #[cfg(feature = "api")]
-    fn assert_legacy_array_schema<T: utoipa::PartialSchema>(length: usize) {
+    fn assert_named_object_schema<T: utoipa::PartialSchema>(fields: &[&str]) {
         let schema = serde_json::to_value(T::schema()).expect("schema must serialize");
-        assert_eq!(schema["type"], "array");
-        assert_eq!(schema["minItems"], length);
-        assert_eq!(schema["maxItems"], length);
-        assert_eq!(schema["items"], false);
-        assert_eq!(schema["prefixItems"].as_array().map(Vec::len), Some(length));
+        assert_eq!(schema["type"], "object");
+        let properties = schema["properties"].as_object().expect("schema must have properties");
+        assert_eq!(properties.len(), fields.len());
+        for field in fields {
+            assert_eq!(properties[*field]["type"], "number");
+        }
+        let required = schema["required"].as_array().expect("schema must have required fields");
+        assert_eq!(required.len(), fields.len());
+        for field in fields {
+            assert!(required.contains(&json!(field)));
+        }
     }
 
     #[cfg(feature = "api")]
     #[test]
-    fn should_describe_binding_dtos_as_legacy_array_schemas() {
-        assert_legacy_array_schema::<PageDimensions>(2);
-        assert_legacy_array_schema::<HierarchicalBoundingBox>(4);
+    fn should_describe_binding_dtos_as_named_object_schemas() {
+        assert_named_object_schema::<PageDimensions>(&["width", "height"]);
+        assert_named_object_schema::<HierarchicalBoundingBox>(&["left", "top", "right", "bottom"]);
     }
 
     #[test]
-    fn should_preserve_legacy_page_dimension_tuple_wire_format() {
+    fn should_still_accept_legacy_positional_array_for_page_dimensions() {
         let legacy = json!({
             "number": 1,
             "dimensions": [612.0, 792.0]
         });
-        let page: PageInfo = serde_json::from_value(legacy.clone()).expect("legacy page info must deserialize");
-        let named: PageDimensions = serde_json::from_value(json!({"width": 612.0, "height": 792.0}))
-            .expect("named page dimensions must deserialize");
+        let page: PageInfo = serde_json::from_value(legacy).expect("legacy page info must deserialize");
         let dimensions = page.dimensions.expect("dimensions must be present");
 
         assert_eq!(dimensions.width, 612.0);
         assert_eq!(dimensions.height, 792.0);
-        assert_eq!(serde_json::to_value(page).expect("page info must serialize"), legacy);
-        assert_eq!(named, dimensions);
+    }
+
+    #[test]
+    fn should_serialize_page_dimensions_as_named_object() {
+        let named: PageDimensions = serde_json::from_value(json!({"width": 612.0, "height": 792.0}))
+            .expect("named page dimensions must deserialize");
+
+        assert_eq!(
+            named,
+            PageDimensions {
+                width: 612.0,
+                height: 792.0
+            }
+        );
         assert_eq!(
             serde_json::to_value(named).expect("named page dimensions must serialize"),
-            json!([612.0, 792.0])
+            json!({"width": 612.0, "height": 792.0})
+        );
+
+        let page = PageInfo {
+            number: 1,
+            title: None,
+            dimensions: Some(named),
+            image_count: None,
+            table_count: None,
+            hidden: None,
+            is_blank: None,
+            has_vector_graphics: false,
+        };
+        assert_eq!(
+            serde_json::to_value(page).expect("page info must serialize"),
+            json!({"number": 1, "dimensions": {"width": 612.0, "height": 792.0}})
         );
     }
 
@@ -496,15 +545,21 @@ mod binding_value_serde_tests {
     }
 
     #[test]
-    fn should_preserve_legacy_hierarchy_bbox_tuple_wire_format() {
+    fn should_still_accept_legacy_positional_array_for_hierarchical_bounding_box() {
         let legacy = json!({
             "text": "Heading",
             "font_size": 18.0,
             "level": "h1",
             "bbox": [1.0, 2.0, 101.0, 22.0]
         });
-        let block: HierarchicalBlock =
-            serde_json::from_value(legacy.clone()).expect("legacy hierarchy block must deserialize");
+        let block: HierarchicalBlock = serde_json::from_value(legacy).expect("legacy hierarchy block must deserialize");
+        let bbox = block.bbox.expect("bounding box must be present");
+
+        assert_eq!((bbox.left, bbox.top, bbox.right, bbox.bottom), (1.0, 2.0, 101.0, 22.0));
+    }
+
+    #[test]
+    fn should_serialize_hierarchical_bounding_box_as_named_object() {
         let named: HierarchicalBoundingBox = serde_json::from_value(json!({
             "left": 1.0,
             "top": 2.0,
@@ -512,17 +567,98 @@ mod binding_value_serde_tests {
             "bottom": 22.0
         }))
         .expect("named hierarchy bounding box must deserialize");
-        let bbox = block.bbox.expect("bounding box must be present");
 
-        assert_eq!((bbox.left, bbox.top, bbox.right, bbox.bottom), (1.0, 2.0, 101.0, 22.0));
-        assert_eq!(named, bbox);
         assert_eq!(
-            serde_json::to_value(block).expect("hierarchy block must serialize"),
-            legacy
+            named,
+            HierarchicalBoundingBox {
+                left: 1.0,
+                top: 2.0,
+                right: 101.0,
+                bottom: 22.0
+            }
         );
         assert_eq!(
             serde_json::to_value(named).expect("named hierarchy bounding box must serialize"),
-            json!([1.0, 2.0, 101.0, 22.0])
+            json!({"left": 1.0, "top": 2.0, "right": 101.0, "bottom": 22.0})
+        );
+
+        let block = HierarchicalBlock {
+            text: "Heading".to_string(),
+            font_size: 18.0,
+            level: "h1".to_string(),
+            bbox: Some(named),
+        };
+        assert_eq!(
+            serde_json::to_value(block).expect("hierarchy block must serialize"),
+            json!({
+                "text": "Heading",
+                "font_size": 18.0,
+                "level": "h1",
+                "bbox": {"left": 1.0, "top": 2.0, "right": 101.0, "bottom": 22.0}
+            })
+        );
+    }
+
+    fn page_content_without_ocr_confidence() -> PageContent {
+        PageContent {
+            page_number: 1,
+            content: "hello".to_string(),
+            tables: Vec::new(),
+            image_indices: Vec::new(),
+            image_preprocessing: None,
+            hierarchy: None,
+            is_blank: None,
+            layout_regions: None,
+            speaker_notes: None,
+            section_name: None,
+            sheet_name: None,
+            ocr_confidence: None,
+        }
+    }
+
+    #[test]
+    fn should_omit_ocr_confidence_key_when_page_was_not_ocrd() {
+        let page = page_content_without_ocr_confidence();
+
+        let value = serde_json::to_value(page).expect("page content must serialize");
+
+        assert!(
+            value
+                .as_object()
+                .expect("page content must serialize as an object")
+                .get("ocr_confidence")
+                .is_none(),
+            "ocr_confidence must be omitted entirely, not serialized as null"
+        );
+    }
+
+    #[test]
+    fn should_deserialize_legacy_page_content_missing_ocr_confidence_field() {
+        let legacy = json!({
+            "page_number": 1,
+            "content": "hello",
+        });
+
+        let page: PageContent =
+            serde_json::from_value(legacy).expect("page content without ocr_confidence must deserialize");
+
+        assert_eq!(page.ocr_confidence, None);
+    }
+
+    #[test]
+    fn should_round_trip_ocr_confidence_when_present() {
+        let mut page = page_content_without_ocr_confidence();
+        page.ocr_confidence = Some(PageOcrConfidence {
+            score: Some(0.87),
+            word_count: 42,
+            backend: "tesseract".to_string(),
+        });
+
+        let value = serde_json::to_value(page).expect("page content with ocr_confidence must serialize");
+
+        assert_eq!(
+            value["ocr_confidence"],
+            json!({"score": 0.87, "word_count": 42, "backend": "tesseract"})
         );
     }
 }

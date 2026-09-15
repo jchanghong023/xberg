@@ -12,7 +12,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::core::config::ExtractionConfig;
 use crate::plugins::{InternalDocumentExtractor, Plugin};
-use crate::transcription::decode::{PcmAudio, decode_audio_to_pcm};
+use crate::transcription::container::decode_to_pcm;
+use crate::transcription::decode::PcmAudio;
 use crate::transcription::engine::WhisperEngine;
 use crate::transcription::model::{WhisperModelPaths, ensure_whisper_model};
 use crate::transcription::tags::AudioTags;
@@ -139,8 +140,21 @@ async fn run_transcription_pipeline(
 ) -> Result<InternalDocument> {
     let bytes_owned = content.to_vec();
     let max_bytes_for_decode = tcfg.max_bytes;
+    let max_duration_for_decode = tcfg.max_duration_ms;
+    let timeout_for_decode = tcfg.timeout_ms;
+    let mime_owned = mime_type.to_string();
     let (pcm, tags): (PcmAudio, crate::transcription::tags::AudioTags) = task::spawn_blocking(move || {
-        let pcm = decode_audio_to_pcm(&bytes_owned, max_bytes_for_decode)?;
+        // ASF/WMV comes back through Media Foundation; everything else uses the
+        // built-in decoder unchanged. The limits travel with the call because this
+        // task outlives the extractor's timeout: a rescue decoder has to stop
+        // itself, the wrapper above can only stop waiting for it.
+        let pcm = decode_to_pcm(
+            &bytes_owned,
+            &mime_owned,
+            max_bytes_for_decode,
+            max_duration_for_decode,
+            timeout_for_decode,
+        )?;
         let tags = crate::transcription::tags::read_audio_tags(&bytes_owned);
         Ok::<_, XbergError>((pcm, tags))
     })
@@ -252,7 +266,9 @@ impl InternalDocumentExtractor for TranscriptionExtractor {
         // aliases core/mime.rs declares for the four canonical types beside them.
         // `validate_mime_type` accepts an alias verbatim and the registry looks extractors up
         // by exact string with no alias resolution, so an unclaimed alias is advertised as
-        // supported and then fails as UnsupportedFormat (#229).
+        // supported and then fails as UnsupportedFormat (#229). The ASF/WMV entries are the
+        // containers the built-in decoder cannot read; their audio track is decoded through
+        // Media Foundation instead (crate::transcription::container).
         &[
             "audio/mpeg",
             "audio/mp3",
@@ -264,6 +280,9 @@ impl InternalDocumentExtractor for TranscriptionExtractor {
             "video/mp4",
             "video/mpeg",
             "video/webm",
+            "video/x-ms-wmv",
+            "video/x-ms-asf",
+            "application/vnd.ms-asf",
         ]
     }
 
@@ -294,7 +313,7 @@ impl TranscriptionExtractor {
             )));
         }
 
-        let pcm = decode_audio_to_pcm(content, tcfg.max_bytes)?;
+        let pcm = decode_to_pcm(content, mime_type, tcfg.max_bytes, tcfg.max_duration_ms, tcfg.timeout_ms)?;
         let tags = crate::transcription::tags::read_audio_tags(content);
 
         if let Some(max_d) = tcfg.max_duration_ms

@@ -9,10 +9,690 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.1.0] - Unreleased
+## [1.2.2] - 2026-09-14
+
+### Fixed
+
+- **(pdf render): `s` (close-and-stroke) is no longer dropped, and no longer floods the next fill.**
+  The object-level content parser had arms for every path-painting operator in ISO 32000-1 Table 60
+  except `s`, which fell through to an operator every consumer ignores. Two things followed: the
+  stroke was never painted, and — because only a painting arm resets the path builder — the
+  abandoned geometry stayed in the builder and was painted by the **next** fill. A stroked frame
+  followed by an ordinary white label fill therefore flooded the frame's whole interior, wiping
+  anything already drawn inside it. Text extraction was unaffected: the byte-level fast path always
+  decomposed `s` correctly. (GH#1633)
+- **(pdf render): a glyph is no longer discarded because its *inferred* Unicode is whitespace.**
+  The byte-indexed rasterizer decided whether to paint by asking what character a code represents
+  rather than whether there was an outline to draw. For a simple TrueType font with a byte-indexed
+  cmap and no `/Encoding` that character is the glyph id reverse-mapped through the font's own
+  `(1, 0)` subtable and read as ASCII or Mac Roman — private glyph ordering decoded as an encoding
+  it never expressed. Six byte values were affected (`0x09`–`0x0D`, `0x20`, and `0xCA` → U+00A0);
+  re-indexed subsets numbering their glyphs from `0x01` upward walked through a whole run unpainted
+  while the advance still applied, leaving gaps that read as spaces. (GH#1632)
+- **(pdf): a hanging-number heading no longer swallows body text indented to its title's edge.**
+  A line was treated as a numbered heading's continuation whenever the heading had a hanging indent
+  and the line began at the title's left edge — which is equally the geometry of any layout that
+  indents the whole clause, as contracts, tenders and many installation manuals are set. Wrapping
+  now also requires that the preceding line actually ran out of room. Separately, a heading that had
+  absorbed a genuine wrap could never be closed, so the sub-heading and entire body below were
+  pulled in after it. (GH#1634)
+- **(cli): the Linux musl CLI binaries are published again.**
+  Since 1.2.0 the `aarch64-unknown-linux-musl` CLI build has been killed mid-link, and because
+  the upload job requires every musl leg to succeed, *no* CLI assets were attached to the 1.2.0
+  or 1.2.1 releases. The cause was the switch to fat LTO: over the `all` feature set the final
+  whole-program link exceeded what the arm64 runner could complete. That build now uses a
+  `release-musl` profile with thin LTO; every other target keeps fat LTO.
+
+---
+
+## [1.2.1] - 2026-09-14
+
+### Fixed
+
+- **(swift): externally tagged enums now decode the wire the core types actually emit.** Regenerated
+  on alef 0.87.1. `EntityCategory`, `PiiCategory` and `ConfidenceSemantics` relied on Swift's
+  synthesized `Codable`, which keys every variant (`{"person":{}}`), while serde writes a bare
+  string for a fieldless variant and a single-keyed object whose value is the payload
+  (`{"custom":"foo"}`). Every bridge-constructed value carrying one of these threw
+  `DecodingError.typeMismatch` — `Entity` and `PiiEntity` decode their `category` into a
+  non-optional field, so any result containing an entity failed. `OutputFormat` is handled
+  separately: its `Custom(String)` variant carries `#[serde(untagged)]`, so it round-trips as a
+  bare string rather than a keyed object.
+
+### Changed
+
+- Dependencies upgraded across the workspace, including `crawlberg` 1.6.1 → 1.6.3 and
+  `tree-sitter-language-pack` 1.19.0 → 1.19.1. `skrifa` stays pinned at 0.46: 0.47 moves to
+  read-fonts 0.44 while harfrust 0.13.3 is still on 0.43, and the PDF text rasterizer passes a
+  harfrust `FontRef` to skrifa's `OutlineFace`.
+
+## [1.2.0] - 2026-09-13
 
 ### Added
 
+- `ServerConfig` gained `job_timeout_secs` (default 600 seconds, override via
+  `XBERG_JOB_TIMEOUT_SECS` or `server.job_timeout_secs`) as the configurable fallback timeout
+  for `POST /extract-async` jobs whose request does not pin down `extraction_timeout_secs`. A
+  per-request `extraction_timeout_secs` still always overrides it, and an explicit
+  `extraction_timeout_secs: null` still falls back to this server cap rather than running
+  unbounded. Previously this fallback was a hardcoded 300 seconds, inconsistent with the 600
+  second default used everywhere else. See the Changed section for the source-compatibility impact.
+
+- A long-running process can now release the embedding and reranker models it no longer
+  uses. `embeddings::evict_model` and `reranking::evict_model` (and the same functions in
+  `sparse_embeddings` and `late_interaction`) drop one model, `clear_engine_cache` drops
+  every model in a cache, and `xberg::clear_engine_caches` drops all of them.
+  `set_engine_cache_limit` bounds the number of resident engines in a cache and drops the
+  least recently used one first. The default stays unbounded, so existing callers see no
+  change (GH#1626).
+
+### Fixed
+
+- `OutputFormat.custom` in the Python binding always returned `None`, even when the value genuinely
+  was a custom format. The accessor derived a discriminator from the enum's JSON, which works for
+  every tagged representation but not for this variant, whose payload is untagged and so carries no
+  discriminator to find. It now matches on the variant directly and returns the label.
+
+- The Python type stub declared a `type: str` attribute on 23 enum classes that have no such
+  attribute at runtime. The stub emitted it for every data enum, while the runtime only exposes it
+  for enums carrying an explicit serde tag -- so for externally tagged enums (`EntityCategory`,
+  `PiiCategory`, `OutputFormat`) a type checker accepted `category.type`, which raised
+  `AttributeError` on use. Stub-only change; no runtime behaviour moved.
+
+- The Ruby binding's `FormatMetadata.from_hash` and `DiffLine.from_hash` read a `_0` key that no
+  longer exists on the wire, so **every variant deserialized with a `nil` payload**. All 24 call
+  sites are corrected: the 21 `FormatMetadata` variants now build their payload from the flattened
+  hash, and the 3 `DiffLine` variants read the `text` key the enum's `#[serde(content = "text")]`
+  actually emits ([#1594](https://github.com/xberg-io/xberg/issues/1594)).
+
+- The Python type stub declared format-metadata payloads as `_0` (for example
+  `_0: ExcelMetadata`), a key present neither on the wire nor on the runtime object -- the runtime
+  per-variant getters such as `.excel` were always correct. The stub now names the real fields, so
+  type checkers stop reporting valid code as an error. Runtime behaviour is unchanged
+  ([#1594](https://github.com/xberg-io/xberg/issues/1594)).
+
+- The Elixir `Xberg.FormatMetadata` typespec documented a `metadata:` payload key that matched
+  neither the NIF struct nor the serialized wire. It now matches the struct the NIF actually
+  returns ([#1594](https://github.com/xberg-io/xberg/issues/1594)).
+
+- A Type0 (composite) font's content-stream character codes are now translated to CIDs before glyph
+  widths and vertical metrics are looked up, instead of being used as if they already were CIDs.
+  The two coincide only for `Identity-H`/`Identity-V`, which is presumably why this went unnoticed.
+  A PDF using a non-Identity predefined CMap (`UniCNS-UCS2-H`, `UniJIS-UCS2-H`, `UniGB-UCS2-H`,
+  `UniKS-UCS2-H`, or their `-V`/`UTF16` counterparts) or an embedded `/Encoding` CMap stream got a
+  wrong width for nearly every glyph -- some over-advancing by up to 4x through the `/DW` fallback,
+  others under-advancing -- which rendered as stretched or overlapping text and, in extracted text,
+  could split one sentence into a spurious extra paragraph. CIDs now resolve from an embedded
+  `/Encoding` CMap stream's own `begincidrange`/`begincidchar` data when present (including a
+  variable-width codespace), else from the font's `/CIDSystemInfo` character collection for the
+  four Unicode-keyed predefined families above, else via `Identity-H`/`Identity-V` as before.
+  Measured over the 230-document local PDF corpus: 227 byte-identical -- the expected result, since
+  most PDFs use Identity-H -- and 2 changed, both merging text that a stale glyph position had
+  fragmented. Legacy multi-byte predefined CMaps this crate carries no code-to-CID table for
+  (`90ms-RKSJ-H`, `GBK-EUC-H`, `B5-H`, the `UTF8` family, `UniJIS-UCS2-HW-*`, `UniJISPro-*`, and
+  others) are unchanged -- still wrong, not newly broken -- and now log once per font instead of
+  failing silently (GH#1631).
+
+- A reconstructed PDF table cell now reads left to right instead of in the order its words happened
+  to arrive. The reported symptom was a sub/superscript printing after the rest of the cell --
+  `eta_S %` came out as `eta % S`, `Q_HE GJ` as `Q GJ HE` -- because a script is drawn as its own
+  content-stream segment a fraction of a point below the line it annotates, so every reading-order
+  sort upstream placed it after the whole line. The same defect also transposed values between
+  columns when two columns were merged into one cell: on a balance sheet whose header reads
+  `2017 2016`, the row beneath it emitted the 2016 figure first, silently attributing each year's
+  number to the other year. A cell's words are now grouped into visual lines and ordered left to
+  right within each line. Grouping first is load-bearing -- ordering by horizontal position alone
+  interleaves the two halves of a wrapped cell. Each word's own whitespace is also collapsed, so a
+  segment carrying a trailing space no longer stacks it on the separator. Table cells recovered by
+  OCR go through the same ordering (GH#1628).
+
+- Image OCR now honours a PNG's embedded `pHYs` pixel density instead of assuming 72 DPI. A genuine
+  300-DPI PNG submitted with `target_dpi = 300` was resized anyway, because the extractor decoded,
+  resized and re-encoded the image -- discarding the density chunk -- before the OCR backend, and
+  therefore before the existing `ocr.backend_options["source_dpi"]` override, ever saw it. Embedded
+  density is now resolved at the extractor boundary and at the backend from one shared
+  implementation, with the explicit override still taking precedence over it. An image carrying no
+  density metadata still defaults to 72 DPI and still resizes (GH#1630).
+
+- A body paragraph is no longer deleted for repeating text that appears elsewhere on the same page.
+  The second `strip_repeating_text` pass keyed on lowercased paragraph text with no check that a
+  table was involved, so a sentence matching an earlier title -- differing only in case, with no
+  table on the page at all -- was silently removed. The pass now runs only on pages that have a
+  detected table, removes a paragraph only when that table's own cells carry the same text, and
+  compares case-sensitively. Measured over 230 PDFs: 44 documents changed, 3472 words recovered and
+  32 lost, both loss cases inspected and benign (one is a restructure whose total content grew, the
+  other two mojibake tokens) (GH#1623).
+
+- OCR text is no longer discarded when a scanned page region is detected as a table but its cell
+  grid cannot be recognised. `recognize_single_table` returned nothing whenever TATR failed,
+  produced no rows or columns, or the grid failed validation, which threw away every OCR element
+  that had been assigned to that region. A region that cannot be recognised as a table now falls
+  back to emitting its text in reading order, and only when that text is not already carried by
+  one of the page's paragraphs, so nothing is duplicated. Together with the restructuring-heuristic
+  retention guard below, recognised OCR text is no longer silently lost on the layout path
+  (GH#1622).
+
+- `extraction_confidence` no longer reports a failed structured extraction as fully
+  schema-valid. The pipeline passed `SchemaCompliance::AllValid` unconditionally, which is 40% of
+  the combined score under the default weights, so a run whose LLM call failed -- or that was
+  built without the `liter-llm` feature, or ran on wasm -- scored exactly as high as one that
+  validated. A requested `structured_extraction` that leaves no `structured_output` now scores
+  `AllInvalid`. Extractions with no `structured_extraction` configured are unaffected and keep
+  their previous score; `ConfidenceSignals` is unchanged in shape, so no serialized form moves
+  (GH#1624).
+
+- `detect_mime_type_from_bytes` no longer refuses text that is not valid UTF-8. A byte buffer with
+  no filename or declared type -- a Windows-1252 or ISO-8859-1 CSV export, say -- returned
+  `UnsupportedFormat` even though the extractors that would receive it decode legacy encodings
+  through `encoding_rs`. Such content is now reported as `text/plain`, the same answer the UTF-8
+  path already gave for the same document, so the two encodings of one file behave alike. Content
+  holding a NUL byte, or with too few printable bytes to read as prose, is still rejected
+  (GH#1625).
+
+- The Go binding no longer discards the message of every error the native layer reports. Each
+  known error code was mapped to a typed sentinel (`ErrTimeout`, `ErrParsing`, `ErrOcr`, and ~20
+  more) and returned before the message was ever read, so the detail the native layer had
+  already produced -- observed durations, limits, plugin names, counts -- was dropped for all of
+  them; only unrecognised codes kept their text. A timeout surfaced as the sentinel's own
+  placeholder-stripped text, `extraction timed out after ms (limit: ms)`, which reads as a
+  formatting bug but is the whole message the binding ever had, and left callers unable to tell
+  which timeout had fired. The message is now read first and returned alongside the sentinel, so
+  `errors.Is(err, xberg.ErrTimeout)` still matches while `err.Error()` carries the real
+  interpolated text. Go was the only binding affected; C#, Java and Zig already read the message
+  before switching on the code. Regression in 1.1.0, when the typed sentinels were introduced.
+- The Python package's public option classes regained `from_json`. `from xberg import
+  ExtractInput` resolves to a generated dataclass that shadows the native class at the same
+  name, and that dataclass carried none of the native class's methods, so `ExtractInput.from_json(...)`
+  raised `AttributeError` while `xberg._xberg.ExtractInput.from_json(...)` worked -- the same
+  name meaning two different things depending on the import. 134 public classes were affected.
+  The dataclasses now delegate `from_json` to the native class, so both import paths behave the
+  same. Other native-only methods on those classes (`validate`, `is_empty`, the
+  `PaddleOcrConfig.with_*` builders) are still absent from the dataclass twins and are tracked
+  separately.
+- An extraction cancelled by `extraction_timeout_secs` now actually stops its per-page PDF OCR
+  work. The timeout fires `cancel_token.cancel()` at every timeout site, but nothing in the OCR
+  page fan-out read the token, so pages kept being OCR'd after the caller already had its
+  `Timeout` error -- burning CPU and holding OCR concurrency permits, which degrades later
+  extractions in a long-lived process (a server, or anything extracting in a loop). The token is
+  now checked both before spawning a page and inside each spawned task, because the spawn loop
+  finishes almost immediately while tasks queue on the OCR semaphore long after it. A cancelled
+  run also reports `Cancelled` instead of tripping the all-pages-failed guard and reporting a
+  wholesale OCR backend failure.
+- PDF no longer promotes ordinary body text to a heading. Two gates decide headings
+  independently and neither tested the line's shape, so any line past the title-length floor
+  could be promoted. The sentence-boundary check that should have caught this looked for a
+  literal `". "` followed by a capital, but paragraph text joins a block's physical lines with a
+  newline, so every sentence boundary landing at a line end was invisible to the gate while the
+  renderer joined the same lines with a space and displayed it -- the gate and the output
+  disagreed about what the text was. Boundaries are now found across any whitespace, and a line
+  that is mostly bare numerals is treated as a flattened data row rather than a heading. Across
+  490 documents: 484 unchanged, 5 with fewer headings, 0 with more (GH#1599).
+
+- Hardened the document-global heading/list heuristic's safety check on the scanned-PDF
+  layout-markdown path (`use_layout_for_markdown` / layout detection, force-OCR route). That
+  heuristic rebuilds paragraphs from bare line geometry with no knowledge of the ML layout
+  regions the OCR path already classified, and can silently drop a line its own font-clustering
+  pass treats as furniture or noise; the guard against this only checked that the whole
+  document still had one non-empty element, so a single surviving word anywhere passed it even
+  if an entire page's body vanished. The guard is now a per-restructuring canonical-character
+  retention check against the lossless OCR assembly, and falls back to that lossless assembly
+  whenever any content would otherwise be lost. Compares characters rather than word tokens: a
+  restructuring pass legitimately re-wraps text across the line boundaries it reads (measured
+  case: "list of findings" split across a line came back "list offindings", one dropped space),
+  and a word-token comparison read that benign re-wrap as content loss and rejected legitimate
+  heading/list promotion along with it. This closes a real gap in the guard's own logic; it was
+  not reproduced against a specific "entire page lost" report and should not be read as a
+  confirmed fix for one (GH#1622).
+- PDF table/paragraph assembly (`assemble_page_elements_with_tables`) now suppresses a
+  paragraph whose words a positioned table's own grid fully carries, so a recognized table no
+  longer also renders its flattened source text as an ordinary paragraph immediately next to
+  the grid -- observed directly (not inferred) on a scanned-PDF fixture with layout detection
+  enabled, where a table's status-row text appeared once as prose and once as a correctly
+  gridded table. Mirrors the GH#1616 precedent from the other direction: suppression requires
+  the table's own cell/markdown content to actually account for every one of the paragraph's
+  words (an order-insensitive multiset match, since a reconstructed grid can reassemble the
+  same words in a different order than the source paragraph), not geometry alone, so a
+  paragraph carrying text the grid does not represent still survives. Note: this closes the
+  duplication for paragraph/table pairs that share a coordinate space (the native-PDF table
+  path). Investigating this also surfaced a separate, unresolved coordinate-space mismatch
+  between OCR/TATR-recognized table bounding boxes and OCR paragraph bounding boxes on the
+  force-OCR + layout-detection route specifically, which currently prevents this same guard
+  from geometrically matching on that route; fixing that is out of scope here and is not yet
+  done (GH#1622).
+- PDF no longer deletes text a table's bounding box covers but its grid leaves out. Suppression
+  of text a table already renders was decided on geometry alone, and a reconstructed grid need
+  not span every printed column inside its own bounding box. On a four-column fault-finding grid
+  reconstructed with two columns, every run in the two omitted columns vanished from the
+  document — not in a cell, not in any element, nowhere. A covered run is now suppressed only
+  when the table actually carries its text (GH#1616).
+- PDF no longer cuts a numbered heading that wraps onto a second line. The wrap exemption
+  compared the two lines' right edges, and a wrap's last line is short by definition, so it could
+  never fire: the heading kept only its first line and the rest of its title was emitted as body
+  text. A heading's own continuation is now recognised by its left edge, which is the title's
+  hanging indent rather than the margin body text returns to. Regression in 1.1.5 (GH#1615).
+- An extraction that never requested OCR no longer fails when no OCR backend is registered.
+  `ocr-pipeline` can be enabled without any backend — `ocr` implies `ocr-pipeline`, not the
+  reverse — and in that build the automatic scanned-page trigger aborted an ordinary PDF
+  extraction with `OCR backend 'tesseract' not registered`. Automatic triggers now check
+  availability and skip with a warning; an explicit `force_ocr`, `force_ocr_pages`,
+  `ocr_inline_images` or caller-supplied `ocr` config still fails loudly (GH#1610).
+- Legacy binary `.ppt` now reports which slide each embedded picture belongs to. Pictures were
+  read from the OLE `Pictures` stream, which stores blips in save order and names no slide, so
+  every extracted image carried no page number and every image node was emitted after the last
+  slide. A slide whose only content is a picture therefore produced nothing at all on its own
+  number and read as a blank slide, and captions or any other data keyed on an image's page were
+  filed against the end of the deck. The owning slide is now resolved through the drawing that
+  references the blip; a picture no live shape references is still extracted, without a slide
+  (GH#1620).
+- Legacy binary `.ppt` no longer extracts deleted slide revisions or presents slides in the
+  wrong order. The format is append-only across saves, so editing a deck leaves superseded
+  copies in the stream; treating every `Slide` container as a slide produced 190 slides for a
+  96-slide presentation, numbered by byte order. Live slides and their order now come from the
+  persist chain (`Current User` → `UserEditAtom` → `PersistDirectoryAtom`) and the document's
+  slide list, falling back to the previous behaviour if the chain cannot be read in full. Slide
+  numbers are the page every element and chunk of a deck is cited by, so both defects reached
+  consumers as wrong page numbers (GH#1614).
+- PDF de-hyphenation no longer welds a compound whose own hyphen falls on a line break. Two
+  sites decide whether a trailing hyphen survives; only one consulted the lexical evidence, so
+  `long-term`, `cost-effective` and `antigen-presenting` came out as `longterm`, `costeffective`
+  and `antigenpresenting` — tokens that do not exist, and so unreachable by any lexical search.
+  The assembly site now asks the same question the paragraph site already asked, weighing both
+  the static compound list and the witnesses collected from the document itself. A hyphen the
+  wrap genuinely inserted is still removed (GH#1613).
+- Legacy binary `.ppt` no longer loses slide titles. PowerPoint keeps a slide's text in two
+  places, and the extractor read only one: titles held in the document-level outline
+  collection (`SlideListWithText`) landed in the loose-text bucket, which is discarded whenever
+  any slide exists, so they were absent from the output entirely. Outline text is now attributed
+  to its slide by persist order and merged in, skipping any line the slide's own drawing already
+  carries so a title drawn on the canvas is not duplicated (GH#1612).
+
+- The documented install versions for Java, Kotlin Android, Swift, Zig and the spring-ai
+  integration no longer lag the release. These snippets sit outside `task version:sync`, which
+  covers the generated API-reference badges but not hand-authored install directives, so they
+  had been telling users to install 1.1.3 (GH#1593 covers the same class of staleness in
+  `test_apps`, which is still open).
+- `OcrConfig` no longer rejects valid Tesseract language codes such as `fao` (Faroese) with
+  `Invalid language code 'fao'. Use ISO 639-1 or ISO 639-3 codes.`. Config validation checked
+  the language against a general-purpose allowlist that was missing 66 codes Tesseract actually
+  supports, while a separate, Tesseract-specific list already carried them; the two lists had
+  never been reconciled. Config validation itself only started running for configs loaded from
+  files, JSON overrides, or set programmatically in 1.1.0 (previously it ran only in tests), which
+  is when this allowlist gap first became user-visible. Both validators now read from one shared
+  list of Tesseract-supported codes, so this class of divergence cannot recur (GH#1621).
+
+### Changed
+
+- **Breaking (Java binding):** enum constants now follow Java's own convention and are
+  `SCREAMING_SNAKE_CASE` instead of carrying Rust's PascalCase verbatim -- `LinkStyle.Inline`
+  becomes `LinkStyle.INLINE`, across roughly 75 generated enums. **The JSON wire value is
+  unchanged**; only the Java identifier moves, so serialized documents and stored payloads are
+  unaffected. Update references to the constants themselves; generated default values
+  (`ChunkType.Unknown`, `OutputFormat.Plain`) moved with the declarations.
+
+- **Breaking (Ruby binding):** an externally tagged enum variant carrying a single payload
+  (`EntityCategory::Custom`, `PiiCategory::Custom`, `OutputFormat::Custom`) now serializes the way
+  the Rust core always did -- `{"custom" => "my-label"}` -- instead of wrapping the payload in an
+  extra object keyed by a synthesized positional name, `{"custom" => {"_0" => "my-label"}}`. Code
+  reading `hash[:custom][:_0]` should read `hash[:custom]`. The previous shape matched no other
+  binding and no core output.
+
+- **Breaking (PHP binding):** `EntityCategory`, `PiiCategory` and `OutputFormat` change from
+  constants-only classes to classes with static factories, because the old shape could not carry a
+  payload at all: a caller-supplied label was silently discarded in both directions, so
+  `Custom($label)` always round-tripped as an empty string. Use `EntityCategory::custom($label)`
+  and `EntityCategory::person()` in place of the old `Xberg\EntityCategory::PERSON` constants; the
+  label is readable from the readonly `$custom` property.
+
+- **Breaking (Node binding):** the JSON surface is camelCase throughout, nested types included, and
+  `FormatMetadata` is a flat discriminated union keyed by `formatType` whose variant payload fields
+  sit directly on the object (`{ formatType: "excel", sheetCount: 2 }`). The binding previously
+  exposed two parallel shapes for one Rust type -- an idiomatic camelCase interface beside a
+  snake_case structural twin -- and only the latter was reachable from a result.
+
+- **Breaking (Node, Swift bindings):** `FormatMetadata` now serializes flat in every binding --
+  `{"format_type": "pdf", "page_count": 12, ...}` -- matching what the core Rust enum has always
+  serialized (`#[serde(tag = "format_type")]`), what the OpenAPI discriminator describes, and what
+  the REST API serves. Two bindings disagreed with that wire and have been corrected:
+  - **Node** nested the payload one level down under a property named for the variant, so
+    `doc.metadata.format.pdf.pageCount` becomes `doc.metadata.format.page_count`. Note the field
+    names are **snake_case**, unlike the camelCase Node uses elsewhere: the variants carry
+    mutually incompatible field types (`headers` is `string[]` for text and an object array for
+    HTML), so no single Node class can describe them and the value is passed through as serde
+    emits it. `format` is typed as a discriminated union in `index.d.ts`, so narrowing on
+    `format_type` still gives a fully typed payload. This also resolves the Node and WebAssembly
+    bindings disagreeing with each other -- WASM was already passing serde's shape through, so the
+    two now emit an identical `format` object for the same document.
+  - **Swift**'s `FormatMetadata` was a `typealias` to an opaque bridge class carrying no payload,
+    so the JSON in `Metadata.format` could not be decoded into anything useful. It is now a real
+    `Codable`/`Sendable` enum with one case per format, making the payload reachable:
+
+    ```swift
+    if let json = doc.metadata?.format,
+       case .excel(let meta) = try formatMetadataFromJson(json) {
+        print(meta.sheetCount)
+    }
+    ```
+
+    `Metadata.format` still hands back the serialized JSON `String`; what changed is that
+    `formatMetadataFromJson` now yields a pattern-matchable enum carrying the payload instead of
+    an opaque handle. The wire was already correct here -- the Swift type system was the part
+    that was missing.
+
+  Python, Go, Java, C#, Kotlin, PHP and Ruby are unaffected on the wire: they either already
+  emitted the flat shape or expose native per-variant accessors over it
+  ([#1594](https://github.com/xberg-io/xberg/issues/1594)).
+
+- **Breaking (Rust source, Java):** `ServerConfig` adds `job_timeout_secs`. Exhaustive Rust struct
+  literals must set the field or use `..ServerConfig::default()`, and the Java record's canonical
+  constructor gains a sixth component, so `new ServerConfig(host, port, corsOrigins,
+  maxRequestBodyBytes, maxMultipartFieldBytes)` no longer compiles -- use `ServerConfig.builder()`,
+  which is unaffected. Every other binding is source-compatible: the field is last and defaulted in
+  the Python dataclass (`= 600`), the Kotlin data class (`= 600L`) and C# (`{ get; init; } = 600`);
+  a defaulted keyword in Ruby and PHP; an optional pointer with `omitempty` in Go; and an additive
+  `xberg_server_config_job_timeout_secs` getter in the C FFI (gated on `api-types`). Deserializing
+  callers are unaffected everywhere -- the field carries `#[serde(default)]`.
+- Public binding-facing structs in this crate are deliberately **not** `#[non_exhaustive]`: alef
+  generates `impl From<Mirror> for xberg::T` with a struct literal in roughly ten binding crates,
+  and `#[non_exhaustive]` forbids that cross-crate (E0639) -- including the `..Default::default()`
+  spread. `Default` plus `#[serde(default)]` is the forward-compatibility mechanism instead, and a
+  field addition is recorded here as a labelled source break rather than prevented by the type
+  system. `#[non_exhaustive]` is reserved for types excluded from binding generation.
+- Retroactive note for 1.1.4: `Metadata#format` in the Ruby binding changed shape and no
+  changelog entry recorded it at the time. The format-specific payload had been nested under a
+  `_0` key (`format.fetch(:_0).fetch(:title)`); since 1.1.4 the payload's fields sit directly
+  alongside the `format_type` tag (`format.fetch(:title)`). Ruby callers written against the
+  older shape raise `KeyError` on `_0`. The binding has emitted the flat shape since 1.1.4; the
+  generated Ruby e2e specs were still asserting the nested one, which is why this went unnoticed
+  for two releases. Only the Ruby binding is affected. Part of GH#1594, which also tracks the
+  Swift binding still discarding the payload entirely -- that half is not yet fixed.
+
+## [1.1.5] - 2026-09-10
+
+### Fixed
+
+- The Java binding compiles again. A method returning `Option<Vec<u8>>` — `Registry.sampleBytes`
+  is the only one today — was generated declaring `Optional<byte[]>` while returning a bare
+  `byte[]`, which javac rejects. 1.1.4 therefore published no Java artifact at all, and the
+  spring-ai integration was blocked waiting on it. Fixed upstream in alef 0.85.12; this release
+  regenerates on it.
+
+## [1.1.4] - 2026-09-09
+
+### Changed
+
+- **BREAKING (Ruby):** `FormatMetadata` reaches Ruby as a flat hash. It previously arrived as
+  `{format_type:, _0: {...}}`, where `_0` was the name serde invents for an unnamed tuple field;
+  it now arrives as `{format_type: 'excel', sheet_count: 2, ...}`, the canonical wire the core
+  declares. Code reading `metadata.format[:_0][:sheet_count]` must read
+  `metadata.format[:sheet_count]`. This shipped unannounced in 1.1.4 and is recorded here
+  retroactively; no other binding's shape changed (GH#1594).
+
+### Fixed
+
+- PDF reading order no longer tears a subscript off the symbol it names. Spans were ordered by the
+  top of their bounding box, but a subscript is drawn 35-40% smaller than its base, so its top sits
+  several points lower even though its baseline is a fraction of a point away. An unrelated span
+  from the next column could sort between a base run and its own subscript, and the symbol the
+  subscript names no longer existed anywhere in the output. Ordering now quantises the baseline
+  into row bands before comparing horizontally, which is what every other caller of that comparator
+  already did (GH#1600).
+- PDF table detection no longer bridges two separate tables across the graphics-free gap between
+  them. A cell was built from intersection points alone, so a section heading printed in that gap
+  was absorbed into one of the tables as a single-cell row. A candidate cell now also requires a
+  drawn vertical rule spanning its own Y-range on both sides. The span tolerance is load-bearing:
+  at the tighter X-axis value, rows of a table whose rules are inset by a few points are dropped
+  (GH#1601).
+- PDF two-column detection no longer loses the page's split to a hanging-number indent. When any
+  span straddled a correctly detected gutter, the split was replaced outright by the midpoint of
+  the widest whole-page whitespace corridor — on a hanging-number layout, the indent between the
+  numbers and the text. The reorder then hoisted every clause number out of its clause. A
+  relocation is now rejected when it would move the split more than a quarter of the page width,
+  which leaves every legitimate corridor move in the corpus intact (GH#1603).
+- PDF paragraph grouping no longer splits a numbered heading that wraps onto a shorter second line.
+  The wrap exemption compared the two lines' right edges, but a heading fills its column on its
+  FIRST line and the continuation is whatever is left over, so the metric was anti-correlated with
+  the answer. The pair is now also exempt when the continuation opens lowercase AND the heading
+  line reaches within a tolerance of the width of what would be merged onto it — the "fills its
+  column" half the original rule stated but never measured. The lowercase test alone is not
+  sufficient: body prose beginning lowercase under a complete numbered heading has the same
+  signature (GH#1605).
+- PDF paragraph grouping now recognises a numbered heading whose line arrives as more than one text
+  span. The break terms tested the predicate against a single span, so a heading set with a hanging
+  section number — `3.1.7` in one span, its title in the next, on one baseline — never looked like a
+  numbered heading and was left to the ordinary paragraph-gap rule. That rule needs a gap wider than
+  ordinary line pitch, so every such heading whose body starts on the next line was welded into it.
+  The line's spans are now re-joined before the predicate runs, which is what the continuation-merge
+  pass already did (GH#1609).
+- PDF paragraph grouping now recognises a heading whose number is not its first token — `ARTIKEL 1.`,
+  `Chapter 1`, `Appendix 1`, `Annex III`, `Exhibit A`. The numbered-heading predicate is the only
+  boundary signal available when a heading shares font, size, weight and leading with its
+  neighbour, so a heading it could not see was welded onto the line above it, and a run of such
+  headings collapsed into a single element. Recognition is by shape, not by a keyword list: one
+  capitalised word standing in front of an enumerator. Prose that opens the same way — `Artikel 12
+  van de wet is van toepassing.` — stays prose, because behind a keyword the text after the
+  enumerator must still be capitalised (GH#1608).
+- PDF heading detection no longer skips a numbered heading that is only two words long. Promotion
+  of a bold, body-size line to a heading required more than two words — a floor that keeps short
+  bold fragments out — and a numbered section title such as `3. PRIJZEN` or `1. INTRODUCTION` falls
+  below it. Those lines stayed plain bold paragraphs, and a run of them was then coalesced into a
+  single bold line in the rendered output, while the element stream still reported them separately.
+  A numbered section heading is now exempt from the word-count floor; everything else still has to
+  clear it (GH#1611).
+- OCR no longer adopts a markdown table rebuild that loses content. The rebuilt page replaced the
+  original whenever it was merely non-empty, so a rebuild that dropped text still won. The rebuild
+  is now rejected, with a warning naming both word counts, when it retains fewer words than the
+  content it would replace (GH#1599).
+- PaddleOCR's default `model_tier` of `mobile` now resolves to the pp-ocrv6 `small` detection model
+  (9.9 MB) rather than `medium` (62 MB). A tier named `mobile` silently loading the largest
+  available model made a 21-page document take over ten minutes. `small` and `medium` share the
+  same 18,708-character dictionary, so recognition coverage is unchanged. The documented model
+  sizes were also wrong and have been corrected (GH#1602).
+- The PHP extension now loads on Debian 12 and other distributions built against GCC 12. The Linux
+  publish runners ship GCC 13+, and the extension picked up a `GLIBCXX_3.4.31` symbol from their
+  libstdc++ while Debian 12 provides at most `GLIBCXX_3.4.30`. libstdc++ is now linked statically;
+  the highest glibc requirement was already below Debian 12's (GH#1606).
+
+## [1.1.3] - 2026-09-08
+
+### Added
+
+- `Table.cell_styles` and `GridCell.heading_level` / `GridCell.style_name` expose the paragraph
+  style a DOCX table cell carries. A heading styled `Heading1`..`Heading6` inside a `w:tc` — the
+  banner row forms, questionnaires and datasheets use as a section title, and what Word's
+  navigation pane and a `TOC` field treat as the document outline — previously reached every
+  consumer as anonymous cell text. Cell text is deliberately unchanged: prefixing it with `#`
+  would put a markdown heading inside a table cell. The style travels beside the text instead, so
+  a caller can decide whether a `heading 2` in a banner row is a section title or a column label.
+  `cell_styles` is sparse and omitted entirely for tables whose cells carry no style, so ordinary
+  tables serialise exactly as before (GH#1587).
+
+### Fixed
+
+- PDF text repair no longer welds two complete words into one. `repair_ligature_spaces` removes the
+  space in `…f` + ` ` + `i|l|f…` to undo a real artefact — some PDFs decompose a ligature glyph and
+  leave a spurious gap, so `first` arrives as `f irst` — but the same character pattern is an
+  ordinary word boundary whenever a word ends in `f` and the next begins with `i`, `l` or `f`. The
+  only guard was a hard-coded list of 33 short English words tested against the left token, so
+  everything outside it welded, English included: `relief for` became `relieffor` and `itself
+  infringes` became `itselfinfringes`. The space is now kept when either fragment is independently
+  attested as a standalone word elsewhere in the same document, reusing the witness mechanism
+  dehyphenation already applies. A fragment appearing only as one half of a candidate pair does not
+  witness itself (GH#1591).
+- DOCX page counting no longer collapses a table onto one page. Word writes
+  `<w:lastRenderedPageBreak/>` into *every* cell of a row that straddles a page boundary — one
+  physical break, one marker per cell — and the duplicated markers were reduced to a single break,
+  losing the originals with the duplicates. A seven-page document reported two. Breaks are now
+  identified by table depth, row and cell, so a marker echoed across the cells of one row counts
+  once while several breaks inside a single deep cell each still count (GH#1592).
+
+- PDF outline (bookmark) named destinations now resolve when the `/Names` -> `/Dests` name-tree
+  key is UTF-16BE-with-BOM, the form Adobe Distiller writes. The lookup previously decoded the
+  `/Dest` byte string with a lossy UTF-8 conversion before searching the tree; a name-tree key is a
+  byte string compared by byte (ISO 32000-1 §7.9.6), not text, so the BOM was mangled into
+  replacement characters and every such destination silently resolved to `None`, leaving the
+  bookmark's `dest` as an unresolved `Destination::Named` with no page (GH#1589).
+- `MimeDetectionPolicy::ContentOnly` no longer rejects a legacy OLE2 Office document (.doc/.xls/.ppt)
+  passed by path when the same bytes are accepted through the bytes API. Path-based content
+  detection only sniffs the first 4 KB of a file, but an MS-CFB compound document cannot be typed
+  from a prefix — identifying it means following the FAT sector chain to the root directory entry,
+  which a truncated buffer cannot do. Detection now falls back to a structure-aware read of the
+  file for a compound-file header that a 4 KB prefix left inconclusive, the same escape hatch a
+  ZIP-based Office document already had for the same class of failure (GH#1590).
+
+- PDF table detection no longer invents a column boundary from a rule that stops short of the row
+  band. `BAND_RULE_SPAN_TOL` was defined as `SNAP_TOL`, conflating two different questions:
+  `SNAP_TOL` decides whether two coordinates *are the same coordinate*, while this one decides
+  whether a vertical rule *runs through* a band. At 3pt an edge could fall short at each end and
+  still count as spanning, so a band up to 6pt shorter than the rule beside it was cut where the
+  drawn rule gave it no boundary. Those phantom columns are what let a band of prose inside a
+  drawn frame split into cells and qualify as a table, which on the reported document cost page
+  text. Now 1.0 and deliberately independent of `SNAP_TOL` (GH#1588).
+
+- Tesseract `psm = 0` is now rejected at configuration validation. PSM 0 is Tesseract's
+  `PSM_OSD_ONLY` — orientation and script detection with no character recognition — so it cannot
+  satisfy a text-extraction request, and Tesseract emits no hOCR for it at all. Setting it
+  previously succeeded while returning either a zero-length document or degraded, partially
+  dropped text, depending on the Tesseract build, in both cases with no warning and at several
+  times the cost of a normal run. The error now names the mode and points at 3 (auto), 6 (single
+  block), and 11 (sparse text). Valid values are 1-13; omitting `psm` continues to let the
+  pipeline choose (GH#1586).
+
+## [1.1.2] - 2026-09-07
+
+> **This release contains a breaking public API change.** `TesseractConfig.psm` is now optional.
+> Callers that read or set it as a plain integer must handle `None` / `null` — see below.
+
+### Changed
+
+- **Breaking:** `TesseractConfig.psm` is now `Option<i32>` (`null`/`None`/absent in the bindings)
+  and defaults to unset rather than to 3. This fixes supplying a `TesseractConfig` at all acting
+  as a hidden behaviour switch: because several code paths keyed on the struct being absent, a
+  caller who set one unrelated field — table detection, a preprocessing knob — silently lost the
+  whole-image PSM 11, the vertical-language PSM 5, the layout-region PSM 6, and the sparse-text
+  retry, and got Tesseract's PSM 3 instead. `TesseractConfig()` with default fields is now a
+  no-op: the pipeline applies exactly the same automatic PSM it would with no `TesseractConfig`.
+  An explicitly set `psm` is still honoured. Bindings that model `psm` as a plain integer expose
+  a companion presence check (for example `xberg_tesseract_config_has_psm` in the C API), since a
+  bare integer cannot distinguish "unset" from a real `0`.
+
+### Fixed
+
+- Fixed a numbered or bulleted list on a scanned page being reconstructed as a table, replacing
+  the list text with a mangled grid. A candidate region whose first column is list markers
+  (`1.`, `a)`, `•`) end to end — the header cell included — is now rejected on the OCR routes.
+  A genuine numbered table is unaffected: its first column carries a header label (`Line`,
+  `Item`) above the numbers, which is what separates the two.
+- Fixed a table detected on a scanned page having its text returned twice — once as paragraphs,
+  once as table cells — in the document content and element tree. This affected every
+  `output_format`; `"plain"` only appeared to avoid it.
+- Fixed `PdfConfig.top_margin_fraction` / `bottom_margin_fraction` defaulting to 0.06/0.05
+  (6%/5%) since 1.1.0, which silently dropped OCR text — page titles included — in the top and
+  bottom bands of every default-config scanned PDF page with no warning. Both now default to
+  0.0 (disabled); set them explicitly to filter header/footer content. The nonzero defaults
+  also forced every default-config OCR page onto the lossy per-page route instead of a
+  document-capable backend's whole-document path; that routing is restored too.
+- Fixed rendered PDF pages losing the Tesseract backend's own `ProcessingWarning`s (including
+  the dictionary-filter removal notice) and OCR metadata (`psm`, `language`,
+  `tesseract_dict_invalid_word_ratio`), both of which reached the caller for a standalone image
+  but were silently dropped for the same page rendered from a PDF.
+- Fixed `OcrConfig.language` being discarded whenever a `TesseractConfig` was supplied, so a
+  German document was OCR'd in English. One precedence rule now governs both Tesseract backends
+  and the vertical-language check.
+- Fixed supplying any `ImageExtractionConfig` suppressing document-level OCR on scanned PDFs,
+  which returned empty pages with only a debug log.
+- Fixed rendered PDF pages ignoring the configured render DPI. `target_dpi`, `min_dpi`,
+  `max_dpi`, and `auto_adjust_dpi` are now honoured. With no configuration the default stays at
+  150 DPI, unchanged.
+- Fixed suspended hyphens being welded during text assembly, turning `onderhouds- en` into
+  `onderhoudsen`. A hyphen is now joined only across a genuine visual line break, matching the
+  rule the pipeline layer already applied.
+- Fixed an unruled full-width band in a ruled table being cut at column positions no rule gives
+  it, splitting headings mid-word. A column boundary now counts only where a vertical edge
+  actually spans the band.
+- Fixed every non-header table cell having its em-dashes, en-dashes and minus signs rewritten to an
+  ASCII hyphen, the spaces around a hyphen collapsed, `E-`/`E+` lowercased to `e-`/`e+`, and any
+  cell consisting solely of a dash emptied. That normalisation is correct for a numeric column (an
+  em-dash means nil, `1.5E-05` is an exponent, `- 3` is `-3`) but corrupted prose tables, turning
+  `Functionaliteit—12` into `Functionaliteit-12` and a part code `HRE - HReco` into `HRe-HReco`.
+  It is now applied only to columns whose data cells are predominantly numeric
+  ([#1582](https://github.com/xberg-io/xberg/issues/1582)).
+- Fixed the Windows PHP extension archives failing to publish at all. `vendor-windows-native-closure.ps1`
+  repacks a `.zip` with `Compress-Archive`, which runs no native command and so never sets
+  `$LASTEXITCODE`; the release workflow gated on it, and an unset `$LASTEXITCODE` compares as
+  non-zero, so every Windows archive was rejected immediately after being vendored successfully.
+  Combined with an all-or-nothing matrix gate that withheld the release's PHP assets whenever any
+  single leg failed, this left v1.1.0 and v1.1.1 with no PHP binaries at all. Both are fixed: the
+  script now sets its exit contract explicitly, matching its sibling scripts, and the upload job
+  now ships the archives from the legs that succeeded
+  ([#1585](https://github.com/xberg-io/xberg/issues/1585)).
+
+## [1.1.1] - 2026-09-07
+
+> **This release contains a breaking public API change.** `OutputFormat::Structured` is renamed to
+> `OutputFormat::DocTags`. Update any config, CLI invocation, or binding call using
+> `output_format = "structured"` to `"doctags"`.
+
+### Changed
+
+- **Breaking:** renamed `OutputFormat::Structured` to `OutputFormat::DocTags` across every binding
+  and the `output_format` config field. The rename shipped in 1.1.0 but was only alluded to there,
+  with no entry describing it; the variant was renamed, not removed, and is available as
+  `"doctags"`. An `output_format` of `"structured"` is not rejected — it resolves to a custom
+  renderer of that name, which is not registered.
+- **Breaking:** the TypeScript and WebAssembly `OutputFormat` type is a string union again
+  (`"plain" | "markdown" | "djot" | "html" | "json" | "doctags" | ...`), matching the serde wire
+  format shared with the CLI, REST, MCP, config-file, and Go surfaces. 1.1.0 briefly published an
+  object union (`{ type: "markdown" }`) for these two bindings only.
+
+### Fixed
+
+- Fixed PHP extension packaging, which produced no PIE archives for 1.1.0.
+- Fixed HEIC and AVIF decoding on the Linux (glibc) Node binding, which shipped a `libheif` built
+  with no HEVC or AV1 decoder at all — every `.heic` and `.avif` input failed to decode while the
+  `heic` feature still reported as present. The Elixir `linux-gnu` NIF carries the same working
+  codec closure.
+- Fixed Elixir NIF publishing for `linux-gnu` and Windows, which produced no artifacts for 1.1.0
+  and left the Hex package at 1.0.14. The `linux-gnu` NIF is now built against the glibc 2.28 floor
+  it claims to support; the artifacts published for 1.0.14 bundled HEIF codec libraries that
+  required a newer glibc.
+- Fixed the Windows Hex package, which declared the `x86_64-pc-windows-gnu` target while CI built
+  and published `x86_64-pc-windows-msvc`. `RustlerPrecompiled` resolves the msvc triple on Windows
+  and rejects any triple the package does not declare, so `mix deps.get` failed with "precompiled
+  NIF is not available for this target" even though the artifact existed. Windows users had to
+  compile the NIF from source.
+
+### Security
+
+- The Linux binding images now verify a pinned SHA-256 for every vendored native dependency
+  (`libde265`, `libheif`, ONNX Runtime) before building it, instead of trusting the download. These
+  libraries are linked into the published Node and Elixir artifacts.
+
+## [1.1.0] - 2026-09-06
+
+> **This release contains breaking public API changes.** Entries prefixed **Breaking:** below remove
+> or change public API — notably `OutputFormat::Structured`, the `ElementId` wrapper,
+> `ExtractedDocument.formatted_content` in the language bindings, and the `core::batch_mode`,
+> `core::formats`, and `core::io` modules — and configuration deserialization now rejects unknown
+> fields rather than ignoring them. Review them before upgrading.
+
+### Added
+
+- Added per-page OCR confidence to `PageContent.ocr_confidence`, reported as a
+  `PageOcrConfidence { score, word_count, backend }`
+  ([#1568](https://github.com/xberg-io/xberg/issues/1568)). The field is absent for pages that
+  were not OCR'd. `score` is populated only for backends whose confidence is a calibrated
+  legibility scale (normalised to `0.0..=1.0`) and is `None` for uncalibrated ones, so a page
+  OCR'd without a comparable score is still distinguishable from a page nobody scored. It is
+  reported alongside `word_count` because noise filtering runs before the score is computed: a
+  high score over very few surviving words does not mean the page read well.
+
+- Added HWPX (Hangul Word Processor XML) extraction to the WebAssembly package. `unhwp`
+  target-gates its ZIP reader to a deflate-only, LZMA-free build under `wasm32`, so the
+  native-C dependency that previously kept `hwpx` off `wasm-target` does not apply there.
+- Added diagram recovery from flat OpenDocument drawings (`.fodg`), including content-based
+  detection of the `application/vnd.oasis.opendocument.graphics-flat-xml` MIME type. Connectors
+  name their endpoints outright, so the recovered graph is exact rather than inferred from
+  geometry (#1545 corpus fixture).
 - Added structural extraction for MyST Markdown syntax and MyST text notebooks, including saved
   inline `{eval}` values in Jupyter markdown cells
   ([#1538](https://github.com/xberg-io/xberg/issues/1538)).
@@ -67,9 +747,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added `classify_chunks_owned` for classifying and returning an owned document.
 - Exposed chunk-classification and LLM concurrency, provider, cache, budget, and rate-limit configuration
   types at the Rust crate root.
+- Added `OcrConfig::security_limits`. `ExtractionConfig::security_limits` is now threaded through to
+  every OCR route — embedded images, Tesseract, PaddleOCR, and scanned PDF pages — instead of each
+  route decoding images under a hardcoded `SecurityLimits::default()`
+  ([#1554](https://github.com/xberg-io/xberg/issues/1554)).
+
+- Added `detected_language_confidences`, carrying each detected language's confidence, proportion,
+  script, and reliability alongside the existing `detected_languages` codes, so a document that is
+  95% English and 5% French is distinguishable from an even mix
+  ([#261](https://github.com/xberg-io/xberg/issues/261)). The existing field keeps its type and ordering.
+- DOCX reviewer comments now emit their own `NodeContent::Comment` node instead of riding the
+  footnote reference and definition machinery, so consumers can tell a comment from a footnote.
+- PDF annotations now preserve their subtype (Ink, Square, Circle, Polygon, PolyLine, Line, Squiggly,
+  Caret, FileAttachment, Sound, Movie) instead of collapsing to `Other`, carry author, modification
+  date, colour, subject, and QuadPoints, recover the text a Highlight marks, and are emitted by the
+  Markdown, Djot, plain, HTML, and JSON renderers — previously no renderer emitted annotations at all
+  ([#63](https://github.com/xberg-io/xberg/issues/63)).
+- PDF extraction now reads image alt text from the structure tree, falls back to XMP for title,
+  author, and subject when the Info dictionary is empty, surfaces `/PageLabels` (roman-numeral front
+  matter, per-section numbering) through `metadata.additional`, excludes content on optional-content
+  layers that are off by default, and renders filled AcroForm values. Unencodable images, annotation
+  failures, and form failures now emit a `ProcessingWarning` instead of being dropped at log level
+  ([#62](https://github.com/xberg-io/xberg/issues/62), [#71](https://github.com/xberg-io/xberg/issues/71)).
+- The OOXML `DocSecurity` bit field is decoded into named protection flags on `Metadata.additional`
+  for DOCX, XLSX, and PPTX, so a password-protected or read-only-recommended document is
+  distinguishable from an unrestricted one.
+- Added PaddleOCR on the tract backend, so classical PaddleOCR (DBNet, CRNN, AngleNet) is available on
+  `wasm32` and the Android x86_64 emulator, where ONNX Runtime cannot link.
+- Added `top_p`, `stop`, `seed`, `presence_penalty`, and `frequency_penalty` to `LlmConfig`, validated
+  and applied to every outgoing request. They were previously accepted by every config file and
+  language binding and then dropped before reaching a provider.
+- Added `LlmConfig.max_concurrency` to bound VLM OCR and image-captioning requests in flight
+  independently of `ConcurrencyConfig.max_threads`, which represents local CPU capacity
+  ([#1453](https://github.com/xberg-io/xberg/issues/1453)).
+- Every error variant now carries a stable FFI error code, so typed error handling works in the C-ABI
+  bindings; `errors.Is(err, ErrOcr)` in Go, Java's `checkLastError` switch, and Zig's error set
+  previously collapsed all variants to a single unknown constant.
+- Exposed `html_to_markdown_rs::ConversionOptions` at the Rust crate root, so callers configuring
+  `ExtractionConfig::html_options` no longer need a direct dependency on the upstream crate, and made
+  `DocumentNode`'s text and node-type accessors public so `DocumentStructure.nodes` can be read as
+  documented.
+- Added `FormatMetadata::html()`, returning the HTML metadata when the variant is `Html`, matching the
+  accessors already exposed for the other formats.
+- Added an opt-in Pdfium PDF extraction backend behind the `pdf-pdfium` feature, selectable with
+  `PdfConfig.backend` or `--pdf-backend pdfium`, providing page count, per-page text, and Info
+  dictionary metadata. Its scope is deliberately narrower than the native engine — no table detection,
+  layout integration, form fields, or OCR fallback — and every result carries a `ProcessingWarning`
+  naming the gap. The feature is not part of `full`, so it reaches source builders only.
+- Added a Scoop manifest published to the `xberg-io/scoop-bucket` on release, so the Windows CLI can be
+  installed with `scoop install xberg`.
+- Extraction now reports a `ProcessingWarning` when a document decodes lossily or degrades silently.
+  Decode provenance is captured before mojibake cleanup strips the replacement characters that used to
+  be the only evidence, and archive, AsciiDoc, WebVTT, XML, and plain-text extraction warn on replaced
+  characters. Unresolved ODT image hrefs, unparseable `styles.xml`, collapsed repeated table cells,
+  skipped LaTeX, Typst, RST, and Org includes, OPML without a body, links past the per-document URI
+  cap, truncated XML, and words Tesseract failed to extract now warn instead of failing silently
+  ([#171](https://github.com/xberg-io/xberg/issues/171), [#133](https://github.com/xberg-io/xberg/issues/133)).
+- A PDF page whose raster render comes back blank now falls back to OCR'ing the page's embedded image
+  XObjects, and that recovery preserves the tables, formulas, LLM usage records, and image
+  preprocessing metadata the backend produced instead of keeping only the text, with every recovered
+  payload accounted against `security_limits`.
 
 ### Changed
 
+- **Breaking (Python binding):** `ExtractionConfig` and `DoctorReport` are now frozen dataclasses
+  rather than `TypedDict`s, matching the 121 option types that were already dataclasses. Passing a
+  plain `dict` or a JSON string as `config` still works — `extract()` coerces both — but an
+  `ExtractionConfig` *object* no longer supports mapping operations, so `config.get("chunking")` and
+  `config["chunking"] = ...` now raise `AttributeError`/`TypeError`, and the instance is immutable.
+  Build a modified config with `dataclasses.replace(config, chunking=...)`.
+- PDF parsing no longer reports recoverable input at WARN. A missing embedded font, an object
+  outside the xref table, an unreadable CFF version, and a reading-order fallback are ordinary
+  properties of real PDFs rather than conditions an operator can act on; they are now TRACE (or
+  DEBUG for strategy fallbacks), and each document emits a single DEBUG summary on the
+  `xberg_native_pdf::recovery` target carrying the totals instead of one event per occurrence.
+  Measured over a 4,000-document corpus this removed 4,012,488 of 4,014,206 log events, against
+  which 44 genuine parse failures had been sitting at a ratio of about 1 in 91,000. ERROR
+  behaviour is unchanged — it already corresponded one to one with documents that failed
+  ([#1547](https://github.com/xberg-io/xberg/issues/1547)).
+
+- **Breaking (Rust source):** `validate_mime_type` no longer accepts any value with an `image/`
+  prefix. It now parses the MIME type and requires exact membership in the supported-format
+  registry, so unregistered vendor image subtypes such as `image/x-custom-format` are rejected as
+  `UnsupportedFormat` instead of validating (#1511).
 - Per-page OCR recognition-noise detail (fragmented-word ratio, word count, mean confidence) now
   reaches the page accept/reject decision and is emitted at `DEBUG` instead of being discarded one
   frame earlier. No threshold is gated on it yet; the blended stage score alone cannot discriminate
@@ -106,7 +866,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Breaking:** Rust element identifiers now use `String` directly; the `ElementId` wrapper has been
   removed.
 - **Breaking:** Public tuple fields for ranges, coordinates, dimensions, links, code blocks, and attributes now
-  use named Rust structs. Existing JSON arrays remain accepted and emitted; named JSON objects are also accepted.
+  use named Rust structs and serialize as JSON objects. Legacy positional JSON arrays are still accepted when
+  parsing, so payloads written by 1.0.x keep deserializing, but they are no longer emitted.
 - **Breaking:** removed the duplicate `xberg::llm::region_extractor::RegionKind`; import `xberg::RegionKind`
   instead.
 - Parsing and configuration deserialization now reject invalid region, redaction, and reranker values.
@@ -121,6 +882,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   extraction completeness; inspect `processing_warnings` for known partial or degraded results.
 - The default `security_limits.max_table_cells` remains 100,000 aggregate cells per document;
   limit errors now explain how to raise it for trusted inputs or reduce the source table.
+
+- `TesseractConfig.language_model_ngram_on` now defaults to `true` on both the PDF and standalone
+  image OCR paths. Tesseract previously applied no penalty to output that does not look like a word of
+  the target language, the dominant failure mode on scanned line art. Set the field to `false` to
+  restore the previous behaviour.
+- Tesseract Markdown-format OCR now drops hOCR lines whose dictionary-checkable words are more than
+  60% invalid, removing recognition noise such as `OWATS DNDEVET` while keeping labels like `EXHIBIT`
+  and `LEGEND`. A line needs at least two checkable words to be scored, and the removed-line count is
+  reported as a `ProcessingWarning`.
+- Undecodable-text OCR routing is now decided per page rather than for the whole document, so a single
+  unreadable page no longer sends every page of a PDF through OCR and discards good native text. The
+  previous document-wide fallback still applies when page boundaries are unavailable or inconsistent.
+- With `max_threads` unset the thread budget is `min(num_cpus, 8)` and now ceilings Rayon, ONNX Runtime
+  intra-op threads, and batch workers alike. A cgroup CPU quota is honoured in place of the hardcoded 8
+  where one exists, and a host with more than 8 cores and no `max_threads` is warned once per process
+  ([#1392](https://github.com/xberg-io/xberg/issues/1392)).
+- PaddleOCR inference now uses the resolved thread budget instead of a hardcoded single thread. The
+  session is serialized behind a mutex, so exactly one worker runs and can claim the whole budget
+  without oversubscribing.
 
 ### Removed
 
@@ -150,6 +930,189 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fixed the Windows Ruby gem failing to build. `xberg-libwpd`'s build script chose its zlib by
+  operating system alone, so the gem's MinGW/UCRT toolchain was handed vcpkg's MSVC-built
+  `x64-windows-static-md` archive and the link died with `corrupt .drectve`/`ld returned 5`. The
+  vcpkg path is now taken only for genuinely MSVC targets; every other target links the static
+  zlib `libz-sys` already builds from source.
+- Fixed `XbergLoader` ignoring chunking and per-page splitting whenever the LangChain
+  integration was given an `ExtractionConfig` object. Both settings were read only when the
+  config was a `dict`, so after `ExtractionConfig` became a frozen dataclass the documented
+  `ExtractionConfig(pages=PageConfig(extract_pages=True))` and `chunking=ChunkingConfig(...)`
+  forms silently produced one Document per file instead of one per page or chunk. The config
+  is now read as an object or a mapping.
+- Fixed a ruled troubleshooting page collapsing into one table, taking its section headings
+  down with it as cell text. `split_rows_by_text_positions` subdivides a producer-drawn row
+  band by the Y positions of the text inside it, and since the #1555 fix a candidate split was
+  accepted only when EVERY resulting Y-cluster carried text in at least two columns, with the
+  rejection all-or-nothing for the band. A band that mixes multi-column data rows with
+  single-column lines -- a section heading, a lead-in, a wrapped continuation -- can never
+  satisfy that, so one such line vetoed the split for the whole band and every line inside it
+  became cell text. On one 56-page installation manual, six ~20 pt row bands became a single
+  522 pt table, the document went from 808 elements to 759, and four numbered headings
+  disappeared from the outline. The band is now split once at least two of its clusters are
+  independently evidenced, and each deficient cluster is resolved on its own terms: it folds
+  into the cluster above only when it introduces no column that cluster left empty, which is
+  the signature of a wrapped continuation. Anything else -- a heading, a lead-in -- stays a row
+  of its own, one cell wide, which is what such a line inside a ruled band actually is. Two
+  independently evidenced clusters are required rather than one because a single evidenced
+  cluster can be coincidence, which is precisely the #1555 case
+  ([#1565](https://github.com/xberg-io/xberg/issues/1565)).
+- Fixed a word split across two touching PDF spans being rejoined with a space, so `prijs`
+  extracted as `pri js`. The gap between the two spans measures 0.069 pt -- 0.008 em at 9 pt,
+  against a 2.5 pt space glyph -- on an identical baseline at an identical font size, so no gap
+  threshold produced the space: `segments_need_space` reached one of its unconditional
+  `return true` branches first. `SegmentData` keeps only `is_bold`/`is_italic`/`is_monospace`
+  and drops `font_name`, so a mid-word switch between two embedded subset fonts whose
+  `/FontDescriptor`s disagree on `ForceBold`, `ItalicAngle` or `FixedPitch` reads as a style
+  change carrying no geometric signal at all. That is why the defect never reproduced against
+  base-14 Helvetica, and why widening the gap to 2 pt changed nothing. A touching-spans guard
+  now runs before those branches: two segments on the same baseline, at the same font size,
+  with alphanumeric characters on both sides of the boundary and a gap under 0.025 em are one
+  word and are concatenated. The guard can only join, never split, and it never fires across an
+  explicitly drawn space. The table path needed the same test one stage earlier, in
+  `segments_to_words`, because `HocrWord` is integer-rounded and cannot represent a sub-point
+  gap by the time cell text is joined. Affects ordinary prose, not just tables: of 18 confirmed
+  cases, 14 were `NarrativeText`, 3 `ListItem` and 3 `Table`
+  ([#1566](https://github.com/xberg-io/xberg/issues/1566)).
+- Fixed PDF table reconstruction dropping early rows when data-start inference classified more
+  than two leading rows as headers. The two-row header cap is retained, but surplus inferred
+  header rows are now demoted to data in source order instead of being discarded
+  ([#1558](https://github.com/xberg-io/xberg/issues/1558)).
+- Fixed native PDF top-to-bottom reading order splitting one visual table row at an absolute
+  3-point coordinate-band boundary, which could move an article number before its position and
+  fuse the two identifiers. Visual rows now use an anchored, font-scaled tolerance, reconstructed
+  lines restore left-to-right fragment order, and narrative assembly preserves a separator after
+  a severe geometric backtrack ([#1560](https://github.com/xberg-io/xberg/issues/1560)).
+- Fixed PDF dehyphenation treating inline run/style boundaries as visual line wraps. Suspended
+  hyphens such as `vracht- en verzendkosten` are now preserved, while compounds genuinely split
+  across different baselines are still rejoined
+  ([#1561](https://github.com/xberg-io/xberg/issues/1561)).
+- Fixed DOCX page attribution staying permanently low after Word omitted a rendered-page marker
+  between vertically stacked inline images. The parser now conservatively infers missing breaks
+  from each section's usable page height, including documents with different section geometries
+  ([#1559](https://github.com/xberg-io/xberg/issues/1559)).
+- Fixed DOCX DrawingML and VML text boxes dropping XML and numeric character references such as
+  `&amp;` and `&#8364;` from extracted text
+  ([#1562](https://github.com/xberg-io/xberg/issues/1562)).
+- Fixed OCR image decoding ignoring the caller's configured `security_limits`. Every OCR route —
+  embedded images, Tesseract, PaddleOCR, and scanned PDF pages — decoded raw image bytes under a
+  hardcoded `SecurityLimits::default()`, so raising `ExtractionConfig::security_limits` to accept a
+  large scan still had it rejected at the OCR decode step. The configured limits now reach all four
+  routes, and PaddleOCR also honors a per-call `backend_options["security_limits"]` override
+  ([#1554](https://github.com/xberg-io/xberg/issues/1554)).
+- Fixed a drawn PDF table row with a wrapped cell being shattered into extra rows. Splitting a row
+  band by text Y-position now requires at least two columns to have independent text evidence for
+  every candidate row before splitting; a band where only one column wraps to a second line now
+  stays a single row ([#1555](https://github.com/xberg-io/xberg/issues/1555)).
+- Fixed monospace font detection matching any font name containing "mono", misclassifying foundry
+  names such as "Monotype Corsiva" as a monospace font and skewing the word-spacing heuristic and
+  code-block detection that depend on it. "Monotype" is now excluded from the substring match, and
+  the PDF text run buffer's separate ad hoc monospace check was replaced with the same shared
+  helper.
+- Fixed a standalone multi-line monospace paragraph not being recognized as a code block unless it
+  had a consecutive monospace neighbor paragraph. A lone paragraph that already carries two or more
+  monospace lines is now fenced as a code block on its own
+  ([#1557](https://github.com/xberg-io/xberg/issues/1557)).
+- Fixed PDF text extraction silently corrupting ordinary text. A contextual ligature-repair pass
+  rewrote `:` to `ti` and an uppercase `M` between lowercase letters to `tti` on every element of
+  every document, mangling identifiers, ratios, times, URLs, and units such as `nM` (for example
+  `aMb` became `attib`). The repair was introduced for European PDFs that encode ligature glyphs
+  at ASCII code points, but it was gated at the time on a per-font broken-CMap signal from
+  pdfium's `has_unicode_map_error()`. That gate was lost when pdfium was removed as a backend and
+  was never ported to pdf_oxide, leaving the rewrite running unconditionally. Both substitutions
+  are removed; they can only return alongside a real document-level evidence gate
+  ([#1556](https://github.com/xberg-io/xberg/issues/1556)).
+- Fixed optional fields in the Python and PHP bindings rejecting payloads that omit them.
+  The generated mirror structs lost their `#[serde(default)]` attributes, so deserializing a
+  document whose JSON left an optional field out failed instead of falling back to the default.
+
+- Fixed legacy `.doc` headings being guessed from line length rather than read from the document's
+  own styles. A paragraph styled `heading 1`..`heading 9` — directly or through a custom style
+  derived from one, such as `TOC Heading` — now becomes a `Heading` at that level, instead of every
+  detected heading being a level 2. Documents that apply no heading style keep the previous
+  shape-based detection, because roughly half the test corpus styles its headings as bold `Normal`
+  and would otherwise lose every one; the choice is made per document, not per paragraph. A
+  heading-styled paragraph that is also list-bound stays a `ListItem`, matching how the DOCX path
+  treats `w:numPr` ([#1553](https://github.com/xberg-io/xberg/issues/1553)).
+- Fixed legacy `.doc` automatic list numbering being dropped entirely: a paragraph Word numbers
+  through its list tables arrived as prose, indistinguishable from an unnumbered sentence, while
+  the DOCX path emitted a `ListItem` for the same construct. Auto-numbered paragraphs now arrive
+  as `ListItem`s inside an ordered or bulleted list container, with their nesting depth, matching
+  the DOCX path. The number Word paints (`1.1`, `a.`) is still not rendered — recovering it needs
+  list-table counter state — so a document mixing automatic and hand-typed numbering shows the
+  typed numbers as text and the automatic ones as list structure
+  ([#1550](https://github.com/xberg-io/xberg/issues/1550)).
+- Fixed legacy `.doc` elements being split on blank lines rather than on Word's paragraph marks,
+  which merged every pair of consecutive paragraphs not separated by a blank line into a single
+  element. One corpus letter returned its entire ten-paragraph body as one element. Word97 and
+  later documents now emit one element per Word paragraph, matching what the DOCX path does with
+  `w:p`. **This changes element boundaries, counts and indices for most `.doc` documents**, and
+  alters `content` line spacing accordingly; consumers keying on element position will see the
+  difference. Word 6/95 documents and those falling back to contiguous text extraction keep the
+  previous blank-line behaviour, because they carry no paragraph properties to use.
+- Fixed legacy `.doc` extraction reading `fcClx` from `FibRgFcLcb97` pair 66 — an obsolete field
+  Word writes as zero — instead of pair 33, so the piece table was never walked for any document
+  and extraction always fell back to reading `reserved5`/`reserved6`, bytes [MS-DOC] requires a
+  reader to ignore. Where those bytes disagreed with the real text start, whole documents were
+  decoded as UTF-16LE and returned as glued CJK-looking code points; multi-piece and fast-saved
+  documents could not be assembled at all. Footnote, header/footer, comment, and text-box
+  subdocument text now also reaches the output for these files
+  ([#1551](https://github.com/xberg-io/xberg/issues/1551)).
+- Fixed the Elixir NIF's vendored `Cargo.lock`, shipped in the Hex package, pinning
+  `tree-sitter-language-pack` 1.15.12 while the crate requires 1.16.1 — a source build of the NIF
+  with `--locked` could not resolve. This affects anyone whose platform has no precompiled
+  artifact and therefore builds from source.
+- Fixed a DOCX table cell spanning several grid columns (`w:gridSpan`) or rows (`w:vMerge`) being
+  returned once per covered column and again for every covered row, so a cell merged across 4
+  columns and 3 rows came back 12 times in `result.tables[].cells`, `result.tables[].markdown`,
+  and `result.content` alike — a 39 KB document could extract to 232 KB. A merged/spanned cell's
+  text is now written once, at its origin, with the columns and rows it covers left blank. This
+  also fixes a DOCX header or footer table with a merged cell shifting every following cell one
+  column to the left ([#1549](https://github.com/xberg-io/xberg/issues/1549)).
+- Fixed PDF render diagnostics matching a captured engine warning against a hardcoded message
+  substring to decide whether it meant a glyph actually failed to paint. The message it was built
+  to exclude no longer reaches this capture at all (it moved to TRACE under #1547), so the match
+  could only ever misfire: a future warning whose text happened to share that substring would have
+  been silently dropped instead of surfacing as a `ProcessingWarning`. Every captured warning is
+  now reported ([#1548](https://github.com/xberg-io/xberg/issues/1548)).
+- Fixed a PDF page that places a statistics table beside a prose column being emitted in
+  full-width Y order, which spliced the prose apart mid-sentence (`more likely to be aged
+  35Female 51.5 ...`) and welded the table's two label/value panels together on every row. The
+  table region is now emitted whole, in row order, ahead of the prose column, and a repeated
+  panel is emitted panel by panel
+  ([#1545](https://github.com/xberg-io/xberg/issues/1545)).
+- Fixed PDF text coming back scrambled when a short `Tj` run sat between two `TJ` arrays: the run
+  was emitted at an earlier run's stale position and sorted into the wrong place, so
+  `within a period ... after conclusion` extracted as `wincthin a period ... after co lusion`.
+  Every text-showing boundary operator closed the pending run except `TJ`
+  ([#1544](https://github.com/xberg-io/xberg/issues/1544)).
+- Fixed every image in a DOCX reporting `page_number` 1 regardless of the page it sits on. The page
+  was resolved by searching rendered Markdown for a per-image placeholder that is never written --
+  every drawing renders to the same link target -- so the lookup always missed. Page numbers now
+  come from the parsed element order ([#1546](https://github.com/xberg-io/xberg/issues/1546)).
+- Fixed an author's hyphen being deleted when it fell at a line break, so `price-` + `determining`
+  joined as `pricedetermining`. A hyphen written mid-line elsewhere in the same document is now
+  treated as evidence that the compound is real and its hyphen is kept. Compounds that appear only
+  broken, with no such occurrence anywhere in the document, are still joined without the hyphen
+  ([#1543](https://github.com/xberg-io/xberg/issues/1543)).
+- Fixed OCR backends registered through `register_ocr_backend` being rejected before extraction
+  started: configuration validation checked the backend name against the built-in list only, which
+  made every custom plugin OCR backend unusable once validation was wired into `extract` and
+  `extract_batch`.
+- Fixed the native C FFI library shipping without eleven features the crate advertises, so the
+  Java, Go, C#, Swift, Zig, and C bindings had no summarization, translation, analysis, HEIC,
+  captioning, ML redaction, or static-embedding support. The desktop dependency hand-maintained a
+  feature list that had drifted from `full`; a regression test now fails on any future omission.
+- Fixed HTML pages fetched over HTTP(S) losing every format-specific metadata field: results were
+  reported as `text/html` while `metadata.format` stayed empty, because the extraction ran over the
+  crawler's pre-rendered Markdown and never reached the HTML extractor. Title, headings, Open Graph,
+  Twitter card, links, and structured data are now recovered from the page HTML.
+- Fixed `pdf_options.hierarchy.enabled` silently producing no hierarchy: headings were detected and
+  then discarded unless the caller also set the unrelated `pages.extract_pages`. Requesting the
+  heading hierarchy now enables the per-page tracking it requires.
+- Fixed the bundled Tesseract build failing to configure on Windows when the MSVC developer
+  environment is not present, which broke building Xberg from source with the default OCR features.
 - Fixed URL extraction reporting internally converted HTML pages as `text/markdown`; results now
   retain a validated, canonical source MIME type.
 - Fixed `clear_post_processors` stopping at the first failed shutdown hook and permanently removing
@@ -245,7 +1208,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed PDF heading recovery for repeated bold section titles set at body font size while retaining
   short bold labels, presenter attributions, and calendar legends as body text (#1513).
 - Fixed PDF table extraction so multi-word cells, rule-less prose regions, OCR-derived tables, and
-  page-local table failures are handled correctly (#688, #1358).
+  page-local table failures are handled correctly (#688, #1358, #1542).
 - Fixed PDF Markdown and Djot output so native text is retained when structured conversion is
   incomplete.
 - Fixed PDF configuration so metadata suppression and header/footer settings are honored by every
@@ -316,6 +1279,190 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fixed the `excel-wasm` feature so spreadsheet extraction builds for WebAssembly.
 - Fixed WebAssembly configuration so unsupported managed credential providers are rejected explicitly.
 
+- Fixed the Swift package failing to link on Linux. `Package.swift` linked `libxberg_ffi.a` alongside
+  `libxberg_swift.a`, but the Swift static library already folds the entire compiled `xberg-ffi` crate
+  in, so every Rust core, std, and alloc symbol existed twice and the linker reported hundreds of
+  duplicate symbols. It also never asked for ONNX Runtime, leaving `OrtGetApiBase` undefined.
+- Fixed the public `clear_ocr_backends()` and `clear_renderers()` leaving their process-global
+  registries permanently empty. After `clear_ocr_backends()` every later extraction failed with "No
+  available OCR backends"; after `clear_renderers()` the `Custom` output-format path silently
+  downgraded DOT renders to plain text for the life of the process. Both now re-seed the built-ins
+  non-destructively, keeping user-registered entries.
+- Fixed nested lists rendering as flat, blank-line-separated bullets in `pages[N].content`: container
+  list markers are never page-tagged, so a page subset dropped them and every item was rewrapped in
+  its own single-item list. Also fixed figure alt text being dropped whenever a caption was present,
+  the VLM OCR probe reporting availability without checking credentials, and the PDF margin filter
+  judging rotated text runs by baseline origin.
+- Fixed HEIC-enabled builds requiring a libheif newer than current stable distributions ship. The
+  prebuilt artifacts link libheif dynamically and were built against 1.21 APIs, so the PHP extension
+  failed to load on Debian 13 with `undefined symbol: heif_image_get_plane_readonly2`. The floor is now
+  1.19, with version-gated fallbacks ([#1541](https://github.com/xberg-io/xberg/issues/1541)).
+- Fixed PDF text collapsing on itself when a font's `/Widths` array declares 0 for an ordinary glyph.
+  Extraction now falls back to the embedded font's own advance for such codes, while an explicit `TJ`
+  displacement stays authoritative and genuine zero-width combining marks remain overlays.
+- Fixed automatic PDF OCR replacing a page's native text with a substantially poorer recognition. OCR
+  output for a page whose native text was independently judged healthy is now rejected when it retains
+  under half that page's alphanumeric characters.
+- Fixed OCR of a single detached page image being attributed to page 1. Local image indices were used
+  as document page numbers, so warnings named the wrong page and the rejected-page filter discarded
+  OCR elements, tables, and formulas belonging to a different page than the one rejected.
+- Fixed XML extraction narrowing element depth to `u8` before clamping, so an element nested more than
+  255 levels deep wrapped to a low heading level in release builds and panicked in debug builds, before
+  the configured `max_xml_depth` limit ever applied
+  ([#1474](https://github.com/xberg-io/xberg/issues/1474)).
+- Fixed PDF XMP metadata losing text fragments split around an entity boundary: named and numeric XML
+  references in XMP scalar and sequence values are preserved instead of the surrounding text being
+  truncated ([#1475](https://github.com/xberg-io/xberg/issues/1475)).
+- Fixed image-level OCR running again over a page-sized PDF XObject on a page whose native text had
+  already been extracted, which duplicated the page's content and paid for a second OCR pass
+  ([#1479](https://github.com/xberg-io/xberg/issues/1479)).
+- Fixed the musl (Alpine) native artifacts failing to load. The published Java, C#, Zig, C, and Elixir
+  artifacts shipped without ONNX Runtime's transitive closure — libprotobuf-lite, the `libabsl_*` set,
+  libre2, and libicu. Both musl images now vendor the full `ldd` closure and hard-fail the build if
+  anything is unresolved. A host runtime that links libstdc++ itself still needs libstdc++ 15 or newer
+  in the process, because a bundled copy cannot win once the soname is already mapped.
+- Fixed a DOCX or PPTX relationship targeting `../media/image1.png` — the ordinary OPC shape for an
+  image at the package root — being rejected by the traversal check and dropped, so the image went
+  missing from extraction. Container-relative names now resolve boundary-relative.
+- Fixed OCR of rendered PDF pages assuming a 72 DPI raster when pages render at 150 DPI, so DPI
+  normalisation computed a 2.48x upscale, hit the dimension clamp, and reported a resolution hint of
+  179 for what was really a 372 DPI image. Also fixed image DPI normalisation being skipped entirely in
+  candle-backend and VLM-only builds.
+- Fixed layout detection marking real figure and drawing text as page furniture, which the renderer
+  then discarded, so labels such as `SITE PLAN` and `LEGEND` disappeared from scanned documents. A
+  `Picture` hint now means a figure was detected, not that the text is decoration, and furniture hints
+  only match short text.
+- Fixed the Docling-compatible endpoint discarding OpenWebUI's extraction parameters. OpenWebUI sends
+  one form field per key rather than a JSON blob, so settings made in its admin UI produced identical
+  output with or without them ([#1462](https://github.com/xberg-io/xberg/issues/1462)).
+- Fixed CLI flags being silently discarded. `--ocr-backend`, `--ocr-language`, `--ocr-auto-rotate`, and
+  `--ocr-backend-options` were dropped unless `--ocr true` was also passed, so `--ocr-scanned-pages
+  --ocr-backend sceptre` ran Tesseract with no error; `--ocr-scanned-pages` alone returned an empty
+  document at exit status 0; and `--chunk-size` was a no-op without `--chunk true`.
+- Fixed legacy `.doc` extraction emitting every field's instruction — its URL, switches, and
+  screen-tips — verbatim as prose, and the non-breaking hyphen being dropped with the other control
+  characters, fusing `twenty-one` into `twentyone`.
+- Fixed paragraph grouping only breaking when a line starts a numbered section and never when the
+  previous line was one, so a subsection heading followed by unnumbered lines at the same size and
+  weight was merged into the following prose
+  ([#1467](https://github.com/xberg-io/xberg/issues/1467)). Consecutive numbered headings are likewise
+  no longer welded into a single paragraph
+  ([#1386](https://github.com/xberg-io/xberg/issues/1386)).
+- Fixed the PDF pipeline stripping a list item's printed marker and discarding it, leaving renderers to
+  synthesize a position, so a document whose clauses are cross-referenced by their printed label was
+  renumbered — `B.` rendering as `1.` and `(a)` as `1.`.
+- Fixed `candle-trocr` accepting a whole page and returning invented text. TrOCR is trained on single
+  cropped lines and force-resizes any input, so a multi-page document exited successfully with text
+  appearing nowhere in it. Input taller than a plausible line crop is now rejected.
+- Fixed inline `<svg>` elements being discarded during HTML extraction even with `extract_images`
+  enabled ([#745](https://github.com/xberg-io/xberg/issues/745)).
+- Fixed an explicitly requested GPU execution provider silently running on CPU. `is_available()`
+  reports only compile-time support and ORT's session builder defaults to not erroring on failure, so
+  an explicit CUDA, TensorRT, or CoreML request that failed to load was swallowed. Explicit requests
+  now fail; `Auto` keeps its silent fallback.
+- Fixed DOCX documents with legacy VML picture markup being rejected as `NestingTooDeep`, and the
+  inverse hole where content inside drawings, table property helpers, the table grid, and streaming
+  section properties was never measured against the depth cap at all. A flat 600-row table of real
+  depth 8 previously leaked over a thousand levels and was rejected outright
+  ([#1395](https://github.com/xberg-io/xberg/issues/1395)).
+- Fixed `XBERG_LLM_API_KEY` and `XBERG_LLM_BASE_URL` fabricating a structured-extraction config with an
+  empty model and schema, so any deployment that merely had an LLM key in its environment ran the
+  post-processor on every document and failed every one
+  ([#1421](https://github.com/xberg-io/xberg/issues/1421)).
+- Fixed two PDF paths aborting or failing the whole request: a `/ModDate` whose raw bytes decode to a
+  replacement character sliced a `str` off a char boundary and panicked, which across the Go FFI
+  boundary aborts the process before any `catch_unwind` frame is consulted; and a rasterizer panic on a
+  page with damaged content streams unwound through the async boundary and lost every other page's text
+  ([#1422](https://github.com/xberg-io/xberg/issues/1422), [#1408](https://github.com/xberg-io/xberg/issues/1408)).
+- Fixed keyword extraction panicking on a language hint whose first character is multi-byte.
+- Fixed legacy `.ppt` slide numbering and image extraction. Slide numbers were the ordinal of a text
+  block in a joined string, so a trailing paragraph mark cut one slide into several; they now come from
+  the slide containers in persist order. The OLE `/Pictures` stream was never opened, so `.ppt`
+  extraction never produced an image ([#1418](https://github.com/xberg-io/xberg/issues/1418),
+  [#1417](https://github.com/xberg-io/xberg/issues/1417)).
+- Fixed PPTX slides without a title losing their page number
+  ([#1413](https://github.com/xberg-io/xberg/issues/1413)).
+- Fixed URL extraction reporting no crawled URLs, because the result field is no longer populated
+  upstream. The URLs are now derived from the crawled pages, deduped in first-seen order.
+- Fixed PDF page-number stripping deleting real table data. The decision was made from one paragraph's
+  text, so any short numeric cell matched; it now requires a margin band, a stable horizontal slot
+  across pages, and a progressive sequence to agree
+  ([#1411](https://github.com/xberg-io/xberg/issues/1411)).
+- Fixed PDF paragraph breaks never being detected on a normally-set page, so a whole memo — date,
+  salutation, body, sign-off — came back as one line. The vertical advance is now compared against the
+  body leading, which is scale-free.
+- Fixed detected PDF tables being injected on top of native text that already contained them, so the
+  same content was rendered twice.
+- Fixed non-HTML raw blocks being written verbatim into styled HTML output. ODP speaker notes and
+  master-page text, Org source, script and style bodies, and Djot raw blocks all reached the page
+  unescaped, so any `<` in them corrupted the document structure.
+- Fixed the PyPI `xberg-cli` wheels shipping without their native libraries. The build hook
+  force-included siblings with a macOS-only glob, so every Linux shared object staged beside the binary
+  was dropped, and the musl wheel shipped only the launcher script. An incomplete platform payload now
+  fails the build instead of publishing a wheel that installs and cannot run.
+- Fixed OCR'd PDF pages reporting bounding boxes in raster pixels while digital pages report PDF
+  points, with nothing in the response distinguishing the two spaces. Node, hierarchy block, chunk page
+  span, and table bounding boxes are now converted to page points with a bottom-left origin
+  ([#1423](https://github.com/xberg-io/xberg/issues/1423)).
+- Fixed OCR on pages carrying a `/Rotate` entry. Backends now declare how they cope with a rotated
+  raster, so a backend that requires an upright page is handed one with its geometry mapped back, and
+  PaddleOCR receives the page rotation as a sort key. Auto-rotation composes with the page hint instead
+  of double-correcting it.
+- Fixed PDF text and tables on rotated pages. Rotated-text repair reconstructs the reading frame but
+  only when rotated spans are at least 20% of a page's characters, so a single rotated caption no
+  longer costs the upright majority of the page its whitespace structure, and heuristic table
+  reconstruction clusters cells on the table's own axes rather than raw page space
+  ([#1358](https://github.com/xberg-io/xberg/issues/1358)).
+- Fixed the OpenAPI document omitting types that client generators need: second-order nested component
+  schemas are now registered, along with the PDF, office, and transcription schema groups and the `415`
+  and `429` responses the extraction endpoints can return
+  ([#1424](https://github.com/xberg-io/xberg/issues/1424)).
+- Fixed `code_intelligence` being hardcoded to `None`, so the documented metrics, imports and exports,
+  comments, docstrings, symbols, and diagnostics never reached callers
+  ([#259](https://github.com/xberg-io/xberg/issues/259)).
+- Fixed Whisper timestamp tokens leaking into transcripts as literal text. They are not marked special
+  in the tokenizer vocabulary, so they survived decoding; they are now paired into segments, emitting
+  one paragraph per segment with start and end times.
+- Fixed `cargo add xberg --features full` failing to link on Windows MSVC, where a transitive build
+  script forces `/MT` while Rust defaults to `/MD`, killing the build with `LNK2038`
+  ([#1389](https://github.com/xberg-io/xberg/issues/1389)).
+- Fixed `show_download_progress` having no readers anywhere on the embedding, sparse-embedding,
+  reranker, and late-interaction model configs, so the documented option did nothing.
+- Fixed `split_and_extract` rebuilding each segment from a handful of fields, dropping keywords,
+  entities, summaries, chunks, warnings, and the rest of the enrichment that extraction produced, and
+  an off-by-one in the chunk image-index remap that pointed chunks at the wrong image.
+- Fixed `target_dpi`, `max_image_dimension`, `auto_adjust_dpi`, `min_dpi`, and `max_dpi` having no
+  readers: every preprocessing config was built with defaults, so these settings were dropped
+  ([#209](https://github.com/xberg-io/xberg/issues/209)).
+- Fixed declared telemetry that never emitted. The cache-hit, cache-miss, and batch instruments were
+  declared but never recorded, and the pipeline and batch operations, five of the eight pipeline stage
+  spans, and the extractor-priority and batch attributes were likewise never recorded, so filtering on
+  them returned nothing ([#332](https://github.com/xberg-io/xberg/issues/332),
+  [#282](https://github.com/xberg-io/xberg/issues/282)).
+- Fixed an injected cache backend never being consulted and `ProgressSink::emit` having no caller on
+  single extraction; `extract_batch` was already correct. A bytes-input cache hit now short-circuits
+  extraction and coarse start, complete, error, and cache-hit events are emitted.
+- Fixed renderer output completeness: JSON silently dropped page breaks, footnote references and
+  definitions, citations, slides, definition terms, admonitions, raw blocks, and metadata blocks
+  through a catch-all arm; styled HTML opened a section for each slide that was never closed and never
+  rendered the slide title; and formulas rendered as preformatted code, which KaTeX and MathJax cannot
+  pick up, and are now delimited display math.
+- Fixed footnote definitions never appearing in JSON output, and a definition present in the document
+  but never referenced being dropped from rendered output entirely
+  ([#68](https://github.com/xberg-io/xberg/issues/68)).
+- Fixed plugin-produced documents losing content at the bridge. The conversion into the internal
+  document dropped `uris`, `children`, `annotations`, `processing_warnings`, `llm_usage`, `pages`, and
+  `ocr_elements`; native renderers reached through the public entry point emitted an empty shell; and
+  `pre_rendered_content` was ignored for HTML and JSON output.
+- Fixed CRLF documents collapsing into a single paragraph. Ten call sites split paragraphs on a bare
+  double newline without normalising line endings first, affecting email and PST bodies, OCR backend
+  output, plain text, and Djot conversion ([#227](https://github.com/xberg-io/xberg/issues/227)).
+- Fixed MIME aliases that were advertised as supported and then failed as `UnsupportedFormat`, because
+  the registry looks up by exact string with no alias resolution. `application/wordperfect`,
+  `application/x-quarto`, and four audio and video transcription aliases now route to the same
+  extractor as their canonical type.
+- Fixed three internal OCR plumbing keys being copied into user-visible document metadata.
+
 ### Security
 
 - Bounded DOCX image and iWork archive member reads by the member's declared uncompressed size
@@ -338,6 +1485,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Cache namespaces are validated before directories are created.
 - Redaction now reports only content that was actually removed, never exposes pre-redaction element
   text, and rejects invalid strategies instead of silently falling back to masking.
+
+- Hardened the native PDF engine against crafted documents that abort or hang the host process. A
+  self-referencing `/Names /EmbeddedFiles` tree and deeply nested array or dictionary brackets each
+  recursed until the stack overflowed, which is an abort no `catch_unwind` can contain; a negative
+  `/W` element in an xref stream, a reversed `bfrange`, a non-hex `ToUnicode` destination, an all-NaN
+  font-size set, and unchecked `/Width`x`/Height`, `/N`, and `/VerticesPerRow` products each panicked
+  or allocated without bound; and `decode_stream_with_params`, the entry point every production call
+  site uses, applied no ratio or size guard at all. All were reachable from `extract_bytes` under
+  default configuration.
+- Bounded every ZIP, TAR, and 7z member read against `SecurityLimits` rather than against the size the
+  archive declares for itself, since a declared uncompressed size is not a bound and the aggregate
+  check previously ran only after the member was fully resident. Covers generic archives, ODT, ODP,
+  EPUB, HWPX, PPTX, XLSX, and OOXML embedded objects, and adds the compression-ratio and aggregate-size
+  validation that PPTX, XLSX, and DOCX were missing. A nested ZIP no longer overflows the stack.
+- Clamped or rejected document-declared counts that reached an allocation or a slice unchecked: HWP
+  table row and column counts, HTML and EPUB `colspan`/`rowspan`, DOCX `w:ilvl`, `w:gridSpan`, and
+  `w:outlineLvl`, PPTX `a:pPr lvl`, RST simple-table column ranges, JATS `date-type`, EPUB link-label
+  offsets, PPTX relationship targets, and the hOCR parser's and annotated-text renderer's byte-offset
+  slices. Each was an out-of-bounds or char-boundary panic, or an allocation abort, on ordinary
+  untrusted input.
+- `security_limits.max_files_in_archive` is now enforced by every OOXML container. XLSX never checked
+  it, DOCX enforced a hardcoded 10,000-entry cap instead of the configured one, PPTX had no entry check
+  at all, and embedded-object extraction walked embeddings uncapped
+  ([#1449](https://github.com/xberg-io/xberg/issues/1449)).
+- EPUB packaging XML now counts real OPF nesting depth against the configured limit and accepts legacy
+  DTD declarations without resolving external or amplified entities, so a crafted package can neither
+  bypass the depth budget nor pull in outside content
+  ([#1477](https://github.com/xberg-io/xberg/issues/1477), [#1478](https://github.com/xberg-io/xberg/issues/1478)).
+- Native PDF tracing no longer carries document content. Decoded page text was emitted verbatim at
+  TRACE, embedded font names appeared in trace events and in the glyph-drop `ProcessingWarning`
+  message, and parser, xref, and recovery failures were logged by formatting the underlying error
+  string. Failure paths now emit a structured `error_code` with an optional byte `error_offset`, and
+  font names are redacted in the warning text.
+- Bounded the native PDF reader's internal caches so a malformed or hostile document cannot grow them
+  without limit: the object-stream cache evicts to a byte budget and rejects oversized entries, font
+  identity hashing stops at a byte budget and a reference-depth cap (both recorded in the hash so
+  distinct fonts stay distinct), and the xref recovery-marker set is capped.
 
 ## [1.0.14] - 2026-08-04
 

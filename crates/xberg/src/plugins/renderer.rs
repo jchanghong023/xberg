@@ -139,6 +139,37 @@ pub fn clear_renderers() -> Result<()> {
     registry.clear_all()
 }
 
+/// Ensure the global renderer registry has its built-in renderers registered.
+///
+/// The global registry is seeded with the built-in renderers (markdown, html, djot,
+/// doctags, dot, plain) when it is first constructed. However, [`clear_renderers`]
+/// empties the registry, including the built-ins, leaving the `Custom` output-format
+/// dispatch path (`extraction::derive::derive_extraction_result`) unable to find any
+/// renderer by name — including a built-in such as `"dot"`, which is reached only
+/// through `Custom` because `OutputFormat::from_str` never maps a string directly to a
+/// dedicated variant for it.
+///
+/// This is the self-healing counterpart, mirroring
+/// `crate::plugins::ensure_ocr_backends_initialized` for the OCR backend registry: it
+/// re-registers the built-in renderers whenever any are missing, so a registry emptied
+/// by [`clear_renderers`] (e.g. by a sibling test or a plugin lifecycle reset) heals
+/// itself before the next render. Re-seeding is non-destructive (user-registered
+/// renderers are kept) and cheap to invoke before every `Custom`-format render. ~keep
+pub(crate) fn ensure_renderers_initialized() {
+    use crate::plugins::registry::get_renderer_registry;
+
+    let registry = get_renderer_registry();
+
+    {
+        let registry = registry.read();
+        if !registry.is_missing_builtin_renderer() {
+            return;
+        }
+    }
+
+    registry.write().ensure_defaults();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

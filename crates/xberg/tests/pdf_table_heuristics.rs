@@ -98,6 +98,19 @@ fn text_pdf(rows: &[Vec<(f32, f32, String)>]) -> Vec<u8> {
     build_pdf_with_content(&content)
 }
 
+/// Like [`text_pdf`] but with an explicit baseline per line, for fixtures whose
+/// leading and paragraph spacing are the thing under test.
+fn text_pdf_at_baselines(lines: &[(f32, f32, &str)]) -> Vec<u8> {
+    let mut content = String::new();
+    for (x, baseline, text) in lines {
+        content.push_str(&format!(
+            "BT\n/Helvetica 10 Tf\n1 0 0 1 {x} {baseline} Tm\n({}) Tj\nET\n",
+            pdf_escape(text)
+        ));
+    }
+    build_pdf_with_content(&content)
+}
+
 fn table_count(bytes: &[u8]) -> usize {
     extract_bytes_document_blocking(bytes, "application/pdf", &ExtractionConfig::default())
         .expect("extraction must succeed")
@@ -194,5 +207,83 @@ fn columned_prose_is_not_a_table() {
         table_count(&text_pdf(&rows)),
         0,
         "columned prose must not be detected as a table"
+    );
+}
+
+/// xberg-io/xberg#1542: three ordinary body paragraphs, wrapped over three lines
+/// each at a single-space word pitch. Paragraphs two and three share their first
+/// two lines verbatim and differ only in the last line — numeric in one,
+/// alphabetic in the other.
+///
+/// At v1.0.14 the numeric one alone came back as a six-column `Table` with its
+/// words reordered column-major: `find_data_start` promotes leading rows into the
+/// header as soon as a later row is digit-heavy, so both prose lines were folded
+/// into row 0, where no `grid[1..]` prose guard and no numeric-exemption
+/// denominator can see them. Merging multi-word cells before detecting columns
+/// closed it — a prose line at one-space pitch is now a single cell token, so the
+/// region is one column wide and never reaches a grid.
+///
+/// The digits are the whole variable, so the assertion is per paragraph: any of
+/// the three becoming a table is the defect.
+#[test]
+fn prose_paragraph_ending_in_a_phone_number_is_not_a_table() {
+    const LEFT: f32 = 48.24;
+    const LEADING: f32 = 13.8;
+    const PARAGRAPH_GAP: f32 = 27.6;
+
+    let paragraphs = [
+        [
+            "This handbook lists the replacement parts for the appliances covered by the current range. The",
+            "exploded views on the following pages show how each assembly is put together, and the position",
+            "numbers in the drawings correspond to the numbers in the table printed beside each drawing.",
+        ],
+        [
+            "Replacement parts are available from your regional distributor. Consult the online catalogue under",
+            "parts for current addresses. For technical assistance you can contact the service desk on working",
+            "Customerservice, telephone 0000 - 00 00 00 (option 0)",
+        ],
+        [
+            "Replacement parts are available from your regional distributor. Consult the online catalogue under",
+            "parts for current addresses. For technical assistance you can contact the service desk on working",
+            "Customerservice, via the switchboard (see the back cover)",
+        ],
+    ];
+
+    let mut lines: Vec<(f32, f32, &str)> = Vec::new();
+    let mut baseline = 758.40_f32;
+    for paragraph in &paragraphs {
+        for line in paragraph {
+            lines.push((LEFT, baseline, line));
+            baseline -= LEADING;
+        }
+        baseline -= PARAGRAPH_GAP - LEADING;
+    }
+
+    let document = extract_bytes_document_blocking(
+        &text_pdf_at_baselines(&lines),
+        "application/pdf",
+        &ExtractionConfig::default(),
+    )
+    .expect("extraction must succeed");
+
+    assert_eq!(
+        document.tables.len(),
+        0,
+        "no paragraph on an unruled prose page may be reconstructed as a table, got {:?}",
+        document.tables.iter().map(|table| &table.markdown).collect::<Vec<_>>()
+    );
+    assert!(
+        document
+            .content
+            .contains("Customerservice, telephone 0000 - 00 00 00 (option 0)"),
+        "the numeric last line must survive in reading order, got:\n{}",
+        document.content
+    );
+    assert!(
+        document
+            .content
+            .contains("Replacement parts are available from your regional distributor."),
+        "the paragraph's opening clause must survive in reading order, got:\n{}",
+        document.content
     );
 }

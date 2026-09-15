@@ -7,8 +7,8 @@ name: CI Python Wheel Smoke
 # actual release. Its smoke test has never executed even once: publish.yaml
 # has not run since it landed.
 #
-# Unlike the musl legs (see ci-musl-python.yaml and siblings), this is NOT
-# wired to push/pull_request: the matrix here is five OS runners driving a
+# Unlike the musl legs built by publish.yaml, this is NOT wired to
+# push/pull_request: the matrix here is five OS runners driving a
 # full cibuildwheel pass per leg (manylinux_2_28 cross builds, a from-source
 # libheif build on macOS, an MSVC + vendored-ORT build on Windows), which
 # would add many minutes to every PR touching a wide swath of crates/ for a

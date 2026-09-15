@@ -12,6 +12,7 @@ pub mod images;
 pub mod page_labels;
 pub mod paths;
 pub mod pattern_detector;
+pub mod recovery_tally;
 pub mod structured;
 pub mod synthetic_structure;
 pub mod text;
