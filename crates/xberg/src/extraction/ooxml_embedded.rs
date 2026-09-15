@@ -222,7 +222,7 @@ enum ImageScan<'a> {
 /// literal `]` in alt text and a literal `)` in a target as `\]`/`\)`, and
 /// stopping at those folded an escaped reference's parse and left the child's
 /// numbering in the parent's body.
-fn find_markdown_image_parts(s: &str) -> ImageScan {
+fn find_markdown_image_parts(s: &str) -> ImageScan<'_> {
     debug_assert!(s.starts_with("!["));
     let rest = &s[2..];
     let Some(close_bracket) = find_unescaped(rest, b']') else {
