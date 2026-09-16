@@ -3,6 +3,8 @@
 ## 仓库性质
 
 - 本仓库是 fork：origin = `https://github.com/jchanghong023/xberg.git`（个人仓库），上游 = `https://github.com/xberg-io/xberg.git`（remote 名 `upstream`）。同步上游用普通 `git merge upstream/main`（历史上即如此）。
+- **fork 定制清单在 `fork.md`（仓库根，入库）**：记录本仓库相对上游的全部功能差异，是判断「这段代码是不是 fork 特有」的唯一索引。改动 fork 定制能力时必须同步更新 `fork.md`（保持精简）。
+- **合并上游的冲突策略**：解决冲突时对照 `fork.md`——冲突文件命中 fork 改动面的，保住 fork 行为；冲突过大难以逐行合并时，**先接受上游版本**，再按 `fork.md` 逐项判断哪些 fork 定制需要在上游新代码上重新实现，重做完由用户决定何时跑 fulltest 验证。
 - **仅支持 Windows**：个人代码和包只在 Windows 11 上使用。本地编译与 GitHub 流水线（见 `.github/workflows/build-windows-cli.yml`）都只针对 Windows，不要为其他平台做适配或测试。
 - **AGENTS.md 跟踪入库（fork 特有约定）**：上游的 `.gitignore` 故意忽略 `AGENTS.md`，本 fork 已删除该忽略条目以保留本文件；merge 上游时若把这条忽略规则带了回来，必须再次移除，保住本文件的入库状态。
 
@@ -36,10 +38,39 @@
 - **阈值来源与校准**：`_expectations.json` 里的 `min_fenced_cjk` 等取自 chi_sim 实测值的一半（OCR 退化回英文输出仍判红）；`min_tables`/`min_headings` 以源文档事实为准（如 tessent 取文档自带 `Table N-M.` 题注 54 个的量级，而不是 `find_tables` 的 468 个——后者约 350 个是页眉框）。改阈值前先按 `_note_*` 注释确认推导依据。
 - `slowtest.py` 只是把同一份 `fulltest.py` 换成打包版 CLI 再跑一遍（参数不变），新检查对打包版自动生效。
 
-## 项目结构
+## 架构与目录组织
 
-- Rust workspace，核心 crate：`crates/xberg`（核心库）、`crates/xberg-cli`（二进制 `xberg`，clap 定义在 `src/main.rs`）；其余 `xberg-ffi` / `xberg-node` / `xberg-wasm` / `xberg-py` 等为语言绑定。
+**数据流一句话**：`xberg extract <输入>` → MIME 探测（`core/mime.rs`）→ `extractors/` 按格式路由 → 底层解析（`extraction/`；PDF 的底层在 `pdf/`、音视频转写在 `transcription/`；按需叠加 OCR / 版面检测）→ `core/pipeline/` 汇聚 → `rendering/` 产出 Markdown（或 json/html 等输出）。改一个格式的转换行为，通常落在该格式的底层解析模块 + `extractors/` + `rendering/` 三处。
+
+### Rust workspace（`crates/`）
+
+| crate | 角色 |
+|---|---|
+| `crates/xberg` | 核心库：配置、抽取、OCR、渲染、转写、HTTP API 都在这里面 |
+| `crates/xberg-cli` | 二进制 `xberg`：clap 定义在 `src/main.rs`，子命令在 `src/commands/`（extract / cache / config / doctor / server 等） |
+| `crates/xberg-windows-metafile` | **fork 新增**：纯 GDI 把 EMF/WMF 栅格化成 PNG |
+| `xberg-paddle-ocr` / `xberg-tesseract` / `xberg-candle-ocr` | OCR 后端 crate（本 fork 只用前两个，candle 不编） |
+| `xberg-native-pdf` / `xberg-libheif` / `xberg-gliner` | PDF 原生解析 / heic（fork 不编）/ NER gliner（fork 不编） |
+| `xberg-ffi` / `xberg-node` / `xberg-wasm` / `xberg-py` / `xberg-php` / `xberg-jni` | 语言绑定，上游资产，fork 不维护 |
+
+workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark-harness`。
+
+### `crates/xberg/src/` 主要模块（日常改动集中地）
+
+- `core/`——配置系统（`config/` 按 extraction / ocr / pdf / concurrency 等分段定义与合并，`--config-json` 的顶层替换在 `config/merge.rs`）、转换管线 `pipeline/`、MIME 探测、图片编码。
+- `extractors/`——对外抽取器：按格式路由、embedded 子文档调度；`extraction/`——各格式底层解析（docx / pptx / excel / visio / ooxml_embedded / image_ocr / markdown_utils 等，fork 改动密集区）。
+- `rendering/`——输出渲染：Markdown（`markdown.rs`、`comrak_bridge.rs`）、HTML / djot / plain、图片 OCR 布局块（`ocr_layout.rs`，fork 新增）。
+- `pdf/`——PDF 专属：原生文本 `native/`、结构分析 `structure/`（分类/段落/页眉页脚）、表格重建 `table_reconstruct.rs`。
+- `ocr/` + `paddle_ocr/`——OCR 后端与调度；`transcription/`——Whisper 转写（`container.rs`/`wmf.rs` 为 fork 新增的 Media Foundation 通道）。
+- `api/`——axum HTTP API（`xberg serve`）；`engine/`——引擎编排入口；`presets/`——预设；`doctor/`——诊断。
+
+### 顶层目录
+
+- `fork.md`——fork 相对上游的定制清单（见「仓库性质」）；`fulltest.py` / `slowtest.py`——fork 验收标准（见上节）。
+- `scripts/`——`publish/cli/package-cli-windows.ps1`（打包唯一入口，也是 fork feature 集的来源之一）、`publish/cli/offline-smoke.ps1`、`ci/`（PE/DLL 闭包校验）。
+- `.github/workflows/build-windows-cli.yml`——fork 自有的 Windows 打包 CI，仅手动 `workflow_dispatch` 触发。上游编译/测试类 workflow（ci-rust、ci-e2e 等）带仓库守卫在本 fork 全 skip；ci-lint / ci-docs / ci-scripts 无守卫，push 命中路径仍会自动跑。
 - `docs-site/`（Astro + Starlight 文档）、`e2e/` + `fixtures/`、`.ai-rulez/`（ai-rulez 管理的 AI 规则/技能，改规则后需用固定版本的 ai-rulez 重新生成 bundle）。**`e2e/` 与 `fixtures/` 是上游的语言绑定 e2e 资产**（csharp/dart/go/...），本 fork 的验收不走它们（走 fulltest.py），日常不要为它们做适配；merge 上游带进来的改动原样保留即可。
+- `packages/` / `integrations/` / `plugin/` / `charts/` / `templates/`——上游生态资产（语言包、第三方集成、Claude 插件、Helm chart、README 生成模板），fork 不主动维护，merge 时原样保留（引擎新增格式时的计数同步除外，见 `fork.md` 末节）。
 
 ## 编译 / 打包 / 测试（仅在用户明确要求时执行）
 
