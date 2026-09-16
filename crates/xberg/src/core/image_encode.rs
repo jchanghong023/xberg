@@ -178,6 +178,63 @@ pub(crate) fn re_encode(
     Ok(true)
 }
 
+/// Re-encode every image in `images` to `target` — the blocking core of the pipeline's
+/// image-format pass.
+///
+/// Shared by the sync pipeline (which runs it inline on its caller's thread) and the async
+/// pipeline (which runs it inside `tokio::task::spawn_blocking`, see
+/// `core::pipeline::apply_output_format_pass_offload`): decoding, the GDI rasterization a
+/// Windows metafile goes through, and encoding are CPU/Win32-bound work that must stay off
+/// async runtime workers.
+///
+/// Returns the re-encoded images, the `(image_index, old format, new format)` renames for
+/// callers that bake `image_N.ext` references into pre-rendered content (only entries whose
+/// format actually changed, so a sibling whose re-encode failed keeps its old extension on
+/// disk and in the references), and one `ProcessingWarning` per failed image, in image order.
+///
+/// The rename key is [`ExtractedImage::image_index`] — the number the renderers bake into
+/// `image_N.ext` and the CLI names the written file by — *not* the vector position: staging
+/// can drop unreferenced images, leaving the positions dense while the field has gaps, and a
+/// position-keyed rename then missed its reference or collided with another image's number.
+/// `re_encode` never touches the field, so recording it after the call is exact.
+pub(crate) fn re_encode_images(
+    mut images: Vec<ExtractedImage>,
+    target: ImageOutputFormat,
+    limits: &SecurityLimits,
+    image_config: &crate::core::config::extraction::ImageExtractionConfig,
+) -> (
+    Vec<ExtractedImage>,
+    Vec<(u32, String, String)>,
+    Vec<crate::types::ProcessingWarning>,
+) {
+    let mut format_renames: Vec<(u32, String, String)> = Vec::new();
+    let mut warnings = Vec::new();
+    for image in images.iter_mut() {
+        let previous_format = image.format.to_string();
+        match re_encode(
+            image,
+            target,
+            limits,
+            image_config,
+            #[cfg(feature = "svg")]
+            &image_config.svg,
+        ) {
+            Ok(true) => {
+                let next_format = image.format.to_string();
+                if !previous_format.eq_ignore_ascii_case(&next_format) {
+                    format_renames.push((image.image_index, previous_format, next_format));
+                }
+            }
+            Ok(false) => {}
+            Err(warning) => warnings.push(crate::types::ProcessingWarning {
+                source: Cow::Borrowed("image_encoder"),
+                message: Cow::Owned(warning.to_string()),
+            }),
+        }
+    }
+    (images, format_renames, warnings)
+}
+
 const ENCODE_FIXED_OVERHEAD_BYTES: u64 = 256 * 1024;
 const PNG_WEBP_ENCODE_BYTES_PER_PIXEL: u64 = 4;
 const JPEG_ENCODE_BYTES_PER_PIXEL: u64 = 3;

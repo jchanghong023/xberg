@@ -147,42 +147,51 @@ fn image_ocr_quality_score(text: &str) -> f64 {
 
 #[cfg(any(test, all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm"))))]
 fn select_image_ocr_result(
-    layout_doc: InternalDocument,
-    whole_image_result: Result<InternalDocument>,
-) -> InternalDocument {
-    let whole_image_doc = match whole_image_result {
-        Ok(doc) => doc,
+    region_doc: InternalDocument,
+    whole: Result<WholeImageOcr>,
+) -> WholeImageOcr {
+    let whole = match whole {
+        Ok(whole) => whole,
         Err(error) => {
             tracing::warn!(%error, "Whole-image OCR quality comparison failed; retaining layout-region OCR");
-            return layout_doc;
+            return WholeImageOcr {
+                document: region_doc,
+                from_whole_image: false,
+            };
         }
     };
-    let layout_text = internal_document_text(&layout_doc);
-    let whole_image_text = internal_document_text(&whole_image_doc);
+    let layout_text = internal_document_text(&region_doc);
+    let whole_text = internal_document_text(&whole.document);
     let layout_score = image_ocr_quality_score(&layout_text);
-    let whole_image_score = image_ocr_quality_score(&whole_image_text);
-    let token_retention = alphanumeric_token_retention(&layout_text, &whole_image_text);
+    let whole_score = image_ocr_quality_score(&whole_text);
+    let token_retention = alphanumeric_token_retention(&layout_text, &whole_text);
 
-    if layout_score < whole_image_score || token_retention < MIN_LAYOUT_OCR_ALPHANUMERIC_TOKEN_RETENTION {
+    if layout_score < whole_score || token_retention < MIN_LAYOUT_OCR_ALPHANUMERIC_TOKEN_RETENTION {
         tracing::debug!(
             layout_score,
-            whole_image_score,
+            whole_score,
             token_retention,
             "Whole-image OCR retained because layout-region OCR reduced text quality"
         );
-        whole_image_doc
+        // The whole-image reading *is* the body again.
+        whole
     } else {
-        layout_doc
+        // Region text won and is already organized into the body; the
+        // whole-image reading would only duplicate it.
+        WholeImageOcr {
+            document: region_doc,
+            from_whole_image: false,
+        }
     }
 }
 
 #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
 fn cached_whole_image_after_layout_error(
-    whole_image_result: &Result<InternalDocument>,
+    whole_image_result: &Result<WholeImageOcr>,
     error: crate::XbergError,
-) -> Result<InternalDocument> {
-    let whole_image_doc = match whole_image_result {
-        Ok(doc) => doc,
+) -> Result<WholeImageOcr> {
+    let whole = match whole_image_result {
+        Ok(whole) => whole,
         Err(whole_image_error) => {
             return Err(crate::XbergError::Other(format!(
                 "Image OCR failed in both paths; whole-image OCR: {whole_image_error}; layout-region OCR: {error}"
@@ -193,14 +202,17 @@ fn cached_whole_image_after_layout_error(
         %error,
         "Layout-region OCR failed after whole-image OCR succeeded; retaining whole-image output"
     );
-    let mut retained = whole_image_doc.clone();
+    let mut retained = whole.document.clone();
     retained.processing_warnings.push(crate::types::ProcessingWarning {
         source: std::borrow::Cow::Borrowed("layout-ocr"),
         message: std::borrow::Cow::Borrowed(
             "Layout-region OCR failed after whole-image OCR succeeded; retained whole-image output",
         ),
     });
-    Ok(retained)
+    Ok(WholeImageOcr {
+        document: retained,
+        from_whole_image: whole.from_whole_image,
+    })
 }
 
 #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
@@ -1102,26 +1114,42 @@ async fn extract_layout_regions(
     Ok(build_region_ocr_document(builder, formulas, processing_warnings))
 }
 
+/// The output of the standalone-image whole-image OCR route: the assembled
+/// document plus which route produced it.
+///
+/// `from_whole_image` marks that the body *is* the whole-image reading. It used
+/// to carry the raw backend result so `extract_content` could attach it to the
+/// extracted image, but that hand-back was deliberately reversed (see the
+/// comment at the `doc.images.push` call sites): the pipeline's shared image-OCR
+/// pass re-recognizes the original bytes on purpose, and the union of both
+/// channels' noise is the accepted output shape. With no reader left for the
+/// payload, only the provenance flag remains — selection tests assert on it.
+#[derive(Debug)]
+struct WholeImageOcr {
+    document: InternalDocument,
+    from_whole_image: bool,
+}
+
 #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
 async fn extract_selected_image_ocr_path<Layout, LayoutFuture, Whole, WholeFuture>(
     use_layout: bool,
     layout: Layout,
     whole: Whole,
-) -> Result<InternalDocument>
+) -> Result<WholeImageOcr>
 where
     Layout: FnOnce() -> LayoutFuture,
-    LayoutFuture: std::future::Future<Output = Result<InternalDocument>>,
+    LayoutFuture: std::future::Future<Output = Result<WholeImageOcr>>,
     Whole: FnOnce() -> WholeFuture,
-    WholeFuture: std::future::Future<Output = Result<InternalDocument>>,
+    WholeFuture: std::future::Future<Output = Result<WholeImageOcr>>,
 {
     if use_layout { layout().await } else { whole().await }
 }
 
 #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
 enum LayoutOcrPreparation {
-    Complete(InternalDocument),
+    Complete(WholeImageOcr),
     Detected {
-        whole_image_result: Result<InternalDocument>,
+        whole_image_result: Result<WholeImageOcr>,
         rgb: std::sync::Arc<image::RgbImage>,
         detections: Vec<crate::layout::LayoutDetection>,
     },
@@ -1540,7 +1568,17 @@ fn ocr_backend_emits_structured_markdown(config: &ExtractionConfig) -> bool {
 
 #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
 fn should_use_layout_ocr(config: &ExtractionConfig) -> bool {
-    config.layout.is_some() && config.ocr.is_some() && !ocr_backend_emits_structured_markdown(config)
+    // An absent `ocr` section must not gate layout OCR off: both whole-image OCR
+    // (`extract_with_ocr`) and the shared image OCR helper fall back to
+    // `OcrConfig::default()` when `config.ocr` is `None`, so OCR runs anyway —
+    // demanding an explicit section here only made a standalone `layout`
+    // configuration silently take the whole-image path (a caller passing
+    // `{"layout": {}}` got no layout detection and no diagnostic). The hard
+    // opt-outs (`disable_ocr` / `ocr.enabled = false`) and structured-markdown
+    // backends remain the gates.
+    config.layout.is_some()
+        && !config.effective_disable_ocr()
+        && !ocr_backend_emits_structured_markdown(config)
 }
 
 #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
@@ -1590,7 +1628,7 @@ impl ImageExtractor {
         content: &[u8],
         mime_type: &str,
         config: &ExtractionConfig,
-    ) -> Result<InternalDocument> {
+    ) -> Result<WholeImageOcr> {
         use crate::plugins::registry::get_ocr_backend_registry;
 
         let default_ocr_config;
@@ -1614,7 +1652,16 @@ impl ImageExtractor {
             let wants_pipeline = ocr_config.vlm_fallback != crate::core::config::VlmFallbackPolicy::Disabled
                 || ocr_config.pipeline.is_some();
             if wants_pipeline && let Some(pipeline) = ocr_config.effective_pipeline() {
-                return self.extract_with_ocr_pipeline(content, config, &pipeline).await;
+                // Pipeline output has no single whole-image backend result to
+                // hand back; the pipeline runner organizes the text itself, and
+                // the pipeline's shared image-OCR pass still fills the fence.
+                return self
+                    .extract_with_ocr_pipeline(content, config, &pipeline)
+                    .await
+                    .map(|document| WholeImageOcr {
+                        document,
+                        from_whole_image: false,
+                    });
             }
         }
 
@@ -1689,6 +1736,10 @@ impl ImageExtractor {
             ocr_result
         };
 
+        // Every field of the backend result moves into the body document
+        // below; nothing else consumes it, so no clone (#1571-era lesson —
+        // backfilling `ExtractedImage::ocr_result` from here was deliberately
+        // removed, see the call sites in `extract_content`).
         let ocr_content = ocr_result.content;
         let ocr_metadata = ocr_result.metadata;
         let ocr_elements = ocr_result.ocr_elements;
@@ -1801,7 +1852,10 @@ impl ImageExtractor {
                 }
             }
 
-            Ok(doc)
+            Ok(WholeImageOcr {
+                document: doc,
+                from_whole_image: true,
+            })
         }
 
         #[cfg(not(feature = "ocr"))]
@@ -1830,7 +1884,10 @@ impl ImageExtractor {
                     ocr_confidence: None,
                 }]);
             }
-            Ok(doc)
+            Ok(WholeImageOcr {
+                document: doc,
+                from_whole_image: true,
+            })
         }
     }
 
@@ -1938,20 +1995,28 @@ impl ImageExtractor {
         content: &[u8],
         mime_type: &str,
         config: &ExtractionConfig,
-    ) -> Result<InternalDocument> {
+    ) -> Result<WholeImageOcr> {
         let layout_config = config.layout.as_ref().ok_or_else(|| crate::XbergError::Parsing {
             message: "Layout config required for layout-enhanced OCR".to_string(),
             source: None,
         })?;
 
-        let ocr_config = config.ocr.as_ref().ok_or_else(|| crate::XbergError::Parsing {
-            message: "OCR config required for layout-enhanced OCR".to_string(),
-            source: None,
-        })?;
+        // Whole-image OCR inside `prepare_layout_ocr` runs with the default
+        // backend when no `ocr` section is configured (`extract_with_ocr`
+        // fallback); region OCR here mirrors that fallback instead of failing
+        // the extraction with "OCR config required".
+        let default_ocr_config;
+        let ocr_config = match config.ocr.as_ref() {
+            Some(c) => c,
+            None => {
+                default_ocr_config = crate::core::config::OcrConfig::default();
+                &default_ocr_config
+            }
+        };
 
         let preparation = prepare_layout_ocr(self, content, mime_type, config, layout_config.clone()).await?;
         let (whole_image_result, rgb, detections) = match preparation {
-            LayoutOcrPreparation::Complete(doc) => return Ok(doc),
+            LayoutOcrPreparation::Complete(whole) => return Ok(whole),
             LayoutOcrPreparation::Detected {
                 whole_image_result,
                 rgb,
@@ -1960,16 +2025,16 @@ impl ImageExtractor {
         };
         #[cfg(feature = "pdf")]
         let recognized_tables = match &whole_image_result {
-            Ok(whole_image_doc) => recognize_cached_image_tables(whole_image_doc, &rgb, &detections, config).await,
+            Ok(whole) => recognize_cached_image_tables(&whole.document, &rgb, &detections, config).await,
             Err(_) => Vec::new(),
         };
         #[cfg(not(feature = "pdf"))]
         let recognized_tables = Vec::new();
 
-        if let Ok(whole_image_doc) = &whole_image_result
+        if let Ok(whole) = &whole_image_result
             && source_image_is_proven_single_frame(content, mime_type)
             && let Some(structured) = try_assemble_cached_layout_document(
-                whole_image_doc,
+                &whole.document,
                 &detections,
                 &recognized_tables,
                 rgb.width(),
@@ -1986,11 +2051,17 @@ impl ImageExtractor {
                 tables = structured.tables.len(),
                 "Assembled cached image OCR with layout structure"
             );
-            return Ok(structured);
+            // The layout assembly already organized the picture's text into the
+            // body (tables, headings, reading order); handing the raw whole-
+            // image result to the fence would print it all a second time.
+            return Ok(WholeImageOcr {
+                document: structured,
+                from_whole_image: false,
+            });
         }
-        if let Ok(whole_image_doc) = &whole_image_result
+        if let Ok(whole) = &whole_image_result
             && let Some(structured) = try_retain_canonical_whole_image_ocr(
-                whole_image_doc,
+                &whole.document,
                 &detections,
                 rgb.width(),
                 rgb.height(),
@@ -1998,10 +2069,15 @@ impl ImageExtractor {
             )
         {
             tracing::debug!(
-                elements = whole_image_doc.prebuilt_ocr_elements.as_ref().map_or(0, Vec::len),
+                elements = whole.document.prebuilt_ocr_elements.as_ref().map_or(0, Vec::len),
                 "Retained canonical whole-image OCR without per-region OCR"
             );
-            return Ok(structured);
+            // The body *is* the whole-image reading here, so the fence keeps
+            // the same source (see `WholeImageOcr`).
+            return Ok(WholeImageOcr {
+                document: structured,
+                from_whole_image: whole.from_whole_image,
+            });
         }
 
         let (backend, region_ocr_config) = match configured_region_ocr(config, ocr_config) {
@@ -2389,7 +2465,7 @@ impl InternalDocumentExtractor for ImageExtractor {
             #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
             {
                 let use_layout = should_use_layout_ocr(config);
-                let mut doc = extract_selected_image_ocr_path(
+                let WholeImageOcr { document: mut doc, .. } = extract_selected_image_ocr_path(
                     use_layout,
                     || self.extract_with_layout_ocr(content, mime_type, config),
                     || self.extract_with_ocr(content, mime_type, config),
@@ -2402,6 +2478,11 @@ impl InternalDocumentExtractor for ImageExtractor {
                 doc.metadata.format = Some(crate::types::FormatMetadata::Image(image_metadata));
                 doc.mime_type = mime_type.to_string();
                 if config.needs_image_data() {
+                    // 不在此回填首次整图 OCR：管线共享 OCR 通道会以原始字节再识别
+                    // 一次，两条通道的噪声并集才是既有输出形态（DPI 归一化字节与
+                    // 原始字节识别结果不同，单通道会丢掉只出现在另一通道的金标准
+                    // token——测试识别.png 实证 `pp-ocrv6`/`TesseractConfig::default`
+                    // 丢失导致 GOLDEN_TOKEN_MISSING FAIL）。
                     doc.images.push(extracted_image);
                 }
                 if let Some(warning) = exif_warning.clone() {
@@ -2415,7 +2496,8 @@ impl InternalDocumentExtractor for ImageExtractor {
                 not(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))
             ))]
             {
-                let mut doc = self.extract_with_ocr(content, mime_type, config).await?;
+                let WholeImageOcr { document: mut doc, .. } =
+                    self.extract_with_ocr(content, mime_type, config).await?;
                 if let Some(ocr_config) = config.ocr.as_ref() {
                     apply_public_image_ocr_element_policy(&mut doc, ocr_config);
                 }
@@ -2423,6 +2505,7 @@ impl InternalDocumentExtractor for ImageExtractor {
                 doc.metadata.format = Some(crate::types::FormatMetadata::Image(image_metadata));
                 doc.mime_type = mime_type.to_string();
                 if config.needs_image_data() {
+                    // 同上：不回填首次 OCR 结果，保留管线第二识别通道（见上一处注释）。
                     doc.images.push(extracted_image);
                 }
                 if let Some(warning) = exif_warning.clone() {
@@ -3124,6 +3207,15 @@ mod tests {
 
     fn image_ocr_document(text: &str) -> InternalDocument {
         build_image_internal_document(Some(text), None)
+    }
+
+    /// A whole-image route output whose body carries `text` and whose fence
+    /// payload is empty unless the test supplies one.
+    fn whole_image_ocr_document(text: &str) -> WholeImageOcr {
+        WholeImageOcr {
+            document: image_ocr_document(text),
+            from_whole_image: false,
+        }
     }
 
     #[test]
@@ -4055,11 +4147,15 @@ mod tests {
     #[cfg(all(feature = "layout-detection", feature = "ocr"))]
     #[test]
     fn should_retain_cached_whole_image_when_region_ocr_fails() {
-        let mut whole = image_ocr_document("cached whole-image text");
-        whole.metadata.additional.insert(
-            std::borrow::Cow::Borrowed("ocr_candidate"),
-            serde_json::json!("whole-image"),
-        );
+        let mut whole = whole_image_ocr_document("cached whole-image text");
+        whole
+            .document
+            .metadata
+            .additional
+            .insert(
+                std::borrow::Cow::Borrowed("ocr_candidate"),
+                serde_json::json!("whole-image"),
+            );
 
         let retained = cached_whole_image_after_layout_error(
             &Ok(whole),
@@ -4067,14 +4163,14 @@ mod tests {
         )
         .expect("cached whole-image OCR must remain usable");
 
-        assert_eq!(internal_document_text(&retained), "cached whole-image text");
+        assert_eq!(internal_document_text(&retained.document), "cached whole-image text");
         assert_eq!(
-            retained.metadata.additional.get("ocr_candidate"),
+            retained.document.metadata.additional.get("ocr_candidate"),
             Some(&serde_json::json!("whole-image"))
         );
-        assert_eq!(retained.processing_warnings.len(), 1);
+        assert_eq!(retained.document.processing_warnings.len(), 1);
         assert_eq!(
-            retained.processing_warnings[0].message,
+            retained.document.processing_warnings[0].message,
             "Layout-region OCR failed after whole-image OCR succeeded; retained whole-image output"
         );
     }
@@ -4108,7 +4204,7 @@ mod tests {
             },
             || {
                 whole_calls.set(whole_calls.get() + 1);
-                std::future::ready(Ok(image_ocr_document("unexpected retry")))
+                std::future::ready(Ok(whole_image_ocr_document("unexpected retry")))
             },
         )
         .await;
@@ -4120,7 +4216,11 @@ mod tests {
 
     #[cfg(all(feature = "layout-detection", feature = "ocr"))]
     #[tokio::test]
-    async fn should_use_default_whole_image_ocr_when_layout_has_no_ocr_config() {
+    async fn should_run_layout_ocr_without_explicit_ocr_config() {
+        // `{"layout": {}}` with no `ocr` section must still take the layout
+        // path: the OCR that feeds it falls back to `OcrConfig::default()`,
+        // so demanding an explicit section here only made the layout
+        // configuration silently degrade to whole-image OCR.
         let config = ExtractionConfig {
             layout: Some(crate::core::config::LayoutDetectionConfig::default()),
             ocr: None,
@@ -4133,30 +4233,60 @@ mod tests {
             should_use_layout_ocr(&config),
             || {
                 layout_calls.set(layout_calls.get() + 1);
-                std::future::ready(Err(crate::XbergError::Other("unexpected layout path".to_string())))
+                std::future::ready(Ok(whole_image_ocr_document("layout path with default OCR")))
             },
             || {
                 whole_calls.set(whole_calls.get() + 1);
-                std::future::ready(Ok(image_ocr_document("default whole-image OCR")))
+                std::future::ready(Ok(whole_image_ocr_document("unexpected whole path")))
             },
         )
         .await
-        .expect("missing explicit OCR config must retain the default whole-image path");
+        .expect("a layout configuration without an ocr section must still take the layout path");
 
-        assert_eq!(internal_document_text(&result), "default whole-image OCR");
-        assert_eq!(layout_calls.get(), 0);
-        assert_eq!(whole_calls.get(), 1);
+        assert_eq!(internal_document_text(&result.document), "layout path with default OCR");
+        assert_eq!(layout_calls.get(), 1);
+        assert_eq!(whole_calls.get(), 0);
+    }
+
+    #[cfg(all(feature = "layout-detection", feature = "ocr"))]
+    #[test]
+    fn should_not_use_layout_ocr_when_ocr_is_hard_disabled() {
+        let config = ExtractionConfig {
+            layout: Some(crate::core::config::LayoutDetectionConfig::default()),
+            disable_ocr: true,
+            ..Default::default()
+        };
+        assert!(
+            !should_use_layout_ocr(&config),
+            "disable_ocr is a hard switch and must keep the layout path off"
+        );
+
+        let config = ExtractionConfig {
+            layout: Some(crate::core::config::LayoutDetectionConfig::default()),
+            ocr: Some(crate::core::config::OcrConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !should_use_layout_ocr(&config),
+            "ocr.enabled = false is a hard switch and must keep the layout path off"
+        );
     }
 
     #[test]
     fn should_use_whole_image_ocr_when_invoice_regions_drop_fields() {
         let layout = image_ocr_document("Invoice 1042 Acme Total 1250 USD");
-        let mut whole = image_ocr_document("Invoice 1042 Acme Corporation Date July 31 Total 1250 USD");
-        whole.metadata.additional.insert(
+        let mut whole = WholeImageOcr {
+            document: image_ocr_document("Invoice 1042 Acme Corporation Date July 31 Total 1250 USD"),
+            from_whole_image: true,
+        };
+        whole.document.metadata.additional.insert(
             std::borrow::Cow::Borrowed("ocr_candidate"),
             serde_json::Value::String("whole-image".to_string()),
         );
-        whole.processing_warnings.push(crate::types::ProcessingWarning {
+        whole.document.processing_warnings.push(crate::types::ProcessingWarning {
             source: std::borrow::Cow::Borrowed("ocr"),
             message: std::borrow::Cow::Borrowed("whole-image warning"),
         });
@@ -4164,15 +4294,19 @@ mod tests {
         let selected = select_image_ocr_result(layout, Ok(whole));
 
         assert_eq!(
-            internal_document_text(&selected),
+            internal_document_text(&selected.document),
             "Invoice 1042 Acme Corporation Date July 31 Total 1250 USD"
         );
         assert_eq!(
-            selected.metadata.additional.get("ocr_candidate"),
+            selected.document.metadata.additional.get("ocr_candidate"),
             Some(&serde_json::Value::String("whole-image".to_string()))
         );
-        assert_eq!(selected.processing_warnings.len(), 1);
-        assert_eq!(selected.processing_warnings[0].message, "whole-image warning");
+        assert_eq!(selected.document.processing_warnings.len(), 1);
+        assert_eq!(selected.document.processing_warnings[0].message, "whole-image warning");
+        assert!(
+            selected.from_whole_image,
+            "the winning whole-image reading is marked as the whole-image route"
+        );
     }
 
     #[test]
@@ -4182,13 +4316,17 @@ mod tests {
             std::borrow::Cow::Borrowed("ocr_candidate"),
             serde_json::Value::String("layout".to_string()),
         );
-        let whole = image_ocr_document("The quick brown fox jumps over the lazy dog");
+        let whole = whole_image_ocr_document("The quick brown fox jumps over the lazy dog");
 
         let selected = select_image_ocr_result(layout, Ok(whole));
 
         assert_eq!(
-            selected.metadata.additional.get("ocr_candidate"),
+            selected.document.metadata.additional.get("ocr_candidate"),
             Some(&serde_json::Value::String("layout".to_string()))
+        );
+        assert!(
+            !selected.from_whole_image,
+            "a region-organized body must not be marked as the whole-image route"
         );
     }
 
@@ -4203,10 +4341,12 @@ mod tests {
             alphanumeric_token_retention(&internal_document_text(&layout), &internal_document_text(&whole)),
             1.0
         );
-        let selected = select_image_ocr_result(layout, Ok(whole));
+        let selected = select_image_ocr_result(layout, Ok(whole_image_ocr_document(
+            "Quarterly revenue increased while operating expenses remained stable.",
+        )));
 
         assert_eq!(
-            internal_document_text(&selected),
+            internal_document_text(&selected.document),
             "Quarterly revenue increased while operating expenses remained stable."
         );
     }
@@ -4243,11 +4383,11 @@ mod tests {
         );
 
         assert_eq!(
-            selected.metadata.additional.get("ocr_candidate"),
+            selected.document.metadata.additional.get("ocr_candidate"),
             Some(&serde_json::Value::String("layout".to_string()))
         );
-        assert_eq!(selected.processing_warnings.len(), 1);
-        assert_eq!(selected.processing_warnings[0].message, "layout warning");
+        assert_eq!(selected.document.processing_warnings.len(), 1);
+        assert_eq!(selected.document.processing_warnings[0].message, "layout warning");
     }
 
     /// Regression test for #705: a backend that gates ocr_elements on include_elements

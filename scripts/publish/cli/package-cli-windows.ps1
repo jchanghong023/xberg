@@ -52,6 +52,10 @@ pwsh -NoProfile -File scripts/publish/cli/package-cli-windows.ps1 -Target x86_64
 Local override when you want a specific parallelism instead of the auto
 local/cap choice. Explicit -Jobs always wins over auto-detection.
 #>
+
+# Start-Process -Environment (validation probes) needs PowerShell 7.4; fail fast
+# instead of dying in the Validate phase after the build already ran.
+#Requires -Version 7.4
 [CmdletBinding()]
 param(
   [string]$Target = "x86_64-pc-windows-msvc",
@@ -501,7 +505,9 @@ function Start-ModelDownloadJob([object[]]$Plan, [int]$Throttle, [string]$LocalC
       $error_ = "unknown failure"
       for ($attempt = 1; $attempt -le 3; $attempt++) {
         try {
-          Invoke-WebRequest -Uri $edge.Url -OutFile $tmp -UseBasicParsing
+          # -TimeoutSec: PS7 默认无限等待；半开/停滞连接不报错，会让整个打包无限挂起。
+          # 600s 对最大的 ~161 MiB 模型留足余量，超时进 catch 走已有的 3 次退避重试。
+          Invoke-WebRequest -Uri $edge.Url -OutFile $tmp -UseBasicParsing -TimeoutSec 600
           $hash = (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash
           $length = (Get-Item -LiteralPath $tmp).Length
           if ($hash -ne $edge.Sha256) { throw "sha256 mismatch (expected $($edge.Sha256), got $hash)" }

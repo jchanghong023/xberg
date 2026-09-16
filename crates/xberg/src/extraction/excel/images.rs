@@ -475,10 +475,11 @@ fn collect_drawing_placements(
 /// paragraph are contiguous text, so they are concatenated without a separator
 /// while paragraphs are joined by a space.
 ///
-/// `<`, `>` and `&` are entity-encoded: a flowchart's text boxes hold connector
-/// glyphs and comparison text, and a bare `<` in Markdown starts an HTML tag
-/// (CommonMark only recovers it when the tag is unterminated), so `&lt;` is both
-/// what the drawing means and what survives rendering.
+/// `<`, `>` and `&` are kept raw: shape text becomes paragraph text nodes in
+/// the internal document, and the CommonMark writer escapes those characters
+/// itself (`\<`, `\>`) so they round-trip. Pre-encoding them as named entities
+/// (`&lt;`) backfired — the writer escapes the `&` of the entity too, leaving
+/// a literal `\&lt;` in the Markdown and a visible `&gt;` in plain output.
 fn shape_text(shape: roxmltree::Node<'_, '_>) -> Option<String> {
     let body = shape
         .children()
@@ -501,24 +502,7 @@ fn shape_text(shape: roxmltree::Node<'_, '_>) -> Option<String> {
     if paragraphs.is_empty() {
         return None;
     }
-    Some(entity_encode_markup(&paragraphs.join(" ")))
-}
-
-/// Entity-encode the three characters that would otherwise be read as markup.
-fn entity_encode_markup(text: &str) -> String {
-    if !text.contains(['<', '>', '&']) {
-        return text.to_string();
-    }
-    let mut encoded = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '<' => encoded.push_str("&lt;"),
-            '>' => encoded.push_str("&gt;"),
-            '&' => encoded.push_str("&amp;"),
-            other => encoded.push(other),
-        }
-    }
-    encoded
+    Some(paragraphs.join(" "))
 }
 
 /// Record the placement of every legacy VML picture shape (`v:shape` holding a
@@ -783,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn should_entity_encode_shape_text_that_is_only_punctuation() {
+    fn keeps_shape_text_that_is_only_punctuation_raw() {
         let xml = "<xdr:wsDr xmlns:xdr=\"urn:x\" xmlns:a=\"urn:a\"><xdr:sp><xdr:txBody><a:p><a:r><a:t>&gt;</a:t></a:r></a:p></xdr:txBody></xdr:sp></xdr:wsDr>";
         let mut placements = Placements::new();
         let mut shapes = Vec::new();
@@ -796,6 +780,8 @@ mod tests {
             &mut shapes,
         );
         assert_eq!(shapes.len(), 1);
-        assert_eq!(shapes[0].text, "&gt;", "a connector glyph must not become a raw `>`");
+        // Raw `>` in a paragraph text node: the CommonMark writer escapes it
+        // (`\>`) on render; a stored `&gt;` would surface as a literal entity.
+        assert_eq!(shapes[0].text, ">", "a connector glyph stays a raw `>`");
     }
 }

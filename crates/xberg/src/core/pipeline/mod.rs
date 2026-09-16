@@ -53,7 +53,14 @@ fn image_ocr_positions(doc: &InternalDocument) -> Vec<usize> {
     doc.images
         .iter()
         .enumerate()
-        .filter_map(|(position, image)| (!should_skip_pdf_image_ocr(doc, image)).then_some(position))
+        .filter_map(|(position, image)| {
+            // An extractor that already recognized the image (standalone
+            // images, PDF inline images with `ocr_inline_images`) has supplied
+            // the result the fence renders; recognizing it again would compare
+            // two independent runs whose noise differs line by line and print
+            // both readings.
+            (!should_skip_pdf_image_ocr(doc, image) && image.ocr_result.is_none()).then_some(position)
+        })
         .collect()
 }
 
@@ -475,8 +482,47 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
     captioning_carry_over.apply(&mut result);
 
     #[cfg(feature = "image-encode")]
+    let mut image_format_renames: Vec<(u32, String, String)> = Vec::new();
+    #[cfg(feature = "image-encode")]
     if let Some(ref image_cfg) = config.images {
-        apply_output_format_pass_with_security_limits(&mut result, image_cfg, config.security_limits.as_ref());
+        #[cfg(feature = "tokio-runtime")]
+        {
+            // The re-encode loop is CPU/GDI-bound; on the async pipeline it runs on the
+            // blocking pool so a large rasterization cannot stall a runtime worker.
+            image_format_renames = apply_output_format_pass_offload(
+                &mut result,
+                image_cfg,
+                config.security_limits.as_ref(),
+            )
+            .await?;
+        }
+        #[cfg(not(feature = "tokio-runtime"))]
+        {
+            image_format_renames =
+                apply_output_format_pass_with_security_limits(&mut result, image_cfg, config.security_limits.as_ref());
+        }
+    }
+
+    // The pass rewrote `image_N.ext` references in `content`/`formatted_content`; the
+    // snapshots above predate it, so bring their clones onto the same state before the
+    // divergence checks compare them.
+    #[cfg(feature = "image-encode")]
+    let (formatted_content_source, internal_document_source_content) = rewrite_snapshot_image_extensions(
+        formatted_content_source,
+        internal_document_source_content,
+        &image_format_renames,
+    );
+
+    // The preserved element tree predates the pass too: its `RawBlock` texts embed
+    // `image_N.old` references (embedded sub-document merges) and its own `images`
+    // copy still carries the pre-rename formats. The snapshot rewrite above keeps
+    // `discard_diverged_internal_document` from dropping the tree, so the tree itself
+    // has to be brought onto the renamed state — `transform_extraction_result_to_elements`
+    // and the blanket renderer both read it and would hand out references the written
+    // files no longer match.
+    #[cfg(feature = "image-encode")]
+    if let Some(tree) = result.internal_document.as_mut() {
+        rewrite_tree_image_extensions(tree, &image_format_renames);
     }
 
     if let Some(ref image_cfg) = config.images {
@@ -725,8 +771,27 @@ pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -
         .map(|formatted| (result.content.clone(), formatted.clone()));
 
     #[cfg(feature = "image-encode")]
-    if let Some(ref image_cfg) = config.images {
-        apply_output_format_pass_with_security_limits(&mut result, image_cfg, config.security_limits.as_ref());
+    let image_format_renames = if let Some(ref image_cfg) = config.images {
+        apply_output_format_pass_with_security_limits(&mut result, image_cfg, config.security_limits.as_ref())
+    } else {
+        Vec::new()
+    };
+
+    // Mirrors `run_pipeline`: the pass rewrote `image_N.ext` references in
+    // `content`/`formatted_content`, so the snapshots above get the same rewrite before the
+    // divergence checks compare them.
+    #[cfg(feature = "image-encode")]
+    let (formatted_content_source, internal_document_source_content) = rewrite_snapshot_image_extensions(
+        formatted_content_source,
+        internal_document_source_content,
+        &image_format_renames,
+    );
+
+    // Mirrors `run_pipeline`: the preserved element tree needs the same rename
+    // rewrite or ElementBased consumers read pre-rename references.
+    #[cfg(feature = "image-encode")]
+    if let Some(tree) = result.internal_document.as_mut() {
+        rewrite_tree_image_extensions(tree, &image_format_renames);
     }
 
     if let Some(ref image_cfg) = config.images {
@@ -848,75 +913,177 @@ fn measure_text_coverage(result: &ExtractedDocument) -> f32 {
 fn apply_output_format_pass(
     result: &mut ExtractedDocument,
     config: &crate::core::config::extraction::ImageExtractionConfig,
-) {
-    apply_output_format_pass_with_security_limits(result, config, None);
+) -> Vec<(u32, String, String)> {
+    apply_output_format_pass_with_security_limits(result, config, None)
 }
 
-#[cfg(feature = "image-encode")]
+#[cfg(all(feature = "image-encode", any(not(feature = "tokio-runtime"), test)))]
 fn apply_output_format_pass_with_security_limits(
     result: &mut ExtractedDocument,
     config: &crate::core::config::extraction::ImageExtractionConfig,
     security_limits: Option<&crate::extractors::security::SecurityLimits>,
-) {
+) -> Vec<(u32, String, String)> {
     use crate::core::config::extraction::ImageOutputFormat;
-    use crate::core::image_encode::re_encode;
 
     #[cfg(not(feature = "svg"))]
     if matches!(config.output_format, ImageOutputFormat::Native) {
-        return;
+        return Vec::new();
     }
     #[cfg(feature = "svg")]
     if matches!(config.output_format, ImageOutputFormat::Native) && !config.svg.sanitize {
-        return;
+        return Vec::new();
     }
 
-    let target = config.output_format;
+    // Inline (blocking) variant used by the sync pipeline, whose caller thread already
+    // expects blocking work, and by the tests. The async pipeline awaits
+    // `apply_output_format_pass_offload`, which runs the same loop on the blocking pool
+    // instead of a runtime worker. The renames are returned so the caller can bring the
+    // #331/#286 snapshots (taken before this pass) onto the same extension state — see
+    // [`rewrite_snapshot_image_extensions`].
     let default_security_limits = crate::extractors::security::SecurityLimits::default();
     let security_limits = security_limits.unwrap_or(&default_security_limits);
-    // Track format renames so pre-rendered Markdown image URLs (already baked into
-    // `content` with the source extension, e.g. `image_0.emf`) can be rewritten after
-    // EMF/WMF → PNG re-encode. Without this, files on disk are PNG while the Markdown
-    // still points at `.emf`. Each entry carries the image's position in `result.images`
-    // — the same number the renderers bake into `image_N.ext` — so a sibling image whose
-    // re-encode failed (still on disk under the old extension) keeps its reference.
-    let mut format_renames: Vec<(u32, String, String)> = Vec::new();
-    for (position, image) in result.images.iter_mut().flatten().enumerate() {
-        let previous_format = image.format.to_string();
-        match re_encode(
-            image,
-            target,
+    let mut format_renames = Vec::new();
+    if let Some(images) = result.images.take() {
+        let (images, renames, warnings) = crate::core::image_encode::re_encode_images(
+            images,
+            config.output_format,
             security_limits,
             config,
-            #[cfg(feature = "svg")]
-            &config.svg,
-        ) {
-            Ok(true) => {
-                let next_format = image.format.to_string();
-                if !previous_format.eq_ignore_ascii_case(&next_format) {
-                    format_renames.push((position as u32, previous_format, next_format));
-                }
-            }
-            Ok(false) => {}
-            Err(warning) => {
-                result.processing_warnings.push(crate::types::ProcessingWarning {
-                    source: std::borrow::Cow::Borrowed("image_encoder"),
-                    message: std::borrow::Cow::Owned(warning.to_string()),
-                });
-            }
+        );
+        result.images = Some(images);
+        result.processing_warnings.extend(warnings);
+        rewrite_all_content_image_extensions(result, &renames);
+        format_renames = renames;
+    }
+    format_renames
+}
+
+/// The inline pass `apply_output_format_pass_with_security_limits`, for the async pipeline:
+/// the per-image re-encode loop (decoding plus the GDI rasterization a Windows metafile goes
+/// through, which plays the metafile back record by record) runs inside `spawn_blocking` — a
+/// complex EMF can occupy its thread for seconds, and on the async side that would stall a
+/// runtime worker. The boundary mirrors `image_ocr`'s metafile rasterization. The
+/// `image_N.ext` string rewrites stay on the async side: they are cheap and need `&mut result`.
+///
+/// Behavior (early returns, warnings, renames, rewrites) is identical to the sync pass; the
+/// only failure mode added is a re-encode task panic, which the sync path would have
+/// propagated as the panic itself. The renames are returned so the caller can bring the
+/// #331/#286 snapshots (taken before this pass) onto the same extension state — see
+/// [`rewrite_snapshot_image_extensions`].
+#[cfg(all(feature = "image-encode", feature = "tokio-runtime"))]
+async fn apply_output_format_pass_offload(
+    result: &mut ExtractedDocument,
+    config: &crate::core::config::extraction::ImageExtractionConfig,
+    security_limits: Option<&crate::extractors::security::SecurityLimits>,
+) -> crate::Result<Vec<(u32, String, String)>> {
+    use crate::core::config::extraction::ImageOutputFormat;
+
+    #[cfg(not(feature = "svg"))]
+    if matches!(config.output_format, ImageOutputFormat::Native) {
+        return Ok(Vec::new());
+    }
+    #[cfg(feature = "svg")]
+    if matches!(config.output_format, ImageOutputFormat::Native) && !config.svg.sanitize {
+        return Ok(Vec::new());
+    }
+
+    let mut format_renames = Vec::new();
+    if let Some(images) = result.images.take() {
+        let target = config.output_format;
+        let image_config = config.clone();
+        let limits = security_limits.cloned().unwrap_or_default();
+        let (images, renames, warnings) = tokio::task::spawn_blocking(move || {
+            crate::core::image_encode::re_encode_images(images, target, &limits, &image_config)
+        })
+        .await
+        .map_err(|error| crate::XbergError::ImageProcessing {
+            message: format!("image re-encode task panicked: {error}"),
+            source: None,
+        })?;
+        result.images = Some(images);
+        result.processing_warnings.extend(warnings);
+        rewrite_all_content_image_extensions(result, &renames);
+        format_renames = renames;
+    }
+    Ok(format_renames)
+}
+
+/// Bring the #331/#286 snapshots onto the extension state the re-encode pass left behind.
+///
+/// Both snapshots (`formatted_content_source`'s two strings and
+/// `internal_document_source_content`) are clones taken *before* the pass, while the pass
+/// rewrote `image_N.ext` references in `result.content`/`result.formatted_content` to follow
+/// the files it renamed on disk. Without applying the same rewrite to the snapshot clones, a
+/// pure extension change made `formatted_content` differ from its snapshot — the divergence
+/// check read that as "a processor rewrote the rendering", kept a stale pre-carry-over
+/// rendering, and `apply_output_format` then overwrote the post-processed text with it — and
+/// made `content` differ from the element-tree snapshot, dropping a tree nothing had
+/// diverged from. With the rewrite, the comparisons are like for like again: only a real
+/// post-pass change to either surface still counts as divergence. Empty renames leave the
+/// clones untouched (`rewrite_content_image_extensions` early-returns).
+#[cfg(feature = "image-encode")]
+fn rewrite_snapshot_image_extensions(
+    mut formatted_content_source: Option<(String, String)>,
+    mut internal_document_source_content: Option<String>,
+    format_renames: &[(u32, String, String)],
+) -> (Option<(String, String)>, Option<String>) {
+    if let Some((source_content, source_formatted)) = formatted_content_source.as_mut() {
+        rewrite_content_image_extensions(source_content, format_renames);
+        rewrite_content_image_extensions(source_formatted, format_renames);
+    }
+    if let Some(source_content) = internal_document_source_content.as_mut() {
+        rewrite_content_image_extensions(source_content, format_renames);
+    }
+    (formatted_content_source, internal_document_source_content)
+}
+
+/// Bring the preserved element tree onto the same extension state as the
+/// re-encode pass: rewrite `image_N.old` references in every element text and
+/// prebuilt page content, and swap the renamed formats in the tree's own
+/// `images` copy. Mirrors [`rewrite_snapshot_image_extensions`] for the tree
+/// the snapshots exist to keep alive.
+#[cfg(feature = "image-encode")]
+fn rewrite_tree_image_extensions(
+    tree: &mut crate::types::internal::InternalDocument,
+    format_renames: &[(u32, String, String)],
+) {
+    if format_renames.is_empty() {
+        return;
+    }
+    for element in tree.elements.iter_mut() {
+        rewrite_content_image_extensions(&mut element.text, format_renames);
+    }
+    if let Some(pages) = tree.prebuilt_pages.as_mut() {
+        for page in pages.iter_mut() {
+            rewrite_content_image_extensions(&mut page.content, format_renames);
         }
     }
-    rewrite_content_image_extensions(&mut result.content, &format_renames);
-    // `apply_output_format` later swaps `formatted_content` into `content`. Rewrite
-    // that pre-render too, or Markdown still points at `.emf` after EMF→PNG re-encode.
-    if let Some(formatted) = result.formatted_content.as_mut() {
-        rewrite_content_image_extensions(formatted, &format_renames);
+    for image in tree.images.iter_mut() {
+        if let Some((_, _old_format, new_format)) = format_renames
+            .iter()
+            .find(|(renamed, old_format, _)| *renamed == image.image_index && *old_format == image.format)
+        {
+            image.format = new_format.clone().into();
+        }
     }
-    // Per-page content is rendered from the element tree before this pass runs and
-    // `apply_output_format` never touches it, so a page would keep pointing at the
-    // pre-encode extension while `content` and the files on disk use the new one.
+}
+
+/// Rewrite `image_N.oldext` references in every pre-rendered content surface after a
+/// re-encode pass renamed the files on disk: the main content, the pre-rendered
+/// `formatted_content` (swapped into `content` by `apply_output_format` at the very end),
+/// and the per-page content (rendered before this pass and never touched afterwards).
+#[cfg(feature = "image-encode")]
+fn rewrite_all_content_image_extensions(
+    result: &mut ExtractedDocument,
+    format_renames: &[(u32, String, String)],
+) {
+    rewrite_content_image_extensions(&mut result.content, format_renames);
+    if let Some(formatted) = result.formatted_content.as_mut() {
+        rewrite_content_image_extensions(formatted, format_renames);
+    }
     if let Some(pages) = result.pages.as_mut() {
         for page in pages.iter_mut() {
-            rewrite_content_image_extensions(&mut page.content, &format_renames);
+            rewrite_content_image_extensions(&mut page.content, format_renames);
         }
     }
 }
@@ -941,8 +1108,10 @@ fn rewrite_content_image_extensions(content: &mut String, format_renames: &[(u32
         let after_prefix = &rest[pos + "image_".len()..];
         let digit_len = after_prefix.bytes().take_while(u8::is_ascii_digit).count();
         let after_digits = &after_prefix[digit_len..];
-        // The renderers bake `image_<position>.<format>` from the image's position in
-        // `doc.images`, so the digits are the lookup key the rename was recorded under.
+        // The renderers bake `image_<image_index>.<format>` from the image's `image_index`
+        // field — the same number the CLI names the written file by — so the digits are the
+        // lookup key the rename was recorded under. The vector position can differ from the
+        // field when staging dropped unreferenced images, so it must not be the key.
         let replacement = if digit_len > 0 {
             let index = after_prefix[..digit_len].parse::<u32>().ok();
             index.and_then(|index| {

@@ -2123,6 +2123,43 @@ mod full_page_image_ocr_tests {
         assert!(image_ocr_positions(&document).is_empty());
     }
 
+    /// An extractor that already recognized an image (standalone images hand
+    /// their whole-image OCR result to the fence via `ExtractedImage::ocr_result`)
+    /// must not have that image recognized a second time: two runs produce two
+    /// readings whose noise differs, and both end up in the output.
+    #[test]
+    fn should_skip_images_that_already_carry_an_ocr_result() {
+        let mut document = pdf_document();
+        document.images = vec![
+            image(
+                0,
+                1,
+                BoundingBox {
+                    x0: 10.0,
+                    y0: 10.0,
+                    x1: 40.0,
+                    y1: 40.0,
+                },
+            ),
+            {
+                let mut recognized = image(
+                    1,
+                    1,
+                    BoundingBox {
+                        x0: 10.0,
+                        y0: 10.0,
+                        x1: 40.0,
+                        y1: 40.0,
+                    },
+                );
+                recognized.ocr_result = Some(Box::new(crate::types::ExtractedDocument::default()));
+                recognized
+            },
+        ];
+
+        assert_eq!(image_ocr_positions(&document), vec![0]);
+    }
+
     #[test]
     fn should_not_apply_pdf_deduplication_to_other_formats() {
         let mut document = pdf_document();
@@ -2327,6 +2364,44 @@ mod output_format_pass_tests {
                 .contains("security_limits.max_content_size")
         );
     }
+
+    /// The rename a re-encode produces is keyed by the image's `image_index` field — the
+    /// number the renderers bake into `image_N.ext` and the CLI names the written file by —
+    /// not by the vector position: staging can drop unreferenced images, leaving the
+    /// positions dense while the field has gaps (here vector position 0 carries
+    /// `image_index` 7). A position-keyed rename rewrote nothing the document referenced,
+    /// or another image's reference outright.
+    #[test]
+    fn rename_keys_come_from_the_image_index_field_not_the_position() {
+        let mut jpeg = make_image(make_jpeg_bytes(), "jpeg");
+        jpeg.image_index = 7;
+        let mut already_png = make_image(make_png_bytes(), "png");
+        already_png.image_index = 12;
+        let mut result = ExtractedDocument {
+            images: Some(vec![jpeg, already_png]),
+            ..Default::default()
+        };
+
+        let cfg = ImageExtractionConfig {
+            output_format: ImageOutputFormat::Png,
+            ..Default::default()
+        };
+
+        let renames = apply_output_format_pass_with_security_limits(&mut result, &cfg, None);
+
+        assert_eq!(
+            renames,
+            vec![(7u32, "jpeg".to_string(), "png".to_string())],
+            "the only format change is jpeg→png, keyed by image_index 7 — not the position 0"
+        );
+
+        let mut content = String::from("![](image_7.jpeg) and ![](image_0.jpeg)");
+        super::rewrite_content_image_extensions(&mut content, &renames);
+        assert_eq!(
+            content, "![](image_7.png) and ![](image_0.jpeg)",
+            "the keyed reference follows the rename; a position-shaped number no image carries stays"
+        );
+    }
 }
 
 /// Unit tests for `apply_data_base64_pass`.
@@ -2425,6 +2500,7 @@ mod data_base64_pass_tests {
 
 mod document_counts {
     use super::super::populate_document_counts;
+    use crate::types::internal::InternalDocument;
     use crate::types::page::{PageContent, PageStructure, PageUnitType};
     use crate::types::{ExtractedDocument, ExtractedImage, Metadata, Table};
 
@@ -2611,5 +2687,57 @@ mod document_counts {
         let mut content = source.clone();
         crate::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut content);
         assert_eq!(content, source);
+    }
+
+    /// An extension rename in the encode pass must not defeat the #331/#286 divergence
+    /// checks: the snapshots predate the pass, so `rewrite_snapshot_image_extensions` brings
+    /// their clones onto the same `image_N.ext` state the live surfaces were rewritten to.
+    /// With that in place, a carry-over that rewrote only the body text still leaves
+    /// `formatted_content` equal to its snapshot — stale — so the pre-rendering is dropped
+    /// instead of overwriting the post-processed text; and a content that moved only by the
+    /// extension change keeps the element tree.
+    #[cfg(feature = "image-encode")]
+    #[test]
+    fn extension_renames_do_not_mask_a_stale_pre_rendering() {
+        let formatted_source = Some((
+            "body ![](image_0.emf) end".to_string(),
+            "rendered ![](image_0.emf) end".to_string(),
+        ));
+        let tree_source = Some("tree ![](image_0.emf) end".to_string());
+        let renames = vec![(0u32, "emf".to_string(), "png".to_string())];
+
+        let (formatted_source, tree_source) =
+            super::rewrite_snapshot_image_extensions(formatted_source, tree_source, &renames);
+        assert_eq!(
+            formatted_source.as_ref().map(|(a, b)| (a.as_str(), b.as_str())),
+            Some(("body ![](image_0.png) end", "rendered ![](image_0.png) end")),
+            "the snapshot clones follow the rename like the live surfaces do"
+        );
+
+        // After the pass (extension rewritten on both surfaces) plus a carry-over that
+        // rewrote only the body: the rendering did not move, so it is stale and dropped.
+        let mut result = crate::types::ExtractedDocument {
+            content: "body ![](image_0.png) end\n\ncarried caption".to_string(),
+            formatted_content: Some("rendered ![](image_0.png) end".to_string()),
+            ..Default::default()
+        };
+        super::discard_diverged_formatted_content(&mut result, formatted_source.as_ref());
+        assert!(
+            result.formatted_content.is_none(),
+            "the rendering predates the carried caption and must be dropped, not swapped in"
+        );
+
+        // A content that moved only by the extension change keeps the element tree (#286):
+        // it still stands for the text.
+        let mut tree_result = crate::types::ExtractedDocument {
+            content: "tree ![](image_0.png) end".to_string(),
+            internal_document: Some(InternalDocument::new("test")),
+            ..Default::default()
+        };
+        super::discard_diverged_internal_document(&mut tree_result, tree_source.as_deref());
+        assert!(
+            tree_result.internal_document.is_some(),
+            "an extension-only change is not divergence; the element tree must survive"
+        );
     }
 }

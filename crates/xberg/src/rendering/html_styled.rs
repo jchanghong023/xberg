@@ -252,7 +252,19 @@ fn render_elements(doc: &InternalDocument, p: &str, buf: &mut String) {
     let mut state = RenderState::default();
     let mut list_ordered_stack: Vec<bool> = Vec::new();
 
-    for elem in &doc.elements {
+    // Same duplicate suppression as the markdown/plain renderers: a body
+    // paragraph reproducing an image's recognized text is the inlined OCR
+    // copy and must not print beside the image's own OCR caption.
+    let repeated_ocr = super::ocr_duplicate_indices(
+        &super::plain::body_paragraph_texts(doc),
+        &super::image_ocr_contents(doc, true),
+    );
+
+    for (index, elem) in doc.elements.iter().enumerate() {
+        if repeated_ocr[index] {
+            continue;
+        }
+
         if !matches!(elem.layer, ContentLayer::Body) {
             continue;
         }
@@ -482,9 +494,15 @@ fn render_elements(doc: &InternalDocument, p: &str, buf: &mut String) {
             ElementKind::Image { image_index } => {
                 if let Some(image) = doc.images.get(image_index as usize) {
                     let render_ocr = elem.should_render_image_ocr();
+                    // Same alt policy as the comrak writers (`comrak_bridge`): a path-like
+                    // `@descr` Office bakes into the image must not surface as an `alt`
+                    // attribute here either, so the element's caption text goes through the
+                    // same sanitizer before it is escaped into the tag.
+                    let alt = crate::extraction::markdown_utils::sanitize_image_alt_text(Some(elem.text.clone()))
+                        .unwrap_or_default();
                     render_image(
                         image,
-                        &elem.text,
+                        &alt,
                         p,
                         doc.ocr_text_only && render_ocr,
                         doc.append_ocr_text && render_ocr,

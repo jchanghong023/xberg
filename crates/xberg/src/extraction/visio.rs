@@ -7,8 +7,9 @@
 
 use crate::Result;
 use crate::XbergError;
+use crate::extractors::security::SecurityLimits;
 use std::collections::HashSet;
-use std::io::{Cursor, Read};
+use std::io::{Cursor, Read, Seek};
 
 const VISIO_HEADER: &[u8] = b"Visio (TM) Drawing\r\n";
 const VISIO_DOCUMENT_OFFSET: usize = 0x24;
@@ -130,6 +131,30 @@ pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Resu
     Ok(parser.text)
 }
 
+/// Reject a Visio Drawing package whose ZIP container violates the caller's
+/// `SecurityLimits` before any part is read: entry count, aggregate declared
+/// size, and compression ratio all use the configured values — the same three
+/// checks `extraction::excel::validate_zip_container` runs ahead of calamine.
+/// The legacy tolerance that function keeps for `.xls` does not apply here: a
+/// Visio Drawing package that reaches this point was already identified as a
+/// readable ZIP by its magic bytes.
+fn validate_package_container<R: Read + Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    limits: &SecurityLimits,
+) -> Result<()> {
+    if archive.len() > limits.max_files_in_archive {
+        return Err(XbergError::validation(format!(
+            "Visio package declares {} entries, which exceeds the configured limit of {} \
+             (SecurityLimits::max_files_in_archive); reduce the archive's entry count or raise the limit",
+            archive.len(),
+            limits.max_files_in_archive
+        )));
+    }
+    crate::extractors::security::ZipBombValidator::new(limits.clone())
+        .validate(archive)
+        .map_err(XbergError::from)
+}
+
 /// Extract shape text from a Visio Drawing package (`.vsdx`/`.vsdm`).
 ///
 /// A drawing package is an OPC (ZIP) container; the shape text lives in the
@@ -137,13 +162,17 @@ pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Resu
 /// parts. This is the OOXML counterpart of [`extract_visio_text`], which reads
 /// the binary `.vsd` container.
 ///
-/// `max_stream_size` is one budget across all package parts: a single part over
-/// it aborts the extraction, and so does the running total once it is spent,
-/// mirroring the binary reader's behavior (a per-part cap alone does not bound
-/// a container with many parts).
-pub(crate) fn extract_visio_package_text(content: &[u8], max_stream_size: usize) -> Result<Vec<String>> {
+/// The container is validated against the caller's `limits` before any part is
+/// read (see [`validate_package_container`]); `limits.max_archive_size` is then
+/// one budget across all package parts: a single part over it aborts the
+/// extraction, and so does the running total once it is spent, mirroring the
+/// binary reader's behavior (a per-part cap alone does not bound a container
+/// with many parts).
+pub(crate) fn extract_visio_package_text(content: &[u8], limits: &SecurityLimits) -> Result<Vec<String>> {
+    let max_stream_size = limits.max_archive_size;
     let mut archive = zip::ZipArchive::new(Cursor::new(content))
         .map_err(|error| XbergError::parsing(format!("Failed to open VSDX as ZIP package: {error}")))?;
+    validate_package_container(&mut archive, limits)?;
 
     let mut text = Vec::new();
     // A per-part cap does not bound the package: a container with many small parts still makes
@@ -197,6 +226,19 @@ pub(crate) fn extract_visio_package_text(content: &[u8], max_stream_size: usize)
             continue;
         };
         for node in document.descendants().filter(|node| node.has_tag_name("Text")) {
+            // EDDX (Edraw) parts nest the same tag name —
+            // `<Text><TextBlock>…<Text><tp>…</tp></Text></TextBlock></Text>` — so a
+            // plain `Text` filter visits the outer and the inner element and pushes
+            // every string twice. The outer pass already collects all descendant
+            // text, so a node that itself has a `Text` ancestor adds nothing new.
+            // Real VSDX parts never nest `Text`, so this changes nothing for them.
+            // roxmltree's `ancestors()` STARTS AT THE NODE ITSELF (`node: Some(*self)`),
+            // so the self-match must be excluded — without `.skip(1)` every `Text`
+            // node sees itself as its own `Text` ancestor and the part yields no text
+            // at all (that bug silently emptied every embedded EDDX section).
+            if node.ancestors().skip(1).any(|ancestor| ancestor.has_tag_name("Text")) {
+                continue;
+            }
             let mut buffer = String::new();
             for descendant in node.descendants() {
                 if descendant.is_text()
@@ -738,4 +780,119 @@ fn read_u16(data: &[u8], offset: usize) -> Option<u16> {
 fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
     let bytes = data.get(offset..offset.checked_add(4)?)?;
     Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal ZIP in memory with `count` page parts.
+    fn make_zip_with_entries(count: usize) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        for index in 0..count {
+            zip.start_file(format!("visio/pages/page{index}.xml"), options).unwrap();
+            zip.write_all(b"<pages/>").unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn validate_package_container_accepts_an_ordinary_package() {
+        let bytes = make_zip_with_entries(2);
+        let mut archive = zip::ZipArchive::new(Cursor::new(&bytes[..])).unwrap();
+        assert!(
+            validate_package_container(&mut archive, &SecurityLimits::default()).is_ok(),
+            "a two-entry package under every default limit must validate"
+        );
+    }
+
+    /// The entry-count ceiling comes from the caller's `SecurityLimits`, not a
+    /// built-in default: a three-entry package against a configured limit of two
+    /// must be rejected with the limit named.
+    #[test]
+    fn validate_package_container_rejects_package_over_the_configured_entry_limit() {
+        let bytes = make_zip_with_entries(3);
+        let mut archive = zip::ZipArchive::new(Cursor::new(&bytes[..])).unwrap();
+        let limits = SecurityLimits {
+            max_files_in_archive: 2,
+            ..Default::default()
+        };
+
+        let error = validate_package_container(&mut archive, &limits)
+            .expect_err("a three-entry package against a limit of two must be rejected");
+        assert!(
+            error.to_string().contains("2"),
+            "the error must name the configured limit: {error}"
+        );
+    }
+
+    /// Build a flat "VDX-style" package (`document.xml` + `pages/page1.xml`, the
+    /// layout an OLE `Package` stream or an EDDX part uses) whose page nests the
+    /// same `Text` tag the way EDDX writes it.
+    fn make_eddx_style_package(page1: &str) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let options = SimpleFileOptions::default();
+        zip.start_file("document.xml", options).unwrap();
+        zip.write_all(b"<document/>").unwrap();
+        zip.start_file("pages/page1.xml", options).unwrap();
+        zip.write_all(page1.as_bytes()).unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    /// EDDX nests `<Text>` inside `<Text>`; the reader must emit each string once,
+    /// not once per matching element (the outer pass already collects everything).
+    #[test]
+    fn eddx_nested_text_elements_are_collected_once() {
+        let page1 = r##"<page>
+            <Text>
+                <TextBlock>
+                    <Text>
+                        <pp><tp>ARCH41_CORE4</tp></pp>
+                    </Text>
+                </TextBlock>
+            </Text>
+            <Text>
+                <TextBlock>
+                    <Text><pp><tp>macro join</tp></pp></Text>
+                </TextBlock>
+            </Text>
+        </page>"##;
+        let bytes = make_eddx_style_package(page1);
+        let text = extract_visio_package_text(&bytes, &SecurityLimits::default())
+            .expect("a well-formed flat package must extract");
+
+        assert_eq!(
+            text.iter().filter(|t| t.as_str() == "ARCH41_CORE4").count(),
+            1,
+            "each nested-Text string must appear exactly once, got {text:?}"
+        );
+        assert_eq!(
+            text.iter().filter(|t| t.as_str() == "macro join").count(),
+            1,
+            "each nested-Text string must appear exactly once, got {text:?}"
+        );
+    }
+
+    /// Ordinary VSDX parts (no `Text` nesting) keep their exact per-shape output.
+    #[test]
+    fn vsdx_flat_text_elements_are_unchanged() {
+        let page1 = r##"<page>
+            <Shapes>
+                <Shape><Text>Alpha<x>br</x></Text></Shape>
+                <Shape><Text>Beta</Text></Shape>
+            </Shapes>
+        </page>"##;
+        let bytes = make_eddx_style_package(page1);
+        let text = extract_visio_package_text(&bytes, &SecurityLimits::default())
+            .expect("a well-formed flat package must extract");
+
+        assert_eq!(text, vec!["Alphabr".to_string(), "Beta".to_string()], "got {text:?}");
+    }
 }

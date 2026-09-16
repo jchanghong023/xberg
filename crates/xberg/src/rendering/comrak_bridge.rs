@@ -702,9 +702,12 @@ fn escape_marker_alt(text: &str) -> String {
 /// only guards the line's syntax: a space ends a CommonMark link destination early, an
 /// unbalanced `)` closes it early (an extractor relationship target like `media/image1).png`
 /// did exactly that, leaving the tail of the name as loose text), and `<`/`>` can open the
-/// pointy-bracket form. Percent-encoding keeps the path resolvable and survives
-/// `render_markdown`'s backslash-unescape pass, which a backslash escape would not.
-fn sanitize_marker_url(url: &str) -> String {
+/// pointy-bracket form. A literal `\` is encoded too: the marker is written as a `Raw` node
+/// (verbatim), and `render_markdown`'s backslash-unescape pass would otherwise delete the
+/// backslash of a `\`-before-target sequence in a Windows path (`C:\data\__x` lost its
+/// underscores). `%5C` survives that pass and percent-decodes back to the path.
+/// Djot image markers share the `![alt](url)` shape, so its renderer reuses this too.
+pub(super) fn sanitize_marker_url(url: &str) -> String {
     let mut sanitized = String::with_capacity(url.len());
     for character in url.chars() {
         match character {
@@ -715,6 +718,7 @@ fn sanitize_marker_url(url: &str) -> String {
             '>' => sanitized.push_str("%3E"),
             '"' => sanitized.push_str("%22"),
             '`' => sanitized.push_str("%60"),
+            '\\' => sanitized.push_str("%5C"),
             // Control characters have no place in the destination and no encoding that would
             // make them printable here, so they are dropped rather than encoded.
             control if control.is_control() => {}
@@ -756,16 +760,14 @@ pub(crate) fn build_comrak_ast<'a>(
 
     // The inlined copy of an image's recognized text is dropped from the paragraph stream: the
     // image itself renders that text, so walking both showed the recognized content twice.
+    // Titles and headings are never candidates: a heading that reproduces a logo's
+    // text is document structure standing before the image, not the copy that
+    // follows it (which the pipeline inserts as a plain paragraph).
     let view_texts: Vec<&str> = consolidated
         .iter()
         .map(|entry| match entry.resolve(&doc.elements) {
             ElementView::Ref(elem) => {
-                if is_body_element(elem)
-                    && matches!(
-                        elem.kind,
-                        ElementKind::Title | ElementKind::Heading { .. } | ElementKind::Paragraph
-                    )
-                {
+                if is_body_element(elem) && matches!(elem.kind, ElementKind::Paragraph) {
                     elem.text.as_str()
                 } else {
                     ""
@@ -1048,7 +1050,7 @@ pub(crate) fn build_comrak_ast<'a>(
                             .and_then(|img| img.ocr_result.as_ref())
                             .is_some_and(|result| !result.content.is_empty());
 
-                    if doc.ocr_text_only && has_ocr {
+                    if image_block_style == ImageBlockStyle::Node && doc.ocr_text_only && has_ocr {
                         let ocr_result = image.and_then(|img| img.ocr_result.as_ref()).unwrap();
                         let ocr_para = mk(arena, NodeValue::Paragraph);
                         ocr_para.append(mk_text(arena, &ocr_result.content));
@@ -1061,11 +1063,21 @@ pub(crate) fn build_comrak_ast<'a>(
                         para.append(img_node);
                         parent.append(para);
 
-                        if render_image_ocr
-                            && doc.append_ocr_text
-                            && let Some(ocr_result) = image.and_then(|img| img.ocr_result.as_ref())
-                            && !ocr_result.content.is_empty()
-                        {
+                        // The markdown renderer's fence path prints recognized text
+                        // regardless of the doc-level flags (its dedup passes
+                        // `respect_ocr_flags = false`); a container-nested image must
+                        // not flip to flag gating or a reproduced paragraph would be
+                        // deleted while nothing prints in its place. Only the
+                        // Node-style writers (HTML) keep the flag gate here.
+                        let append_ocr = render_image_ocr
+                            && (image_block_style == ImageBlockStyle::Fence || doc.append_ocr_text)
+                            && image
+                                .and_then(|img| img.ocr_result.as_ref())
+                                .is_some_and(|result| !result.content.is_empty());
+                        if append_ocr {
+                            let ocr_result = image
+                                .and_then(|img| img.ocr_result.as_ref())
+                                .unwrap();
                             let ocr_para = mk(arena, NodeValue::Paragraph);
                             ocr_para.append(mk_text(arena, &ocr_result.content));
                             parent.append(ocr_para);
@@ -1090,7 +1102,12 @@ pub(crate) fn build_comrak_ast<'a>(
                         .and_then(crate::rendering::ocr_layout::layout_ocr_text)
                         .or_else(|| {
                             let text = result.content.trim();
-                            (!text.is_empty()).then(|| text.to_string())
+                            // Fence bodies are verbatim: a literal `\r` would
+                            // ride along into the output, so CRLF-only content
+                            // is normalized here, matching the layout path's
+                            // per-line handling.
+                            (!text.is_empty())
+                                .then(|| text.replace("\r\n", "\n").replace('\r', "\n"))
                         })
                 });
                 // Every image leaves its marker line — the markdown image carrying the path the
@@ -1450,6 +1467,19 @@ mod tests {
         let mut output = String::new();
         format_html(root, &Options::default(), &mut output).unwrap();
         output
+    }
+
+    /// A marker URL carries a raw filesystem path, so a `\` before a
+    /// backslash-unescape target (`\_`) must be percent-encoded: the marker is
+    /// a `Raw` node written verbatim into the prose, where `render_markdown`'s
+    /// unescape pass deletes target backslashes and would corrupt the path.
+    #[test]
+    fn sanitize_marker_url_encodes_backslashes() {
+        assert_eq!(
+            sanitize_marker_url(r"C:\data\__pycache__\a.png"),
+            r"C:%5Cdata%5C__pycache__%5Ca.png"
+        );
+        assert_eq!(sanitize_marker_url("image_0.png"), "image_0.png");
     }
 
     #[test]

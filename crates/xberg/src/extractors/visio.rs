@@ -4,6 +4,7 @@ use crate::Result;
 use crate::core::config::ExtractionConfig;
 use crate::core::mime::{VISIO_DRAWING_ML_MIME_TYPE, VISIO_MIME_TYPE};
 use crate::extraction::visio::{extract_visio_package_text, extract_visio_text};
+use crate::extractors::security::SecurityLimits;
 use crate::plugins::{InternalDocumentExtractor, Plugin};
 use crate::types::Metadata;
 use crate::types::internal::{ElementKind, InternalDocument, InternalElement};
@@ -67,27 +68,28 @@ impl InternalDocumentExtractor for VisioExtractor {
             return Err(crate::error::XbergError::Cancelled);
         }
 
-        let max_stream_size = config.security_limits.clone().unwrap_or_default().max_archive_size;
+        let security_limits = config.security_limits.clone().unwrap_or_default();
         let text = {
             #[cfg(feature = "tokio-runtime")]
             if crate::core::batch_mode::is_batch_mode() {
                 let content_owned = content.to_vec();
+                let limits_owned = security_limits.clone();
                 let span = tracing::Span::current();
                 tokio::task::spawn_blocking(move || {
                     let _guard = span.entered();
-                    extract_visio_drawing(&content_owned, max_stream_size)
+                    extract_visio_drawing(&content_owned, &limits_owned)
                 })
                 .await
                 .map_err(|error| {
                     crate::error::XbergError::parsing(format!("Visio extraction task failed: {error}"))
                 })??
             } else {
-                extract_visio_drawing(content, max_stream_size)?
+                extract_visio_drawing(content, &security_limits)?
             }
 
             #[cfg(not(feature = "tokio-runtime"))]
             {
-                extract_visio_drawing(content, max_stream_size)?
+                extract_visio_drawing(content, &security_limits)?
             }
         };
 
@@ -124,11 +126,13 @@ impl InternalDocumentExtractor for VisioExtractor {
 }
 
 /// Dispatch a Visio drawing to the binary (`.vsd`) or package (`.vsdx`) reader
-/// based on the container's magic bytes.
-fn extract_visio_drawing(content: &[u8], max_stream_size: usize) -> Result<Vec<String>> {
+/// based on the container's magic bytes. The package reader enforces the
+/// caller's full `SecurityLimits`; the binary reader needs only the stream-size
+/// budget, which it takes from `limits.max_archive_size`.
+fn extract_visio_drawing(content: &[u8], limits: &SecurityLimits) -> Result<Vec<String>> {
     if content.starts_with(b"PK\x03\x04") {
-        extract_visio_package_text(content, max_stream_size)
+        extract_visio_package_text(content, limits)
     } else {
-        extract_visio_text(content, max_stream_size)
+        extract_visio_text(content, limits.max_archive_size)
     }
 }

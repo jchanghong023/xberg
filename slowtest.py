@@ -37,13 +37,13 @@ sys.stderr.reconfigure(encoding="utf-8", line_buffering=True)
 def run_package():
     """运行打包脚本（实时透传输出）。返回 True 表示 zip 已生成。"""
     pwsh = shutil.which("pwsh")
-    if pwsh:
-        cmd = [pwsh, "-NoProfile", "-File", str(PACKAGE_SCRIPT)]
-    else:
-        # 无 PowerShell 7 时退回系统自带的 Windows PowerShell；脚本若用了
-        # pwsh 7 语法会在这一步报错，此时需先安装 PowerShell 7。
-        print("未找到 pwsh，改用 Windows PowerShell（若打包脚本报语法错误请安装 PowerShell 7）")
-        cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(PACKAGE_SCRIPT)]
+    if not pwsh:
+        # 打包脚本带 `#Requires -Version 7.4`（Start-Process -Environment 等依赖），
+        # Windows PowerShell 5.1 会在加载期被直接拒绝，回退只会报误导性的语法错误。
+        print("未找到 pwsh：打包需要 PowerShell >= 7.4，请先安装 PowerShell 7"
+              "（https://aka.ms/powershell），不要用 Windows PowerShell 5.1 运行。")
+        return False
+    cmd = [pwsh, "-NoProfile", "-File", str(PACKAGE_SCRIPT)]
     proc = subprocess.run(cmd, cwd=str(REPO))
     if proc.returncode != 0:
         print(f"打包失败（退出码 {proc.returncode}）")

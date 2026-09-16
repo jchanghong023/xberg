@@ -49,22 +49,23 @@ fn display_width(text: &str) -> usize {
 /// Reads the OCR document's line elements, whose boxes carry the geometry the public
 /// `ocr_elements` list only exposes when the caller asked for it.
 pub(crate) fn layout_ocr_text(document: &InternalDocument) -> Option<String> {
-    let items: Vec<(f64, f64, f64, String)> = document
-        .elements
-        .iter()
-        .filter_map(|element| {
-            if !matches!(element.kind, ElementKind::OcrText { .. }) {
-                return None;
-            }
-            let text = element.text.trim();
-            if text.is_empty() {
-                return None;
-            }
-            let bbox = element.bbox?;
-            let height = (bbox.y1 - bbox.y0).abs();
-            Some((bbox.x0, bbox.y0, height, text.to_string()))
-        })
-        .collect();
+    let mut items: Vec<(f64, f64, f64, String)> = Vec::new();
+    for element in &document.elements {
+        if !matches!(element.kind, ElementKind::OcrText { .. }) {
+            continue;
+        }
+        let text = element.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        // A line with text but no measured box cannot be placed. Emitting a grid without it
+        // would silently drop the line from the fenced block while the flat `content` still
+        // carries it, so the whole layout is refused and the caller keeps the flat OCR text
+        // — the same "refuse rather than lose lines" contract as the row/column caps below.
+        let bbox = element.bbox?;
+        let height = (bbox.y1 - bbox.y0).abs();
+        items.push((bbox.x0, bbox.y0, height, text.to_string()));
+    }
     layout_boxes(items)
 }
 
@@ -327,6 +328,13 @@ fn rank_rows(indexed: &[(usize, f64, f64, f64, String)], line_height: f64) -> Op
             columns.last_mut().expect("column is never empty").push(item);
         }
     }
+    // Pair each column's lines by vertical order, not by the left order the column was just
+    // built in: a column's left edges jitter by a pixel or two (centred labels read
+    // 0.0/2.0/1.0), and pairing the left-sorted ranks crossed lines that never shared a row.
+    // `indexed` arrives sorted by top and this sort is stable, so equal tops keep that order.
+    for column in &mut columns {
+        column.sort_by(|a, b| indexed[*a].2.partial_cmp(&indexed[*b].2).unwrap_or(std::cmp::Ordering::Equal));
+    }
     let count = columns.first()?.len();
     if columns.len() < 2 || count == 0 || columns.iter().any(|column| column.len() != count) {
         return None;
@@ -381,6 +389,47 @@ mod tests {
     fn returns_none_without_usable_elements() {
         assert!(layout_boxes(Vec::new()).is_none());
         assert!(layout_boxes(vec![element("   ", 0.0, 0.0, 10.0, 10.0)]).is_none());
+    }
+
+    /// A line with text but no measured box cannot be placed: the layout must be refused
+    /// outright so the caller keeps the flat OCR text. A grid that silently omitted the
+    /// line lost it from the fenced block while `content` still carried it.
+    #[test]
+    fn refuses_the_layout_when_a_line_has_no_bbox() {
+        use crate::types::internal::{ElementKind, InternalDocument, InternalElement};
+
+        let boxed = {
+            let mut element = InternalElement::text(
+                ElementKind::OcrText {
+                    level: crate::types::OcrElementLevel::Line,
+                },
+                "boxed line",
+                0,
+            );
+            element.bbox = Some(crate::types::extraction::BoundingBox {
+                x0: 0.0,
+                y0: 0.0,
+                x1: 120.0,
+                y1: 20.0,
+            });
+            element
+        };
+        let unboxed = InternalElement::text(
+            ElementKind::OcrText {
+                level: crate::types::OcrElementLevel::Line,
+            },
+            "unboxed line",
+            0,
+        );
+
+        let mut document = InternalDocument::new("ocr");
+        document.push_element(boxed);
+        document.push_element(unboxed);
+
+        assert!(
+            layout_ocr_text(&document).is_none(),
+            "a layout that would drop the unboxed line must be refused"
+        );
     }
 
     /// CJK glyphs are two display columns wide, so a Chinese line keeps its proportion
@@ -491,5 +540,29 @@ mod tests {
             "the value must sit on its own label's row: {block:?}"
         );
         assert!(ijtag_row < mbist_row, "the labels keep the OCR order: {block:?}");
+    }
+
+    /// A column's left edges can jitter by a pixel or two (centred labels read
+    /// 0.0/2.0/1.0). Pairing the left-sorted ranks crossed lines that never shared a row —
+    /// `beta` landed below `gamma` with the next label's value — so each column pairs by
+    /// vertical order instead.
+    #[test]
+    fn jittered_column_edges_pair_by_vertical_order() {
+        let label = |text: &str, left: f64, top: f64| element(text, left, top, 60.0, 12.0);
+        let block = layout_boxes(vec![
+            label("alpha", 0.0, 0.0),
+            label("beta", 2.0, 20.0),
+            label("gamma", 1.0, 40.0),
+            label("one", 200.0, 1.0),
+            label("two", 200.0, 21.0),
+            label("three", 200.0, 41.0),
+        ])
+        .expect("layout");
+
+        let lines: Vec<&str> = block.lines().collect();
+        assert_eq!(lines.len(), 3, "three visual rows: {block:?}");
+        assert!(lines[0].contains("alpha") && lines[0].contains("one"), "{block:?}");
+        assert!(lines[1].contains("beta") && lines[1].contains("two"), "{block:?}");
+        assert!(lines[2].contains("gamma") && lines[2].contains("three"), "{block:?}");
     }
 }

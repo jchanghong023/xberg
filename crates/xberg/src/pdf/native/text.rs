@@ -66,6 +66,50 @@ impl PageMarginFractions {
     }
 }
 
+/// Which cross-page furniture passes may strip, derived from
+/// `ContentFilterConfig`. `strip_repeating_text = false` disables both
+/// detectors (the documented escape hatch when repeated brand names or
+/// headings are wrongly removed); `include_headers` / `include_footers`
+/// protect the matching edge band from candidacy, mirroring how
+/// [`PageMarginFractions::from_extraction_config`] zeroes the margin bands.
+/// Removal stays global once a string qualifies: a string registered from the
+/// still-strippable band is removed wherever it repeats, so a running title
+/// printed in BOTH edge bands survives only via `strip_repeating_text = false`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FurniturePermissions {
+    pub strip_repeating_text: bool,
+    pub strip_top_edges: bool,
+    pub strip_bottom_edges: bool,
+}
+
+impl Default for FurniturePermissions {
+    fn default() -> Self {
+        Self {
+            strip_repeating_text: true,
+            strip_top_edges: true,
+            strip_bottom_edges: true,
+        }
+    }
+}
+
+impl FurniturePermissions {
+    pub(crate) fn from_extraction_config(config: Option<&ExtractionConfig>) -> Self {
+        let Some(filter) = config.and_then(|config| config.content_filter.as_ref()) else {
+            return Self::default();
+        };
+        Self {
+            strip_repeating_text: filter.strip_repeating_text,
+            strip_top_edges: !filter.include_headers,
+            strip_bottom_edges: !filter.include_footers,
+        }
+    }
+
+    /// Whether any edge-zone furniture detection may run at all.
+    pub(crate) fn enabled(&self) -> bool {
+        self.strip_repeating_text && (self.strip_top_edges || self.strip_bottom_edges)
+    }
+}
+
 /// Result type for unified PDF text and metadata extraction.
 ///
 /// Contains text, optional page boundaries, optional per-page content, and metadata.
@@ -158,14 +202,15 @@ pub(crate) fn extract_text_from_native_document(
 ) -> Result<PdfTextExtractionResult> {
     let needs_boundaries =
         extraction_config.is_some_and(|c| c.force_ocr_pages.as_ref().is_some_and(|p| !p.is_empty()) || c.ocr.is_some());
+    let furniture_permissions = FurniturePermissions::from_extraction_config(extraction_config);
 
     if let Some(config) = page_config {
-        extract_text_with_tracking(doc, config, margins)
+        extract_text_with_tracking(doc, config, margins, furniture_permissions)
     } else if needs_boundaries {
         let default_config = PageConfig::default();
-        extract_text_with_tracking(doc, &default_config, margins)
+        extract_text_with_tracking(doc, &default_config, margins, furniture_permissions)
     } else {
-        extract_text_fast_path(doc, margins)
+        extract_text_fast_path(doc, margins, furniture_permissions)
     }
 }
 
@@ -174,7 +219,11 @@ pub(crate) fn extract_text_from_native_document(
 /// Iterates pages one-by-one, applies control-char fixes and optional HTML
 /// conversion, and builds a single concatenated string. Pre-allocates capacity
 /// after sampling the first 5 pages.
-fn extract_text_fast_path(doc: &mut NativeDocument, margins: PageMarginFractions) -> Result<PdfTextExtractionResult> {
+fn extract_text_fast_path(
+    doc: &mut NativeDocument,
+    margins: PageMarginFractions,
+    furniture_permissions: FurniturePermissions,
+) -> Result<PdfTextExtractionResult> {
     let page_count = doc
         .doc
         .page_count()
@@ -208,7 +257,7 @@ fn extract_text_fast_path(doc: &mut NativeDocument, margins: PageMarginFractions
         }
     }
 
-    strip_repeated_edge_furniture(&mut page_texts);
+    strip_repeated_edge_furniture(&mut page_texts, furniture_permissions);
 
     for (page_idx, cleaned) in page_texts.iter().enumerate() {
         if page_idx > 0 {
@@ -229,6 +278,7 @@ fn extract_text_with_tracking(
     doc: &mut NativeDocument,
     config: &PageConfig,
     margins: PageMarginFractions,
+    furniture_permissions: FurniturePermissions,
 ) -> Result<PdfTextExtractionResult> {
     let page_count = doc
         .doc
@@ -271,7 +321,7 @@ fn extract_text_with_tracking(
         }
     }
 
-    strip_repeated_edge_furniture(&mut page_texts);
+    strip_repeated_edge_furniture(&mut page_texts, furniture_permissions);
 
     for (page_idx, cleaned) in page_texts.iter().enumerate() {
         let page_number = page_idx + 1;
@@ -361,8 +411,11 @@ pub(crate) fn furniture_min_page_fraction() -> f64 {
 /// detect furniture over its own page-grouped paragraphs. Unlike that pass,
 /// this function only *returns* the furniture strings; removal is the caller's
 /// job.
-pub(crate) fn furniture_from_page_lines(pages: &[Vec<String>]) -> std::collections::HashSet<String> {
-    if pages.len() < FURNITURE_MIN_PAGES {
+pub(crate) fn furniture_from_page_lines(
+    pages: &[Vec<String>],
+    permissions: FurniturePermissions,
+) -> std::collections::HashSet<String> {
+    if pages.len() < FURNITURE_MIN_PAGES || !permissions.enabled() {
         return Default::default();
     }
 
@@ -383,11 +436,15 @@ pub(crate) fn furniture_from_page_lines(pages: &[Vec<String>]) -> std::collectio
             continue;
         }
         let mut edge_line_positions = std::collections::HashSet::new();
-        for position in non_empty.iter().take(EDGE_LINES) {
-            edge_line_positions.insert(*position);
+        if permissions.strip_top_edges {
+            for position in non_empty.iter().take(EDGE_LINES) {
+                edge_line_positions.insert(*position);
+            }
         }
-        for position in non_empty.iter().rev().take(EDGE_LINES) {
-            edge_line_positions.insert(*position);
+        if permissions.strip_bottom_edges {
+            for position in non_empty.iter().rev().take(EDGE_LINES) {
+                edge_line_positions.insert(*position);
+            }
         }
         let mut seen_on_this_page = std::collections::HashSet::new();
         for position in edge_line_positions {
@@ -464,12 +521,12 @@ pub(crate) fn furniture_from_page_lines(pages: &[Vec<String>]) -> std::collectio
 ///
 /// Docs with fewer than [`FURNITURE_MIN_PAGES`] pages carry too little
 /// evidence to judge a line furniture, so they pass through unchanged.
-pub(crate) fn strip_repeated_edge_furniture(pages: &mut [String]) {
+pub(crate) fn strip_repeated_edge_furniture(pages: &mut [String], permissions: FurniturePermissions) {
     let as_lines: Vec<Vec<String>> = pages
         .iter()
         .map(|page| page.lines().map(str::to_string).collect())
         .collect();
-    let furniture = furniture_from_page_lines(&as_lines);
+    let furniture = furniture_from_page_lines(&as_lines, permissions);
     if furniture.is_empty() {
         return;
     }
@@ -2065,7 +2122,7 @@ mod tests {
                 format!("{}\n\n{footer}\n", body.join("\n"))
             })
             .collect();
-        strip_repeated_edge_furniture(&mut pages);
+        strip_repeated_edge_furniture(&mut pages, FurniturePermissions::default());
 
         for (page, text) in pages.iter().enumerate() {
             assert!(!text.contains(footer), "page {page} still carries the footer: {text:?}");
@@ -2084,7 +2141,7 @@ mod tests {
         let mut pages: Vec<String> = (0..8)
             .map(|page| format!("heading {page}\nintro {page}\n{body}\nclosing {page}\n"))
             .collect();
-        strip_repeated_edge_furniture(&mut pages);
+        strip_repeated_edge_furniture(&mut pages, FurniturePermissions::default());
 
         for (page, text) in pages.iter().enumerate() {
             assert!(text.contains(body), "page {page} lost repeated body text: {text:?}");
@@ -2108,7 +2165,7 @@ mod tests {
                 format!("{header}\n{}\n", lines.join("\n"))
             })
             .collect();
-        strip_repeated_edge_furniture(&mut pages);
+        strip_repeated_edge_furniture(&mut pages, FurniturePermissions::default());
 
         for (page, text) in pages.iter().enumerate() {
             assert!(!text.contains(header), "page {page} still carries the header: {text:?}");
@@ -2126,7 +2183,7 @@ mod tests {
         let mut numbered: Vec<String> = (0..8)
             .map(|page| format!("page body {page}\n\n{page}\n"))
             .collect();
-        strip_repeated_edge_furniture(&mut numbered);
+        strip_repeated_edge_furniture(&mut numbered, FurniturePermissions::default());
         assert!(
             numbered.iter().enumerate().all(|(page, text)| text.contains(&page.to_string())),
             "page numbers must survive: {numbered:?}"
@@ -2140,7 +2197,7 @@ mod tests {
             })
             .collect();
         let before = tiny.clone();
-        strip_repeated_edge_furniture(&mut tiny);
+        strip_repeated_edge_furniture(&mut tiny, FurniturePermissions::default());
         assert_eq!(tiny, before, "a three-page document must pass through unchanged");
     }
 
@@ -2168,7 +2225,7 @@ mod tests {
                 format!("{edge}{}\n", body.join("\n"))
             })
             .collect();
-        strip_repeated_edge_furniture(&mut pages);
+        strip_repeated_edge_furniture(&mut pages, FurniturePermissions::default());
 
         for (page, text) in pages.iter().enumerate() {
             if (12..24).contains(&page) {

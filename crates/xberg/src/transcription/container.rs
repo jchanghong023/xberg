@@ -235,6 +235,21 @@ fn decode_via_ffmpeg(
         (Some(bytes), Some(needed)) => Some(bytes.max(needed)),
         (budget, _) => budget,
     };
+    // A WAV past the duration-derived allowance means the source ran longer
+    // than `max_duration_ms` (the `-t` above truncated it to the margin, and
+    // the 44-byte header tips it over): report the duration overflow, not a
+    // byte limit the user never configured — the generic size error below
+    // would quote the raised, duration-derived ceiling.
+    if let Some(allowed) = duration_bytes
+        && wav.len() as u64 > allowed
+    {
+        return Err(crate::XbergError::transcription(format!(
+            "decoded audio runs past transcription.max_duration_ms ({} ms): WAV is {} bytes, duration allowance {} bytes",
+            max_duration_ms.unwrap_or_default(),
+            wav.len(),
+            allowed
+        )));
+    }
     decode_audio_to_pcm(&wav, wav_limit)
 }
 

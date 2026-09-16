@@ -122,10 +122,10 @@ fn parse_placeable(data: &[u8]) -> Result<(PlaceableBounds, &[u8]), MetafileErro
     if data.len() < PLACEABLE_HEADER_BYTES || read_u32(data, 0)? != PLACEABLE_KEY {
         return Err(MetafileError::new("invalid placeable WMF key"));
     }
-    let checksum = (0..10).try_fold(0_u16, |value, word| read_u16(data, word * 2).map(|part| value ^ part))?;
-    if checksum != read_u16(data, 20)? {
-        return Err(MetafileError::new("invalid placeable WMF checksum"));
-    }
+    // The placeable header's Checksum (XOR of its first 10 WORDs) is deliberately not
+    // verified: real-world writers leave it zero or compute it wrongly, mainstream
+    // readers (LibreOffice, libwmf, ...) ignore it, and it plays no role in decoding --
+    // so a hard comparison here only rejects images that would rasterize just fine.
     let left = i32::from(read_i16(data, 6)?);
     let top = i32::from(read_i16(data, 8)?);
     let right = i32::from(read_i16(data, 10)?);
@@ -392,4 +392,44 @@ fn play_wmf(surface: &DibSurface, records: &[u8], bounds: Option<PlaceableBounds
         return Err(MetafileError::new("PlayMetaFile failed"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A placeable header whose stored Checksum (both words) is wrong must still parse:
+    /// the checksum is ignored because real-world writers fill it unreliably and it has
+    /// no effect on decoding (see the comment in `parse_placeable`).
+    #[test]
+    fn placeable_header_with_wrong_checksum_parses() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&PLACEABLE_KEY.to_le_bytes());
+        data.extend_from_slice(&0_u16.to_le_bytes()); // leading Checksum: zeroed on purpose
+        data.extend_from_slice(&0_i16.to_le_bytes()); // bounding box: left
+        data.extend_from_slice(&0_i16.to_le_bytes()); // top
+        data.extend_from_slice(&100_i16.to_le_bytes()); // right
+        data.extend_from_slice(&50_i16.to_le_bytes()); // bottom
+        data.extend_from_slice(&1440_u16.to_le_bytes()); // inch (must be non-zero)
+        data.extend_from_slice(&0_u32.to_le_bytes()); // reserved
+        data.extend_from_slice(&0xBEEF_u16.to_le_bytes()); // trailing Checksum: wrong on purpose
+        // Minimal valid standard WMF payload so validate_standard_wmf passes: type 1,
+        // header size 9, version 0x0300, total size 12 words, max record 3 words, plus
+        // one 6-byte placeholder record.
+        data.extend_from_slice(&1_u16.to_le_bytes());
+        data.extend_from_slice(&9_u16.to_le_bytes());
+        data.extend_from_slice(&0x0300_u16.to_le_bytes());
+        data.extend_from_slice(&12_u32.to_le_bytes());
+        data.extend_from_slice(&0_u16.to_le_bytes()); // object count (not validated)
+        data.extend_from_slice(&3_u32.to_le_bytes()); // maximum record size in words
+        data.extend_from_slice(&0_u16.to_le_bytes()); // parameter count (not validated)
+        data.extend_from_slice(&[0_u8; 6]);
+
+        let (bounds, records) = parse_placeable(&data).expect("a wrong checksum must not reject the metafile");
+        assert_eq!(bounds.left, 0);
+        assert_eq!(bounds.top, 0);
+        assert_eq!(bounds.width, 100);
+        assert_eq!(bounds.height, 50);
+        assert_eq!(records.len(), data.len() - PLACEABLE_HEADER_BYTES);
+    }
 }

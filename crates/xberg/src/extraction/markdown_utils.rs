@@ -1,5 +1,77 @@
 //! Shared Markdown helpers that must compile without the `office` feature.
 
+/// A code fence's opening marker: the fence character and its length.
+///
+/// CommonMark: a fence opens with three or more backticks or tildes, optionally indented by
+/// up to three spaces; the line may carry an info string after the marker (for a backtick
+/// fence the info string must not contain a backtick). Shared by the content rewriters that
+/// must leave fenced code untouched — an `image_N` reference inside a fence is literal
+/// text, not a file reference.
+pub fn code_fence_open(line: &str) -> Option<(char, usize)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let marker = rest.chars().next()?;
+    if marker != '`' && marker != '~' {
+        return None;
+    }
+    let length = rest.chars().take_while(|&character| character == marker).count();
+    if length < 3 {
+        return None;
+    }
+    if marker == '`' && rest[length..].contains('`') {
+        return None;
+    }
+    Some((marker, length))
+}
+
+/// Whether `line` closes the fence that `(marker, length)` opened: the same character, at
+/// least as many of them, nothing else on the line but ASCII spaces and tabs (CommonMark
+/// accepts no other trailing content — a general `trim()` would let arbitrary Unicode
+/// whitespace pass as a closer), at most three spaces of indentation.
+pub fn code_fence_close(line: &str, marker: char, length: usize) -> bool {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return false;
+    }
+    let rest = &line[indent..];
+    let run = rest.chars().take_while(|&character| character == marker).count();
+    run >= length && rest[run..].bytes().all(|byte| byte == b' ' || byte == b'\t')
+}
+
+/// Code-fence state across the lines of a Markdown document.
+///
+/// [`FenceTracker::fenced`] reports whether a line is fence content (the opening and closing
+/// lines included) after updating the state with it; content rewriters skip such lines so
+/// fenced code stays verbatim.
+#[derive(Debug, Default)]
+pub struct FenceTracker {
+    open: Option<(char, usize)>,
+}
+
+impl FenceTracker {
+    /// Whether `line` belongs to a code fence, having first updated the state with it.
+    pub fn fenced(&mut self, line: &str) -> bool {
+        match self.open {
+            Some((marker, length)) => {
+                if code_fence_close(line, marker, length) {
+                    self.open = None;
+                }
+                true
+            }
+            None => match code_fence_open(line) {
+                Some(opened) => {
+                    self.open = Some(opened);
+                    true
+                }
+                None => false,
+            },
+        }
+    }
+}
+
 /// Move a markdown image marker out of the `text` fence it was baked into.
 ///
 /// The PPTX content builder writes a picture's placeholder into the same code block as the
@@ -30,45 +102,90 @@ pub fn lift_image_markers_out_of_fences(content: &mut String) {
             opener_backticks += 1;
         }
         let opening_end = position + opener_backticks + "text".len();
-        let body_start = match rest[opening_end..].strip_prefix("\r\n") {
-            Some(_) => opening_end + 2,
-            None if rest[opening_end..].starts_with('\n') => opening_end + 1,
+        // A fence opener must sit at the start of its line (CommonMark allows up to three
+        // spaces of indentation). "```text" anywhere else on the line is literal text — an
+        // inline snippet in a markdown tutorial — and must survive verbatim.
+        let line_start = rest[..position].rfind('\n').map_or(0, |index| index + 1);
+        let at_line_start = {
+            let indent = &rest[line_start..position];
+            indent.len() <= 3 && indent.bytes().all(|byte| byte == b' ')
+        };
+        let body_start = if at_line_start {
+            match rest[opening_end..].strip_prefix("\r\n") {
+                Some(_) => Some(opening_end + 2),
+                None if rest[opening_end..].starts_with('\n') => Some(opening_end + 1),
+                None => None,
+            }
+        } else {
+            None
+        };
+        let body_start = match body_start {
+            Some(start) => {
+                start + rest[start..].len() - rest[start..].trim_start_matches(['\r', '\n']).len()
+            }
             None => {
                 out.push_str(&rest[..opening_end]);
                 rest = &rest[opening_end..];
                 continue;
             }
         };
-        let body_start = body_start
-            + rest[body_start..].len()
-            - rest[body_start..].trim_start_matches(['\r', '\n']).len();
         let body = &rest[body_start..];
         let first_line_end = body.find('\n').map_or(body.len(), |index| index + 1);
         let first_line = body[..first_line_end].trim_end_matches(['\r', '\n']).trim();
         let is_marker = first_line.starts_with("![") && first_line.contains("](") && first_line.ends_with(')');
         if !is_marker {
             out.push_str(&rest[..body_start]);
-            rest = body;
+            // The fence's body is literal content: skip past its closing line
+            // instead of scanning inside it, so a ```text line in tutorial-like
+            // OCR text can never be mistaken for a fresh opener and rewritten.
+            // The fence itself is kept verbatim (its opener was just pushed).
+            let mut consumed = 0usize;
+            for line in body.split_inclusive('\n') {
+                consumed += line.len();
+                let bare = line.trim_end_matches(['\r', '\n']);
+                if code_fence_close(bare, '`', opener_backticks) {
+                    break;
+                }
+            }
+            out.push_str(&body[..consumed]);
+            rest = &body[consumed..];
             continue;
         }
         out.push_str(&rest[..position]);
         out.push_str(first_line);
         out.push_str("\n\n");
         rest = &body[first_line_end..];
-        // Only a line that is nothing but backticks — at least as many as the opener — closes
-        // the fence. A body line that merely starts with backticks (a nested ```python opener,
-        // say) is content: skipping it dropped the line from the output and left the re-opened
-        // fence below unclosed, which then swallows every paragraph after it on re-parse.
-        let next_line = rest.split('\n').next().unwrap_or(rest).trim_end();
-        let closes_fence = next_line.len() >= opener_backticks && next_line.bytes().all(|byte| byte == b'`');
-        if closes_fence {
-            let closing_end = rest.find('\n').map_or(rest.len(), |index| index + 1);
-            rest = &rest[closing_end..];
-        } else {
-            // Re-open with the opener's own run: its length was picked to outgrow the body's
-            // backtick runs, and a shorter one could be closed early by a body line.
-            out.push_str(&"`".repeat(opener_backticks));
-            out.push_str("text\n");
+        // Find the closing line: only a line of nothing but the fence character —
+        // at least as many as the opener, at most three spaces of indent — closes
+        // the fence. A body line that merely starts with backticks (a nested
+        // ```python opener, say) is content: skipping it dropped the line from the
+        // output and left the re-opened fence below unclosed, which then swallowed
+        // every paragraph after it on re-parse.
+        let mut inter_body_end = 0usize;
+        let mut closer_end = None;
+        let mut consumed = 0usize;
+        for line in rest.split_inclusive('\n') {
+            let bare = line.trim_end_matches(['\r', '\n']);
+            if code_fence_close(bare, '`', opener_backticks) {
+                closer_end = Some(consumed + line.len());
+                break;
+            }
+            consumed += line.len();
+            inter_body_end = consumed;
+        }
+        match closer_end {
+            Some(end) if rest[..inter_body_end].trim().is_empty() => {
+                // The marker was the fence's only content: drop the fence with
+                // its closer instead of re-opening an empty one.
+                rest = &rest[end..];
+            }
+            _ => {
+                // Re-open with the opener's own run: its length was picked to
+                // outgrow the body's backtick runs, and a shorter one could be
+                // closed early by a body line.
+                out.push_str(&"`".repeat(opener_backticks));
+                out.push_str("text\n");
+            }
         }
     }
     out.push_str(rest);
@@ -158,5 +275,69 @@ mod tests {
             content, "![](image_3.png)\n\n````text\nlet x = 1;\n````\n",
             "the 4-backtick opener must not leak a backtick and must be re-opened at its own length"
         );
+    }
+
+    /// A fence opener must sit at the start of its line: "```text" mid-line is literal text
+    /// even when a newline follows it (CommonMark never opens a fence there). The old
+    /// implementation took it for an opener, lifted the next line's marker out of a fence
+    /// that never existed, and deleted the closing line — `"text before ```text\n![](i.png)\n```\n"`
+    /// came back as `"text before ![](i.png)\n\n"` — so the assertion below discriminates:
+    /// with the line-start check the passage must survive byte for byte.
+    #[test]
+    fn midline_text_fence_before_a_newline_is_not_an_opener() {
+        let source = String::from("text before ```text\n![](image_1.png)\n```\n");
+        let mut content = source.clone();
+        lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(
+            content, source,
+            "a mid-line ```text is literal text: nothing may be lifted or deleted"
+        );
+    }
+
+    /// A ```text line that sits INSIDE another fence's body is literal content
+    /// (a markdown tutorial the fence quotes): the lifter must skip the whole
+    /// outer fence instead of treating the inner line as a fresh opener — the
+    /// old scan continued inside the body, lifted the "marker" out of a fence
+    /// that never opened, and deleted the inner closing line.
+    #[test]
+    fn text_fence_line_inside_another_fence_body_is_not_lifted() {
+        let source = String::from("````text\n```text\n![](image_1.png)\n```\n````\n");
+        let mut content = source.clone();
+        lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(
+            content, source,
+            "a ```text inside a fence body is literal text: nothing may be lifted or deleted"
+        );
+    }
+
+    /// When the lifted marker was the fence's only content apart from blank
+    /// lines, the whole fence goes away — re-opening an empty ```text block
+    /// left stray fence noise in the output.
+    #[test]
+    fn fence_left_with_only_the_marker_and_blanks_is_dropped_whole() {
+        let mut content = String::from("```text\n![](image_0.png)\n\n```\nafter\n");
+        lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(content, "![](image_0.png)\n\nafter\n");
+    }
+
+    /// The tracker recognizes backtick and tilde fences with info strings, keeps lines
+    /// between an opener and its closer fenced, and requires a closing run at least as long
+    /// as the opener.
+    #[test]
+    fn fence_tracker_pairs_openers_with_their_closers() {
+        let mut tracker = FenceTracker::default();
+        assert!(tracker.fenced("```rust"));
+        assert!(tracker.fenced("let x = ![](image_0.png);"));
+        // A two-backtick line inside a three-backtick fence is fence content, not a closer.
+        assert!(tracker.fenced("`` above is code"));
+        assert!(tracker.fenced("  ```"));
+        assert!(!tracker.fenced("plain paragraph"));
+
+        let mut tracker = FenceTracker::default();
+        assert!(tracker.fenced("~~~text info with ~~~ tildes"));
+        assert!(tracker.fenced("body"));
+        assert!(tracker.fenced("~~ a shorter run does not close"));
+        assert!(tracker.fenced("~~~~"));
+        assert!(!tracker.fenced("plain paragraph"));
     }
 }

@@ -543,7 +543,10 @@ fn parse_list(tx_body_node: &Node, xml_str: &str) -> Result<ListElement> {
 /// turns `ContentBuilder::add_list_item`'s per-level `"  "` indent loop
 /// (`content_builder.rs`) into ~4.29 billion pushes -- several GB of string growth --
 /// instead of a bounded few.
-const MAX_LIST_NESTING_LEVEL: u32 = 8;
+///
+/// Re-exported for the second-pass reader in `extractors::pptx`, which derives
+/// nesting depth from raw leading spaces and clamps against the same ceiling.
+pub(crate) const MAX_LIST_NESTING_LEVEL: u32 = 8;
 
 /// Returns (level, is_ordered, has_bullet).
 fn parse_list_properties(p_node: &Node) -> Result<(u32, bool, bool)> {

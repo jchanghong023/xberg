@@ -110,6 +110,27 @@ fn validate_workbook_budget(workbook: &crate::types::ExcelWorkbook, budget: &mut
     Ok(())
 }
 
+/// Charge a workbook's cells and floating shape text against one budget.
+///
+/// Shared by both entry points (`extract_content` for in-memory bytes,
+/// `extract_path` for files) so the CLI and the HTTP/FFI callers enforce the
+/// same `SecurityLimits`: a budget only one of them applies is no budget at all.
+/// Floating shape text is body content the drawing walk surfaced, so it answers
+/// to the same `max_content_size` the cell text does — without this, a workbook
+/// whose content lives in shapes carries an unbounded amount of text past the
+/// limits every other path enforces.
+fn charge_workbook_budget(
+    workbook: &crate::types::ExcelWorkbook,
+    shapes: &[XlsxShapeText],
+    budget: &mut SecurityBudget,
+) -> crate::Result<()> {
+    validate_workbook_budget(workbook, budget)?;
+    for shape in shapes {
+        budget.account_text(shape.text.len())?;
+    }
+    Ok(())
+}
+
 /// MIME types backed by an OOXML (or OOXML-derived binary) ZIP package, i.e.
 /// formats whose package may carry embedded objects under `xl/embeddings/`
 /// (xberg-io/xberg#78) and embedded pictures under `xl/media/`.
@@ -633,14 +654,7 @@ impl InternalDocumentExtractor for ExcelExtractor {
         let (workbook, read_warnings) = read_result;
 
         let mut budget = SecurityBudget::from_config(config);
-        validate_workbook_budget(&workbook, &mut budget)?;
-        // Floating shape text is body content the drawing walk surfaced, so it is
-        // charged against the same budget the cell text answers to; without this
-        // a workbook whose content lives in shapes carries an unbounded amount of
-        // text past the limits every other path enforces here.
-        for shape in &shapes {
-            budget.account_text(shape.text.len())?;
-        }
+        charge_workbook_budget(&workbook, &shapes, &mut budget)?;
         let mut doc = Self::workbook_to_internal_document(&workbook, pictures, shapes);
         doc.processing_warnings.extend(read_warnings);
         doc.mime_type = mime_type.to_string();
@@ -689,6 +703,11 @@ impl InternalDocumentExtractor for ExcelExtractor {
         } else {
             (Vec::new(), Vec::new())
         };
+        // Same budget the bytes entry point enforces: the file entry point (the CLI's
+        // path for on-disk workbooks) must not accept a workbook the bytes entry
+        // point rejects.
+        let mut budget = SecurityBudget::from_config(config);
+        charge_workbook_budget(&workbook, &shapes, &mut budget)?;
         let mut doc = Self::workbook_to_internal_document(&workbook, pictures, shapes);
         doc.processing_warnings.extend(read_warnings);
         doc.mime_type = mime_type.to_string();
@@ -1085,6 +1104,42 @@ mod tests {
             .collect();
         assert_eq!(dde_warnings.len(), 1, "one DDE warning expected in InternalDocument");
         assert!(dde_warnings[0].message.contains("DDE"), "{}", dde_warnings[0].message);
+    }
+
+    /// Both entry points charge cells and floating shape text against the same
+    /// budget: cells (10 bytes) plus shape text (10 bytes) must exhaust a
+    /// 15-byte `max_content_size` no matter which entry point is taken.
+    #[test]
+    fn charge_workbook_budget_counts_cells_and_shape_text() {
+        let workbook = make_workbook(vec![make_sheet(
+            "Sheet1",
+            Some(vec![vec!["abcdefghij".to_string()]]),
+        )]);
+        let shapes = vec![XlsxShapeText {
+            text: "0123456789".to_string(),
+            sheet_name: "Sheet1".to_string(),
+            anchor: None,
+        }];
+
+        let mut budget = SecurityBudget::from_limits(&crate::extractors::security::SecurityLimits {
+            max_content_size: 15,
+            ..Default::default()
+        });
+        assert!(
+            charge_workbook_budget(&workbook, &shapes, &mut budget).is_err(),
+            "cells (10 bytes) + shape text (10 bytes) must exceed the 15-byte budget"
+        );
+
+        // Without the shapes the same workbook fits: the helper charges exactly
+        // what the two producers emit, nothing more.
+        let mut budget = SecurityBudget::from_limits(&crate::extractors::security::SecurityLimits {
+            max_content_size: 15,
+            ..Default::default()
+        });
+        assert!(
+            charge_workbook_budget(&workbook, &[], &mut budget).is_ok(),
+            "cells alone (10 bytes) must fit the 15-byte budget"
+        );
     }
 
     #[test]

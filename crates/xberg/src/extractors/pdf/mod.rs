@@ -431,7 +431,10 @@ fn structured_native_token_coverage(document: &InternalDocument, native_text: &s
 ///    document (page number, book title and section title occupy those slots),
 ///    so edge-zone detection misses it even though the exact string repeats on
 ///    every page of the chapter.
-fn strip_furniture_from_structured_document(document: &mut InternalDocument) {
+fn strip_furniture_from_structured_document(
+    document: &mut InternalDocument,
+    permissions: crate::pdf::native::text::FurniturePermissions,
+) {
     use crate::types::internal::{ElementKind, InternalElement};
 
     // Group paragraph texts by page, preserving first-seen order.
@@ -451,10 +454,16 @@ fn strip_furniture_from_structured_document(document: &mut InternalDocument) {
         .iter()
         .filter_map(|page| pages.get(page).cloned())
         .collect();
-    let mut furniture = crate::pdf::native::text::furniture_from_page_lines(&page_line_lists);
-    furniture.extend(furniture_from_consecutive_page_paragraphs(
-        &page_line_lists,
-    ));
+    let mut furniture = crate::pdf::native::text::furniture_from_page_lines(&page_line_lists, permissions);
+    // The consecutive-page detector has no positional evidence to separate a
+    // running header from a footer, so — like the structure pipeline's
+    // `mark_cross_page_repeating_text` — it is gated only by
+    // `strip_repeating_text`, not by the per-band include flags.
+    if permissions.strip_repeating_text {
+        furniture.extend(furniture_from_consecutive_page_paragraphs(
+            &page_line_lists,
+        ));
+    }
     if furniture.is_empty() {
         return;
     }
@@ -545,6 +554,7 @@ fn select_native_pdf_document(
     mime_type: &str,
     pre_rendered_doc: Option<InternalDocument>,
     boundaries: Option<&[crate::types::PageBoundary]>,
+    furniture_permissions: crate::pdf::native::text::FurniturePermissions,
 ) -> (InternalDocument, bool) {
     let Some(mut document) = pre_rendered_doc else {
         return (flat_pdf_document(text, mime_type, boundaries), false);
@@ -553,7 +563,7 @@ fn select_native_pdf_document(
 
     let coverage = structured_native_token_coverage(&document, text);
     if coverage.is_none_or(|coverage| coverage >= MIN_STRUCTURED_NATIVE_TOKEN_COVERAGE) {
-        strip_furniture_from_structured_document(&mut document);
+        strip_furniture_from_structured_document(&mut document, furniture_permissions);
         return (document, true);
     }
 
@@ -577,10 +587,12 @@ fn select_pdf_document(
     structured_ocr_pages: Option<&ahash::AHashMap<u32, InternalDocument>>,
     boundaries: Option<&[crate::types::PageBoundary]>,
     output_format: &crate::core::config::OutputFormat,
+    furniture_permissions: crate::pdf::native::text::FurniturePermissions,
 ) -> (InternalDocument, PdfDocumentOrigin, bool) {
     let (mut doc, origin, structured) = match extraction_method {
         ExtractionMethod::Native => {
-            let (document, structured) = select_native_pdf_document(text, mime_type, pre_rendered_doc, boundaries);
+            let (document, structured) =
+                select_native_pdf_document(text, mime_type, pre_rendered_doc, boundaries, furniture_permissions);
             (document, PdfDocumentOrigin::Native, structured)
         }
         ExtractionMethod::Mixed => {
@@ -2571,6 +2583,7 @@ impl PdfExtractor {
             structured_ocr_pages.as_ref(),
             selector_boundaries.as_deref(),
             &config.output_format,
+            crate::pdf::native::text::FurniturePermissions::from_extraction_config(Some(config)),
         );
         #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
         if extraction_method == ExtractionMethod::Mixed
@@ -2580,8 +2593,13 @@ impl PdfExtractor {
             replace_tables_with_ocr_output(&mut tables, accepted_mixed_ocr_tables(accepted_pages));
         }
         #[cfg(not(any(feature = "ocr", feature = "ocr-pipeline")))]
-        let (mut doc, document_is_structured) =
-            select_native_pdf_document(&text, mime_type, pre_rendered_doc, boundaries.as_deref());
+        let (mut doc, document_is_structured) = select_native_pdf_document(
+            &text,
+            mime_type,
+            pre_rendered_doc,
+            boundaries.as_deref(),
+            crate::pdf::native::text::FurniturePermissions::from_extraction_config(Some(config)),
+        );
         // #1575: `doc.metadata` is fully replaced by a fresh `Metadata { .. }` literal below
         // (native/mixed extraction never populates `doc.metadata` this early, so this is a
         // no-op for them), which would otherwise discard the OCR pipeline's `psm`/`language`/
@@ -3095,7 +3113,13 @@ mod tests {
         structured.push_element(InternalElement::text(ElementKind::Heading { level: 1 }, represented, 0));
 
         let (selected, is_structured) =
-            select_native_pdf_document(&native_text, "application/pdf", Some(structured), None);
+            select_native_pdf_document(
+                &native_text,
+                "application/pdf",
+                Some(structured),
+                None,
+                crate::pdf::native::text::FurniturePermissions::default(),
+            );
 
         assert!(!is_structured);
         assert_eq!(selected.elements.len(), 1);
@@ -3110,7 +3134,13 @@ mod tests {
         structured.push_element(InternalElement::text(ElementKind::Heading { level: 1 }, represented, 0));
 
         let (selected, is_structured) =
-            select_native_pdf_document(&native_text, "application/pdf", Some(structured), None);
+            select_native_pdf_document(
+                &native_text,
+                "application/pdf",
+                Some(structured),
+                None,
+                crate::pdf::native::text::FurniturePermissions::default(),
+            );
 
         assert!(is_structured);
         assert!(matches!(selected.elements[0].kind, ElementKind::Heading { level: 1 }));
@@ -3125,7 +3155,13 @@ mod tests {
             ..Default::default()
         });
 
-        let (_, is_structured) = select_native_pdf_document(&native_text, "application/pdf", Some(structured), None);
+        let (_, is_structured) = select_native_pdf_document(
+                &native_text,
+                "application/pdf",
+                Some(structured),
+                None,
+                crate::pdf::native::text::FurniturePermissions::default(),
+            );
 
         assert!(is_structured);
     }
@@ -3136,7 +3172,13 @@ mod tests {
         structured.push_element(InternalElement::text(ElementKind::Heading { level: 1 }, "Title", 0));
 
         let (selected, is_structured) =
-            select_native_pdf_document("Title and body", "application/pdf", Some(structured), None);
+            select_native_pdf_document(
+                "Title and body",
+                "application/pdf",
+                Some(structured),
+                None,
+                crate::pdf::native::text::FurniturePermissions::default(),
+            );
 
         assert!(is_structured);
         assert!(matches!(selected.elements[0].kind, ElementKind::Heading { level: 1 }));
@@ -3367,6 +3409,7 @@ mod tests {
             Some(&structured_pages),
             None,
             &crate::core::config::OutputFormat::Plain,
+            crate::pdf::native::text::FurniturePermissions::default(),
         );
         assert!(plain.prebuilt_ocr_elements.is_none());
 
@@ -3399,6 +3442,7 @@ mod tests {
             Some(&structured_pages),
             None,
             &crate::core::config::OutputFormat::Plain,
+            crate::pdf::native::text::FurniturePermissions::default(),
         );
         assert!(plain.tables.is_empty());
 
@@ -3756,6 +3800,7 @@ mod tests {
             None,
             None,
             &crate::core::config::OutputFormat::Markdown,
+            crate::pdf::native::text::FurniturePermissions::default(),
         );
 
         assert_eq!(origin, PdfDocumentOrigin::Ocr);
@@ -3801,6 +3846,7 @@ mod tests {
             None,
             None,
             &crate::core::config::OutputFormat::Markdown,
+            crate::pdf::native::text::FurniturePermissions::default(),
         );
 
         assert_eq!(origin, PdfDocumentOrigin::Mixed);
@@ -3862,6 +3908,7 @@ mod tests {
             Some(&structured_pages),
             Some(&boundaries),
             &crate::core::config::OutputFormat::Markdown,
+            crate::pdf::native::text::FurniturePermissions::default(),
         );
 
         assert_eq!(origin, PdfDocumentOrigin::Mixed);
@@ -3907,6 +3954,7 @@ mod tests {
             None,
             None,
             &crate::core::config::OutputFormat::Markdown,
+            crate::pdf::native::text::FurniturePermissions::default(),
         );
         let allow_injection = !structured || (origin == PdfDocumentOrigin::Ocr && doc.tables.is_empty());
 

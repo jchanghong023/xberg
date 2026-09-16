@@ -128,7 +128,7 @@ pub(crate) fn extract_tables_native(doc: &mut NativeDocument) -> Result<(Vec<Tab
                 continue;
             }
 
-            let (cells, markdown) = convert_extracted_table(&extracted_table);
+            let (mut cells, markdown) = convert_extracted_table(&extracted_table);
 
             if cells.is_empty() || markdown.trim().is_empty() {
                 continue;
@@ -143,6 +143,19 @@ pub(crate) fn extract_tables_native(doc: &mut NativeDocument) -> Result<(Vec<Tab
                 );
                 continue;
             }
+
+            // Same truth-table repair as the bordered loop below: this built-in
+            // detector's grids also skip post_process_table_inner, so a clustered
+            // `1 1 0`-into-`110` row would reach the output unsplit. The rewrite's
+            // own gates (3-8 columns, pure-bit merged value, single-bit evidence
+            // row, 60% bit-shaped grid) are what make it safe, not the entry point.
+            let split_count =
+                crate::pdf::table_reconstruct::split_merged_truth_table_cells(&mut cells);
+            let markdown = if split_count > 0 {
+                table_to_markdown(&cells)
+            } else {
+                markdown
+            };
 
             let bounding_box = extracted_table.bbox.map(|rect| BoundingBox {
                 x0: rect.x as f64,
@@ -246,7 +259,7 @@ pub(crate) fn extract_tables_bordered(
                 continue;
             }
 
-            let (cells, markdown) = convert_extracted_table(&extracted_table);
+            let (mut cells, markdown) = convert_extracted_table(&extracted_table);
 
             if cells.is_empty() || markdown.trim().is_empty() {
                 continue;
@@ -261,6 +274,19 @@ pub(crate) fn extract_tables_bordered(
                 );
                 continue;
             }
+
+            // Bordered grids never pass through post_process_table_inner (that
+            // repair runs on the unbordered/OCR paths), so a truth table's
+            // clustered `1 1 0`-into-`110` row would reach the output unsplit.
+            // The rewrite has its own truth-table gates; regenerating the
+            // markdown keeps the flat field in step with the cells.
+            let split_count =
+                crate::pdf::table_reconstruct::split_merged_truth_table_cells(&mut cells);
+            let markdown = if split_count > 0 {
+                table_to_markdown(&cells)
+            } else {
+                markdown
+            };
 
             let bounding_box = extracted_table.bbox.map(|rect| BoundingBox {
                 x0: rect.x as f64,

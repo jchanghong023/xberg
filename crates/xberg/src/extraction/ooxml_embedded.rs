@@ -222,6 +222,14 @@ enum ImageScan<'a> {
 /// literal `]` in alt text and a literal `)` in a target as `\]`/`\)`, and
 /// stopping at those folded an escaped reference's parse and left the child's
 /// numbering in the parent's body.
+///
+/// A closer search never crosses the next unescaped `![` opener: an opener
+/// whose `)` never comes (malformed text before a later, well-formed
+/// reference) would otherwise swallow that reference — its parse fails, the
+/// span is replaced by the outer alt text, and the later image silently loses
+/// its reference and its staged file. CommonMark recovers at the next opener;
+/// so does this scan, by reporting the opener as [`ImageScan::Malformed`]
+/// (two bytes consumed) and letting the loop rescan from there.
 fn find_markdown_image_parts(s: &str) -> ImageScan<'_> {
     debug_assert!(s.starts_with("!["));
     let rest = &s[2..];
@@ -236,7 +244,26 @@ fn find_markdown_image_parts(s: &str) -> ImageScan<'_> {
     let Some(close_paren) = find_unescaped(after, b')') else {
         return ImageScan::NoTerminator;
     };
+    if let Some(next_opener) = find_unescaped_opener(after) {
+        if next_opener < close_paren {
+            return ImageScan::Malformed;
+        }
+    }
     ImageScan::Parts(alt, &after[1..close_paren], 2 + close_bracket + 1 + close_paren + 1)
+}
+
+/// Index of the first unescaped `![` in `s`, or `None`.
+fn find_unescaped_opener(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut from = 0usize;
+    loop {
+        let bang = find_unescaped(&s[from..], b'!')? + from;
+        let next = bang + 1;
+        if next < bytes.len() && bytes[next] == b'[' {
+            return Some(bang);
+        }
+        from = next;
+    }
 }
 
 /// Index of the first unescaped `needle` byte in `s`. A `\` escapes the character
@@ -302,6 +329,11 @@ pub(crate) async fn extract_ooxml_embedded_objects(
             }
         })
         .collect();
+    // A malformed archive can list the same embeddings path twice; `by_name`
+    // would return the same entry for both and the object's text would land in
+    // the output twice. Same hygiene as the xlsx media walk.
+    embedding_names.sort_unstable();
+    embedding_names.dedup();
 
     if embedding_names.is_empty() {
         return (children, warnings);
@@ -1066,6 +1098,33 @@ mod tests {
             "the escaped reference is renumbered, got {rewritten}"
         );
         assert_eq!(referenced, vec![0], "the escaped reference counts as a staging candidate");
+    }
+
+    /// A malformed opener whose `)` never comes must not swallow the next
+    /// well-formed reference: the closer search stops at the next `![`, the
+    /// malformed opener degrades to two literal bytes, and the later reference
+    /// is rescanned from its own start — its image stays a staging candidate.
+    #[test]
+    fn renumber_embedded_image_refs_recovers_at_the_next_opener() {
+        let images = vec![crate::types::ExtractedImage {
+            image_index: 0,
+            ..Default::default()
+        }];
+        let (rewritten, referenced) =
+            renumber_embedded_image_refs("![a](unclosed ![c](image_0.png)", 3, &images);
+        assert!(
+            rewritten.contains("![c](image_3.png)"),
+            "the later reference must be renumbered, got {rewritten}"
+        );
+        assert_eq!(referenced, vec![0], "the later reference is staged");
+        // The malformed opener's own text stays verbatim (Malformed keeps two
+        // literal bytes); what must NOT survive is the inner reference in its
+        // un-renumbered form — that would mean the span was parsed as one
+        // reference and the image silently lost.
+        assert!(
+            !rewritten.contains("image_0.png"),
+            "the swallowed inner reference must not survive un-renumbered, got {rewritten}"
+        );
     }
 
     /// A child whose body is empty after renumbering (a reference that matches

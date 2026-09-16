@@ -20,6 +20,8 @@ jobs:
     timeout-minutes: 120
     env:
       TARGET: x86_64-pc-windows-msvc
+    outputs:
+      xberg-version: ${{ steps.probe.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -46,6 +48,24 @@ jobs:
         run: |
           pwsh -NoProfile -File "$env:GITHUB_WORKSPACE/scripts/publish/cli/package-cli-windows.ps1" -Target x86_64-pc-windows-msvc
 
+      # The packaging script keeps the staged tree, so probe the freshly built exe
+      # instead of hardcoding an upstream version in the release body (it goes stale).
+      # Two output shapes exist (verified on the staged exe): the clap `--version`
+      # flag prints plain "xberg <semver>" (command name is "xberg"), while the
+      # `version` SUBCOMMAND prints a styled "xberg-cli <semver>" (CARGO_PKG_NAME,
+      # and the styler only honors NO_COLOR -- no isatty check, and Actions runners
+      # do not set it). NO_COLOR plus the last whitespace token yields the bare
+      # semver under both shapes and survives program-name or styling drift.
+      - name: Probe packaged xberg version
+        id: probe
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:GITHUB_WORKSPACE "xberg-cli-$env:TARGET/xberg.exe"
+          $env:NO_COLOR = '1'
+          $raw = (& $exe --version | Select-Object -First 1).Trim()
+          $version = ($raw -split '\s+')[-1]
+          "version=$version" >> $env:GITHUB_OUTPUT
+
       - name: Upload Windows CLI artifact
         uses: actions/upload-artifact@v7
         with:
@@ -62,6 +82,7 @@ jobs:
       contents: write
     env:
       TARGET: x86_64-pc-windows-msvc
+      XBERG_VERSION: ${{ needs.build-windows-cli.outputs.xberg-version }}
     steps:
       - name: Download Windows CLI artifact
         uses: actions/download-artifact@v8
@@ -99,7 +120,7 @@ jobs:
           ## 这是什么
 
           **fork 仓库** [`jchanghong023/xberg`](https://github.com/jchanghong023/xberg) 的 Windows CLI 发布包。
-          基于上游 Xberg **1.1.6**，额外修了文档抽取里 Office 矢量图 / Markdown 预览相关的问题。
+          基于上游 Xberg **__XBERG_VERSION__**，额外修了文档抽取里 Office 矢量图 / Markdown 预览相关的问题。
 
           **下载后解压即可用**：`xberg.exe` + ONNX Runtime DLL。把解压目录加入 `PATH`，或直接运行 `xberg.exe`。
 
@@ -124,6 +145,9 @@ jobs:
           - `feat(images): rasterize EMF/WMF to PNG and sanitize path-like alt text`
           EOF
           )
+          # The heredoc above is quoted, so __XBERG_VERSION__ was not expanded in it;
+          # splice in the version probed off the built exe (build job output) instead.
+          STATIC_HEAD=${STATIC_HEAD//'__XBERG_VERSION__'/${XBERG_VERSION}}
           BUILD_INFO=$(cat <<EOF
           ## 构建信息
 

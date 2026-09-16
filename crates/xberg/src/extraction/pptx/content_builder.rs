@@ -234,7 +234,7 @@ impl ContentBuilder {
     pub(super) fn add_image_with_desc(&mut self, _image_id: &str, description: Option<&str>, target: &str) {
         if !self.plain {
             let alt = description
-                .map(|d| d.replace('\n', " ").replace('\r', ""))
+                .map(|d| Self::escape_alt_text(&d.replace('\n', " ").replace('\r', "").trim()))
                 .unwrap_or_default();
             let src = if target.is_empty() {
                 String::new()
@@ -244,8 +244,27 @@ impl ContentBuilder {
             if !self.content.is_empty() && !self.content.ends_with('\n') {
                 self.content.push('\n');
             }
-            self.content.push_str(&format!("![{}]({})\n", alt.trim(), src));
+            self.content.push_str(&format!("![{}]({})\n", alt, src));
         }
+    }
+
+    /// Backslash-escape the alt-text characters that would end the `![` run early.
+    ///
+    /// A `]` closes the alt in CommonMark — and a `](` pair is also what the
+    /// placeholder reader in `extractors::pptx::markdown_image_references`
+    /// splits on — while a bare `\` would itself become an escape. Escaping
+    /// `[`, `]` and `\` keeps an alt carrying them whole through the bake →
+    /// promote round trip; the reader undoes exactly these escapes when it
+    /// hands the alt back.
+    fn escape_alt_text(alt: &str) -> String {
+        let mut escaped = String::with_capacity(alt.len());
+        for character in alt.chars() {
+            if matches!(character, '[' | ']' | '\\') {
+                escaped.push('\\');
+            }
+            escaped.push(character);
+        }
+        escaped
     }
 
     pub(super) fn add_notes(&mut self, notes: &str) {

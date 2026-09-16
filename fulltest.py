@@ -4,7 +4,7 @@
 
 目标：不靠人工读正文，也能判断「转换是否可接受」。
 
-四层检查（每层都独立出码）：
+五层检查（每层都独立出码）：
   1. 进程/结构 —— CLI 退出码、空结果、乱码/控制字符/格式泄漏、Markdown 围栏与表格列、
      图片引用可解析性、落盘图片文件合法性（大小 + magic bytes）
   2. 源文对齐   —— 基准去页眉页脚后 bigram 召回 + 数字/标识边界匹配 + 正文字符量比值 +
@@ -13,6 +13,8 @@
      磁盘落盘 vs MD 引用（四方对账）；音视频文件体积 vs 转写文本量
   4. 深检       —— Markdown 语义噪声、内嵌对象与子文档保真、PPTX 标题/备注、xlsx 图形文本、
      PDF 书签与表格数、OCR 通道、逐文件金标准断言（_expectations.json）
+  5. 失败路径   —— 对抗语料 `_adversarial/`（源目录下子目录，损坏/截断/空文件）主队列后
+     追加：必须优雅失败（非零退出+诊断）或干净转换，panic/静默失败/吐垃圾都判红（ADV_* 码）
 
 用法:
     python fulltest.py [--cli PATH] [--src DIR] [--out DIR] [--timeout SECS]
@@ -23,10 +25,8 @@
 附加机制:
     - `--selftest`         判定器自测（合成样例，不需要 CLI/语料/金标准）
     - 金标准加载自检        未知键/pattern 卫生告警；报告与基线记录金标准 sha256 与代码 commit
-    - `_adversarial/`      源目录下的对抗语料子目录（损坏/截断/空文件），主队列后追加
-                           失败路径测试（ADV_* 码：必须优雅失败，不得 panic/静默/吐垃圾）
-    - `--save-baseline` 护栏 存在 FAIL 或金标准未加载时拒绝保存（`--force` 覆盖）；
-                           基线对比含「恶化」计数（同码次数增加）
+    - `--save-baseline` 护栏 存在 FAIL、金标准未加载或本轮提前终止（半截结果）时拒绝保存
+                           （`--force` 覆盖）；基线对比含「恶化」计数（同码次数增加）
 
 默认调用 target\\debug\\xberg.exe，输出到 D:\\测试转markdown转换效果\\测试文档_md_fulltest。
 每个文件打印质量报告；结束时写 `_quality-report.md` 与 `_quality-report.json`。
@@ -35,6 +35,7 @@
 
 import argparse
 import hashlib
+import html
 import json
 import os
 import re
@@ -140,6 +141,7 @@ ISSUE_META = {
     "ENGINE_WARN": "WARN",
     "ENGINE_FAILISH": "FAIL",
     "CMD_FAILED": "FAIL",
+    "JUDGE_CRASH": "FAIL",      # 判定器自身异常——单文件问题不得放大为整轮崩溃，报告与基线对比仍可完成
     # 深检（Markdown 语义 / 源文保真 / 金标准）
     "PSEUDO_HEADING": "FAIL",        # 标题行是内嵌对象文件名（## oleObject1.bin / ## Microsoft_Visio___.vsdx …）
     "GIANT_LINE": "FAIL",            # 单行 > GIANT_LINE_FAIL（内嵌对象被压成一行）
@@ -316,6 +318,12 @@ def strip_pdf_page_numbers(text: str) -> str:
 # 公认无信息的重复行（分隔线/表格框）
 DUP_IGNORE_RE = re.compile(r"^(?:[-=_*|:\s]+|#*\s*Page\s*\d+\s*|#*\s*\d+\s*)$")
 
+# 嵌入对象文本区：`Embedded object: <name>` caption 行之后、直到下一个结构性元素
+# （标题/围栏/表格行/图片行/下一个 caption）之前的松散短行是内嵌流程图的框标签
+# （ATPG/DFT 实测：eddx 流程图 14 个同名框 ARCH41_CORE4 各排一行，是源事实而非
+# 页眉刷屏）——重复行统计跳过该区间。
+EMBED_CAPTION_RE = re.compile(r"^Embedded object:\s+\S")
+
 # ---------------------------------------------------------------- 深检阈值（Markdown 语义 / 源文保真 / 金标准）
 # 逐文件金标准与回归基线都在仓库外（内部文档派生，禁止入库）
 EXPECTATIONS_DEFAULT = Path(r"D:\测试转markdown转换效果\_expectations.json")
@@ -419,8 +427,14 @@ def _norm_ws(s: str) -> str:
 
 
 def bigram_recall(source: str, md: str) -> float:
-    """源文本字符 bigram 在 markdown 中的覆盖率（0~1）。空源返回 -1 表示无法评估。"""
-    src, out = _norm_ws(source), _norm_ws(md)
+    """源文本字符 bigram 在 markdown 中的覆盖率（0~1）。空源返回 -1 表示无法评估。
+
+    两侧先剔除 `|` 再做空白归一：MD 表格的单元格分隔符是渲染结构不是内容——
+    纯表格源（xlsx 逐单元格拼接）里相邻单元格构成的 bigram 会被 MD 必然插入的
+    `|` 打断，造成结构性低估（实测 DFT收集方案 84.3% → 剔除后 98.2%，缺失
+    区间全部 ≤4 个 bigram、形态为「版本|日期|修订」跨格拼接，无真丢内容）。
+    """
+    src, out = _norm_ws(source.replace("|", "")), _norm_ws(md.replace("|", ""))
     if len(src) < 20:
         return -1.0
     grams = {src[i:i + 2] for i in range(len(src) - 1)}
@@ -496,12 +510,43 @@ BINARY_LEAK_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]{3,}")
 PAGE_TITLE_RE = re.compile(r"^#{1,3}\s*Page\s+(\d+)\s*$", re.I | re.M)
 
 
+def _is_windows_noise(path: Path) -> bool:
+    """资源管理器/Office 在语料目录留下的系统垃圾文件。
+
+    图片密集目录会被 Thumbs.db 跟踪，打开过的 Word 文档留下 ~$ 锁文件；它们进入
+    主队列只会产出 CMD_FAILED 假红并触发默认提前终止，与转换质量无关。
+    """
+    name = path.name
+    return (name.lower() in {"thumbs.db", "desktop.ini", ".ds_store"}
+            or name.startswith("~$"))
+
+
 def structural_metrics(md_text: str, img_dir: Path):
     lines = md_text.splitlines()
+    # 围栏内外先拆开（本函数后半段深检度量也要用）：图片引用对账只看围栏外——
+    # 围栏内的 ![](...) 是代码/OCR 字面量示例，不是引用；外链目标也排除，因为
+    # Path("https://example.com/a/diagram.png").name 在 Windows 会解析出
+    # "diagram.png"，与落盘集合比对产生假 IMG_MISSING。
+    outside_lines, fenced_blocks = split_fenced(md_text)
+    outside_text = "\n".join(outside_lines)
     chars = len(md_text)
     headings = sum(1 for l in lines if re.match(r"^#{1,6}\s", l))
     table_rows = sum(1 for l in lines if l.lstrip().startswith("|"))
-    img_refs = len(re.findall(r"!\[[^\]]*\]\([^)]+\)", md_text))
+    # 图片引用只数本地目标：外链（http(s):/data: 等 scheme）不是落盘资产，计入会让
+    # IMG_LOST 假红、judge_source_images 的 recovered 虚高掩盖真丢图——与 broken_refs
+    # 的排除口径对齐。目标解析遵循 CommonMark：剥 <> 包裹、可选 title 取首段。
+    ref_targets = []
+    for _ref in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", outside_text):
+        target = _ref.strip()
+        if target.startswith("<") and ">" in target:
+            target = target[1:target.index(">")]
+        else:
+            target = target.split()[0] if target.split() else ""
+        if target:
+            ref_targets.append(target)
+    local_ref_targets = [t for t in ref_targets
+                         if not re.match(r"[A-Za-z][A-Za-z0-9+.\-]*:", t)]
+    img_refs = len(local_ref_targets)
     fences = sum(1 for l in lines if l.lstrip().startswith("```"))
     nonempty = sum(1 for l in lines if l.strip())
     empty = len(lines) - nonempty
@@ -509,17 +554,30 @@ def structural_metrics(md_text: str, img_dir: Path):
     ctrl = sum(1 for c in md_text if ord(c) < 32 and c not in "\n\r\t")
     img_dir_files = [p for p in img_dir.iterdir() if p.is_file()] if img_dir.is_dir() else []
     img_names = {p.name for p in img_dir_files}
-    broken_refs = [ref for ref in re.findall(r"!\[[^\]]*\]\(([^)]+)\)", md_text)
+    broken_refs = [ref for ref in local_ref_targets
                    if Path(ref).name not in img_names]
     # 重复非平凡行（页眉页脚刷屏）。表行/标题/围栏不算——xlsx 合法重复行很常见。
     line_counts = Counter()
     in_fence = False
+    in_embed = False
     for l in lines:
         raw = l.strip()
         if raw.startswith("```"):
             in_fence = not in_fence
+            in_embed = False
             continue
-        if in_fence or not raw or raw.startswith("|") or raw.startswith("#"):
+        if in_fence or not raw:
+            continue
+        if raw.startswith("|") or raw.startswith("#"):
+            in_embed = False                  # 结构性行结束嵌入对象区间
+            continue
+        if raw.startswith("!["):
+            in_embed = False
+            continue
+        if EMBED_CAPTION_RE.match(raw):
+            in_embed = True                   # caption 行开启嵌入对象区间
+            continue
+        if in_embed:
             continue
         if len(raw) >= 12 and not DUP_IGNORE_RE.match(raw):
             # 长句重复多见于交叉引用正文；页眉/页脚通常较短
@@ -536,7 +594,7 @@ def structural_metrics(md_text: str, img_dir: Path):
             cur = 0
     page_titles = [int(x) for x in PAGE_TITLE_RE.findall(md_text)]
     # 深检度量：表格块 / 超长行 / 中文量 / 伪标题 / 页码残留 / 纯加粗短行
-    outside_lines, fenced_blocks = split_fenced(md_text)
+    # （outside_lines / fenced_blocks 已在函数开头拆好，图片对账与深检共用同一次拆分）
     tables = sum(1 for _start, rows in _table_blocks(lines)
                  if any(TABLE_SEP_RE.match(x) for x in rows))
     max_line_len = max((len(l) for l in lines), default=0)
@@ -928,7 +986,11 @@ def judge_markdown_semantics(md_text: str, m, issues, exp, src_file: Path | None
     fence_leaks = sum(1 for l in outside if ESCAPED_FENCE_RE.search(l))
     n_esc = esc + dash_lines + esc_pipes + fence_leaks
     m["escapes"], m["dash_lines"] = n_esc, dash_lines
-    if n_esc >= ESCAPE_NOISE_MIN:
+    # exp 上限替换默认阈值（放行方向：exp 存在时以 exp 为准，缺省回退 >=ESCAPE_NOISE_MIN，
+    # 与旧判定一致）；收紧方向另有 GOLDEN_METRIC 的 max_escapes 规格（metric_specs 读同一
+    # 键、同一 m["escapes"] 口径），两处不会互相矛盾。
+    esc_limit = _exp_int(exp, "max_escapes")
+    if n_esc > (esc_limit if esc_limit is not None else ESCAPE_NOISE_MIN - 1):
         issues.append(make_issue(
             "ESCAPE_NOISE",
             f"转义/实体噪声 {n_esc} 处(\\# \\. {esc} | 纯 \\- 行 {dash_lines} | "
@@ -1302,9 +1364,42 @@ def _pixel_hash(data: bytes):
         return None
 
 
+def _exempt_media_hashes(path: Path):
+    """顶层文档自身 media 的 md5/像素哈希——EMBED_MEDIA_LOST 的跨子文档豁免集。
+
+    子文档页眉 rels 引用的图片常与顶层文档 media 里同一张图字节完全相同
+    （第九课 docx 实测：子文档页眉 image8/14.jpeg ≡ 主文档页眉 image34.jpeg，
+    sha256 1d0fd52c…，36135B，仅被页眉 rels 引用）。同字节图片已属于顶层文档
+    的媒体清单（顶层侧丢图由 IMG_SRC_GAP/IMG_SRC_EMPTY 对账把守），不应因子
+    文档页眉再引用一次就报「子文档图片丢失」。
+    """
+    import hashlib, zipfile
+    prefix = {"docx": "word/media/", "pptx": "ppt/media/",
+              "xlsx": "xl/media/"}.get(path.suffix.lower().lstrip("."))
+    md5s, pxs = set(), set()
+    if not prefix:
+        return md5s, pxs
+    try:
+        with zipfile.ZipFile(path) as z:
+            for name in z.namelist():
+                low = name.lower()
+                if low.startswith(prefix) and low.endswith(
+                        (".png", ".jpg", ".jpeg", ".bmp")):
+                    data = z.read(name)
+                    md5s.add(hashlib.md5(data).hexdigest())
+                    px = _pixel_hash(data)
+                    if px:
+                        pxs.add(px)
+    except Exception:
+        return set(), set()
+    return md5s, pxs
+
+
 def _embedded_media_lost(path: Path, m):
     """内嵌图片是否落盘。PNG 先比字节 md5，其余/重编码过的一律比解码像素。
 
+    豁免集有两路：① 本文件落盘图片（引擎可能把同一张图去重后只写一份）；
+    ② 顶层文档自身 media（`_exempt_media_hashes`，跨子文档共享的页眉装饰图）。
     返回 (丢失文件名, 总数)；EMF/WMF 等矢量格式无法按像素比对，不计入分母。
     """
     import hashlib
@@ -1343,15 +1438,34 @@ def _embedded_media_lost(path: Path, m):
         px = _pixel_hash(data)
         if px:
             disk_px.add(px)
+    top_md5, top_px = _exempt_media_hashes(path)
     lost = []
     for name, md5, _ext in media:
-        if md5 in disk_md5:
+        if md5 in disk_md5 or md5 in top_md5:
             continue
         px = _pixel_hash(raw.get(name, b"")) if name in raw else None
-        if px and px in disk_px:
+        if px and (px in disk_px or px in top_px):
             continue
         lost.append(name)
     return lost, len(media)
+
+
+def _toc_title_key(title: str) -> str:
+    """标题/书签与 `_md_headings` 的比对 key：剥强调/代码标记再空白归一。
+
+    `_md_headings` 侧已剥 `*`/`_`/`` ` ``/`~`；标题侧 key 若只做空白归一，
+    标识符常态的下划线（Func_mbist / DFT_TOP / scan_out）会被 MD 侧剥 `_` 后的
+    归一化文本永久错开——内容明明都在，却恒判「缺失」（判定器 bug，非引擎丢
+    内容）。PPTX 幻灯片标题（第三课实测 5 张「丢失」标题全部带下划线，其实都
+    以 `## Func_mbist` 形式存在）与 PDF 书签（tessent 手册书签 scan_out 同病）
+    共用本 key。
+    """
+    return _norm_ws(re.sub(r"[*_`~]", "", title or ""))
+
+
+def _pptx_title_key(title: str) -> str:
+    """幻灯片标题的比对 key：`_toc_title_key` 归一化后截前 20 字。"""
+    return _toc_title_key(title)[:20]
 
 
 def _judge_pptx_render(src_file: Path, md_text: str, issues):
@@ -1371,7 +1485,7 @@ def _judge_pptx_render(src_file: Path, md_text: str, issues):
         except Exception:
             title = ""
         if title:
-            key = _norm_ws(title)[:20]
+            key = _pptx_title_key(title)
             if key and not any(key in h for h in heads):
                 miss_t.append((idx, title))
         if slide.has_notes_slide:
@@ -1394,7 +1508,13 @@ def _judge_pptx_render(src_file: Path, md_text: str, issues):
 
 
 def _judge_xlsx_shapes(src_file: Path, md_text: str, issues):
-    """xlsx 浮动图形（drawing xml）里的文本是否进入 MD。"""
+    """xlsx 浮动图形（drawing xml）里的文本是否进入 MD。
+
+    `a:t` 是 XML 文本节点，`<`/`>`/`&` 以实体形式存储（`&lt;`/`&gt;`/`&amp;`），
+    比较前必须解码：拿 `&gt;` 这类字面量去比对，旧引擎输出的实体垃圾 `\\&gt;`
+    恰好含该子串=假 PASS，一旦引擎改为输出正确的 `\\>` 反而报「丢失」。
+    长度过滤仍按原始文本（候选集口径不变，避免把 `&gt;` 解码成 1 字符后被静默跳过）。
+    """
     import zipfile
     texts = []
     try:
@@ -1405,11 +1525,11 @@ def _judge_xlsx_shapes(src_file: Path, md_text: str, issues):
                     texts += [t.strip() for t in re.findall(r"<a:t>([^<]*)</a:t>", xml)]
     except Exception:
         return
-    cand = [t for t in texts if len(t) >= 2]
+    cand = [(raw, html.unescape(raw)) for raw in texts if len(raw) >= 2]
     if not cand:
         return
     md_nos = _norm_ws(md_text)
-    lost = [t for t in cand if _norm_ws(t) not in md_nos]
+    lost = [dec for _raw, dec in cand if _norm_ws(dec) not in md_nos]
     if not lost:
         return
     ratio = len(lost) / len(cand)
@@ -1418,6 +1538,18 @@ def _judge_xlsx_shapes(src_file: Path, md_text: str, issues):
         f"xlsx 浮动图形文本丢失 {len(lost)}/{len(cand)}({ratio:.0%}): "
         f"{', '.join(lost[:3])}",
         severity=None if ratio >= XLSX_SHAPE_LOST_RATIO else "WARN"))
+
+
+def _toc_heading_miss(entries, md_text):
+    """书签条目中未以标题形式出现的标题（比对 key 与 `_md_headings` 同归一化）。
+
+    同 `_pptx_title_key` 的判定 bug：书签标题含 `_`（如 scan_out）时只做空白归一
+    会在 MD 侧（已剥 `_`）恒不命中，TOC_HEADING_GAP 假性偏高。
+    """
+    heads = [h for h, _n, _raw in _md_headings(md_text)]
+    return [str(t) for _lvl, t, _pg in entries
+            if _toc_title_key(str(t))
+            and not any(_toc_title_key(str(t)) in h for h in heads)]
 
 
 def _judge_pdf_structure(src_file: Path, md_text: str, m, issues, exp):
@@ -1431,9 +1563,7 @@ def _judge_pdf_structure(src_file: Path, md_text: str, m, issues, exp):
         entries = [e for e in (doc.get_toc() or [])
                    if len(e) >= 3 and e[0] <= 2 and (e[2] or 0) > 0]
         if len(entries) >= 20:
-            heads = [h for h, _n, _raw in _md_headings(md_text)]
-            miss = [str(t) for _l, t, _p in entries
-                    if _norm_ws(str(t)) and not any(_norm_ws(str(t)) in h for h in heads)]
+            miss = _toc_heading_miss(entries, md_text)
             recall = 1 - len(miss) / len(entries)
             min_recall = exp.get("toc_heading_min_recall")
             if not isinstance(min_recall, (int, float)):
@@ -1552,11 +1682,15 @@ def _judge_expectations(md_text: str, m, issues, exp):
         issues.append(make_issue(
             "GOLDEN_FORBIDDEN", f"出现 {hits} 处期望禁止的形态(首个在第 {first_ln} 行)"))
     bad_order = []
+    # order 与 required_tokens 同口径：剥掉 *、_、`、~ 等强调标记后再去空白。标题常被渲染成
+    # `## **Fault** 类型`，原始子串匹配会被 ** 挡住，把「顺序正确」误判成 GOLDEN_ORDER。
+    # 只做最低限度归一，不做 CJK 交错容差（交错是 _golden_token_hit 的专属语义）。
+    md_order = _norm_ws(re.sub(r"[*_`~]+", "", md_text))
     for pair in exp.get("order") or []:
         if not isinstance(pair, (list, tuple)) or len(pair) != 2:
             continue
         a, b = str(pair[0]), str(pair[1])
-        ia, ib = md_text.find(a), md_text.find(b)
+        ia, ib = md_order.find(_norm_ws(a)), md_order.find(_norm_ws(b))
         if ia < 0 or ib < 0 or ia >= ib:
             bad_order.append(f"{a[:20]} 应在 {b[:20]} 之前")
     if bad_order:
@@ -1661,11 +1795,36 @@ def judge_emphasis_noise(md_text: str, issues, exp=None):
         hl += len(found)
         sample = sample or (found[0] if found else "")
     mx = _exp_int(exp, "max_highlights")
-    if hl >= HIGHLIGHT_MIN or (mx is not None and hl > mx):
+    # exp 上限替换默认阈值（放行方向）；exp 缺省回退 >=HIGHLIGHT_MIN，与旧判定一致。
+    # 旧判定 `hl >= MIN or (mx 有且 hl > mx)` 的问题在 mx >= MIN 时：MIN 那条腿先放行，
+    # 期望的上限形同虚设（如 max_highlights=10、hl=6 仍报），替换后 exp 才真正生效。
+    if hl > (mx if mx is not None else HIGHLIGHT_MIN - 1):
         issues.append(make_issue(
             "NONSTD_HIGHLIGHT",
             f"非标准 ==高亮== 标记 {hl} 对(如 {sample[:30]})"
             + _exp_msg(exp, "max_highlights", hl)))
+
+
+def _toc_level_stats(entries, md_text):
+    """书签标题 vs MD 标题 # 层数（容差 ±1）的核对统计，返回 (checked, mismatch)。
+
+    命中口径与 `_toc_heading_miss` 相同（`_toc_title_key` 归一化），保证
+    TOC_LEVEL_MISMATCH 的 checked 子集不漏掉带下划线等标记的书签。
+    """
+    heads = _md_headings(md_text)
+    checked = mism = 0
+    for level, title, _page in entries:
+        key = _toc_title_key(str(title))
+        if not key:
+            continue
+        for h, n_hash, _raw in heads:
+            if key in h:
+                checked += 1
+                lo, hi = (1, 2) if level <= 1 else (2, 3)
+                if not (lo <= n_hash <= hi):
+                    mism += 1
+                break
+    return checked, mism
 
 
 def judge_toc_levels(src_file: Path, md_text: str, issues):
@@ -1682,19 +1841,7 @@ def judge_toc_levels(src_file: Path, md_text: str, issues):
                    if len(e) >= 3 and e[0] <= 2 and (e[2] or 0) > 0]
         if len(entries) < 20:
             return
-        heads = _md_headings(md_text)
-        checked = mism = 0
-        for level, title, _page in entries:
-            key = _norm_ws(str(title))
-            if not key:
-                continue
-            for h, n_hash, _raw in heads:
-                if key in h:
-                    checked += 1
-                    lo, hi = (1, 2) if level <= 1 else (2, 3)
-                    if not (lo <= n_hash <= hi):
-                        mism += 1
-                    break
+        checked, mism = _toc_level_stats(entries, md_text)
         if checked and mism / checked >= TOC_LEVEL_MISMATCH_RATIO:
             issues.append(make_issue(
                 "TOC_LEVEL_MISMATCH",
@@ -1813,9 +1960,16 @@ KNOWN_FILE_KEYS = {
 KNOWN_RUN_KEYS = {"ocr_config", "layout_config"}
 KNOWN_TOP_KEYS = {"version", "note", "files", "run"}
 
+# 期望键的值类型契约：键存在但类型写错时检查同样静默失效——字符串 "3" 不是阈值
+# （_exp_int 只认 int）、字符串 "false" 在 truthy 读取下恒为真、裸字符串
+# forbidden_patterns 会被逐字符迭代成单字符正则。与键名拼错同等可见。
+_EXP_LIST_KEYS = {"required_tokens", "forbidden_patterns", "order"}
+_EXP_BOOL_KEYS = {"require_chinese_ocr", "require_nested_bullets"}
+_EXP_NUMBER_KEYS = {"toc_heading_min_recall"}
+
 
 def _validate_expectations(data: dict) -> list:
-    """金标准自检：未知键 / pattern 卫生。返回配置级告警（打印并进报告，不进逐文件 issues）。
+    """金标准自检：未知键 / pattern 卫生 / 值类型。返回配置级告警（打印并进报告，不进逐文件 issues）。
 
     动机：期望文件在仓外、无版本控制——键名拼错 = 检查静默不生效；JSON 的 \\b 是退格
     转义，曾把 forbidden 正则变成「退格字面量」，回归守卫永远打不中（2026-09-14 实例）。
@@ -1834,6 +1988,29 @@ def _validate_expectations(data: dict) -> list:
             if k.startswith("_note") or k in KNOWN_FILE_KEYS:
                 continue
             warns.append(f"{name}: 未知键「{k}」（判定代码不读取，疑似拼写错误→检查静默不生效）")
+        for k, v in ent.items():
+            if k.startswith("_note"):
+                continue
+            if k in _EXP_LIST_KEYS and not isinstance(v, list):
+                warns.append(f"{name}: 键「{k}」应为数组，实为 {type(v).__name__}"
+                             "（消费口径改变→检查静默失效或乱报）")
+            elif k in _EXP_BOOL_KEYS and not isinstance(v, bool):
+                warns.append(f"{name}: 键「{k}」应为布尔，实为 {type(v).__name__}"
+                             "（truthy 读取下非空值恒为真）")
+            elif k in _EXP_NUMBER_KEYS and (isinstance(v, bool) or not isinstance(v, (int, float))):
+                warns.append(f"{name}: 键「{k}」应为数值，实为 {type(v).__name__}")
+            elif (k in KNOWN_FILE_KEYS and k not in _EXP_LIST_KEYS
+                  and k not in _EXP_BOOL_KEYS and k not in _EXP_NUMBER_KEYS
+                  and (isinstance(v, bool) or not isinstance(v, int))):
+                warns.append(f"{name}: 键「{k}」应为整数阈值，实为 {type(v).__name__}"
+                             "（_exp_int 只认 int→检查静默不生效）")
+        order = ent.get("order")
+        if isinstance(order, list):
+            for pair in order:
+                if not (isinstance(pair, list) and len(pair) == 2
+                        and all(isinstance(x, str) for x in pair)):
+                    warns.append(f"{name}: order 元素应为两个字符串的数组，实为 {pair!r}"
+                                 "（GOLDEN_ORDER 跳过该对→顺序守卫静默消失）")
         for pat in ent.get("forbidden_patterns") or []:
             p = str(pat)
             if not p:
@@ -1932,7 +2109,11 @@ def compare_baseline(prev: dict, cur: list, expectations_loaded: bool = True) ->
     同一码次数增加（如 DUP_SPAM 2→5）不算新增但算恶化——只比集合会把它判成
     「无变化」，质量劣化被吞掉。
     """
-    prev_files = {f.get("name"): f for f in (prev.get("files") or [])}
+    # 键含 adversarial 标记：主队列与对抗语料允许同名文件（把主队列某文件的损坏
+    # 副本放进 _adversarial/ 是扩充语料的常见方式），只按名字建字典会让对抗条目
+    # 覆盖主队列条目——对账错位、金标准码被误剔、读数失真。
+    prev_files = {(f.get("name"), bool(f.get("adversarial"))): f
+                  for f in (prev.get("files") or [])}
     out = {"files": {}, "totals": {"new": 0, "fixed": 0, "worsened": 0},
            "skipped_exp_codes": False, "expectations_changed": None}
     prev_sha = prev.get("expectations_sha256")
@@ -1941,14 +2122,24 @@ def compare_baseline(prev: dict, cur: list, expectations_loaded: bool = True) ->
     for rec in cur:
         name = rec.get("name")
         cur_applied = bool((rec.get("golden") or {}).get("applied"))
-        prev_rec = prev_files.get(name) or {}
+        prev_rec = prev_files.get((name, bool(rec.get("adversarial")))) or {}
+        # 报告与基线 JSON 的输出键：对抗条目带后缀，避免与同名主队列条目互相覆盖
+        out_key = f"{name} [_adversarial]" if rec.get("adversarial") else name
         # 基线未记录 golden_applied（旧格式）时按「有金标准」处理，保持原有可追踪性
         prev_applied = prev_rec.get("golden_applied", True)
         if not expectations_loaded:
             drop, flag = set(EXP_GATED_CODES), True
         elif not cur_applied:
-            drop = set(EXP_GATED_CODES)
-            flag = bool(prev_rec)
+            # 对抗记录没有金标准条目属设计内（golden.applied=False），基线侧同样带
+            # adversarial 标记：不剔除、不置「未加载金标准」——否则基线一旦收录对抗
+            # 文件，每轮报告都会误报降级提示（对抗码集与 EXP_GATED 无交集，剔除本来
+            # 就是空操作）。旧基线无 adversarial 标记时保持保守：按「主队列条目被删/
+            # 改名」的旧语义置 flag，宁可误报也不吞掉真丢失条目的告警。
+            if rec.get("adversarial") or prev_rec.get("adversarial"):
+                drop, flag = set(), False
+            else:
+                drop = set(EXP_GATED_CODES)
+                flag = bool(prev_rec)
         elif prev_applied is not True:
             drop, flag = set(EXP_GATED_CODES), True
         else:
@@ -1965,26 +2156,32 @@ def compare_baseline(prev: dict, cur: list, expectations_loaded: bool = True) ->
         worse = {c: (before_c[c], now_c[c])
                  for c in sorted(now & before) if now_c[c] > before_c[c]}
         if new or fixed or worse:
-            out["files"][name] = {"new": new, "fixed": fixed, "worse": worse}
+            out["files"][out_key] = {"new": new, "fixed": fixed, "worse": worse}
             out["totals"]["new"] += len(new)
             out["totals"]["fixed"] += len(fixed)
             out["totals"]["worsened"] += len(worse)
     return out
 
 
-def baseline_block_reason(results: list, expectations_loaded: bool) -> str | None:
+def baseline_block_reason(results: list, expectations_loaded: bool,
+                          stopped_early: bool = False,
+                          early_file: str | None = None) -> str | None:
     """--save-baseline 的护栏：返回不可保存的原因，None 表示可以保存。
 
-    把坏状态（带 FAIL、或金标准未加载的降级跑）存成回归基准，会静默遮蔽之后的
-    真回归——重设基线应发生在「确认当前红项为接受状态」之后，绕过护栏需显式 --force。
+    把坏状态（带 FAIL、金标准未加载的降级跑、或 --strict/遇 FAIL 提前终止的半截
+    结果）存成回归基准，会静默遮蔽之后的真回归——重设基线应发生在「确认当前红项
+    为接受状态」之后，绕过护栏需显式 --force。
     """
+    if stopped_early:
+        return (f"本轮提前终止（于 {early_file or '?'} 命中阻断判定退出），"
+                "之后的文件未测试——半截结果不能存成基线；确要保存请加 --force")
     fails = [r.get("name") for r in results if r.get("verdict") == "FAIL"]
     if fails:
         return ("存在 FAIL 判定文件: " + ", ".join(str(f) for f in fails[:5])
                 + ("…" if len(fails) > 5 else "")
                 + "——基线应记录达标/已接受状态；确认这些红项可接受后加 --force 保存")
     if not expectations_loaded:
-        return ("金标准未加载（--no-expectations 或文件缺失）：依赖金标准的码本次未产出，"
+        return ("金标准未加载（--no-expectations、文件缺失或 files 为空）：依赖金标准的码本次未产出，"
                 "此时存的基线会把它们全判成「已修复」；确要保存请加 --force")
     return None
 
@@ -2010,55 +2207,81 @@ def classify_adversarial_failure(rc: int, err_text: str) -> tuple:
     return "PASS", []
 
 
+def finalize_adversarial_success(m, issues):
+    """对抗文件 rc==0 的收尾判定：区分「输出垃圾」与「空/过短」并落 ADV 码。
+
+    EMPTY/TOO_SHORT 在主队列是 FAIL，但对空/损坏文件「成功且空」是可辩护行为
+    （ADV_EMPTY_OK 的 WARN 语义）；若保留 FAIL 级，issues_to_verdict 见 FAIL 即
+    FAIL，ADV_EMPTY_OK 的 WARN 就永远落不到 verdict 上。因此：存在其他 FAIL 级
+    结构问题 → ADV_GARBAGE_OK；仅空/过短 → ADV_EMPTY_OK；最后把 soft 码降级为
+    WARN——可辩护但必须可见，不能静默吞掉。
+    """
+    soft = {"EMPTY", "TOO_SHORT"}
+    hard = sorted({i["code"] for i in issues
+                   if i["severity"] == "FAIL" and i["code"] not in soft})
+    if hard:
+        issues.append(make_issue(
+            "ADV_GARBAGE_OK",
+            f"对抗文件「成功」但输出含结构问题 [{', '.join(hard)}]"))
+    elif any(i["code"] in soft for i in issues):
+        issues.append(make_issue(
+            "ADV_EMPTY_OK",
+            f"对抗文件「成功」且输出为空/过短({m['chars']}字符)——静默空结果，请确认可接受"))
+    # soft 码降级放最后：hard/soft 分支判定都依赖原始 FAIL 级别，先判完再降
+    for i in issues:
+        if i["code"] in soft:
+            i["severity"] = "WARN"
+
+
 def run_adversarial(cli: Path, adv_dir: Path, out_dir: Path, timeout: int,
-                    env: dict) -> list:
+                    env: dict, tags: dict | None = None) -> list:
     """对抗语料（<src>/_adversarial/）：损坏/截断/空文件必须优雅失败或优雅处理。
 
     判定：非零退出且有诊断 → PASS（优雅失败）；非零退出无诊断/panic → FAIL；
-    转换「成功」则跑结构检查——输出垃圾（乱码/泄漏/坏引用）→ ADV_GARBAGE_OK，
-    输出为空/过短 → ADV_EMPTY_OK（WARN：对空文件而言空结果可辩护，但必须可见）。
+    转换「成功」则跑结构检查后交给 finalize_adversarial_success 收尾——输出垃圾
+    （乱码/泄漏/坏引用）→ ADV_GARBAGE_OK，输出为空/过短 → ADV_EMPTY_OK
+    （WARN：对空文件而言空结果可辩护，但必须可见）。
     超时沿用 TIMEOUT（对抗文件应快速失败，超时上限取 min(timeout, 300)）。
+    tags：主流程按「主队列+对抗文件」整体预生成的产物命名 tag（见 _stem_tags），
+    缺省退回 stem。
     """
     files = sorted(p for p in adv_dir.iterdir() if p.is_file()
-                   and p.suffix.lower().lstrip(".") not in AV_EXTS)
+                   and p.suffix.lower().lstrip(".") not in AV_EXTS
+                   and not _is_windows_noise(p))
     emit("\n## 失败路径（对抗）测试")
     emit(f"  语料: {adv_dir}（{len(files)} 个文件；损坏/截断/空样本必须优雅失败）")
     results = []
     for f in files:
+        tag = (tags or {}).get(f) or f.stem
         emit(f"\n[对抗] {f.name} ({f.stat().st_size/1024:.1f} KB) ...")
         exp = expect_for(f.name)
         try:
             md_text, meta, elapsed, rc, used_cli = convert_one(
-                cli, f, out_dir, min(timeout, 300), env, transcription=False)
+                cli, f, out_dir, min(timeout, 300), env, transcription=False, tag=tag)
         except subprocess.TimeoutExpired:
-            m = structural_metrics("", out_dir / f"{f.stem}_images")
+            m = structural_metrics("", out_dir / f"{tag}_images")
             issues = [make_issue("TIMEOUT", "对抗文件超时(疑似挂死而非快速失败)")]
             verdict = "FAIL"
             elapsed = float(min(timeout, 300))
             rc = None
             meta = {"warnings": [], "notes": []}
         else:
-            m = structural_metrics(md_text, out_dir / f"{f.stem}_images")
+            m = structural_metrics(md_text, out_dir / f"{tag}_images")
             issues = []
             if rc == 0:
                 judge_structure(m, issues)
                 judge_md_integrity(md_text, issues)
                 judge_tables(md_text, issues)
-                soft = {"EMPTY", "TOO_SHORT"}
-                hard = sorted({i["code"] for i in issues
-                               if i["severity"] == "FAIL" and i["code"] not in soft})
-                if hard:
-                    issues.append(make_issue(
-                        "ADV_GARBAGE_OK",
-                        f"对抗文件「成功」但输出含结构问题 [{', '.join(hard)}]"))
-                elif any(i["code"] in soft for i in issues):
-                    issues.append(make_issue(
-                        "ADV_EMPTY_OK",
-                        f"对抗文件「成功」且输出为空/过短({m['chars']}字符)——静默空结果，请确认可接受"))
-                else:
+                # 与主队列同口径：落盘垃圾图片（IMG_CORRUPT）与引擎 panic 级警告
+                # （ENGINE_FAILISH）都是 FAIL 级码，进 hard 集合触发 ADV_GARBAGE_OK。
+                judge_image_files(m, issues)
+                judge_engine_warnings(meta, issues)
+                finalize_adversarial_success(m, issues)
+                if not any(i["code"] in ("ADV_GARBAGE_OK", "ADV_EMPTY_OK")
+                           for i in issues):
                     emit("  优雅处理：转换成功且无结构问题")
             else:
-                err_path = out_dir / f"{f.stem}.err.txt"
+                err_path = out_dir / f"{tag}.err.txt"
                 err_text = err_path.read_text("utf-8", errors="replace") \
                     if err_path.is_file() else ""
                 adv_verdict, adv_issues = classify_adversarial_failure(rc, err_text)
@@ -2168,7 +2391,17 @@ def run_with_ticker(label, cmd, env, timeout):
                 print(f"\r  {label} 运行中... {elapsed}s", end="", flush=True)
             if timeout and time.time() - t0 > timeout:
                 kill_process_tree(proc)
-                out, err = proc.communicate()
+                # 孙进程会继承管道写句柄，taskkill 失败时管道不会闭合——无超时的
+                # communicate 会让超时保护退化成永久挂死。逐级降级：30s 收尾 →
+                # proc.kill() → 5s 收尾 → 放弃残留输出（已触发 TimeoutExpired，输出不参与判定）。
+                try:
+                    out, err = proc.communicate(timeout=30)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    try:
+                        out, err = proc.communicate(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        out, err = b"", b""
                 print(f"\n  {label} 超时(>{timeout}s)，已终止", flush=True)
                 raise subprocess.TimeoutExpired(cmd, timeout)
     print("\r" + " " * 100 + "\r", end="", flush=True)
@@ -2250,10 +2483,35 @@ def save_markdown(out_dir: Path, stem: str, md_text: str, img_dirname: str):
     (out_dir / f"{stem}.md").write_text(saved, encoding="utf-8")
 
 
+def _stem_tags(main_files: list, adv_files: list | None = None) -> dict:
+    """按 stem 分组生成产物命名 tag：组内唯一 stem 直接用 stem，重名追加「_扩展名」消歧；
+    对抗文件恒再追加 `_adv`——主队列与 _adversarial 同名同扩展时仅靠扩展名仍会同 tag，
+    `{tag}_images`/`{tag}.err.txt`/`{tag}.md` 会互相覆盖，审计产物与判定对象错位。
+    判定键（f.name / expect_for / JSON_RESULTS 与基线的 name）一律用文件名，不受 tag 影响。
+    """
+    adv = list(adv_files or [])
+    main_counts = Counter(p.stem for p in main_files)
+    adv_counts = Counter(p.stem for p in adv)
+    tags = {}
+    for p in main_files:
+        tags[p] = p.stem if main_counts[p.stem] == 1 \
+            else f"{p.stem}_{p.suffix.lower().lstrip('.')}"
+    for p in adv:
+        base = p.stem if adv_counts[p.stem] == 1 \
+            else f"{p.stem}_{p.suffix.lower().lstrip('.')}"
+        tags[p] = f"{base}_adv"
+    return tags
+
+
 def convert_one(cli: Path, src_file: Path, out_dir: Path, timeout: int, env: dict,
-                transcription: bool):
-    """转换单个文件（只用本地编译的 CLI，不做任何回退）。返回 (md_text, meta, elapsed, returncode, used_cli)。"""
-    stem = src_file.stem
+                transcription: bool, tag: str | None = None):
+    """转换单个文件（只用本地编译的 CLI，不做任何回退）。返回 (md_text, meta, elapsed, returncode, used_cli)。
+
+    tag：落盘产物（{tag}_images/{tag}.err.txt/{tag}.md）的命名键。同名 stem 的文件
+    会互相覆盖审计产物，由 main 用 _stem_tags 预生成消歧 tag 传入；缺省退回
+    src_file.stem。判定键始终用文件名，与 tag 无关。
+    """
+    stem = tag or src_file.stem
     img_dir = out_dir / f"{stem}_images"
     # 上一次运行留下的图片必须清空：残留文件会掩盖真实丢图（IMG_LOST/IMG_MISSING 都以
     # 该目录内容为判据），中断运行留下的半截文件还会误报 IMG_CORRUPT。
@@ -2411,8 +2669,10 @@ def run_selftest() -> int:
     """判定器自测：合成样例 + 随机等价性对照；不需要 CLI / 语料 / 金标准。
 
     维护约定：改判定核心函数（_golden_token_hit / save_markdown / _validate_expectations /
-    compare_baseline / baseline_block_reason / classify_adversarial_failure）必须同步
-    加/改本函数用例——验收器自身的回归同样算回归。
+    compare_baseline / baseline_block_reason / classify_adversarial_failure /
+    finalize_adversarial_success，以及本行后续加入的 _toc_heading_miss /
+    _toc_level_stats / structural_metrics 重复行口径 / _embedded_media_lost /
+    _judge_xlsx_shapes）必须同步加/改本函数用例——验收器自身的回归同样算回归。
     """
     import random
     import tempfile
@@ -2493,6 +2753,48 @@ def run_selftest() -> int:
     check("合法配置零告警", _validate_expectations(good) == [],
           str(_validate_expectations(good)))
 
+    # --- _validate_expectations：值类型告警（类型写错＝检查静默失效，与拼错键同等可见） ---
+    bad_types = {
+        "files": {"a.pdf": {
+            "forbidden_patterns": "abc",      # 裸字符串：逐字符迭代成单字符正则→乱报
+            "order": ["x", "y"],              # 扁平数组：GOLDEN_ORDER 静默跳过
+            "required_tokens": "tok",         # 裸字符串：迭代成单字符 token
+            "min_tables": "3",                # 字符串阈值：_exp_int 不认→检查不生效
+            "require_chinese_ocr": "false",   # truthy 读取下恒为真
+            "toc_heading_min_recall": "0.8",
+        }},
+    }
+    warns_types = "\n".join(_validate_expectations(bad_types))
+    check("forbidden_patterns 裸字符串被告警", "forbidden_patterns」应为数组" in warns_types)
+    check("required_tokens 裸字符串被告警", "required_tokens」应为数组" in warns_types)
+    check("扁平 order 数组按元素形态被告警", "两个字符串的数组" in warns_types)
+    check("字符串阈值被告警", "应为整数阈值" in warns_types)
+    check("字符串布尔被告警", "require_chinese_ocr」应为布尔" in warns_types)
+    check("字符串召回率被告警", "toc_heading_min_recall」应为数值" in warns_types)
+    bad_order_pair = {"files": {"a.pdf": {"order": [["a", "b"], ["c"]]}}}
+    check("order 非二元组元素被告警",
+          "两个字符串的数组" in "\n".join(_validate_expectations(bad_order_pair)))
+    good_types = {"files": {"a.pdf": {
+        "min_tables": 3, "require_chinese_ocr": True, "toc_heading_min_recall": 0.8,
+        "order": [["a", "b"]], "forbidden_patterns": ["x+"],
+    }}}
+    check("合法值类型零告警", _validate_expectations(good_types) == [],
+          str(_validate_expectations(good_types)))
+
+    # --- structural_metrics：外链与带 title 的图片引用口径 ---
+    with tempfile.TemporaryDirectory() as _td:
+        _tmp = Path(_td)
+        _img_dir = _tmp / "imgs"
+        _img_dir.mkdir()
+        (_img_dir / "image_0.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        _md = ("![](image_0.png)\n\n![](https://example.com/logo.png)\n\n"
+               '![](image_0.png "题注")\n')
+        _m = structural_metrics(_md, _img_dir)
+        check("外链引用不计入 img_refs", _m["img_refs"] == 2, str(_m["img_refs"]))
+        check("带 title 的引用按目标名对账", _m["broken_refs"] == [], str(_m["broken_refs"]))
+        _m2 = structural_metrics("![](missing.png \"t\")\n", _img_dir)
+        check("缺失目标仍判 broken", _m2["broken_refs"] == ["missing.png"], str(_m2["broken_refs"]))
+
     # --- compare_baseline：集合对比 + 同码次数恶化 + 金标准门控剔除 ---
     global EXPECTATIONS_SHA256
     saved_sha = EXPECTATIONS_SHA256
@@ -2525,6 +2827,20 @@ def run_selftest() -> int:
             expectations_loaded=True)
         check("对抗文件无金标准条目不触发「未加载金标准」",
               not out_adv["skipped_exp_codes"])
+        # 基线已收录对抗文件（golden_applied=False + adversarial 标记）同样不得置 flag：
+        # 406f922ddb 只修了「不在基线」的半边，本用例锁住「已在基线」的另一半
+        out_adv_saved = compare_baseline(
+            {"files": [{"name": "main.pdf", "golden_applied": True, "issues": []},
+                       {"name": "adv_empty.pdf", "golden_applied": False,
+                        "adversarial": True, "issues": []}]},
+            [{"name": "main.pdf", "golden": {"applied": True}, "issues": []},
+             {"name": "adv_empty.pdf", "golden": {"applied": False},
+              "adversarial": True, "issues": [{"code": "ADV_PANIC"}]}],
+            expectations_loaded=True)
+        check("基线收录的对抗文件不触发「未加载金标准」",
+              not out_adv_saved["skipped_exp_codes"])
+        check("对抗码不因豁免剔除而被吞(新增照常计数)",
+              out_adv_saved["files"].get("adv_empty.pdf [_adversarial]", {}).get("new") == ["ADV_PANIC"])
         check("金标准未加载仍触发剔除标记",
               compare_baseline({"files": []},
                                [{"name": "x", "golden": {"applied": False}, "issues": []}],
@@ -2533,6 +2849,24 @@ def run_selftest() -> int:
               compare_baseline({"expectations_sha256": "a" * 64, "files": []}, [],
                                expectations_loaded=True)
               ["expectations_changed"] is not None)
+        # 主队列与对抗语料同名：键含 adversarial 标记，两侧各对各的账。
+        # 只按名字建字典时对抗条目覆盖主队列条目——主队列的金标准码被误剔、
+        # 对抗码算到主队列头上，读数整体失真。
+        out_same_name = compare_baseline(
+            {"files": [
+                {"name": "broken.pdf", "golden_applied": True,
+                 "issues": [{"code": "GOLDEN_TOKEN_MISSING"}]},
+                {"name": "broken.pdf", "golden_applied": False,
+                 "adversarial": True, "issues": []}]},
+            [{"name": "broken.pdf", "golden": {"applied": True}, "issues": []},
+             {"name": "broken.pdf", "golden": {"applied": False},
+              "adversarial": True, "issues": [{"code": "ADV_PANIC"}]}],
+            expectations_loaded=True)
+        check("同名主队列/对抗条目不互相覆盖",
+              not out_same_name["skipped_exp_codes"]
+              and out_same_name["files"].get("broken.pdf [_adversarial]", {}).get("new") == ["ADV_PANIC"]
+              and out_same_name["files"]["broken.pdf"]["fixed"] == ["GOLDEN_TOKEN_MISSING"],
+              str(out_same_name))
     finally:
         EXPECTATIONS_SHA256 = saved_sha
 
@@ -2545,6 +2879,32 @@ def run_selftest() -> int:
               [{"name": "x.pdf", "verdict": "WARN"}], False) or ""))
     check("干净结果允许保存",
           baseline_block_reason([{"name": "x.pdf", "verdict": "PASS"}], True) is None)
+    check("提前终止的半截结果拒绝保存",
+          "提前终止" in (baseline_block_reason(
+              [{"name": "x.pdf", "verdict": "PASS"}], True, True, "y.pdf") or ""))
+
+    # --- 判定口径修正：pptx 标题 key 同归一化；bigram_recall 剔除表格分隔符 ---
+    check("pptx 标题 key 剥强调标记后可命中下划线标题",
+          any(_pptx_title_key("Func_mbist") in h
+              for h, _n, _raw in _md_headings("## Func_mbist\n")))
+    check("bigram_recall 不把表格分隔符当内容缺失",
+          bigram_recall("版本日期修订描述与测试覆盖率统计表格数据",
+                        "| 版本 | 日期 | 修订 | 描述 | 与测 | 试覆 | 盖率 | 统计 | 表格 | 数据 |") == 1.0)
+
+    # --- PDF 书签 key 与 _md_headings 同归一化（下划线书签恒不命中 → TOC 假缺失） ---
+    check("书签含下划线可命中 MD 标题(不假缺失)",
+          _toc_heading_miss([(1, "MUX Scan With scan_out", 3)],
+                            "## MUX Scan With scan_out\n") == [])
+    check("真缺失的书签仍报缺失",
+          _toc_heading_miss([(1, "确实缺失的标题", 3)], "## 别的标题\n")
+          == ["确实缺失的标题"])
+    check("书签无下划线时命中口径不变",
+          _toc_heading_miss([(1, "Fault types", 3)], "## Fault types\n") == [])
+    checked, mism = _toc_level_stats(
+        [(1, "Func_mbist", 3), (2, "Sub_a", 4)], "## Func_mbist\n### Sub_a\n")
+    check("层级核对纳入下划线书签且层级相符(checked=2)", (checked, mism) == (2, 0))
+    checked, mism = _toc_level_stats([(1, "Deep_title", 4)], "#### Deep_title\n")
+    check("下划线书签层级不符仍计 mismatch(checked=1,mism=1)", (checked, mism) == (1, 1))
 
     # --- classify_adversarial_failure：失败路径分类 ---
     check("panic 判 FAIL",
@@ -2555,6 +2915,163 @@ def run_selftest() -> int:
     check("非零退出带诊断判 PASS(优雅失败)",
           classify_adversarial_failure(2, "Error: invalid PDF: unexpected end of file")
           [0] == "PASS")
+
+    # --- finalize_adversarial_success：对抗「成功」收尾（空/过短降级，垃圾仍 FAIL） ---
+    iss = [make_issue("EMPTY", "转换结果为空")]
+    finalize_adversarial_success({"chars": 0}, iss)
+    check("对抗仅 EMPTY → ADV_EMPTY_OK 且无 FAIL 级残留(verdict 将为 WARN)",
+          any(i["code"] == "ADV_EMPTY_OK" for i in iss)
+          and not any(i["severity"] == "FAIL" for i in iss))
+    iss = [make_issue("TOO_SHORT", "过短"), make_issue("IMG_CORRUPT", "坏图")]
+    finalize_adversarial_success({"chars": 3}, iss)
+    check("对抗含 FAIL 级结构码 → ADV_GARBAGE_OK 且仍 FAIL",
+          any(i["code"] == "ADV_GARBAGE_OK" for i in iss)
+          and any(i["severity"] == "FAIL" for i in iss))
+    iss = []
+    finalize_adversarial_success({"chars": 100}, iss)
+    check("对抗干净成功不追加任何 ADV 码", iss == [])
+
+    # --- exp 上限替换默认阈值（放行方向）：ESCAPE_NOISE / NONSTD_HIGHLIGHT ---
+    # 6 处围栏外 \# → n_esc=6：默认阈值(>=5)触发，exp max_escapes=10 放行
+    md_esc = "\n".join(f"值 \\# {k}" for k in range(6))
+    iss = []
+    judge_markdown_semantics(md_esc, {}, iss, {})
+    check("exp 缺省时 n_esc=6 仍触发 ESCAPE_NOISE(默认阈值不变)",
+          any(i["code"] == "ESCAPE_NOISE" for i in iss))
+    iss = []
+    judge_markdown_semantics(md_esc, {}, iss, {"max_escapes": 10})
+    check("exp max_escapes=10 放行 n_esc=6(不出码)",
+          not any(i["code"] == "ESCAPE_NOISE" for i in iss))
+    md_hl = "重点 ==A1== 和 ==B2== 与 ==C3== 或 ==D4== 加 ==E5== 与 ==F6=="
+    iss = []
+    judge_emphasis_noise(md_hl, iss, {})
+    check("exp 缺省时 hl=6 仍触发 NONSTD_HIGHLIGHT(默认阈值不变)",
+          any(i["code"] == "NONSTD_HIGHLIGHT" for i in iss))
+    iss = []
+    judge_emphasis_noise(md_hl, iss, {"max_highlights": 10})
+    check("exp max_highlights=10 放行 hl=6(不出码)",
+          not any(i["code"] == "NONSTD_HIGHLIGHT" for i in iss))
+
+    # --- _judge_expectations：order 与 required_tokens 同口径（剥强调标记） ---
+    iss = []
+    _judge_expectations("## **Fault** 类型\n\n## **竞争冒险**\n", {}, iss,
+                        {"order": [["Fault 类型", "竞争冒险"]]})
+    check("order 命中不受 ** 强调标记干扰",
+          not any(i["code"] == "GOLDEN_ORDER" for i in iss))
+    iss = []
+    _judge_expectations("## 竞争冒险\n\n## Fault 类型\n", {}, iss,
+                        {"order": [["Fault 类型", "竞争冒险"]]})
+    check("真逆序仍判 GOLDEN_ORDER",
+          any(i["code"] == "GOLDEN_ORDER" for i in iss))
+
+    # --- _stem_tags：同名 stem 的产物命名消歧；对抗文件恒带 _adv ---
+    tags = _stem_tags([Path("d/a.pdf"), Path("d/a.docx"), Path("d/b.pdf")])
+    check("重名 stem 生成带后缀 tag",
+          tags[Path("d/a.pdf")] == "a_pdf" and tags[Path("d/a.docx")] == "a_docx")
+    check("唯一 stem 沿用 stem", tags[Path("d/b.pdf")] == "b")
+    adv_tags = _stem_tags([Path("d/a.pdf")], [Path("adv/a.pdf"), Path("adv/b.pdf")])
+    check("对抗文件恒带 _adv(与主队列同名同扩展也分离)",
+          adv_tags[Path("adv/a.pdf")] == "a_adv"
+          and adv_tags[Path("d/a.pdf")] == "a")
+    adv_dup = _stem_tags([], [Path("adv/a.pdf"), Path("adv/a.docx")])
+    check("对抗内部重名 stem 先按扩展消歧再加 _adv",
+          adv_dup[Path("adv/a.pdf")] == "a_pdf_adv"
+          and adv_dup[Path("adv/a.docx")] == "a_docx_adv")
+
+    # --- DUP_SPAM：嵌入对象区间（Embedded object: caption → 下一结构性元素）不计重复 ---
+    spam = "ARCH41_CORE4"
+    embed_md = "\n".join(
+        ["正文引导行甲", "Embedded object: oleObject1.bin"]
+        + [x for _ in range(14) for x in (spam, "")]
+        + ["## 下一节", "正文收尾行乙"])
+    iss = []
+    judge_structure(structural_metrics(embed_md, Path("no_such_dir")), iss)
+    check("嵌入对象区间内的 14 次同名框行不判 DUP_SPAM",
+          not any(i["code"] == "DUP_SPAM" for i in iss))
+    plain_md = "\n".join(
+        ["正文引导行甲"] + [x for _ in range(14) for x in (spam, "")]
+        + ["## 下一节", "正文收尾行乙"])
+    iss = []
+    judge_structure(structural_metrics(plain_md, Path("no_such_dir")), iss)
+    check("无 caption 的同量重复行仍判 DUP_SPAM(不放宽真缺陷)",
+          any(i["code"] == "DUP_SPAM" for i in iss))
+    cap_head_md = "\n".join(
+        ["Embedded object: a.bin", "## 下一节"]
+        + [x for _ in range(14) for x in (spam, "")])
+    iss = []
+    judge_structure(structural_metrics(cap_head_md, Path("no_such_dir")), iss)
+    check("caption 后紧跟标题则区间为空，其后重复行仍判 DUP_SPAM",
+          any(i["code"] == "DUP_SPAM" for i in iss))
+
+    # --- EMBED_MEDIA_LOST：与顶层文档 media 同字节/同像素的嵌入图片不算丢失 ---
+    import io as _io
+    import zipfile as _zip
+    banner = b"\x89PNG\r\n\x1a\n" + b"B" * 200      # 伪字节（判定只看哈希，无需真图）
+    figure = b"\x89PNG\r\n\x1a\n" + b"F" * 200
+    onlysub = b"\x89PNG\r\n\x1a\n" + b"O" * 200
+    sub_buf = _io.BytesIO()
+    with _zip.ZipFile(sub_buf, "w") as zsub:
+        zsub.writestr("word/media/banner.jpeg", banner)   # 与顶层 media 同字节（页眉横幅）
+        zsub.writestr("word/media/figure.png", figure)    # 已落盘的正常子文档图
+        zsub.writestr("word/media/lonely.png", onlysub)   # 真丢：磁盘/顶层都没有
+    tmp_docx = Path(tempfile.mkdtemp(prefix="fulltest-selftest-", dir=str(tmp_root))) / "d.docx"
+    with _zip.ZipFile(tmp_docx, "w") as ztop:
+        ztop.writestr("word/media/image1.png", banner)    # 顶层文档自己的 media
+        ztop.writestr("word/embeddings/sub.docx", sub_buf.getvalue())
+    img_dir2 = tmp_docx.parent / "imgs"
+    img_dir2.mkdir()
+    (img_dir2 / "image_0.png").write_bytes(figure)
+    lost, total = _embedded_media_lost(tmp_docx,
+                                       {"img_dir_files": list(img_dir2.iterdir())})
+    check("与顶层 media 同字节的嵌入图不算丢失，真丢仍报",
+          (lost, total) == (["lonely.png"], 3), f"lost={lost} total={total}")
+    shutil.rmtree(tmp_docx.parent, ignore_errors=True)
+    try:
+        from PIL import Image as _Img
+        has_pil = True
+    except Exception:
+        has_pil = False
+    if has_pil:
+        buf = _io.BytesIO()
+        _Img.new("RGB", (4, 4), (200, 30, 40)).save(buf, "PNG")
+        png_bytes = buf.getvalue()
+        buf = _io.BytesIO()
+        _Img.open(_io.BytesIO(png_bytes)).save(buf, "BMP")
+        bmp_bytes = buf.getvalue()                        # 同像素、不同容器字节
+        sub2 = _io.BytesIO()
+        with _zip.ZipFile(sub2, "w") as zsub:
+            zsub.writestr("word/media/pic.png", png_bytes)
+        tmp_docx2 = Path(tempfile.mkdtemp(prefix="fulltest-selftest-",
+                                          dir=str(tmp_root))) / "d2.docx"
+        with _zip.ZipFile(tmp_docx2, "w") as ztop:
+            ztop.writestr("word/media/image1.bmp", bmp_bytes)
+            ztop.writestr("word/embeddings/sub.docx", sub2.getvalue())
+        lost2, _t2 = _embedded_media_lost(tmp_docx2, {"img_dir_files": []})
+        check("与顶层 media 同像素(重编码)的嵌入图经像素回退豁免", lost2 == [],
+              f"lost={lost2}")
+        shutil.rmtree(tmp_docx2.parent, ignore_errors=True)
+
+    # --- _judge_xlsx_shapes：a:t 是 XML 文本节点，实体解码后才可比对 ---
+    import zipfile as _zipf
+    with tempfile.TemporaryDirectory() as _td:
+        _xlsx = Path(_td) / "shapes.xlsx"
+        with _zipf.ZipFile(_xlsx, "w") as _z:
+            _z.writestr(
+                "xl/drawings/drawing1.xml",
+                '<xdr:wsDr xmlns:a="x"><a:t>P&amp;ID 图</a:t>'
+                "<a:t>&lt;</a:t><a:t>&gt;</a:t><a:t>丢失标记ABCD</a:t></xdr:wsDr>")
+        _iss = []
+        _judge_xlsx_shapes(_xlsx, "P&ID 图 \\< \\>\n", _iss)
+        check("a:t 实体解码：转义输出可命中、只报真丢失(1/4)",
+              [i["code"] for i in _iss] == ["XLSX_SHAPE_TEXT_MISSING"]
+              and "1/4" in _iss[0]["message"], str(_iss))
+        _iss2 = []
+        _judge_xlsx_shapes(_xlsx, "P&ID 图 \\< \\> 丢失标记ABCD\n", _iss2)
+        check("a:t 实体字面量不必出现在 MD 里(不假报丢失)",
+              _iss2 == [], str(_iss2))
+
+    # --- ISSUE_META 登记：新问题码必须有严重度 ---
+    check("JUDGE_CRASH 登记为 FAIL 级", ISSUE_META.get("JUDGE_CRASH") == "FAIL")
 
     verdict = "全部通过" if not fails else f"{len(fails)} 项失败: {fails}"
     print(f"selftest: {verdict}", flush=True)
@@ -2664,7 +3181,7 @@ def main():
         # $HF_HOME/hub，指向包内不存在的子目录，等于让引擎回退到用户缓存或联网下载。
         env["HF_HUB_CACHE"] = str(pkg_dir / "models")
 
-    files = sorted(p for p in src.iterdir() if p.is_file())
+    files = sorted(p for p in src.iterdir() if p.is_file() and not _is_windows_noise(p))
     if not files:
         sys.exit(f"测试目录为空: {src}")
     n_av = sum(1 for f in files if f.suffix.lower().lstrip(".") in AV_EXTS)
@@ -2677,11 +3194,17 @@ def main():
         print(f"  ... 其余 {len(files) - 5} 个略", flush=True)
     # 对抗语料（子目录不进主队列；主队列全部跑完后追加失败路径测试）
     adv_dir = src / "_adversarial"
-    if adv_dir.is_dir():
-        n_adv = sum(1 for p in adv_dir.iterdir() if p.is_file())
-        if n_adv:
-            print(f"[preflight] 对抗语料: {adv_dir}（{n_adv} 个失败路径样本，主队列后追加）",
-                  flush=True)
+    # 与 run_adversarial 同一筛选（AV 不进失败路径队列），供 stem 消歧与预检计数
+    adv_files = sorted(p for p in adv_dir.iterdir() if p.is_file()
+                       and p.suffix.lower().lstrip(".") not in AV_EXTS) \
+        if adv_dir.is_dir() else []
+    if adv_files:
+        print(f"[preflight] 对抗语料: {adv_dir}（{len(adv_files)} 个失败路径样本，主队列后追加）",
+              flush=True)
+    # 主队列+对抗文件统一预生成产物命名 tag（见 _stem_tags）：重名 stem 按扩展名消歧，
+    # 对抗文件恒加 `_adv`——否则主队列与 _adversarial 同名同扩展仍会同 tag，
+    # {tag}_images/{tag}.err.txt/{tag}.md 会互相覆盖审计产物；判定键仍用 f.name，不受影响。
+    tags = _stem_tags(files, adv_files)
 
     preflight(cli, env, files)
     print(f"集成测试: {len(files)} 个文件 | 源: {src} | 输出: {out_dir} | "
@@ -2708,13 +3231,15 @@ def main():
         av = f.suffix.lower().lstrip(".") in AV_EXTS
         print(f"\n[{i}/{n}] {f.name} ({f.stat().st_size/1024:.0f} KB){' [音视频转写]' if av else ''} ...",
               flush=True)
-        img_dir = out_dir / f"{f.stem}_images"
+        # 产物命名 tag：与 convert_one 内部一致（同 stem 重名时带后缀，见 _stem_tags）
+        tag = tags[f]
+        img_dir = out_dir / f"{tag}_images"
         # 超时记录也要带 golden.applied，否则基线与本次的问题码集合按「未加载金标准」剔除，
         # 该文件会显示成一批假「已修复」。
         exp = expect_for(f.name)
         try:
             md_text, meta, elapsed, rc, used_cli = convert_one(cli, f, out_dir, args.timeout,
-                                                               env, transcription=av)
+                                                               env, transcription=av, tag=tag)
         except subprocess.TimeoutExpired:
             meta = {"warnings": [f"超时(>{args.timeout}s)"], "counts": {}, "languages": [],
                     "notes": []}
@@ -2751,88 +3276,98 @@ def main():
         m = structural_metrics(md_text, img_dir)
         issues = []
         ocr_info = None
-        if rc != 0:
-            issues.append(make_issue("CMD_FAILED", "转换命令失败"))
-            for w in (meta.get("warnings") or [])[:2]:
-                issues.append(make_issue("CLI_FAIL", str(w)[:160]))
-        else:
-            judge_structure(m, issues)
-            judge_md_integrity(md_text, issues)
-            judge_tables(md_text, issues)
-            judge_image_files(m, issues)
-            judge_meta_images(meta, m, issues)
-            judge_engine_warnings(meta, issues)
-            judge_av_sparsity(f, m, issues)
-            judge_markdown_semantics(md_text, m, issues, exp, src_file=f)
-            judge_duplication(md_text, issues)
-            judge_code_tables(md_text, issues, exp)
-            judge_emphasis_noise(md_text, issues, exp)
-            judge_running_head(md_text, issues, exp)
-            ocr_info = judge_ocr_channel(
-                f, md_text, out_dir / f"{f.stem}.err.txt", issues, exp, OCR_CONFIG, m=m)
-
         recall_info = {"note": None, "bigram": None, "num_recall": None,
                        "ident_recall": None, "missing_nums": [], "missing_id": [],
                        "char_ratio": None, "src_images": None, "src_images_note": None,
                        "recall_good": RECALL_GOOD, "recall_fail": RECALL_FAIL}
         source_pages = None
-        if rc == 0:
-            print("  抽取源文本基准并计算召回率 ...", flush=True)
-            src_text, note, extras = extract_source_text(f)
-            source_pages = extras.get("pages") if extras else None
-            src_img_n, src_img_note = count_source_images(f)
-            recall_info["src_images"] = src_img_n
-            if src_img_note and src_img_n is None:
-                # 探测失败只记录，不阻断——但必须把原因带进报告：否则 src_images=null 与
-                # 「该格式本来就没有基准抽取器」不可区分，四方图片对账会静默失效。
-                recall_info["src_images_note"] = src_img_note
-            if src_text is not None:
-                # 去掉整页 PDF 里反复出现的页眉/页脚，再进入召回与体量评估
-                src_clean = strip_repeated_short_lines(src_text)
-                src_for_tokens = strip_pdf_page_numbers(src_clean)
-                bigram = bigram_recall(src_clean, md_text)
-                num_r, id_r, miss_n, miss_i = token_recall(src_for_tokens, md_text)
-                char_ratio = char_volume_ratio(src_clean, md_text)
-                recall_info.update({
-                    "bigram": bigram, "num_recall": num_r, "ident_recall": id_r,
-                    "missing_nums": miss_n, "missing_id": miss_i,
-                    "char_ratio": char_ratio,
-                    "note": f"基准抽取: {note}" + (f"；已剥重复短行" if src_clean != src_text else ""),
-                })
-                if bigram >= 0 and bigram < RECALL_FAIL:
-                    issues.append(make_issue(
-                        "RECALL_LOW", f"召回率过低({bigram:.0%} < {RECALL_FAIL:.0%})"))
-                elif bigram >= 0 and bigram < RECALL_GOOD:
-                    issues.append(make_issue(
-                        "RECALL_WEAK", f"召回率偏低({bigram:.0%} < {RECALL_GOOD:.0%})"))
-                if num_r >= 0 and num_r < NUM_RECALL_FAIL:
-                    sample = f" | 缺失: {', '.join(miss_n[:5])}" if miss_n else ""
-                    issues.append(make_issue(
-                        "NUM_RECALL_LOW",
-                        f"数字召回率过低({num_r:.0%} < {NUM_RECALL_FAIL:.0%}){sample}"))
-                judge_char_volume(char_ratio, issues)
-            elif note:
-                recall_info["note"] = note
+        # 判定链自身抛异常（第三方库对异常源文件崩溃、未预料的输入形态等）不得把
+        # 整轮验收炸掉——报告落盘与基线对比还要继续。两段判定（结构/语义与源文对齐）
+        # 整体包住，单文件降级为 JUDGE_CRASH（FAIL：该文件本轮判定不完整，属红项）。
+        # m/meta/recall_info/source_pages 均已在 try 前初始化，except 后的结果收集照常执行。
+        try:
+            if rc != 0:
+                issues.append(make_issue("CMD_FAILED", "转换命令失败"))
+                for w in (meta.get("warnings") or [])[:2]:
+                    issues.append(make_issue("CLI_FAIL", str(w)[:160]))
+            else:
+                judge_structure(m, issues)
+                judge_md_integrity(md_text, issues)
+                judge_tables(md_text, issues)
+                judge_image_files(m, issues)
+                judge_meta_images(meta, m, issues)
+                judge_engine_warnings(meta, issues)
+                judge_av_sparsity(f, m, issues)
+                judge_markdown_semantics(md_text, m, issues, exp, src_file=f)
+                judge_duplication(md_text, issues)
+                judge_code_tables(md_text, issues, exp)
+                judge_emphasis_noise(md_text, issues, exp)
+                judge_running_head(md_text, issues, exp)
+                ocr_info = judge_ocr_channel(
+                    f, md_text, out_dir / f"{tag}.err.txt", issues, exp, OCR_CONFIG, m=m)
 
-            judge_source_images(src_img_n, meta, m, issues)
+            if rc == 0:
+                print("  抽取源文本基准并计算召回率 ...", flush=True)
+                src_text, note, extras = extract_source_text(f)
+                source_pages = extras.get("pages") if extras else None
+                src_img_n, src_img_note = count_source_images(f)
+                recall_info["src_images"] = src_img_n
+                if src_img_note and src_img_n is None:
+                    # 探测失败只记录，不阻断——但必须把原因带进报告：否则 src_images=null 与
+                    # 「该格式本来就没有基准抽取器」不可区分，四方图片对账会静默失效。
+                    recall_info["src_images_note"] = src_img_note
+                if src_text is not None:
+                    # 去掉整页 PDF 里反复出现的页眉/页脚，再进入召回与体量评估
+                    src_clean = strip_repeated_short_lines(src_text)
+                    src_for_tokens = strip_pdf_page_numbers(src_clean)
+                    bigram = bigram_recall(src_clean, md_text)
+                    num_r, id_r, miss_n, miss_i = token_recall(src_for_tokens, md_text)
+                    char_ratio = char_volume_ratio(src_clean, md_text)
+                    recall_info.update({
+                        "bigram": bigram, "num_recall": num_r, "ident_recall": id_r,
+                        "missing_nums": miss_n, "missing_id": miss_i,
+                        "char_ratio": char_ratio,
+                        "note": f"基准抽取: {note}" + (f"；已剥重复短行" if src_clean != src_text else ""),
+                    })
+                    if bigram >= 0 and bigram < RECALL_FAIL:
+                        issues.append(make_issue(
+                            "RECALL_LOW", f"召回率过低({bigram:.0%} < {RECALL_FAIL:.0%})"))
+                    elif bigram >= 0 and bigram < RECALL_GOOD:
+                        issues.append(make_issue(
+                            "RECALL_WEAK", f"召回率偏低({bigram:.0%} < {RECALL_GOOD:.0%})"))
+                    if num_r >= 0 and num_r < NUM_RECALL_FAIL:
+                        sample = f" | 缺失: {', '.join(miss_n[:5])}" if miss_n else ""
+                        issues.append(make_issue(
+                            "NUM_RECALL_LOW",
+                            f"数字召回率过低({num_r:.0%} < {NUM_RECALL_FAIL:.0%}){sample}"))
+                    judge_char_volume(char_ratio, issues)
+                elif note:
+                    recall_info["note"] = note
 
-            # PDF/PPTX：按页/按幻灯片抽查「源页有字、MD 对不上」
-            if f.suffix.lower() in (".pdf", ".pptx"):
-                chunks = page_text_chunks(f)
-                if chunks:
-                    judge_page_body_coverage(chunks, md_text, issues)
+                judge_source_images(src_img_n, meta, m, issues)
 
-            if source_pages:
-                judge_page_cross(meta, source_pages, m, issues)
+                # PDF/PPTX：按页/按幻灯片抽查「源页有字、MD 对不上」
+                if f.suffix.lower() in (".pdf", ".pptx"):
+                    chunks = page_text_chunks(f)
+                    if chunks:
+                        judge_page_body_coverage(chunks, md_text, issues)
 
-            # 源文保真（内嵌子文档/标题备注/图形文本/书签/金标准）
-            if src_text is not None:
-                judge_hash_glyph(src_for_tokens, md_text, issues)
-                judge_ident_fragmentation(src_for_tokens, md_text, issues)
-            judge_source_fidelity(f, md_text, src_text, m, issues, exp, src_img_n)
-            judge_toc_levels(f, md_text, issues)
-            judge_xlsx_cell_folding(f, md_text, issues, exp)
-            judge_bullet_levels(f, md_text, issues, exp)
+                if source_pages:
+                    judge_page_cross(meta, source_pages, m, issues)
+
+                # 源文保真（内嵌子文档/标题备注/图形文本/书签/金标准）
+                if src_text is not None:
+                    judge_hash_glyph(src_for_tokens, md_text, issues)
+                    judge_ident_fragmentation(src_for_tokens, md_text, issues)
+                judge_source_fidelity(f, md_text, src_text, m, issues, exp, src_img_n)
+                judge_toc_levels(f, md_text, issues)
+                judge_xlsx_cell_folding(f, md_text, issues, exp)
+                judge_bullet_levels(f, md_text, issues, exp)
+        except Exception as e:  # noqa: BLE001 - 判定器异常只记单个文件，不中止整轮
+            issues.append(make_issue(
+                "JUDGE_CRASH", f"判定阶段异常({type(e).__name__}): {str(e)[:160]}"))
+            emit(f"  [JUDGE_CRASH] 判定阶段异常({type(e).__name__}): {str(e)[:160]}"
+                 "（该文件按 FAIL 记录，报告与基线对比照常）")
 
         verdict = issues_to_verdict(issues)
         report_file(f.name, verdict, m, recall_info, meta, elapsed, issues, used_cli,
@@ -2876,7 +3411,7 @@ def main():
     # 对抗语料：主队列后追加，结果并入汇总/JSON/基线对比（对抗文件名作 key）；
     # 默认遇 FAIL 提前终止时同样跳过（与「立即终止」语义一致，--keep-going 才会跑到这里）
     if not stopped_early and adv_dir.is_dir() and any(p.is_file() for p in adv_dir.iterdir()):
-        results.extend(run_adversarial(cli, adv_dir, out_dir, args.timeout, env))
+        results.extend(run_adversarial(cli, adv_dir, out_dir, args.timeout, env, tags=tags))
 
     n_fail, n_warn = print_summary(results, stopped_early, early_reason, strict=args.strict)
 
@@ -2907,7 +3442,9 @@ def main():
              f"恶化 {regression['totals']['worsened']} 项(同码次数增加)")
 
     if args.save_baseline:
-        reason = baseline_block_reason(JSON_RESULTS, bool(EXPECTATIONS.get("files")))
+        reason = baseline_block_reason(JSON_RESULTS, bool(EXPECTATIONS.get("files")),
+                                       stopped_early=stopped_early,
+                                       early_file=early_reason)
         if reason and not args.force:
             emit(f"\n--save-baseline 已跳过: {reason}")
             print(f"回归基线未保存（护栏拦截；确认后可加 --force）: {args.baseline}")

@@ -3464,7 +3464,7 @@ pub(crate) fn extract_document_structure_from_segments(
     if !include_watermarks {
         mark_arxiv_noise(&mut all_page_paragraphs);
     }
-    recover_headings_from_outline(&mut all_page_paragraphs, outline_entries);
+    recover_headings_from_outline(&mut all_page_paragraphs, &page_heights, outline_entries);
     // Runs after heading recovery (so recovered headings are excluded) and
     // immediately before the deletion pass it feeds. It needs every page in
     // hand, which is why it cannot live in `process_single_page`.
@@ -5710,8 +5710,12 @@ struct OutlineParagraphMatch {
     depth: usize,
 }
 
-fn recover_headings_from_outline(all_pages: &mut [Vec<PdfParagraph>], outline_entries: &[PdfOutlineEntry]) {
-    let matches = collect_unique_outline_matches(all_pages, outline_entries);
+fn recover_headings_from_outline(
+    all_pages: &mut [Vec<PdfParagraph>],
+    page_heights: &[f32],
+    outline_entries: &[PdfOutlineEntry],
+) {
+    let matches = collect_unique_outline_matches(all_pages, page_heights, outline_entries);
     let offset = calibrated_outline_heading_offset(all_pages, &matches);
 
     for matched in matches {
@@ -5731,6 +5735,7 @@ fn recover_headings_from_outline(all_pages: &mut [Vec<PdfParagraph>], outline_en
 
 fn collect_unique_outline_matches(
     all_pages: &[Vec<PdfParagraph>],
+    page_heights: &[f32],
     outline_entries: &[PdfOutlineEntry],
 ) -> Vec<OutlineParagraphMatch> {
     let mut outline_counts = ahash::AHashMap::<(usize, String), usize>::new();
@@ -5742,11 +5747,10 @@ fn collect_unique_outline_matches(
     let paragraph_matches = all_pages
         .iter()
         .map(|page| {
-            let mut matches = ahash::AHashMap::<String, (usize, usize)>::new();
+            let mut matches: ahash::AHashMap<String, Vec<usize>> = ahash::AHashMap::new();
             for (index, paragraph) in page.iter().enumerate() {
                 let title = normalize_outline_title(&paragraph_text_raw(paragraph));
-                let entry = matches.entry(title).or_insert((0, index));
-                entry.0 += 1;
+                matches.entry(title).or_default().push(index);
             }
             matches
         })
@@ -5759,14 +5763,59 @@ fn collect_unique_outline_matches(
             if outline_counts.get(&(page_index, title.clone())) != Some(&1) {
                 return None;
             }
-            let &(paragraph_count, paragraph_index) = paragraph_matches[page_index].get(&title)?;
-            (paragraph_count == 1).then_some(OutlineParagraphMatch {
+            let indices = paragraph_matches[page_index].get(&title)?;
+            let page_height = page_heights
+                .get(page_index)
+                .copied()
+                .unwrap_or(FALLBACK_PAGE_HEIGHT_PTS);
+            let paragraph_index = unique_outline_paragraph_index(&all_pages[page_index], indices, page_height)?;
+            Some(OutlineParagraphMatch {
                 page_index,
                 paragraph_index,
                 depth: entry.depth,
             })
         })
         .collect()
+}
+
+/// Pick the paragraph an outline entry points at when the printed title occurs
+/// more than once on the target page.
+///
+/// Tessent-style manuals print the section's running-head tab at the top margin
+/// AND the genuine sidehead mid-page on the section's opening page ("How to
+/// Debug Models" twice on one page), so the former `count == 1` gate skipped
+/// every such title and the sidehead stayed a bold body line. Disambiguation is
+/// deliberately narrow: exactly one copy must sit OUTSIDE the top/bottom 10%
+/// margin bands, carry usable geometry, and not already be flagged furniture;
+/// anything else keeps the old ambiguity refusal. A copy without a bounding box
+/// cannot be placed and never wins disambiguation.
+fn unique_outline_paragraph_index(page: &[PdfParagraph], indices: &[usize], page_height: f32) -> Option<usize> {
+    let Some(&single) = indices.first() else {
+        return None;
+    };
+    if indices.len() == 1 {
+        return Some(single);
+    }
+    let top_margin_y = page_height * 0.9;
+    let bottom_margin_y = page_height * 0.1;
+    let mut body_candidate: Option<usize> = None;
+    for &index in indices {
+        let paragraph = page.get(index)?;
+        if paragraph.is_page_furniture || paragraph.block_bbox.is_none() {
+            continue;
+        }
+        let in_margin = paragraph
+            .block_bbox
+            .is_some_and(|(_, bottom, _, top)| top > top_margin_y || bottom < bottom_margin_y);
+        if in_margin {
+            continue;
+        }
+        if body_candidate.is_some() {
+            return None;
+        }
+        body_candidate = Some(index);
+    }
+    body_candidate
 }
 
 fn outline_match_key(entry: &PdfOutlineEntry, page_count: usize) -> Option<(usize, String)> {
@@ -9179,7 +9228,7 @@ where new shares are issued;";
             PdfOutlineEntry::test_entry("Methods", 1, 1),
         ];
 
-        recover_headings_from_outline(&mut pages, &entries);
+        recover_headings_from_outline(&mut pages, &[], &entries);
 
         assert_eq!(pages[0][0].heading_level, Some(2));
         assert_eq!(pages[0][1].heading_level, Some(3));
@@ -9201,7 +9250,7 @@ where new shares are issued;";
             PdfOutlineEntry::test_entry("Recovered", 2, 1),
         ];
 
-        recover_headings_from_outline(&mut pages, &entries);
+        recover_headings_from_outline(&mut pages, &[], &entries);
 
         assert_eq!(pages[0][2].heading_level, Some(3));
     }
@@ -9216,7 +9265,7 @@ where new shares are issued;";
             PdfOutlineEntry::test_entry("Recovered", 1, 1),
         ];
 
-        recover_headings_from_outline(&mut pages, &entries);
+        recover_headings_from_outline(&mut pages, &[], &entries);
 
         assert_eq!(pages[0][1].heading_level, Some(3));
     }
@@ -9234,7 +9283,42 @@ where new shares are issued;";
             PdfOutlineEntry::test_entry("Duplicate paragraph", 0, 1),
         ];
 
-        recover_headings_from_outline(&mut pages, &entries);
+        recover_headings_from_outline(&mut pages, &[], &entries);
+
+        assert!(pages[0].iter().all(|paragraph| paragraph.heading_level.is_none()));
+    }
+
+    #[test]
+    fn outline_recovery_disambiguates_margin_tab_from_body_sidehead() {
+        // Tessent 开题页形：节名既出现在顶部边带的运行页签上，又以正文区
+        // sidehead 出现在同一页——旧的 count==1 门控把这类书签整条跳过，
+        // sidehead 于是滞留为粗体正文行（TOC_HEADING_GAP 22/102 缺口的主因）。
+        // 消歧后：几何落在正文区且非家具的唯一副本胜出，边带页签不恢复。
+        let mut tab = outline_para("How to Debug Models");
+        tab.block_bbox = Some((72.0, 45.6, 144.2, 56.8));
+        let mut sidehead = outline_para("How to Debug Models");
+        sidehead.block_bbox = Some((72.0, 601.1, 236.0, 615.0));
+        let mut pages = vec![vec![tab, sidehead]];
+        let entries = vec![PdfOutlineEntry::test_entry("How to Debug Models", 1, 1)];
+
+        recover_headings_from_outline(&mut pages, &[], &entries);
+
+        assert_eq!(pages[0][0].heading_level, None, "margin running-head copy stays body text");
+        assert_eq!(pages[0][1].heading_level, Some(3), "depth 1 + default offset 2");
+    }
+
+    #[test]
+    fn outline_recovery_still_refuses_ambiguous_body_copies() {
+        // 反例守卫：两个同名副本都落在正文区（无法用边带区分）时，保留旧的
+        // 歧义拒绝，不猜哪个是书签目标。
+        let mut first = outline_para("How to Debug Models");
+        first.block_bbox = Some((72.0, 200.0, 236.0, 214.0));
+        let mut second = outline_para("How to Debug Models");
+        second.block_bbox = Some((72.0, 601.1, 236.0, 615.0));
+        let mut pages = vec![vec![first, second]];
+        let entries = vec![PdfOutlineEntry::test_entry("How to Debug Models", 1, 1)];
+
+        recover_headings_from_outline(&mut pages, &[], &entries);
 
         assert!(pages[0].iter().all(|paragraph| paragraph.heading_level.is_none()));
     }
@@ -9254,7 +9338,7 @@ where new shares are issued;";
             PdfOutlineEntry::test_entry("Formula", 0, 1),
         ];
 
-        recover_headings_from_outline(&mut pages, &entries);
+        recover_headings_from_outline(&mut pages, &[], &entries);
 
         assert!(pages[0].iter().all(|paragraph| paragraph.heading_level.is_none()));
     }

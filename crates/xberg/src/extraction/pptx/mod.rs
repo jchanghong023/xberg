@@ -50,6 +50,7 @@ use ahash::AHashMap;
 use bytes::Bytes;
 
 pub(crate) use content_builder::LIST_INDENT;
+pub(crate) use parser::MAX_LIST_NESTING_LEVEL;
 
 use crate::core::diagnostics::push_warning;
 use crate::error::Result;

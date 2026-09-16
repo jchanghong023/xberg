@@ -482,6 +482,47 @@ fn post_process_table_inner(
         return None;
     }
 
+    // Caption rows a region absorbed from just above/below the real grid
+    // ("Table 3-1. Cell_types", "Table 3-5. Pin Attributes (cont.)"). The
+    // borderless detector buckets the caption line into the table region, where
+    // it reconstructs as a grid row — and for continued tables as the merged
+    // header, demoting the real column labels into a data row (Tessent manual:
+    // 5 caption rows absorbed). The anchor pattern is tight: the row must OPEN
+    // with `Table N-M.` / `Figure N-M.` and carry only short caption-title
+    // text, so a data row merely *ending* in a cross-reference ("... or
+    // Table 3-1.") never matches. Dropped at the grid entrance so every later
+    // header/flow check sees the caption-free table. ~keep
+    if table.len() >= 2 {
+        let before = table.len();
+        table.retain(|row| !is_caption_row(row));
+        if table.len() < before {
+            tracing::debug!(
+                target: "xberg::table_reconstruct",
+                dropped_caption_rows = before - table.len(),
+                "post_process_table_inner: dropped caption rows from grid"
+            );
+        }
+    }
+    if table.is_empty() {
+        tracing::debug!(
+            target: "xberg::table_reconstruct",
+            reason = "empty_after_caption_drop",
+            "post_process_table_inner: rejected table"
+        );
+        return None;
+    }
+
+    // Truth-table merged cells: a value row like `1 1 0` whose three words
+    // clustered into one grid cell reconstructs as a single multi-character
+    // cell (`110`) on an otherwise empty row. When the grid is a truth table
+    // (almost every cell a single 0/1/X/Z bit) and the merged cell's length
+    // equals the column count, splitting it per character restores the row
+    // with no positional guesswork. Anything else (merged values scattered
+    // across several wrong columns, length != column count) needs cell
+    // coordinates this grid no longer carries and is left untouched.
+    // ~keep
+    split_merged_truth_table_cells(&mut table);
+
     let rejection_rows = table.len();
     let rejection_cols = table.first().map_or(0, Vec::len);
 
@@ -504,6 +545,41 @@ fn post_process_table_inner(
     }
 
     if non_empty > 0 {
+        // Dot-leader table-of-contents rows: a grid whose rows are dominated by
+        // `Entry . . . . N` bands is a fragment of the document's own TOC / list
+        // of figures, not tabular data. The wide whitespace band between a TOC
+        // entry and its page number reads as a column boundary, so the borderless
+        // detector reconstructs a two-column "table" — and the dotted band then
+        // shows up as an oversized banner header cell (Tessent manual: 16 such
+        // headers, 58 caption rows absorbed). Reject so the entries render as
+        // the text lines they are. ≥4 dots per cell keeps genuine ellipsis
+        // ("...") cells and decimal numbers safe; the 60% row share keeps a
+        // table that merely quotes one dotted row. `is_toc_dot_band_cell`
+        // extends this to band cells that kept their entry title ("Logic
+        // . . . ... 269"), which the pure-band check cannot see.
+        let non_empty_rows = table
+            .iter()
+            .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
+            .count();
+        let dot_leader_rows = table
+            .iter()
+            .filter(|row| {
+                row.iter()
+                    .any(|cell| is_dot_leader_cell(cell) || is_toc_dot_band_cell(cell))
+            })
+            .count();
+        if non_empty_rows >= 3 && dot_leader_rows * 5 > non_empty_rows * 3 {
+            tracing::debug!(
+                target: "xberg::table_reconstruct",
+                reason = "dot_leader_toc_rows",
+                dot_leader_rows,
+                non_empty_rows,
+                rows = rejection_rows,
+                cols = rejection_cols,
+                "post_process_table_inner: rejected table"
+            );
+            return None;
+        }
         if layout_guided {
             if long_cells > 0 {
                 let long_cells_100 = table
@@ -632,6 +708,45 @@ fn post_process_table_inner(
             "post_process_table_inner: rejected table"
         );
         return None;
+    }
+
+    // Prose banner header: a small grid whose header row is really a wrapped
+    // prose sentence — one long lowercase cell (>60 chars, no terminal
+    // punctuation) plus a hanging continuation row (empty first column, text
+    // in the second). Real table headers are short labels; a sentence-shaped
+    // banner comes from the borderless detector bucketing two-column prose
+    // with its continuation lines (Tessent manual: "You | can map multiple
+    // non-scan models to one scan model by listing multiple non-scan" heading
+    // a 5-row grid of the sentence's continuation and a code stanza). The
+    // lowercase opening separates it from long-but-title-case real headers,
+    // and rejecting the grid returns its lines to the prose flow they came
+    // from. ~keep
+    {
+        let banner_header = header_rows.iter().any(|row| {
+            row.iter().any(|cell| {
+                let text = cell.trim();
+                let mut chars = text.chars();
+                matches!(chars.next(), Some(first) if first.is_lowercase())
+                    && text.chars().count() > 60
+                    && !text.ends_with(['.', '?', '!', ':'])
+            })
+        });
+        if banner_header && data_rows.len() <= 4 {
+            let hanging_continuation = data_rows.iter().any(|row| {
+                row.first().is_some_and(|cell| cell.trim().is_empty())
+                    && row.get(1).is_some_and(|cell| !cell.trim().is_empty())
+            });
+            if hanging_continuation {
+                tracing::debug!(
+                    target: "xberg::table_reconstruct",
+                    reason = "prose_banner_header",
+                    header_rows = header_rows.len(),
+                    data_rows = data_rows.len(),
+                    "post_process_table_inner: rejected table"
+                );
+                return None;
+            }
+        }
     }
 
     let header = merge_rows_columnwise(&header_rows, column_count);
@@ -1869,6 +1984,418 @@ fn is_numeric_value_cell(cell: &str) -> bool {
 /// isolated braces appear only in code block delimiters, never in real table data.
 const CODE_BRACE_CELL_FRACTION: f64 = 0.20;
 
+/// Minimum number of non-empty rows carrying a Verilog port/attribute
+/// declaration signal before [`looks_like_verilog_declaration_grid`] may
+/// demote a reconstructed grid as a code listing.
+const VERILOG_DECLARATION_MIN_ROWS: usize = 3;
+
+/// Fraction of non-empty rows carrying a Verilog port/attribute declaration
+/// signal required to demote a grid as a code listing. At 0.60, an isolated
+/// assignment-looking row inside a genuine table cannot demote it on its own.
+const VERILOG_DECLARATION_ROW_FRACTION: f64 = 0.60;
+
+/// Returns `true` if the reconstructed table grid reads as Verilog port /
+/// attribute declaration rows rather than genuine tabular data.
+///
+/// The Tessent-style hardware manuals present LibComp attribute blocks as
+/// monospace stanzas — `nonscan_model = FD2P;`, `input (CD) (active_high_reset)`,
+/// `output [Bits-1 : 0] Q;` — whose per-row two-token shape reconstructs into a
+/// plausible-looking two-column "table". Unlike C listings these carry no curly
+/// braces, so [`looks_like_code_listing`]'s brace signals never fire. Five row
+/// shapes count as declaration evidence:
+/// 1. an assignment row: any cell contains `=` and the joined row contains `;`
+/// 2. a port-attribute pair: `ident) (group` — a parenthesised identifier
+///    group followed by a space-free parenthesised group, the classic
+///    `(pin) (attribute)` Verilog port notation (a space inside the second
+///    group, as in prose "(see Table 4) (Appendix B)", is not a port group)
+/// 3. a keyword-led declaration: the row opens with `input`/`output`/
+///    `inout`/`parameter` and is `;`-terminated like every Verilog statement
+/// 4. a bare scaffolding cell whose whole text is `(` or `)`
+/// 5. a comment-led row: the joined row opens with `//`
+///
+/// Requiring a supermajority of rows keeps API-reference tables (which may
+/// quote one code-ish cell) and prose tables safe from demotion.
+pub(crate) fn looks_like_verilog_declaration_grid(table_cells: &[Vec<String>]) -> bool {
+    let non_empty_rows = table_cells
+        .iter()
+        .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
+        .collect::<Vec<_>>();
+    if non_empty_rows.len() < VERILOG_DECLARATION_MIN_ROWS {
+        return false;
+    }
+    let signal_rows = non_empty_rows
+        .iter()
+        .filter(|row| is_verilog_declaration_row(row))
+        .count();
+    (signal_rows as f64) / (non_empty_rows.len() as f64) >= VERILOG_DECLARATION_ROW_FRACTION
+}
+
+/// Whether one cell is a pure dot-leader band — dots (optionally space
+/// separated, as PDF TOC dot rows usually are) optionally followed by a page
+/// number, with no other characters. `". . . . . 279"` qualifies; `"..."`,
+/// `"3.4.1"` and `"see section 2"` do not.
+fn is_dot_leader_cell(cell: &str) -> bool {
+    let trimmed = cell.trim();
+    let dot_count = trimmed.chars().filter(|c| *c == '.').count();
+    if dot_count < 4 {
+        return false;
+    }
+    trimmed
+        .chars()
+        .all(|c| c == '.' || c.is_whitespace() || c.is_ascii_digit())
+}
+
+/// Maximum total caption-title characters (anchor excluded) a
+/// [`is_caption_row`] row may carry. Caption titles are short ("Cell_types",
+/// "Pin Attributes (cont.)"); a data row carrying a cross-reference stays well
+/// above this once its other cells are counted.
+const CAPTION_ROW_MAX_TITLE_CHARS: usize = 64;
+
+/// Whether one reconstructed row reads as a table caption line: its first
+/// non-empty cell opens with a `Table N-M.` / `Figure N-M.` anchor (digits,
+/// dash, digits, terminating dot) and the row's remaining text is a short
+/// caption title. See the drop site in [`post_process_table_inner`] for why.
+fn is_caption_row(row: &[String]) -> bool {
+    let cells: Vec<&str> = row
+        .iter()
+        .map(|cell| cell.trim())
+        .filter(|cell| !cell.is_empty())
+        .collect();
+    let Some(anchor) = cells.first() else {
+        return false;
+    };
+    let Some(title_in_anchor) = strip_caption_anchor(anchor) else {
+        return false;
+    };
+    let title_chars = title_in_anchor.chars().count()
+        + cells[1..]
+            .iter()
+            .map(|cell| cell.chars().count())
+            .sum::<usize>();
+    title_chars <= CAPTION_ROW_MAX_TITLE_CHARS
+}
+
+/// Whether `cell` opens with a `Table N-M.` / `Figure N-M.` caption anchor;
+/// returns the anchor cell's trailing text (the start of the caption title),
+/// if any. The anchor must END the anchor cell's number with `.` — "Table 3-1
+/// lists" (a prose sentence quoting the reference) does not match.
+fn strip_caption_anchor(cell: &str) -> Option<&str> {
+    let mut rest = cell.trim_start();
+    let kind_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    if kind_end == 0 || (&rest[..kind_end] != "Table" && &rest[..kind_end] != "Figure") {
+        return None;
+    }
+    rest = rest[kind_end..].trim_start();
+    let number_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let number = &rest[..number_end];
+    let mut chars = number.chars().peekable();
+    fn take_digits(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+        let mut any = false;
+        while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+            chars.next();
+            any = true;
+        }
+        any
+    }
+    if !take_digits(&mut chars) {
+        return None;
+    }
+    if chars.next() != Some('-') {
+        return None;
+    }
+    if !take_digits(&mut chars) {
+        return None;
+    }
+    if chars.next() != Some('.') || chars.peek().is_some() {
+        return None;
+    }
+    // Whatever remains of the anchor cell after "Table N-M." is the start of
+    // the caption title ("Cell_types" in "Table 3-1. Cell_types").
+    Some(rest[number_end..].trim_start())
+}
+
+/// Whether one cell reads as a table-of-contents dot band that carries entry
+/// text: `"Logic . . . . 269"` — arbitrary prefix tokens, then a run of
+/// space-separated dot tokens totalling >= 4 dots, then at most one trailing
+/// page-number token. [`is_dot_leader_cell`] only matches cells that are
+/// *pure* dot/page-number bands; long TOC entry titles reconstruct with the
+/// title text and its dot band in separate grid columns, so the band cell
+/// keeps its prefix (Tessent manual: "Mux Scan DFF With Complex Asynchronous
+/// | Logic . . . ... 269"). A bare `"...."` ellipsis cell matches neither
+/// check: without a prefix or a page number it carries no TOC evidence.
+fn is_toc_dot_band_cell(cell: &str) -> bool {
+    let mut run_dots = 0usize;
+    let mut has_prefix = false;
+    for token in cell.split_whitespace() {
+        let token_is_dots = !token.is_empty() && token.chars().all(|c| c == '.');
+        if token_is_dots {
+            run_dots += token.chars().count();
+            continue;
+        }
+        // First non-dot token after a >=4-dot run must be the page number.
+        if run_dots >= 4 {
+            return !token.is_empty() && token.chars().all(|c| c.is_ascii_digit());
+        }
+        // Non-dot token before the run gathered enough dots: prefix text.
+        has_prefix = true;
+        run_dots = 0;
+    }
+    run_dots >= 4 && has_prefix
+}
+
+/// Whether one cell's characters are all truth-table bit symbols (`0` `1` `X`
+/// `Z` `x` `z` `l` `h` `L` `H`), optionally with the `/` don't-care separator
+/// and a `*` footnote marker ("`0/1/X/Z`", "`Z*`"). Digits beyond 0/1 are
+/// included because truth-table prints annotate states with numeric footnote
+/// markers ("`X2`" = X with footnote 2); this gate only decides whether the
+/// grid reads as bit-shaped, so being generous here costs nothing — the actual
+/// split decision below requires pure bit characters.
+fn is_bitstring_cell(cell: &str) -> bool {
+    !cell.is_empty()
+        && cell
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'X' | 'Z' | 'x' | 'z' | 'l' | 'h' | 'L' | 'H' | '/' | '*'))
+}
+
+/// Whether `value` is pure bit symbols (no `/`, `*`, or footnote digits) — the
+/// strict character set a merged truth-table value row must satisfy before its
+/// characters may be re-split into columns.
+fn is_pure_bit_value(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| matches!(c, '0' | '1' | 'X' | 'Z' | 'x' | 'z' | 'l' | 'h' | 'L' | 'H'))
+}
+
+/// Whether `row` is a merged truth-table value row: exactly one non-empty
+/// cell, whose value is pure-bit and whose length equals the grid's column
+/// count — the shape of a `1 1 0` input row whose three words clustered into
+/// one cell. Length == column count is what makes the per-character split
+/// positionally exact: the reconstructed values fill the row left to right
+/// with no coordinate guesswork. Returns the split cells.
+fn merged_truth_table_row(row: &[String]) -> Option<Vec<String>> {
+    let mut non_empty = row.iter().map(|cell| cell.trim()).filter(|cell| !cell.is_empty());
+    let value = non_empty.next()?;
+    if non_empty.next().is_some() || value.chars().count() != row.len() {
+        return None;
+    }
+    if !is_pure_bit_value(value) {
+        return None;
+    }
+    Some(value.chars().map(|c| c.to_string()).collect())
+}
+
+/// Anchor-validated variant for rows the exact split cannot handle: several
+/// single-bit cells survived in their own columns while the rest of the row
+/// (its empty cells plus one adjacent bit run) clustered together —
+/// `| | 00 | 0 |` on a 3-column grid (the `IN` bit merged into the `CNT`
+/// cell) or `| 0 | 0 | XX0 | | 0 | 0 | |` on a 7-column one. The surviving
+/// single-bit cells are anchors: concatenate every pure-bit cell in reading
+/// order and accept only when the total length equals the column count and
+/// every anchor's character equals the character its column position
+/// predicts. A mismatch means the merged run does not cover the empty
+/// columns contiguously in reading order and the split point would be a
+/// guess — the row is left untouched. Returns the per-column characters.
+fn anchored_truth_table_row(row: &[String]) -> Option<Vec<String>> {
+    let mut chars = String::new();
+    let mut multi_cell_count = 0usize;
+    for cell in row {
+        let trimmed = cell.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !is_pure_bit_value(trimmed) {
+            return None;
+        }
+        if trimmed.chars().count() > 1 {
+            multi_cell_count += 1;
+        }
+        chars.push_str(trimmed);
+    }
+    if multi_cell_count != 1 || chars.chars().count() != row.len() {
+        return None;
+    }
+    let split: Vec<String> = chars.chars().map(|c| c.to_string()).collect();
+    let mut index = 0usize;
+    for cell in row {
+        let trimmed = cell.trim();
+        if trimmed.is_empty() {
+            index += 1;
+            continue;
+        }
+        if trimmed.chars().count() == 1 && split[index] != trimmed {
+            return None;
+        }
+        index += 1;
+    }
+    Some(split)
+}
+
+/// Split merged truth-table value rows (`| | 110 | |` on a 3-column grid)
+/// into one single-bit cell per column (`| 1 | 1 | 0 |`). Gated four ways so
+/// no other table shape can reach the split: 3-8 columns; at least one merged
+/// row; at least one ordinary row whose non-empty cells are majority single
+/// bit characters (proof the grid really is a truth table, not a numeric
+/// table where "101" is a decimal value); and >=60% of all non-empty cells
+/// outside the first (header-candidate) row bit-shaped — measured on the raw
+/// Tessent grids this targets (e.g. the 6-column D flip-flop table whose
+/// "X2"-style footnote cells drag the all-row figure to 58%), the header
+/// labels are the only non-bit cells a truth table carries. Returns how many
+/// rows were split. Rows whose merged values scattered across several wrong
+/// columns, or whose length != column count, carry no positional evidence
+/// and are left untouched (they need cell coordinates this grid no longer
+/// has). [`anchored_truth_table_row`] additionally rescues rows where
+/// single-bit anchor cells pin down an otherwise ambiguous cluster.
+pub(crate) fn split_merged_truth_table_cells(table: &mut [Vec<String>]) -> usize {
+    let Some(columns) = table.first().map(Vec::len) else {
+        return 0;
+    };
+    if !(3..=8).contains(&columns) {
+        return 0;
+    }
+    let mut merged_rows = 0usize;
+    let mut anchored_rows = 0usize;
+    let mut non_empty_cells = 0usize;
+    let mut bitstring_cells = 0usize;
+    let mut has_single_bit_evidence_row = false;
+    let mut passed_header_candidate = false;
+    for row in table.iter() {
+        if merged_truth_table_row(row).is_some() {
+            merged_rows += 1;
+        } else if anchored_truth_table_row(row).is_some() {
+            anchored_rows += 1;
+        }
+        let row_is_empty = row.iter().all(|cell| cell.trim().is_empty());
+        let counts_toward_fraction = passed_header_candidate || row_is_empty;
+        if !row_is_empty {
+            passed_header_candidate = true;
+        }
+        let mut non_empty_in_row = 0usize;
+        let mut single_bit_in_row = 0usize;
+        for cell in row {
+            let trimmed = cell.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if counts_toward_fraction {
+                non_empty_cells += 1;
+                if is_bitstring_cell(trimmed) {
+                    bitstring_cells += 1;
+                }
+            }
+            non_empty_in_row += 1;
+            if trimmed.chars().count() == 1
+                && trimmed
+                    .chars()
+                    .next()
+                    .is_some_and(|c| matches!(c, '0' | '1' | 'X' | 'Z' | 'x' | 'z' | 'l' | 'h' | 'L' | 'H'))
+            {
+                single_bit_in_row += 1;
+            }
+        }
+        if non_empty_in_row > 0 && single_bit_in_row * 2 >= non_empty_in_row {
+            has_single_bit_evidence_row = true;
+        }
+    }
+    if merged_rows + anchored_rows == 0
+        || !has_single_bit_evidence_row
+        || non_empty_cells == 0
+        || bitstring_cells * 100 < non_empty_cells * TRUTH_TABLE_MIN_BITSTRING_CELL_PERCENT
+    {
+        return 0;
+    }
+    let mut split_count = 0usize;
+    for row in table.iter_mut() {
+        if let Some(split) = merged_truth_table_row(row) {
+            *row = split;
+            split_count += 1;
+        } else if let Some(split) = anchored_truth_table_row(row) {
+            *row = split;
+            split_count += 1;
+        }
+    }
+    split_count
+}
+
+/// Minimum percentage of a truth-table candidate's non-empty cells that must
+/// be bit-shaped before [`split_merged_truth_table_cells`] may rewrite rows.
+const TRUTH_TABLE_MIN_BITSTRING_CELL_PERCENT: usize = 60;
+
+/// Whether one reconstructed row reads as a Verilog port/attribute declaration
+/// line. See [`looks_like_verilog_declaration_grid`] for the five shapes.
+fn is_verilog_declaration_row(row: &[String]) -> bool {
+    let cells: Vec<&str> = row.iter().map(|cell| cell.trim()).filter(|cell| !cell.is_empty()).collect();
+    if cells.is_empty() {
+        return false;
+    }
+    let joined = cells.join(" ");
+
+    // 1. Assignment row: `nonscan_model = FD2P;`
+    if cells.iter().any(|cell| cell.contains('='))
+        && joined.contains(';')
+    {
+        return true;
+    }
+
+    // 2. Port-attribute pair: `input (CD) (active_high_reset)`. Hand-rolled to
+    //    avoid pulling `regex` in: find `)` followed by optional spaces and `(`,
+    //    with an identifier character before the closing paren. The group after
+    //    the second `(` must be a space-free bracketed run — that is what
+    //    separates the port notation from prose cross-references like
+    //    "(see Table 4) (Appendix B)", whose second group contains a space.
+    //    An empty second group (`input (clk) ( )`, the no-attributes port form)
+    //    also qualifies: empty parentheses pairs do not occur in prose.
+    {
+        let bytes = joined.as_bytes();
+        for i in 1..bytes.len() {
+            if bytes[i] == b')'
+                && bytes[i - 1].is_ascii_alphanumeric()
+                && joined[i + 1..]
+                    .trim_start()
+                    .starts_with('(')
+            {
+                let group = joined[i + 1..].trim_start().trim_start_matches('(');
+                if let Some(end) = group.find(')') {
+                    let inner = &group[..end];
+                    if inner.trim().is_empty()
+                        || (end <= 32 && !inner.chars().any(char::is_whitespace))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Keyword-led declaration: `output [Bits-1 : 0] Q;`, `input CK, CSN;`.
+    //    Verilog declaration statements are `;`-terminated, so the keyword
+    //    signal requires the terminator: that keeps a genuine port table's
+    //    data rows ("input | Clock (rising) | ...", no semicolon in any
+    //    column) from counting as declaration evidence regardless of which
+    //    column Direction sits in.
+    if let Some(first) = joined.split_whitespace().next() {
+        if matches!(first, "input" | "output" | "inout" | "parameter") && joined.contains(';') {
+            return true;
+        }
+    }
+
+    // 4. Bare scaffolding cell: a lone `(` or `)` opening/closing a stanza.
+    if cells.iter().any(|cell| *cell == "(" || *cell == ")") {
+        return true;
+    }
+
+    // 5. Comment-led code row: the joined row opens with `//` (C/Verilog line
+    //    comment). Code stanzas wrapped into two-column grids carry their
+    //    comment lines as rows ("// | The data being output from the core to
+    //    the PAD (outside world) thru"); real table data effectively never
+    //    opens a row with a comment marker.
+    if joined.starts_with("//") {
+        return true;
+    }
+
+    false
+}
+
 /// Returns `true` if the reconstructed table grid looks like a code listing
 /// rather than genuine tabular data.
 ///
@@ -1876,7 +2403,7 @@ const CODE_BRACE_CELL_FRACTION: f64 = 0.20;
 /// (especially C-family language listings with curly-brace syntax) as table
 /// regions, because monospace character spacing creates apparent column positions.
 ///
-/// Three signals are checked:
+/// Signals checked:
 /// 1. **Hard reject**: any non-empty cell whose entire trimmed text is `{` or
 ///    `}` (an isolated brace cannot appear in real table content).
 /// 2. **Fraction check**: if ≥ [`CODE_BRACE_CELL_FRACTION`] of non-empty cells
@@ -1885,6 +2412,9 @@ const CODE_BRACE_CELL_FRACTION: f64 = 0.20;
 ///    head followed by pointer-bearing, comma-delimited parameter rows. A
 ///    terminal `);` or comma termination on every parameter row is required to
 ///    avoid rejecting API-reference tables with incidental code punctuation.
+/// 4. **Verilog declaration grid**: brace-free hardware-description attribute
+///    stanzas (`= FD2P;`, `input (CD) (active_high_reset)`) — see
+///    [`looks_like_verilog_declaration_grid`].
 ///
 /// Python, Ruby, and other brace-free languages are not caught by this check;
 /// those rarely produce false-positive tables at the heuristic tier.
@@ -1910,6 +2440,7 @@ pub(crate) fn looks_like_code_listing(table_cells: &[Vec<String>]) -> bool {
         .count();
     (brace_count as f64) / (non_empty.len() as f64) >= CODE_BRACE_CELL_FRACTION
         || looks_like_declaration_grid(table_cells)
+        || looks_like_verilog_declaration_grid(table_cells)
 }
 
 fn looks_like_declaration_grid(table_cells: &[Vec<String>]) -> bool {
@@ -3814,6 +4345,88 @@ mod tests {
         assert!(!looks_like_code_listing(&grid));
     }
 
+    /// Tessent 手册的 LibComp 属性块：无花括号的 Verilog 声明逐行被无框表格
+    /// 检测切成两列伪表（fulltest 码 CODE_AS_TABLE，tessent 语料实测 27 块）。
+    /// 三种实测行形态——赋值 `= FD2P;`、端口属性对 `(CD) (active_high_reset)`、
+    /// 关键字行 `output [Bits-1 : 0] Q;`——都应判为代码清单并交还正文。
+    #[test]
+    fn verilog_declaration_grids_are_rejected_as_code() {
+        let attribute_block = vec![
+            vec!["model".into(), "FD3SP(D, CP, TI,".into(), "TE, CD, Q, QN) (".into()],
+            vec!["nonscan_model".into(), "= FD2P;".into(), "".into()],
+            vec!["cell_type".into(), "= scan_cell;".into(), "".into()],
+            vec!["input".into(), "(CD) (active_high_reset)".into(), "".into()],
+            vec!["input".into(), "(D) (data_in)".into(), "".into()],
+            vec!["(".into(), "".into(), "".into()],
+            vec![")".into(), "".into(), "".into()],
+        ];
+        assert!(
+            looks_like_code_listing(&attribute_block),
+            "Verilog attribute declaration rows must read as a code listing"
+        );
+
+        let port_list = vec![
+            vec!["input (clk) ( )".into(), "".into()],
+            vec!["input (din_2) ( )".into(), "".into()],
+            vec!["input (din_1) ( )".into(), "".into()],
+            vec!["input (din_0) ( )".into(), "".into()],
+        ];
+        assert!(looks_like_code_listing(&port_list), "port(attribute) rows must read as a code listing");
+
+        let bit_range_ports = vec![
+            vec!["output".into(), "[Bits-1 : 0] Q;".into()],
+            vec!["input".into(), "[Addr-1 : 0] A;".into()],
+            vec!["input".into(), "CK, CSN;".into()],
+        ];
+        assert!(
+            looks_like_code_listing(&bit_range_ports),
+            "keyword-led bit-range port rows must read as a code listing"
+        );
+    }
+
+    /// 真正引用 Verilog 关键词的描述表必须放行：行数不足六成带声明信号、
+    /// 且描述散文行不携带赋值/双括号/裸括号证据。
+    #[test]
+    fn verilog_port_description_table_is_not_rejected_as_code() {
+        let grid = vec![
+            vec!["Port".into(), "Direction".into(), "Description".into()],
+            vec!["clk".into(), "input".into(), "Clock, edge-sensitive".into()],
+            vec!["csn".into(), "input".into(), "Active-low chip select".into()],
+            vec!["q".into(), "output".into(), "Read data bus".into()],
+        ];
+        assert!(
+            !looks_like_code_listing(&grid),
+            "a port-description table quoting keywords is real tabular data"
+        );
+    }
+
+    /// 目录/插图清单的点线行（`Entry . . . . 279`）被无框检测当成两列表：
+    /// tessent 语料实测 25 块、58 行题注混入（CAPTION_IN_TABLE）、
+    /// 16 个超长点线表头（TABLE_HEADER_LONG）。≥60% 行为纯点线条+页码
+    /// 即拒收，交还正文；孤立的 "..." 省略号格与普通表格不受影响。
+    #[test]
+    fn dot_leader_toc_grid_is_rejected() {
+        let toc_grid = vec![
+            vec!["D Latch Example .".into(), ". . . . . . . 272".into()],
+            vec!["I/O Pad Limitations and Examples".into(), ". . . . . . 274".into()],
+            vec!["Strength Propagation".into(), ". . . . . . . 274".into()],
+        ];
+        assert!(
+            post_process_table(toc_grid.clone(), true, false).is_none(),
+            "a dot-leader TOC fragment must not be promoted to a table"
+        );
+
+        let genuine = vec![
+            vec!["Step".into(), "Command".into(), "Notes".into()],
+            vec!["1".into(), "run".into(), "see section 2...".into()],
+            vec!["2".into(), "verify".into(), "idempotent".into()],
+        ];
+        assert!(
+            post_process_table(genuine, true, false).is_some(),
+            "a genuine table quoting one ellipsis cell survives"
+        );
+    }
+
     /// Regression test for xberg-io/xberg#1301 (mode b): a colon-introduced,
     /// semicolon-delimited 2-item list whose clauses were word-per-cell
     /// reconstructed into a 10-column, 2-data-row grid. The existing
@@ -4437,5 +5050,310 @@ mod tests {
             processed[4],
             vec!["Afschrijving".to_string(), "-12".to_string(), "-9".to_string()]
         );
+    }
+
+    fn row(cells: &[&str]) -> Vec<String> {
+        cells.iter().map(|c| c.to_string()).collect()
+    }
+
+    #[test]
+    fn caption_rows_with_anchor_first_cell_are_detected() {
+        assert!(is_caption_row(&row(&["", "Table 3-1.", "Cell_types"])));
+        assert!(is_caption_row(&row(&["Table 3-1.", "Cell_types (cont.)"])));
+        assert!(is_caption_row(&row(&["Table 3-5.", "Pin Attributes", "(cont.)"])));
+        assert!(is_caption_row(&row(&["Figure 2-3.", "Scan cell"])));
+    }
+
+    #[test]
+    fn prose_and_data_rows_are_not_caption_rows() {
+        // Prose continuation row that merely ENDS in a cross-reference.
+        assert!(!is_caption_row(&row(&[
+            "detail following",
+            "this table or",
+            "Table 3-1.",
+        ])));
+        // Prose sentence quoting the reference without the terminating dot.
+        assert!(!is_caption_row(&row(&[
+            "Table 3-1 lists all the",
+            "cell_types, which",
+            "are described in detail following this table.",
+        ])));
+        // Real column-header / data rows.
+        assert!(!is_caption_row(&row(&["cell_type", "", "Description"])));
+        assert!(!is_caption_row(&row(&[
+            "clock_gating_and",
+            "",
+            "See \"clock_gating_and\".",
+        ])));
+    }
+
+    #[test]
+    fn caption_row_too_long_to_be_a_title_is_kept() {
+        let long_title = "a".repeat(CAPTION_ROW_MAX_TITLE_CHARS + 1);
+        assert!(!is_caption_row(&row(&["Table 3-1.", &long_title])));
+    }
+
+    #[test]
+    fn caption_rows_are_dropped_and_header_promoted() {
+        // Tessent continued-table shape: the "(cont.)" caption reconstructs as
+        // the grid's first row, demoting the real column labels into data.
+        let table = vec![
+            row(&["Table 3-1.", "Cell_types (cont.)"]),
+            row(&["cell_type", "Description"]),
+            row(&["and", "Logical AND"]),
+            row(&["or", "Logical OR"]),
+        ];
+        let processed = post_process_table(table, true, false).expect("real table must survive");
+        assert_eq!(processed[0], row(&["cell_type", "Description"]));
+        assert!(processed
+            .iter()
+            .all(|r| !r.iter().any(|c| c.contains("Table 3-1"))));
+    }
+
+    #[test]
+    fn toc_dot_band_cells_with_entry_text_are_detected() {
+        assert!(is_toc_dot_band_cell("Logic . . . . ... 269"));
+        assert!(is_toc_dot_band_cell("Example - Mux Scan DFF . . . ."));
+        assert!(is_toc_dot_band_cell("Off By Scan Enable. . . . . 270"));
+    }
+
+    #[test]
+    fn plain_cells_are_not_toc_dot_band_cells() {
+        // A bare ellipsis cell has neither prefix text nor a page number.
+        assert!(!is_toc_dot_band_cell("...."));
+        // Fewer than four dots in the run.
+        assert!(!is_toc_dot_band_cell("1.2 . . . 3"));
+        assert!(!is_toc_dot_band_cell("Weak 0"));
+        assert!(!is_toc_dot_band_cell("see section 2"));
+        // Text after the band that is not a page number.
+        assert!(!is_toc_dot_band_cell("Entry . . . . and more text"));
+    }
+
+    #[test]
+    fn toc_remnant_grid_with_titled_dot_bands_is_rejected() {
+        // Tessent L10701: a TOC fragment whose entry titles kept their dot
+        // bands in the second column — pure-band detection cannot see it.
+        let table = vec![
+            row(&["Mux Scan DFF With Complex Asynchronous", "Logic . . . . ... 269"]),
+            row(&["Example - Mux Scan DFF . . . .", ". . . ... 269"]),
+            row(&[
+                "Example - Mux Scan Cell With Asynchronous Gated",
+                "Off By Scan Enable. . . . . 270",
+            ]),
+        ];
+        assert!(post_process_table(table, true, false).is_none());
+    }
+
+    #[test]
+    fn prose_banner_header_grid_is_rejected() {
+        // Tessent L4082: a wrapped prose sentence + code stanza bucketed into
+        // a 2-column grid — banner header cell, then hanging continuations.
+        let table = vec![
+            row(&[
+                "You",
+                "can map multiple non-scan models to one scan model by listing multiple non-scan",
+            ]),
+            row(&["models", "and their pin lists, separated by commas as follows:"]),
+            row(&["nonscan_model", "= model1(in1, in2, in3, out1, out2),"]),
+            row(&["", "model2(i1, i2, i3, o1, o2),"]),
+            row(&["", "model3(in1, in2, in3, out1);"]),
+        ];
+        assert!(post_process_table(table, true, false).is_none());
+    }
+
+    #[test]
+    fn titled_long_header_table_is_not_a_banner() {
+        // Title-case long header + no hanging rows: a genuine (if verbose)
+        // header must survive.
+        let table = vec![
+            row(&["Signal", "Minimum pulse width requirements for the input pins of this cell"]),
+            row(&["CK", "1.0"]),
+            row(&["SE", "2.0"]),
+        ];
+        assert!(post_process_table(table, true, false).is_some());
+    }
+
+    #[test]
+    fn merged_truth_table_cells_are_split_per_character() {
+        // Tessent NAND truth table (Table 3-8): `1 1 0` clustered into "110".
+        let table = vec![
+            row(&["IN0", "IN1", "OUT"]),
+            row(&["0", "0/1/X/Z", "1"]),
+            row(&["0/1/X/Z", "0", "1"]),
+            row(&["", "110", ""]),
+            row(&["", "1X/ZX", ""]),
+            row(&["X/Z", "1", "X"]),
+        ];
+        let split_count = split_merged_truth_table_cells(&mut table.clone());
+        assert_eq!(split_count, 1, "only the pure-bit 3==cols row splits");
+        let processed = post_process_table(table, true, false).expect("truth table must survive");
+        assert_eq!(processed[3], row(&["1", "1", "0"]));
+        // "1X/ZX" carries a don't-care group: no positional evidence, kept.
+        assert_eq!(processed[4], row(&["", "1X/ZX", ""]));
+    }
+
+    #[test]
+    fn four_column_mux_merged_rows_split_into_all_columns() {
+        // Tessent MUX truth table (Table 3-19): `1 1 X 1` -> one cell per column.
+        let mut grid = vec![
+            row(&["IN0", "IN1", "CNT", "OUT"]),
+            row(&["0", "0/1/X/Z", "0", "0"]),
+            row(&["", "", "11X1", ""]),
+            row(&["", "", "00X0", ""]),
+            row(&["", "", "01XX", ""]),
+            row(&["", "", "10XX", ""]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut grid), 4);
+        assert_eq!(grid[2], row(&["1", "1", "X", "1"]));
+    }
+
+    #[test]
+    fn merged_rows_needing_coordinates_are_left_untouched() {
+        // Tessent D flip-flop table: "101" + "0/1/X010" clustered on one row
+        // across several wrong columns — splitting would be guesswork.
+        let mut grid = vec![
+            row(&["D1", "CLK1", "SET", "RESET", "Q", "QN"]),
+            row(&["", "101", "", "", "0/1/X010", ""]),
+            row(&["0", "0/1/X", "0", "0/1/X", "0", "1"]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut grid), 0);
+        assert_eq!(grid[1], row(&["", "101", "", "", "0/1/X010", ""]));
+
+        // 6-column grid, merged value shorter than the column count.
+        let mut short = vec![
+            row(&["Di", "CLKi", "SET", "RESET", "Q", "QN"]),
+            row(&["", "", "", "010001", "", ""]),
+            row(&["X1", "0", "0", "", "XX", ""]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut short), 1);
+        // Only the 6-char "010001" row splits. "X1"/"XX" in the last row are
+        // genuine multi-bit values (X->1 transition, both outputs don't-care):
+        // two multi-bit cells in one row give the anchor check no single
+        // cluster to validate, so the row must survive untouched.
+        // ...but a 3-value merged row on a 6-column grid does not split.
+        let mut mismatched = vec![
+            row(&["Di", "CLKi", "SET", "RESET", "Q", "QN"]),
+            row(&["", "", "101", "", "", ""]),
+            row(&["X1", "0", "0", "", "XX", ""]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut mismatched), 0);
+    }
+
+    #[test]
+    fn numeric_table_with_lone_bitstring_value_is_not_split() {
+        // A decimal "101" alone in an otherwise multi-digit numeric table:
+        // no row carries single-bit cells, so the truth-table evidence gate
+        // keeps every cell intact.
+        let mut grid = vec![
+            row(&["Region", "Q1", "Q2"]),
+            row(&["", "101", ""]),
+            row(&["North", "12", "34"]),
+            row(&["South", "56", "78"]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut grid), 0);
+        assert_eq!(grid[1], row(&["", "101", ""]));
+    }
+
+    #[test]
+    fn anchored_rows_split_when_single_bit_cells_validate_the_cluster() {
+        // Tessent TSL truth table: the `IN` bit merged into the adjacent `CNT`
+        // cell ("0"+"0" -> "00"). The surviving OUT cell is the anchor that
+        // proves the split point.
+        let mut grid = vec![
+            row(&["IN", "CNT", "OUT"]),
+            row(&["", "00", "0"]),
+            row(&["", "10", "1"]),
+            row(&["", "11", "0"]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut grid), 3);
+        assert_eq!(grid[1], row(&["0", "0", "0"]));
+        assert_eq!(grid[2], row(&["1", "0", "1"]));
+
+        // A 7-column row whose don't-care run "XX0" absorbed its empty
+        // neighbour: every surrounding single-bit cell agrees with the
+        // reading-order split, so the rewrite is positionally forced.
+        let mut wide = vec![
+            row(&["A", "B", "C", "D", "E", "F", "G"]),
+            row(&["0", "0", "XX0", "", "0", "0", ""]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut wide), 1);
+        assert_eq!(wide[1], row(&["0", "0", "X", "X", "0", "0", "0"]));
+    }
+
+    #[test]
+    fn anchored_rows_with_contradictory_anchors_are_rejected() {
+        // "000" cannot cover columns 0-2 while column 2 itself carries "1":
+        // the anchor contradicts the reading-order prediction, so the split
+        // point would be a guess.
+        let mut contradictory = vec![
+            row(&["A", "B", "C", "D"]),
+            row(&["", "000", "1", ""]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut contradictory), 0);
+        assert_eq!(contradictory[1], row(&["", "000", "1", ""]));
+
+        // Two multi-bit cells in one row: no single cluster, no validation.
+        let mut two_clusters = vec![
+            row(&["A", "B", "C", "D", "E", "F"]),
+            row(&["", "X1", "0", "0", "XX", ""]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut two_clusters), 0);
+
+        // Non-bit content (letters with a space) blocks the row entirely.
+        let mut mixed = vec![
+            row(&["A", "B", "C", "D"]),
+            row(&["", "00X", "", "L 1"]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut mixed), 0);
+    }
+
+    #[test]
+    fn verilog_port_pair_requires_space_free_second_group() {
+        let signal = |cells: &[&str]| is_verilog_declaration_row(&row(cells));
+        // The classic port-attribute notation still counts.
+        assert!(signal(&["input (CD)", "(active_high_reset)"]));
+        // Prose cross-references with a spaced second group do not. (A spaced
+        // FIRST group with a space-free second group — "(see notes) (below)"
+        // — still signals; single-word prose groups are indistinguishable
+        // from `(pin) (attr)` on cell text alone, and the 60% row
+        // supermajority is what keeps them from demoting a real table.)
+        assert!(!signal(&["(see Table 4)", "(Appendix B)"]));
+    }
+
+    #[test]
+    fn verilog_keyword_form_requires_semicolon() {
+        let signal = |cells: &[&str]| is_verilog_declaration_row(&row(cells));
+        assert!(signal(&["output [Bits-1 : 0] Q;"]));
+        assert!(signal(&["input", "CK, CSN;"]));
+        // Direction-first port-table rows carry no semicolon: not evidence,
+        // whichever column Direction sits in.
+        assert!(!signal(&["input", "Clock (rising)"]));
+        assert!(!signal(&["Clock (rising)", "input"]));
+        assert!(!signal(&["output", "Q", "register output"]));
+    }
+
+    #[test]
+    fn verilog_comment_rows_and_combined_grids() {
+        let signal = |cells: &[&str]| is_verilog_declaration_row(&row(cells));
+        assert!(signal(&["//", "The data being output from the core to the PAD (outside world) thru"]));
+        assert!(signal(&["//", "this I/O pad."]));
+
+        // Tessent L10962: comment rows + `input data_out;` -> 3/3 signals.
+        let grid = vec![
+            row(&["//", "The data being output from the core to the PAD (outside world) thru"]),
+            row(&["//", "this I/O pad."]),
+            row(&["input", "data_out;"]),
+        ];
+        assert!(looks_like_verilog_declaration_grid(&grid));
+
+        // A genuine port table must NOT demote: one `;` row among prose rows
+        // stays far below the 60% supermajority.
+        let port_table = vec![
+            row(&["Port", "Clock", "Description"]),
+            row(&["input", "Clock (rising)", "Sampled on rising edge"]),
+            row(&["output", "Q", "Data output"]),
+            row(&["input", "data_out;", "legacy"]),
+        ];
+        assert!(!looks_like_verilog_declaration_grid(&port_table));
     }
 }

@@ -36,7 +36,10 @@ pub use json::render_json;
 /// recognized content twice. An element joins the reproduction only when *all* of its non-empty
 /// lines continue it in order, so a paragraph that merely repeats one line of a picture is a
 /// paragraph of the document and stays. Callers pass an empty string for anything that is not a
-/// body paragraph — an empty text never matches a line, so those entries are neutral.
+/// body paragraph — an empty text never matches a line, so those entries are neutral. Titles
+/// and headings must be among the neutral entries: a heading that reproduces a logo's text is
+/// structure standing *before* the image, while the inlined copy the dedup exists to delete is
+/// a plain paragraph after it.
 pub(crate) fn ocr_duplicate_indices(texts: &[&str], ocr_contents: &[&str]) -> Vec<bool> {
     let mut repeats = vec![false; texts.len()];
     for content in ocr_contents {
@@ -82,11 +85,15 @@ pub(crate) fn ocr_duplicate_indices(texts: &[&str], ocr_contents: &[&str]) -> Ve
                     for index in run.drain(..) {
                         repeats[index] = true;
                     }
-                    // The pipeline inlines each image's recognized text once, so
-                    // the first full line-for-line reproduction is that inlined
-                    // copy. Stopping here keeps a body paragraph the document
-                    // itself repeats later — a title above a logo image's text,
-                    // a repeated warning — from being deleted with it.
+                    // Every caller that passes `respect_ocr_flags = false` prints the
+                    // recognized text from the image itself (the markdown fence, the
+                    // plain/djot OCR block) regardless of the doc-level flags, so ANY
+                    // full line-for-line reproduction is redundant in that output:
+                    // deleting the first one loses no text — it survives via the
+                    // image — whether that first hit was the pipeline's inlined copy
+                    // or, with the flags off, the document's own repeat. Stopping
+                    // after the first keeps a later repeat — a title-like paragraph
+                    // further down, a quoted warning — from being deleted with it.
                     break;
                 }
                 continue;

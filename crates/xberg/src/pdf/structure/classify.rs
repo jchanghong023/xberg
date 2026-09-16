@@ -1624,7 +1624,7 @@ fn is_changelog_hierarchy_member(page: &[PdfParagraph], index: usize) -> bool {
 
 /// Merge consecutive H1 paragraphs at the same font size into a single heading.
 ///
-/// Split titles (e.g., "KAISUN HOLDINGS" on one line, "LIMITED" on the next)
+/// Split titles (e.g., "KAISUN HOLDINGS" on one line, "LIMITED on the next")
 /// often produce separate H1 paragraphs. When they share the same font size
 /// and look like grammatical continuations they should be a single heading.
 ///
@@ -1638,12 +1638,14 @@ fn merge_consecutive_h1s(page: &mut Vec<PdfParagraph>) {
             continue;
         }
         let base_fs = page[i].dominant_font_size;
+        let opener_run = chapter_opener_label(effective_text(&page[i]).trim());
         let mut run_end = i + 1;
         while run_end < page.len()
             && page[run_end].heading_level == Some(1)
             && page[run_end].layout_region_path == page[i].layout_region_path
             && (page[run_end].dominant_font_size - base_fs).abs() < 0.5
-            && looks_like_title_continuation(&page[run_end - 1], &page[run_end])
+            && (looks_like_title_continuation(&page[run_end - 1], &page[run_end])
+                || (opener_run && opener_chain_link(&page[run_end - 1], &page[run_end], run_end == i + 1)))
         {
             run_end += 1;
         }
@@ -1668,6 +1670,71 @@ fn merge_consecutive_h1s(page: &mut Vec<PdfParagraph>) {
         }
         i += 1;
     }
+}
+
+/// True when `prev` is a bare chapter-opener label ("Chapter 4", "Appendix A",
+/// "Part II") whose title continues on the following H1 line.
+///
+/// Tessent-style manuals print the opener as three same-size lines: the label
+/// ("Chapter 4"), the title wrapped over one or two lines ("Create Tessent
+/// Insertion Attributes Using" / "Liberty"). [`looks_like_title_continuation`]
+/// caps each side at 4 words, which refuses the 5-word title line and leaves
+/// "# Chapter 4" / "# Create Tessent Insertion Attributes Using" / "# Liberty"
+/// as three headings — no heading then contains "Chapter 4 <title>", so
+/// outline-derived assertions against the printed title all miss it. The relaxed
+/// link accepts up to 12 title words directly after a bare label (and up to the
+/// usual 4 between title lines deeper in the chain), and additionally demands
+/// vertical adjacency so an unrelated H1 further down the page is not absorbed.
+fn opener_chain_link(prev: &PdfParagraph, next: &PdfParagraph, first_link: bool) -> bool {
+    let next_text = effective_text(next);
+    if looks_like_standalone_heading_text(&next_text) {
+        return false;
+    }
+    let prev_text = effective_text(prev);
+    if prev_text.trim_end().ends_with(['.', '!', '?', ':']) {
+        return false;
+    }
+    let next_wc = next_text.split_whitespace().count();
+    // The link hanging directly off the bare label carries the (possibly long)
+    // wrapped title line; deeper links go back to the conservative 4-word cap
+    // so a run of separate headings cannot chain itself into one.
+    let max_words = if first_link { 12 } else { 4 };
+    if next_wc == 0 || next_wc > max_words {
+        return false;
+    }
+    heading_lines_vertically_adjacent(prev, next, 2.5)
+}
+
+/// `true` for a bare opener label: "Chapter 4", "Appendix A", "Part II" —
+/// exactly two words, a known label plus a single alphanumeric/roman token.
+fn chapter_opener_label(text: &str) -> bool {
+    let mut words = text.split_whitespace();
+    let first = words.next().unwrap_or("").to_ascii_lowercase();
+    if !matches!(first.as_str(), "chapter" | "appendix" | "part" | "section") {
+        return false;
+    }
+    let second = words.next().unwrap_or("");
+    if second.is_empty() || words.next().is_some() {
+        return false;
+    }
+    let alphanumeric = !second.is_empty() && second.chars().all(|c| c.is_ascii_alphanumeric());
+    alphanumeric || is_valid_roman(second)
+}
+
+/// Whether the boundary lines of two heading paragraphs stack within
+/// `max_multiple` line-heights — tight enough to be one printed title, too
+/// tight for two unrelated headings separated by body text. Refuses when
+/// either side lacks a usable baseline (geometry-free input stays conservative).
+fn heading_lines_vertically_adjacent(prev: &PdfParagraph, next: &PdfParagraph, max_multiple: f32) -> bool {
+    let (Some(prev_line), Some(next_line)) = (prev.lines.last(), next.lines.first()) else {
+        return false;
+    };
+    if prev_line.baseline_y == 0.0 || next_line.baseline_y == 0.0 {
+        return false;
+    }
+    let line_height = prev.dominant_font_size.max(next.dominant_font_size).max(1.0);
+    let gap = (prev_line.baseline_y - next_line.baseline_y).abs();
+    gap <= line_height * max_multiple
 }
 
 /// True when `next` looks like a grammatical continuation of `prev` (split title).
@@ -2497,6 +2564,96 @@ mod tests {
         let mut p = make_h1(font_size, text);
         p.text = text.to_string();
         p
+    }
+
+    /// An H1 with a controllable baseline so opener-adjacency tests can place
+    /// title lines at the printed stack distance (tessent: 23pt at 22pt type).
+    fn make_h1_at(font_size: f32, text: &str, baseline_y: f32) -> PdfParagraph {
+        let mut p = make_h1_with_text(font_size, text);
+        let line = &mut p.lines[0];
+        line.baseline_y = baseline_y;
+        let segment = &mut line.segments[0];
+        segment.baseline_y = baseline_y;
+        segment.y = baseline_y;
+        p
+    }
+
+    #[test]
+    fn test_merge_chapter_opener_label_and_wrapped_title() {
+        // Tessent 开题页实测几何：22pt Arial-Bold，三行 23pt 间距
+        // （p221: y70.4 / y93.4 / y116.4）。旧的 4-word 上限拒绝 5 词的
+        // 标题行，"Chapter 4 / Create Tessent Insertion Attributes Using /
+        // Liberty" 于是碎成三个 H1，任何标题都不含完整
+        // "Chapter 4 <title>"，fulltest 书签断言随之全部脱靶。
+        let mut page = vec![
+            make_h1_at(22.0, "Chapter 4", 70.4),
+            make_h1_at(22.0, "Create Tessent Insertion Attributes Using", 93.4),
+            make_h1_at(22.0, "Liberty", 116.4),
+            {
+                let mut body = make_paragraph(12.0, 5);
+                body.lines[0].baseline_y = 160.0;
+                body.lines[0].segments[0].baseline_y = 160.0;
+                body
+            },
+        ];
+        merge_consecutive_h1s(&mut page);
+        assert_eq!(page.len(), 2, "label + two title lines must fuse into one H1");
+        assert_eq!(page[0].heading_level, Some(1));
+        assert_eq!(
+            page[0].text,
+            "Chapter 4 Create Tessent Insertion Attributes Using Liberty"
+        );
+    }
+
+    #[test]
+    fn test_merge_appendix_opener_two_lines() {
+        let mut page = vec![
+            make_h1_at(22.0, "Appendix A", 70.4),
+            make_h1_at(22.0, "Attributes and the Tessent Cell Library", 93.4),
+        ];
+        merge_consecutive_h1s(&mut page);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].text, "Appendix A Attributes and the Tessent Cell Library");
+    }
+
+    #[test]
+    fn test_opener_label_distant_h1_not_absorbed() {
+        // 反例：标签行下方隔了正文间距（>2.5× 行高）的 H1 是独立标题，
+        // 不得被开题合并吸收。几何缺失（baseline 0）时同样拒绝。
+        let mut page = vec![
+            make_h1_at(22.0, "Chapter 4", 70.4),
+            make_h1_at(22.0, "Create Tessent Insertion Attributes", 210.0),
+        ];
+        merge_consecutive_h1s(&mut page);
+        assert_eq!(page.len(), 2, "an H1 140pt below the label is not its title line");
+
+        let mut geometry_free = vec![
+            make_h1_with_text(22.0, "Chapter 4"),
+            make_h1_with_text(22.0, "Some Longer Title With More Words"),
+        ];
+        // make_h1_with_text inherits baseline 700 on both lines — emulate a
+        // missing baseline by zeroing it, which the relaxed path must refuse.
+        // The 6-word next line only clears the opener channel (the conservative
+        // path caps it at 4), so the merge decision here is solely the
+        // adjacency check's geometry refusal.
+        for p in &mut geometry_free {
+            p.lines[0].baseline_y = 0.0;
+            p.lines[0].segments[0].baseline_y = 0.0;
+        }
+        merge_consecutive_h1s(&mut geometry_free);
+        assert_eq!(geometry_free.len(), 2, "geometry-free opener links must not merge");
+    }
+
+    #[test]
+    fn test_non_label_two_word_h1_keeps_conservative_cap() {
+        // 反例守卫：非标签的 2 词 H1（"KAISUN HOLDINGS"）不得借开题通道
+        // 把后续 5-12 词的 H1 吸进来——原 4-word 上限的保护必须保留。
+        let mut page = vec![
+            make_h1_at(24.0, "KAISUN HOLDINGS", 100.0),
+            make_h1_at(24.0, "Annual Report of the Board of Directors", 123.0),
+        ];
+        merge_consecutive_h1s(&mut page);
+        assert_eq!(page.len(), 2, "a non-label two-word H1 must not absorb a long title line");
     }
 
     #[test]

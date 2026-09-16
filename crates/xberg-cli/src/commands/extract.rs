@@ -135,6 +135,9 @@ fn batch_image_dir(base: &Path, result_index: usize) -> PathBuf {
 /// or `>` can open the pointy-bracket form. `C:\Users\John Doe\out` otherwise produced
 /// `![](C:/Users/John Doe/out/image_0.png)`, which no renderer resolves and which leaks the
 /// path tail as loose text.
+///
+/// Lines inside a code fence are literal text — a listing that documents the very references
+/// rewritten here — and are passed through verbatim.
 fn prefix_image_refs(content: &str, dir: &Path) -> String {
     let normalized = dir.to_string_lossy().replace('\\', "/");
     let mut encoded = String::with_capacity(normalized.len());
@@ -160,7 +163,25 @@ fn prefix_image_refs(content: &str, dir: &Path) -> String {
         }
     }
     let prefix = format!("]({encoded}/image_");
-    content.replace("](image_", &prefix)
+    let mut out = String::with_capacity(content.len());
+    let mut fence = xberg::extraction::markdown_utils::FenceTracker::default();
+    for line in content.split_inclusive('\n') {
+        let terminator = if line.ends_with('\n') { "\n" } else { "" };
+        let line_body = line.strip_suffix('\n').unwrap_or(line);
+        let had_cr = line_body.strip_suffix('\r').is_some();
+        let body = line_body.strip_suffix('\r').unwrap_or(line_body);
+        if fence.fenced(body) {
+            out.push_str(line);
+        } else {
+            out.push_str(&body.replace("](image_", &prefix));
+            // The replacement sees the line's own characters only; a CRLF ending keeps its `\r`.
+            if had_cr {
+                out.push('\r');
+            }
+            out.push_str(terminator);
+        }
+    }
+    out
 }
 
 /// Execute single document extraction command.
@@ -184,7 +205,7 @@ pub fn extract_command(
     let emit_stage_timing = stage_timing_requested();
 
     let t0 = Instant::now();
-    let result = extract_input_sync(input, mime_type.as_deref(), &config)?;
+    let mut result = extract_input_sync(input, mime_type.as_deref(), &config)?;
     let elapsed = t0.elapsed();
     let extraction_time_ms = elapsed.as_secs_f64() * 1000.0;
 
@@ -196,8 +217,12 @@ pub fn extract_command(
             // A picture's placeholder can arrive inside the code block drawn around it (the PPTX
             // content builder writes both into one block), where markdown never fetches it. The
             // pipeline lifts it for library callers; this covers any path that produced the text
-            // without going through that pass.
-            if content.contains("```text") {
+            // without going through that pass — and, like the pipeline (`apply_output_format`),
+            // only on the Markdown output format: everywhere else a line-start ```text is
+            // literal text and lifting it would silently corrupt the output.
+            if matches!(config.output_format, xberg::core::config::OutputFormat::Markdown)
+                && content.contains("```text")
+            {
                 let mut lifted = result.content.clone();
                 xberg::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut lifted);
                 content = std::borrow::Cow::Owned(lifted);
@@ -239,6 +264,12 @@ pub fn extract_command(
             if let Some(images) = &result.images {
                 let dir = output_dir.as_deref().unwrap_or(Path::new("."));
                 write_extracted_images(images, dir)?;
+                if let Some(explicit) = output_dir.as_deref() {
+                    // Same contract as the Text path and batch TOON: with an explicit
+                    // `--output-dir` the content's references carry that directory, so the
+                    // envelope's content finds its pictures wherever it lands.
+                    result.content = prefix_image_refs(&result.content, explicit);
+                }
             }
             // Serialize the same envelope the JSON path emits. Previously this serialized the
             // bare `ExtractedDocument`, so TOON consumers lost the timing/peak-memory fields
@@ -299,7 +330,11 @@ pub fn batch_command(
             let mut diagnostics = std::io::stderr().lock();
             for (i, result) in output.results.iter().enumerate() {
                 let mut content = std::borrow::Cow::Borrowed(result.content.as_str());
-                if content.contains("```text") {
+                // Markdown-only, same as the library gate in `apply_output_format` and the
+                // single-document Text path above.
+                if matches!(config.output_format, xberg::core::config::OutputFormat::Markdown)
+                    && content.contains("```text")
+                {
                     let mut lifted = result.content.clone();
                     xberg::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut lifted);
                     content = std::borrow::Cow::Owned(lifted);
@@ -1094,5 +1129,22 @@ mod tests {
 
         assert!(results[0].chunks.is_none());
         assert!(results[1].chunks.as_ref().is_some_and(|chunks| chunks.len() > 1));
+    }
+
+    /// Lines inside a code fence are literal text — a listing that shows the very references
+    /// rewritten here — so only the reference outside the fence gains the directory prefix.
+    #[test]
+    fn prefix_image_refs_skips_code_fences() {
+        let content = "见 ![](image_0.png)\n\n```text\n![](image_0.png)\n```\n";
+        let prefixed = prefix_image_refs(content, Path::new("out dir"));
+
+        assert!(
+            prefixed.starts_with("见 ![](out%20dir/image_0.png)\n\n"),
+            "the reference outside the fence must be prefixed: {prefixed:?}"
+        );
+        assert!(
+            prefixed.contains("```text\n![](image_0.png)\n```"),
+            "the fenced reference is literal text and must stay verbatim: {prefixed:?}"
+        );
     }
 }
