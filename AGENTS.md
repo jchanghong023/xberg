@@ -1,5 +1,11 @@
 # AGENTS.md
 
+## 项目概况与权威文档
+
+- 本仓库由 AI Agent 开发与维护：后续 agent 按本文件执行开发、验证与文档同步，质量由自动化验收（`fulltest.py` / `slowtest.py` 的质量报告）保证，不依赖用户人工读代码或人工回归。
+- **两份权威文档，职责分开**：`AGENTS.md`（本文件）＝开发规则与操作手册；`fork.md`（仓库根）＝需求权威，记录本 fork 相对上游必须长期保留的功能、默认行为与验收条件。具体需求、功能规划、需求变化只写 `fork.md`，不写进本文件。
+- **文档联动**：需求或用户可见行为变化 → 必须同步 `fork.md`（不得只改代码）；仅实现方式变化（需求不变）→ 不制造需求变更，也不得为了让文档符合现状而改写需求、把缺陷合理化；入口 / 命令 / 开发规则变化 → 同步本文件；同步上游后 → 按 `fork.md` 逐项核对仍有效的本地需求，而不只是看有没有 Git 冲突。
+
 ## 仓库性质
 
 - 本仓库是 fork：origin = `https://github.com/jchanghong023/xberg.git`（个人仓库），上游 = `https://github.com/xberg-io/xberg.git`（remote 名 `upstream`）。同步上游用普通 `git merge upstream/main`（历史上即如此）。
@@ -19,8 +25,17 @@
 - **验收资产修改必须显式披露**：修改 `fulltest.py` 的判定逻辑/阈值/问题码、`_expectations.json` 的任何键、或重设基线时，必须在回复中**单独列出改动点并给出实测依据**（哪个文件哪次实测值支持这次调整），不允许夹在引擎改动里静默带过。fulltest 报告与基线已记录金标准 sha256 与代码 commit，资产被动过是可对账的。
 - **报告闭环（声称修复前必须核对）**：用户跑完 fulltest 后，后续 agent 会话在声称任何修复生效前，必须先读 `D:\测试转markdown转换效果\测试文档_md_fulltest\_quality-report.json`，逐码核对「与基线对比」的新增/已修复/恶化与自己的声明一致；不一致不得声称已修复，只能报告"已实施、待用户验证"。
 - **临时脚本 / 临时目录 / 临时文件只准放 `./.tmp`**：仓库内的一次性脚本、临时目录、临时文件一律建在仓库根目录的 `.tmp\`（不存在先 `mkdir -p .tmp`），不得散落在仓库根、`scratch*` 或其他任何目录——根目录只保留仓库资产，避免 `git status` 噪音和误提交；`.tmp/` 已在 `.gitignore` 中（不入库）。验证完自行清理临时产物。
-- **`fulltest.py`（仓库根目录）只在用户明确要求时才运行**。它是文档转换效果的集成测试：遍历 `D:\测试转markdown转换效果\测试文档`，逐文件调用本地编译的 CLI 转成 Markdown，打印四层质量评估（结构启发式、用 pymupdf/python-docx/python-pptx/openpyxl 对源文件算文本召回率、xberg 元数据警告、深检与逐文件金标准断言），结果输出到 `D:\测试转markdown转换效果\测试文档_md_fulltest`。运行它只需本地编译出 exe（不需要打包），默认遇 FAIL 立即终止，`--keep-going` 跑完；音视频转写超时默认 1800s。音视频也只用本地编译版：预检会用 max_bytes=1 快速探测 transcription feature，缺 feature 直接报错退出并提示 `cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,layout-detection,api`，**不回退打包版**。
+- **`fulltest.py`（仓库根目录）只在用户明确要求时才运行**。它是文档转换效果的集成测试：遍历 `D:\测试转markdown转换效果\测试文档`，逐文件调用本地编译的 CLI 转成 Markdown，打印五层质量评估（结构启发式、用 pymupdf/python-docx/python-pptx/openpyxl 对源文件算文本召回率、xberg 元数据警告、深检与逐文件金标准断言、对抗语料失败路径），结果输出到 `D:\测试转markdown转换效果\测试文档_md_fulltest`。运行它只需本地编译出 exe（不需要打包），默认遇 FAIL 立即终止，`--keep-going` 跑完；音视频转写超时默认 1800s。音视频也只用本地编译版：预检会用 max_bytes=1 快速探测 transcription feature，缺 feature 直接报错退出并提示 `cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,layout-detection,api`，**不回退打包版**。
 - **`slowtest.py`（仓库根目录）同样只在用户明确要求时才运行**。慢速全量验证，测**打包版 CLI**：① 跑 `scripts/publish/cli/package-cli-windows.ps1` 打完整 zip；② 解压到临时目录，对解压出的 xberg.exe 跑 fulltest.py（`--keep-going` 全量测完，`--pkg-dir` 指向解压目录）；③ 输出转码质量报告（报告副本存 `target/slowtest-report-<时间戳>.md`）。包含完整 release 编译与打包，耗时可能 30 分钟以上；`--skip-package` 可复用已有 zip。**用户根据该报告决定是否发布版本。**
+
+## 测试要求（对 agent 的硬性要求）
+
+- **功能性开发和功能性修改必须有自动化验证**：UT 验证局部逻辑（源码内 `#[cfg(test)]` 与 crate 的 `tests/`）；E2E 验证从真实公开入口到可观察结果的完整链路——本 fork 的 E2E 就是 `fulltest.py`（真实 `xberg.exe extract` → 落盘 Markdown/图片 + 逐文件金标准断言 + 对抗语料失败路径）与 `slowtest.py`（打包版跑同一套）。跨模块交互按需增加集成测试。
+- **编译、`cargo check`、clippy、局部模拟都不能替代 E2E**：它们只证明类型或局部逻辑，不证明转换质量；桩和模拟可以补充测试，但绕过的真实边界（真实文件、真实 OCR / 转写模型、真实 CLI 入口）必须说明，不能当作端到端结论。
+- **测试要对需求与验收条件负责**：覆盖核心成功路径与相关关键失败路径（失败路径＝`_adversarial/` 那套语义：损坏 / 截断 / 空输入必须优雅失败），不得只复述实现或只断言"没 panic"。
+- **验证状态必须如实区分**：已实现 / 验证通过 / 验证失败 / 未验证（写明未验证范围与原因）。环境、依赖或权限不足时说明未验证部分，不能用"已修复"描述未验证的改动（与「硬性约束」的交付要求一致）。
+- **Windows 上可用的 UT 入口**（均属编译类命令，只在用户点名时运行）：`cargo test -p xberg`、`cargo test -p xberg-cli`，或 `task test:quick`（= `cargo test --locked --lib --workspace --exclude xberg-php --exclude xberg-node --exclude xberg-wasm`，只跑 lib 单测）。`task test` / `task test:ci` 在 `.task/languages/rust.yml` 里只声明了 linux / darwin 平台，在 Windows 上不执行。
+- **现状与缺口（如实记录）**：本 fork 没有自动跑 Rust 测试的 CI（上游 `ci-rust.yaml` 等编译 / 测试 workflow 被仓库守卫 skip，无守卫的 `ci-lint` 只跑治理 / 文档 / 脚本类检查，不编译 Rust、不跑 Rust 测试）；fork 新增模块多数自带 UT（`extraction/visio.rs`、`rendering/ocr_layout.rs`、`extraction/markdown_utils.rs`、`extraction/excel/images.rs`、`crates/xberg-windows-metafile`），但部分模块（如 `transcription/wmf.rs`）没有 UT，只有 fulltest 的 E2E 覆盖；上游 `e2e/` + `fixtures/` 的语言绑定 e2e 在本 fork 不运行、不作为验收依据。`cargo test` 目前是否全绿未经本 fork 验证，不得当成已通过。
 
 ## fulltest.py 的作用（本仓库的验收标准）
 
@@ -68,7 +83,7 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 
 - `fork.md`——fork 相对上游的定制清单（见「仓库性质」）；`fulltest.py` / `slowtest.py`——fork 验收标准（见上节）。
 - `scripts/`——`publish/cli/package-cli-windows.ps1`（打包唯一入口，也是 fork feature 集的来源之一）、`publish/cli/offline-smoke.ps1`、`ci/`（PE/DLL 闭包校验）。
-- `.github/workflows/build-windows-cli.yml`——fork 自有的 Windows 打包 CI，仅手动 `workflow_dispatch` 触发。上游编译/测试类 workflow（ci-rust、ci-e2e 等）带仓库守卫在本 fork 全 skip；ci-lint / ci-docs / ci-scripts 无守卫，push 命中路径仍会自动跑。
+- `.github/workflows/build-windows-cli.yml`——fork 自有的 Windows 打包 CI，仅手动 `workflow_dispatch` 触发。上游编译/测试类 workflow（ci-rust、ci-e2e 等）带仓库守卫在本 fork 全 skip；push 命中路径会自动跑的只有无守卫的 ci-lint / ci-docs / ci-scripts（其余无守卫 workflow 是 workflow_dispatch / release / issue-PR 事件触发，不随 push 跑）。
 - `docs-site/`（Astro + Starlight 文档）、`e2e/` + `fixtures/`、`.ai-rulez/`（ai-rulez 管理的 AI 规则/技能，改规则后需用固定版本的 ai-rulez 重新生成 bundle）。**`e2e/` 与 `fixtures/` 是上游的语言绑定 e2e 资产**（csharp/dart/go/...），本 fork 的验收不走它们（走 fulltest.py），日常不要为它们做适配；merge 上游带进来的改动原样保留即可。
 - `packages/` / `integrations/` / `plugin/` / `charts/` / `templates/`——上游生态资产（语言包、第三方集成、Claude 插件、Helm chart、README 生成模板），fork 不主动维护，merge 时原样保留（引擎新增格式时的计数同步除外，见 `fork.md` 末节）。
 
@@ -120,7 +135,8 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 
 ### 其他验证（同样仅在明确要求时执行）
 
-- Rust 测试：`cargo test -p xberg`；lint：`cargo clippy`；task runner 为 `Taskfile.yml`（`task build`、`task test` 等）。
+- Rust 测试：`cargo test -p xberg` / `-p xberg-cli`（Windows 可用的 `task` 入口见「测试要求」）；lint：`cargo clippy`；task runner 为 `Taskfile.yml`（`task build`、`task lint:check` 等；`task test` / `task test:ci` 只声明了 linux/darwin 平台）。
+- 这些命令与 `cargo build` 同类，属于「严禁私自跑费时操作」的范围：只在用户明确点名时执行；跑完按「硬性约束」如实报告验证状态。
 
 ## 已知坑
 

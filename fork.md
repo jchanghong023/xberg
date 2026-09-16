@@ -1,36 +1,56 @@
 # fork.md — 本 fork 相对上游的定制清单
 
-上游 = `https://github.com/xberg-io/xberg.git`（remote 名 `upstream`）。本文件是 **merge 上游时解决冲突的依据**和 fork 改动的唯一索引：改动下列任何能力，必须同步更新本文件。保持精简，细节以代码与提交历史为准（`git log upstream/main..main`）。
+上游 = `https://github.com/xberg-io/xberg.git`（remote 名 `upstream`）。本文件是 **merge 上游时解决冲突的依据**、fork 改动的唯一索引，也是本仓库的需求权威（`AGENTS.md` 只写开发规则）：改动下列任何能力，必须同步更新本文件。保持精简，细节以代码与提交历史为准（`git log upstream/main..main`）。
+
+**状态与核对约定**：本清单描述「同步上游后仍需在本 fork 成立的行为」，不是 Git 差异摘要或开发日志；对照基线 = `git merge-base main upstream/main`。下列条目由现行实现与本地提交恢复而来，验收 = `fulltest.py` 对应检查不回归 + 各条给出的可观察行为。同步上游后必须逐项复核（上游可能已独立实现或改变同一行为），不能只看有没有 Git 冲突。最近一次复核：2026-09-16 对 upstream/main（`a2730b2221`）逐项核对，清单涉及的新增文件与默认行为（含默认输出格式、图片抽取默认、OCR 默认后端与回退移除、CLI 行为、引擎槽位、配置合并 API）上游均无等价实现——全部仍需本地维护。
 
 ## 定位
 
 仅 Windows 11 的个人 fork：只做「文件 → Markdown」+ OCR + 音视频转写 + HTTP 服务（`xberg serve`）。不维护上游的语言绑定、heic、pdfium、embedding、NER、MCP 等能力（feature 集见 AGENTS.md）。
 
+## 用户可见默认行为（与上游不同）
+
+- **默认输出格式**：库默认 `OutputFormat::Markdown`（上游 `Plain`）；CLI 反过来把自己的基准钉成 `Plain`（`xberg extract` 不带参数仍打印纯文本）。配置文件与 `--config-json` 只覆盖写了的键，未写的键保留基准值、不重置成库默认（`ExtractionConfig::from_file_over` / `discover_over`）。验收：库 API 默认渲染 Markdown；CLI 默认输出纯文本；配置文件省略 `output_format` 时 CLI 仍输出纯文本。
+- **默认抽取图片**：`PdfConfig::extract_images` 默认 `true`；缺省 `images` 段视为抽取图片（`needs_image_data()` / `needs_image_processing()` 默认真）；`ImageExtractionConfig::append_ocr_text` 默认 `true`（`ocr_text_only = true` 仍可只留文本）。验收：默认配置下 PDF / Office 图片会被抽取、落盘并被 OCR；显式 `extract_images = false` 能关掉。
+- **默认 OCR 后端 = PaddleOCR pp-ocrv6 tiny**（编入 `paddle-ocr` 时为默认，否则 tesseract）；**不合成古典回退 pipeline**——上游「默认后端时自动拼 `[tesseract@100, paddleocr@50]`」的逻辑已移除（弱引擎的误读会在默认引擎正确地"没找到"的位置胜出；需要混合时由调用方显式配置 `pipeline`）；Tesseract 语言代码统一解析成 pack 名（`zh` → `chi_sim`）后再交给各消费者。验收：默认后端为 `paddle-ocr`；未显式配置 `pipeline` 时 `effective_pipeline()` 返回 `None`。
+
+## CLI 行为
+
+- **`--output-dir` 语义**：显式给出目录时，输出里的图片引用带上该目录（空格、括号等按 CommonMark 百分号编码；围栏内文本不改写）；批处理把每份结果的图片写进 `<dir>/doc_<N>/`，否则多文档的 `image_N.ext` 会互相覆盖、引用全指向最后一份。验收：批处理 ≥2 个文档时各文档图片不互相覆盖且引用可解析。
+- **主线程栈**：CLI 主体跑在 16 MiB 栈的 worker 线程（`xberg-main`）上——Windows 主线程栈容不下 crate 的递归解析器，否则 Windows 与 Unix 行为不一致。
+
 ## 引擎定制（crates/，冲突时保 fork 行为）
 
-- **默认 OCR = PaddleOCR pp-ocrv6 tiny**，Tesseract 编入作后备（`paddle_ocr/`、`core/config/ocr.rs`）。
-- **图片 OCR 渲染**：OCR 文本与图片路径合并进一个保持原位的围栏块（`rendering/ocr_layout.rs`，fork 新增）；`ocr_text_only` 开启时也保留该块。
-- **EMF/WMF 图元文件 → PNG**：新 crate `crates/xberg-windows-metafile`（纯 GDI 栅格化，fork 新增），Office 内嵌图元文件因此可落盘、可 OCR。
-- **Visio 抽取**：`.vsd`/`.vsdx`/`.vsdm` 形状文本（`extraction/visio.rs`、`extractors/visio.rs`，fork 新增）。
-- **xlsx 内嵌图片**：提取并 OCR（`extraction/excel/images.rs`，fork 新增）。
-- **OOXML/OLE 内嵌对象**：内嵌 Word OLE 文本合并进宿主文档、PPTX OLE/PresentationML fallback 图片抽取（`extraction/ooxml_embedded.rs`）。
-- **PPTX 质量**：标题/演讲者备注读取与归属守卫（`extractors/pptx.rs`、`extraction/pptx/`）。
-- **PDF 质量大改**：表格重建（`pdf/table_reconstruct.rs`）、原生文本抽取（`pdf/native/text.rs`）、结构分类/段落/页眉页脚剔除（`pdf/structure/`）；有原生文本的页面不做破坏性整页 OCR 回退。
-- **Windows Media 转写**：Media Foundation 读 ASF/WMV 音轨，解码失败回退外部 ffmpeg（`transcription/container.rs`、`transcription/wmf.rs`，fork 新增）。
-- **Markdown 渲染**：图片 alt 路径清理、图片与 OCR 文本同块等输出修复（`rendering/markdown.rs`、`rendering/comrak_bridge.rs`）。
+- **OCR 后端与调度**：`paddle_ocr/`、`core/config/ocr.rs`——承载上节的默认后端、语言解析与线程预算规则。
+- **图片 OCR 渲染**：OCR 文本与图片路径合并进一个保持原位的围栏块（`rendering/ocr_layout.rs`，fork 新增）；`ocr_text_only` 开启时也保留该块。验收：图片路径与其 OCR 文本落在同一围栏块且位置不变，围栏内的既有文本不被改写。
+- **EMF/WMF 图元文件 → PNG**：新 crate `crates/xberg-windows-metafile`（纯 GDI 栅格化，fork 新增），Office 内嵌图元文件因此可落盘、可 OCR（`docker/`、`.dockerignore` 需同步该 member）。验收：Office 文档里的 EMF/WMF 以 PNG 落盘并在 Markdown 中被引用。
+- **Visio 抽取**：`.vsd`/`.vsdx`/`.vsdm` 形状文本（`extraction/visio.rs`、`extractors/visio.rs`，fork 新增；MIME 表同步登记）。验收：三类扩展名都能抽到形状文本并走到 Visio 抽取器。
+- **xlsx 内嵌图片**：提取并 OCR（`extraction/excel/images.rs`，fork 新增）。验收：表格内嵌图片落盘并被 OCR。
+- **OOXML/OLE 内嵌对象**：内嵌 Word OLE 文本合并进宿主文档、PPTX OLE/PresentationML fallback 图片抽取（`extraction/ooxml_embedded.rs`）。验收：内嵌 OLE 文本出现在宿主文档对应位置，fallback 图片被抽出。
+- **PPTX 质量**：标题/演讲者备注读取与归属守卫（`extractors/pptx.rs`、`extraction/pptx/`）。验收：标题与备注归属到正确幻灯片，不串页、不重复。
+- **PDF 质量大改**：表格重建（`pdf/table_reconstruct.rs`）、原生文本抽取（`pdf/native/text.rs`）、结构分类/段落/页眉页脚剔除（`pdf/structure/`）。验收：有原生文本的页面不做破坏性整页 OCR 回退（原生文本保留），表格按重建结果输出、页眉页脚被剔除。
+- **Windows Media 转写**：Media Foundation 读 ASF/WMV 音轨，解码失败回退外部 ffmpeg（`transcription/container.rs`、`transcription/wmf.rs`，fork 新增）。验收：`.wmv`/`.asf` 能转写出音轨文本；MF 读不了的文件回退 ffmpeg 后仍能出文本。
+- **Markdown 渲染**：图片 alt 路径清理、图片与 OCR 文本同块等输出修复（`rendering/markdown.rs`、`rendering/comrak_bridge.rs`、`extraction/markdown_utils.rs`）。验收：输出不残留本地路径垃圾，改动围栏内文本的改写不发生。
+
+## 性能 / 资源策略
+
+- **PaddleOCR 并发**：把线程预算拆给多个并发引擎实例（每模型键有槽位上限，默认 8），而不是给单个会话堆 intra-op 线程——实测（32 核）把单会话 intra-op 预算 8→32，八文档 OCR 批量只快约 12%（会话带互斥锁，同一时刻只能跑一张图），引擎槽位才转成图级吞吐。每实例复制模型权重与 ORT arena，故槽位数有上限。
+- 线程预算门控 `active_thread_budget()` 同时覆盖 `paddle_ocr`（不只上游的 `sceptre_ocr`），使 `ConcurrencyConfig::max_threads` 对模型会话生效。
 
 ## 打包 / CI（fork 独有或大改）
 
-- `.github/workflows/build-windows-cli.yml`（新增）：fork 自有的打包流水线（仅手动 `workflow_dispatch` 触发），调用 `package-cli-windows.ps1`。上游 ci-rust / ci-e2e 等编译测试类 workflow 被仓库守卫 skip；ci-lint / ci-docs / ci-scripts 无守卫，push 命中路径仍会自动跑。
+- `.github/workflows/build-windows-cli.yml`（新增）：fork 自有的打包流水线（仅手动 `workflow_dispatch` 触发），调用 `package-cli-windows.ps1`，含带时间戳的 Windows release 发布。上游 ci-rust / ci-e2e 等编译测试类 workflow 被仓库守卫 skip；ci-lint / ci-docs / ci-scripts 无守卫，push 命中路径仍会自动跑。
 - `scripts/publish/cli/package-cli-windows.ps1`（大改）：模型随包分发（Whisper tiny + RT-DETR + TATR + PaddleOCR tiny）、MSVC CRT 部署、并行度与打包门禁；**fork feature 集的来源之一**。
 - `scripts/publish/cli/offline-smoke.ps1`（新增）：离线 smoke 与空缓存缺模型诊断探测。
 - `scripts/ci/lib/pe-imports.ps1`（新增）+ `scripts/ci/verify-windows-dll-closure.ps1`（改造）：PE 导入闭包校验。
+- `.ai-rulez/` 与 `plugin/` 的规则 bundle：格式计数等随引擎改动伴生同步，其中 release profile 的描述按 fork 的 LTO 设置改写（bundle 由固定版本 ai-rulez 生成，改规则后须用同一版本重新生成，见 AGENTS.md）。
 
 ## 验收与仓库约定（fork 独有）
 
 - `fulltest.py` / `slowtest.py`（仓库根）：本仓库的验收标准，规则见 AGENTS.md。
 - `AGENTS.md` 入库（上游 `.gitignore` 忽略它，fork 删掉了该条；见 AGENTS.md「仓库性质」）。
-- `.gitignore` 追加 fork 本地产物忽略（打包输出、转换 scratch、`.tmp/` 等）。
+- `.gitignore` 追加 fork 本地产物忽略（打包输出、转换 scratch、`.tmp/`、`.zcode/` 等）。
+- 上游测试：fork 行为改变了上游断言时改断言而不是删测试（如 CLI 批处理错误路径在 Windows 的 `{:?}` 转义渲染、格式/扩展名/MIME 计数常量）；Rust 测试不在本 fork 的 CI 中运行（见 AGENTS.md「测试要求」）。
 
 ## 构建配置刻意背离上游的点
 
