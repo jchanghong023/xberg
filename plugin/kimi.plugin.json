@@ -1,7 +1,7 @@
 {
   "name": "xberg",
   "version": "1.2.2",
-  "description": "Local document extraction: text, tables, metadata, images from 107 formats with optional OCR.",
+  "description": "Local document extraction: text, tables, metadata, images from 110 formats with optional OCR.",
   "author": {
     "name": "Kreuzberg, Inc.",
     "email": "contact@xberg.io",
@@ -29,7 +29,7 @@
   },
   "interface": {
     "displayName": "Xberg",
-    "shortDescription": "Local document extraction for 107 formats",
+    "shortDescription": "Local document extraction for 110 formats",
     "longDescription": "Extract text, tables, metadata, and images from PDFs, Office files, images, HTML, email, archives, and academic formats. Runs locally via the xberg CLI and an auto-registered MCP server. Plugin ships skills covering the CLI surface, OCR backends, table extraction, and output-format selection.",
     "developerName": "Kreuzberg, Inc.",
     "category": "document-intelligence",

@@ -116,6 +116,9 @@ pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Resu
         max_stream_size,
         remaining_stream_bytes: max_stream_size,
         stream_budget_exhausted: false,
+        depth_exhausted: false,
+        pointer_limit_exhausted: false,
+        text_truncated: false,
         visited: HashSet::new(),
         text: Vec::new(),
     };
@@ -126,6 +129,21 @@ pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Resu
     if parser.stream_budget_exhausted {
         return Err(XbergError::parsing(format!(
             "Visio stream data exceeds the configured budget of {max_stream_size} bytes"
+        )));
+    }
+    if parser.depth_exhausted {
+        return Err(XbergError::parsing(
+            "Visio stream nesting exceeds the safety limit",
+        ));
+    }
+    if parser.pointer_limit_exhausted {
+        return Err(XbergError::parsing(
+            "Visio pointer container exceeds the child safety limit",
+        ));
+    }
+    if parser.text_truncated {
+        return Err(XbergError::parsing(format!(
+            "Visio document carries more than the safety limit of {MAX_TEXT_CHUNKS} text chunks"
         )));
     }
     Ok(parser.text)
@@ -276,6 +294,17 @@ struct VisioParser<'a> {
     /// budget failure there would otherwise degrade into silently truncated text. The caller
     /// checks this flag after the descent and reports the failure instead.
     stream_budget_exhausted: bool,
+    /// Set when a pointer chain ran past [`MAX_CHILD_DEPTH`]. The same tolerance applies
+    /// — the `let _ =` at the recursion site would swallow the error and return a
+    /// "clean" conversion of silently truncated text.
+    depth_exhausted: bool,
+    /// Set when a pointer container declared more children than [`MAX_CHILD_POINTERS`]:
+    /// the parse refuses to return a table, the `if let Ok` at the recursion site swallows
+    /// that error, and the subtree's text would be silently lost without the report.
+    pointer_limit_exhausted: bool,
+    /// Set when the shape-text collection hit [`MAX_TEXT_CHUNKS`] — same silent-truncation
+    /// discipline as the other safety caps.
+    text_truncated: bool,
     visited: HashSet<StreamKey>,
     text: Vec<String>,
 }
@@ -304,7 +333,8 @@ struct StreamData {
 impl<'a> VisioParser<'a> {
     fn scan_stream(&mut self, pointer: Pointer, depth: usize) -> Result<()> {
         if depth > MAX_CHILD_DEPTH {
-            return Err(XbergError::parsing("Visio stream nesting exceeds the safety limit"));
+            self.depth_exhausted = true;
+            return Ok(());
         }
 
         let key = StreamKey {
@@ -403,7 +433,7 @@ impl<'a> VisioParser<'a> {
         Ok(())
     }
 
-    fn parse_child_pointers(&self, parent: Pointer, contents: &[u8]) -> Result<Vec<Pointer>> {
+    fn parse_child_pointers(&mut self, parent: Pointer, contents: &[u8]) -> Result<Vec<Pointer>> {
         let pointer_size = pointer_size(self.version);
         let (count_offset, count, post_count_skip) = if self.version >= 6 {
             let count_offset = read_u32(contents, 0)
@@ -427,6 +457,9 @@ impl<'a> VisioParser<'a> {
         };
 
         if count > MAX_CHILD_POINTERS {
+            // The recursion site's `if let Ok` swallows this error — surface it at the
+            // top level instead of losing the subtree's text to a "clean" conversion.
+            self.pointer_limit_exhausted = true;
             return Err(XbergError::parsing(format!(
                 "Visio pointer container declares {count} children, over the safety limit"
             )));
@@ -458,6 +491,10 @@ impl<'a> VisioParser<'a> {
 
     fn scan_chunks(&mut self, stream: &StreamData) {
         if self.text.len() >= MAX_TEXT_CHUNKS {
+            // Same discipline as the budget and depth caps: the caller must see the
+            // truncation instead of receiving a "clean" conversion that silently
+            // dropped text.
+            self.text_truncated = true;
             return;
         }
 
@@ -498,6 +535,7 @@ impl<'a> VisioParser<'a> {
                 if !text.is_empty() && text != "\n" && !repeated {
                     self.text.push(text);
                     if self.text.len() >= MAX_TEXT_CHUNKS {
+                        self.text_truncated = true;
                         break;
                     }
                 }

@@ -89,6 +89,11 @@ pub fn lift_image_markers_out_of_fences(content: &mut String) {
     }
     let mut out = String::with_capacity(content.len());
     let mut rest = content.as_str();
+    // Whether `rest` begins at a real line start. The skip paths below slice `rest` at
+    // arbitrary byte offsets; a slice cut mid-line has no newline behind its first
+    // match, and without this flag the line-start check below would mistake the same
+    // line's second "```text" for an opener at column zero.
+    let mut rest_starts_at_line_start = true;
     while let Some(found) = rest.find("```text") {
         // `find` lands on the last three backticks of a longer opener (like "````text"), so walk
         // back to the run's first one: anything left in the prefix leaks into the paragraph the
@@ -105,10 +110,15 @@ pub fn lift_image_markers_out_of_fences(content: &mut String) {
         // A fence opener must sit at the start of its line (CommonMark allows up to three
         // spaces of indentation). "```text" anywhere else on the line is literal text — an
         // inline snippet in a markdown tutorial — and must survive verbatim.
-        let line_start = rest[..position].rfind('\n').map_or(0, |index| index + 1);
-        let at_line_start = {
-            let indent = &rest[line_start..position];
-            indent.len() <= 3 && indent.bytes().all(|byte| byte == b' ')
+        let at_line_start = match rest[..position].rfind('\n') {
+            Some(index) => {
+                let indent = &rest[index + 1..position];
+                indent.len() <= 3 && indent.bytes().all(|byte| byte == b' ')
+            }
+            None => rest_starts_at_line_start && {
+                let indent = &rest[..position];
+                indent.len() <= 3 && indent.bytes().all(|byte| byte == b' ')
+            },
         };
         let body_start = if at_line_start {
             match rest[opening_end..].strip_prefix("\r\n") {
@@ -126,6 +136,7 @@ pub fn lift_image_markers_out_of_fences(content: &mut String) {
             None => {
                 out.push_str(&rest[..opening_end]);
                 rest = &rest[opening_end..];
+                rest_starts_at_line_start = false;
                 continue;
             }
         };
@@ -149,12 +160,15 @@ pub fn lift_image_markers_out_of_fences(content: &mut String) {
             }
             out.push_str(&body[..consumed]);
             rest = &body[consumed..];
+            rest_starts_at_line_start = true;
             continue;
         }
         out.push_str(&rest[..position]);
         out.push_str(first_line);
         out.push_str("\n\n");
         rest = &body[first_line_end..];
+        // `rest` begins at a line start here; both arms of the closer match below
+        // re-slice to a line boundary and set `rest_starts_at_line_start` themselves.
         // Find the closing line: only a line of nothing but the fence character —
         // at least as many as the opener, at most three spaces of indent — closes
         // the fence. A body line that merely starts with backticks (a nested
@@ -178,13 +192,22 @@ pub fn lift_image_markers_out_of_fences(content: &mut String) {
                 // The marker was the fence's only content: drop the fence with
                 // its closer instead of re-opening an empty one.
                 rest = &rest[end..];
+                rest_starts_at_line_start = true;
             }
             _ => {
                 // Re-open with the opener's own run: its length was picked to
                 // outgrow the body's backtick runs, and a shorter one could be
-                // closed early by a body line.
+                // closed early by a body line. The body and closer are literal
+                // content of the fence just re-opened: emit them verbatim and
+                // resume after the closer — a "```text" line inside the body
+                // would otherwise be mistaken for a fresh opener and rewritten
+                // while still inside a fence the output already opened.
+                let end = closer_end.unwrap_or(rest.len());
                 out.push_str(&"`".repeat(opener_backticks));
                 out.push_str("text\n");
+                out.push_str(&rest[..end]);
+                rest = &rest[end..];
+                rest_starts_at_line_start = true;
             }
         }
     }
@@ -307,6 +330,38 @@ mod tests {
         assert_eq!(
             content, source,
             "a ```text inside a fence body is literal text: nothing may be lifted or deleted"
+        );
+    }
+
+    /// Two literal "```text" spellings on ONE line: the scan skips past the first one
+    /// mid-line, and the slice that remains must remember it is no longer at a line
+    /// start — the old line-start check saw no newline behind the second match, took it
+    /// for an opener at column zero, lifted the next line's "marker" out of a fence that
+    /// never opened, and deleted the closing line.
+    #[test]
+    fn second_midline_text_fence_on_the_same_line_is_not_an_opener() {
+        let source = String::from("intro\n\n```text```text\n![](image_9.png)\n```\n\noutro\n");
+        let mut content = source.clone();
+        lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(
+            content, source,
+            "a second ```text on the same line is literal text: nothing may be lifted or deleted"
+        );
+    }
+
+    /// A ```text line inside the body of a fence whose marker was lifted is literal
+    /// content of the re-opened fence: emitting only the opener and leaving the body to
+    /// the next scan iteration let that inner line pass as a fresh opener, lifted the
+    /// "marker" after it, and deleted the closing line — leaving an unclosed fence that
+    /// swallowed the rest of the document on re-parse.
+    #[test]
+    fn text_fence_inside_a_lifted_marker_fence_stays_literal() {
+        let mut content =
+            String::from("```text\n![](image_0.png)\n```text\n![](image_1.png)\n```\n");
+        lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(
+            content, "![](image_0.png)\n\n```text\n```text\n![](image_1.png)\n```\n",
+            "only the outer marker is lifted; the inner ```text and its marker stay verbatim"
         );
     }
 

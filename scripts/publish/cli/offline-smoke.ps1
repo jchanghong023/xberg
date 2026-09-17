@@ -59,14 +59,28 @@ function Fail([string]$Message) {
   exit 1
 }
 
-function Invoke-Captured([string]$FilePath, [string[]]$Arguments) {
+function Invoke-Captured([string]$FilePath, [string[]]$Arguments, [int]$TimeoutMs = 900000) {
   $stdoutFile = New-TemporaryFile
   $stderrFile = New-TemporaryFile
   try {
-    & $FilePath @Arguments 1>$stdoutFile.FullName 2>$stderrFile.FullName
-    $code = $LASTEXITCODE
+    # Start-Process rather than `&`: the probe must be killable when it hangs (a model
+    # session deadlocked on load), or a stuck binary would block the packaging gate until
+    # a human intervenes. -ArgumentList joins with spaces without quoting, so arguments
+    # carrying spaces quote themselves. taskkill is called by absolute path: this script
+    # replaces PATH with the clean path before probing, and System32 is not on it.
+    $quoted = foreach ($argument in $Arguments) {
+      if ($argument -match '\s') { '"' + $argument + '"' } else { $argument }
+    }
+    $process = Start-Process -FilePath $FilePath -ArgumentList $quoted -PassThru -NoNewWindow `
+      -RedirectStandardOutput $stdoutFile.FullName -RedirectStandardError $stderrFile.FullName
+    if (-not $process.WaitForExit($TimeoutMs)) {
+      & "$env:SystemRoot\System32\taskkill.exe" /PID $process.Id /T /F | Out-Null
+      # Bounded: if the kill itself failed, giving up on the wait beats hanging the caller.
+      $process.WaitForExit(10000) | Out-Null
+      Fail "probe did not finish within $($TimeoutMs / 1000)s and was killed: $FilePath $($Arguments -join ' ')"
+    }
     return [pscustomobject]@{
-      ExitCode = $code
+      ExitCode = $process.ExitCode
       Stdout   = (Get-Content -LiteralPath $stdoutFile.FullName -Raw -ErrorAction SilentlyContinue)
       Stderr   = (Get-Content -LiteralPath $stderrFile.FullName -Raw -ErrorAction SilentlyContinue)
     }

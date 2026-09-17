@@ -1883,8 +1883,15 @@ mod tests {
 
     /// The per-model budget must be split across engine slots rather than handed whole to a
     /// single serialised session, and the split must never exceed the budget it was given.
+    ///
+    /// The exact tuples only hold on the policy path; a shell that exports
+    /// `XBERG_PADDLE_ENGINE_SLOTS` (a deliberate override) makes them environment-dependent,
+    /// so the test steps aside rather than flake there.
     #[test]
     fn paddle_engine_layout_splits_the_budget_across_slots() {
+        if std::env::var("XBERG_PADDLE_ENGINE_SLOTS").is_ok() {
+            return;
+        }
         assert_eq!(paddle_engine_layout(1), (1, 1));
         assert_eq!(paddle_engine_layout(4), (4, 1));
         assert_eq!(paddle_engine_layout(8), (8, 1));
@@ -1900,6 +1907,9 @@ mod tests {
     /// `with_intra_threads(0)` would be a session-construction footgun.
     #[test]
     fn paddle_engine_layout_floors_intra_op_threads_at_one() {
+        if std::env::var("XBERG_PADDLE_ENGINE_SLOTS").is_ok() {
+            return;
+        }
         assert_eq!(paddle_engine_layout(0), (1, 1));
     }
 

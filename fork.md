@@ -22,7 +22,7 @@
 ## 引擎定制（crates/，冲突时保 fork 行为）
 
 - **OCR 后端与调度**：`paddle_ocr/`、`core/config/ocr.rs`——承载上节的默认后端、语言解析与线程预算规则。
-- **图片 OCR 渲染**：OCR 文本与图片路径合并进一个保持原位的围栏块（`rendering/ocr_layout.rs`，fork 新增）；`ocr_text_only` 开启时也保留该块。验收：图片路径与其 OCR 文本落在同一围栏块且位置不变，围栏内的既有文本不被改写。
+- **图片 OCR 渲染**：每张图片的 marker 是独立段落，其后紧跟装 OCR 文本的 ` ```text ` 围栏块（网格布局优先、放不下整行回退平文本；`rendering/ocr_layout.rs`，fork 新增）；`ocr_text_only` 开启时两部分都保留。验收：marker 段落与其 OCR 围栏块相邻且位置不变，围栏内既有文本不被改写，OCR 文本不因段落去重而丢失。
 - **EMF/WMF 图元文件 → PNG**：新 crate `crates/xberg-windows-metafile`（纯 GDI 栅格化，fork 新增），Office 内嵌图元文件因此可落盘、可 OCR（`docker/`、`.dockerignore` 需同步该 member）。验收：Office 文档里的 EMF/WMF 以 PNG 落盘并在 Markdown 中被引用。
 - **Visio 抽取**：`.vsd`/`.vsdx`/`.vsdm` 形状文本（`extraction/visio.rs`、`extractors/visio.rs`，fork 新增；MIME 表同步登记）。验收：三类扩展名都能抽到形状文本并走到 Visio 抽取器。
 - **xlsx 内嵌图片**：提取并 OCR（`extraction/excel/images.rs`，fork 新增）。验收：表格内嵌图片落盘并被 OCR。
@@ -30,7 +30,7 @@
 - **PPTX 质量**：标题/演讲者备注读取与归属守卫（`extractors/pptx.rs`、`extraction/pptx/`）。验收：标题与备注归属到正确幻灯片，不串页、不重复。
 - **PDF 质量大改**：表格重建（`pdf/table_reconstruct.rs`）、原生文本抽取（`pdf/native/text.rs`）、结构分类/段落/页眉页脚剔除（`pdf/structure/`）。验收：有原生文本的页面不做破坏性整页 OCR 回退（原生文本保留），表格按重建结果输出、页眉页脚被剔除。
 - **Windows Media 转写**：Media Foundation 读 ASF/WMV 音轨，解码失败回退外部 ffmpeg（`transcription/container.rs`、`transcription/wmf.rs`，fork 新增）。验收：`.wmv`/`.asf` 能转写出音轨文本；MF 读不了的文件回退 ffmpeg 后仍能出文本。
-- **Markdown 渲染**：图片 alt 路径清理、图片与 OCR 文本同块等输出修复（`rendering/markdown.rs`、`rendering/comrak_bridge.rs`、`extraction/markdown_utils.rs`）。验收：输出不残留本地路径垃圾，改动围栏内文本的改写不发生。
+- **Markdown 渲染**：图片 alt 路径清理、图片 marker 独立段落与 OCR 文本围栏等输出修复（`rendering/markdown.rs`、`rendering/comrak_bridge.rs`、`extraction/markdown_utils.rs`）。验收：输出不残留本地路径垃圾，改动围栏内文本的改写不发生。
 
 ## 性能 / 资源策略
 

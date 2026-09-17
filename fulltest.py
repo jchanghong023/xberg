@@ -120,7 +120,7 @@ ISSUE_META = {
     "XML_LEAK": "FAIL",
     "MD_FENCE": "FAIL",
     "IMG_MISSING": "FAIL",      # 引用指向不存在的文件
-    "IMG_LOST": "FAIL",         # 引用数 > 落盘数（丢图）
+    "IMG_LOST": "FAIL",         # 唯一引用目标数 > 落盘数（丢图；同一图片多次引用不算）
     "IMG_CORRUPT": "FAIL",      # 零字节 / 过小 / magic 不匹配
     "IMG_META": "WARN",
     "IMG_SRC_EMPTY": "FAIL",    # 源文件有图，但 MD 无引用且磁盘无落盘
@@ -547,6 +547,9 @@ def structural_metrics(md_text: str, img_dir: Path):
     local_ref_targets = [t for t in ref_targets
                          if not re.match(r"[A-Za-z][A-Za-z0-9+.\-]*:", t)]
     img_refs = len(local_ref_targets)
+    # 唯一目标数：与「落盘文件数」同量纲。同一图片的多次引用（页眉 logo 每页一次）
+    # 是合法形态，按出现次数对账会把 2 次引用 1 份文件误判成丢图。
+    img_refs_unique = len(set(local_ref_targets))
     fences = sum(1 for l in lines if l.lstrip().startswith("```"))
     nonempty = sum(1 for l in lines if l.strip())
     empty = len(lines) - nonempty
@@ -607,7 +610,8 @@ def structural_metrics(md_text: str, img_dir: Path):
     bold_short_lines = sum(1 for l in outside_lines if BOLD_SHORT_RE.match(l.strip()))
     return {
         "chars": chars, "headings": headings, "table_rows": table_rows,
-        "img_refs": img_refs, "fences": fences, "nonempty": nonempty, "empty": empty,
+        "img_refs": img_refs, "img_refs_unique": img_refs_unique,
+        "fences": fences, "nonempty": nonempty, "empty": empty,
         "replacement": replacement, "ctrl": ctrl, "imgs_on_disk": len(img_dir_files),
         "broken_refs": broken_refs,
         "fence_balanced": fences % 2 == 0,
@@ -634,7 +638,8 @@ def json_metrics(m) -> dict:
     return {
         "chars": m["chars"], "nonempty": m["nonempty"],
         "headings": m["headings"], "table_rows": m["table_rows"],
-        "img_refs": m["img_refs"], "imgs_on_disk": m["imgs_on_disk"],
+        "img_refs": m["img_refs"], "img_refs_unique": m["img_refs_unique"],
+        "imgs_on_disk": m["imgs_on_disk"],
         "page_titles": len(m.get("page_titles") or []),
         "max_page": m.get("max_page") or 0,
         "tables": m.get("tables") or 0,
@@ -660,11 +665,13 @@ def judge_structure(m, issues):
         issues.append(make_issue("ENCODING", f"含 {m['replacement']} 个替换字符(疑似乱码)"))
     if m["ctrl"] > 10:
         issues.append(make_issue("ENCODING", f"含 {m['ctrl']} 个控制字符"))
-    # 丢图：引用多于落盘。落盘多于引用不算问题（PPTX 剥重复装饰图引用，数据仍保留）。
-    if m["img_refs"] > m["imgs_on_disk"]:
+    # 丢图：唯一引用目标多于落盘。落盘多于引用不算问题（PPTX 剥重复装饰图引用，
+    # 数据仍保留）；引用按唯一目标计——同一图片多次合法引用不是丢图，具体哪条
+    # 引用断了由 IMG_MISSING 逐条对账。
+    if m["img_refs_unique"] > m["imgs_on_disk"]:
         issues.append(make_issue(
             "IMG_LOST",
-            f"图片引用({m['img_refs']})多于导出图片数({m['imgs_on_disk']})"))
+            f"图片引用({m['img_refs_unique']}个唯一目标)多于导出图片数({m['imgs_on_disk']})"))
     if m["broken_refs"]:
         issues.append(make_issue(
             "IMG_MISSING",
@@ -778,7 +785,9 @@ def judge_source_images(src_img_count, meta, m, issues):
     if src_img_count is None or src_img_count <= 0:
         return
     disk = m["imgs_on_disk"]
-    refs = m["img_refs"]
+    # 引用按唯一目标计：与磁盘/元数据同为「图片个数」量纲——出现次数会把单图
+    # 多次引用虚高成恢复量，掩盖真实缺口。
+    refs = m["img_refs_unique"]
     imgs_meta = (meta.get("counts") or {}).get("images") or 0
 
     # 源里有图，但既无引用也无落盘 → 整类丢失
@@ -1699,7 +1708,10 @@ def _judge_expectations(md_text: str, m, issues, exp):
         ("min_headings", "headings", "min"), ("max_headings", "headings", "max"),
         ("min_tables", "tables", "min"), ("max_tables", "tables", "max"),
         ("min_chars", "chars", "min"), ("max_chars", "chars", "max"),
-        ("min_images", "img_refs", "min"), ("max_images", "img_refs", "max"),
+        # 图片个数量纲 = 唯一引用目标（与 IMG_LOST/四方对账同口径）；出现次数会把
+        # 单图多次引用虚高成图片数。阈值按唯一口径实测校准（ATPG中小特性方案.docx
+        # 实测出现 27 = 唯一 27，min_images=22 在两口径下等价）。
+        ("min_images", "img_refs_unique", "min"), ("max_images", "img_refs_unique", "max"),
         ("max_line_len", "max_line_len", "max"), ("max_escapes", "escapes", "max"),
     )
     violated = []
@@ -2464,7 +2476,7 @@ def _encode_markdown_dir(name: str) -> str:
     的）关系目标，所以那里不能编码 `%`。
     """
     table = {" ": "%20", "(": "%28", ")": "%29", "<": "%3C", ">": "%3E",
-             '"': "%22", "`": "%60", "%": "%25"}
+             '"': "%22", "`": "%60", "%": "%25", "#": "%23"}
     return "".join(table.get(ch, ch) for ch in name
                    if unicodedata.category(ch) != "Cc")
 
@@ -2475,12 +2487,37 @@ def save_markdown(out_dir: Path, stem: str, md_text: str, img_dirname: str):
     只对「裸文件名」引用加前缀：引擎自产的引用形如 `image_N.ext`，不含空白、
     括号或目录分隔。target 类曾只排除 `)/`，对含括号的带路径引用会在第一个
     `)` 处半匹配截断、把链接改坏——那种形态不是引擎产物，收紧为不匹配、
-    原样保留，交给后面的引用对账判定。
+    原样保留，交给后面的引用对账判定。围栏内是字面量（OCR 围栏/代码示例里的
+    `![](image_0.png)` 不是引用），与 CLI 的 `prefix_image_refs` 一样跳过——
+    判定读内存 md_text 不受影响，这里只保证落盘审计副本与 CLI 口径一致。
     """
     prefix = _encode_markdown_dir(img_dirname)
-    saved = re.sub(r"(!\[[^\]]*\]\()([^\s()/]+)\)",
-                   lambda match: f"{match.group(1)}{prefix}/{match.group(2)})", md_text)
-    (out_dir / f"{stem}.md").write_text(saved, encoding="utf-8")
+    pattern = re.compile(r"(!\[[^\]]*\]\()([^\s()/]+)\)")
+    fence = None  # (围栏字符, 长度)——当前打开的代码围栏
+    saved_lines = []
+    for line in md_text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        if fence is not None:
+            saved_lines.append(line)
+            stripped = body.lstrip(" ")
+            run = len(stripped) - len(stripped.lstrip(fence[0]))
+            if (len(body) - len(stripped) <= 3 and run >= fence[1]
+                    and stripped[run:].strip(" \t") == ""):
+                fence = None
+            continue
+        stripped = body.lstrip(" ")
+        first = stripped[:1]
+        run = len(stripped) - len(stripped.lstrip(first)) if first in ("`", "~") else 0
+        # 与 Rust 侧 code_fence_open 同契约：≥3 个围栏字符、缩进 ≤3 空格、反引号
+        # 围栏的 info string 里不得再出现反引号。
+        if (len(body) - len(stripped) <= 3 and run >= 3
+                and not (first == "`" and "`" in stripped[run:])):
+            fence = (first, run)
+            saved_lines.append(line)
+            continue
+        saved_lines.append(pattern.sub(
+            lambda match: f"{match.group(1)}{prefix}/{match.group(2)})", line))
+    (out_dir / f"{stem}.md").write_text("".join(saved_lines), encoding="utf-8")
 
 
 def _stem_tags(main_files: list, adv_files: list | None = None) -> dict:
@@ -2563,7 +2600,7 @@ def report_file(name, verdict, m, recall_info, meta, elapsed, issues, used_cli, 
     emit(f"\n{'='*72}")
     emit(f"{ok} [{verdict}] {name}   ({elapsed:.1f}s)")
     emit(f"  内容: {m['chars']} 字符 | 非空行 {m['nonempty']} | 标题 {m['headings']} | "
-         f"表格行 {m['table_rows']} | 图片引用 {m['img_refs']}(落盘 {m['imgs_on_disk']}) | "
+         f"表格行 {m['table_rows']} | 图片引用 {m['img_refs']}/唯一 {m['img_refs_unique']}(落盘 {m['imgs_on_disk']}) | "
          f"代码围栏 {m['fences']} | 表格块 {m.get('tables', 0)}")
     if m.get("max_page"):
         emit(f"  MD页标题: {len(m.get('page_titles') or [])} 个 | 最大 Page {m['max_page']}")
@@ -2725,6 +2762,13 @@ def run_selftest() -> int:
               and "](doc_images/image_1.png)" in saved)
         check("带路径引用原样保留", "](sub/dir.png)" in saved)
         check("含括号引用原样保留(不半匹配截断)", "](im (1).png)" in saved)
+        md2 = "```text\n![](image_0.png)\n```\n![](image_1.png)\n"
+        save_markdown(tmp, "t2", md2, "doc_images")
+        saved2 = (tmp / "t2.md").read_text("utf-8")
+        check("围栏内引用是字面量，不加前缀",
+              "![](image_0.png)" in saved2 and "doc_images/image_0.png" not in saved2,
+              saved2)
+        check("围栏外引用仍加前缀", "](doc_images/image_1.png)" in saved2, saved2)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -2794,6 +2838,15 @@ def run_selftest() -> int:
         check("带 title 的引用按目标名对账", _m["broken_refs"] == [], str(_m["broken_refs"]))
         _m2 = structural_metrics("![](missing.png \"t\")\n", _img_dir)
         check("缺失目标仍判 broken", _m2["broken_refs"] == ["missing.png"], str(_m2["broken_refs"]))
+        # 同一图片多次引用：出现次数 2、唯一目标 1——唯一数才与落盘文件数同量纲。
+        _m3 = structural_metrics("![](image_0.png)\n![](image_0.png)\n", _img_dir)
+        check("重复引用按唯一目标计", _m3["img_refs"] == 2 and _m3["img_refs_unique"] == 1,
+              f"refs={_m3['img_refs']} unique={_m3['img_refs_unique']}")
+        # judge 级接线：唯一目标 ≤ 落盘就不出 IMG_LOST——metric 用例不守护消费行本身。
+        _issues3 = []
+        judge_structure(_m3, _issues3)
+        check("重复引用同一存在图片不判 IMG_LOST",
+              not any(i["code"] == "IMG_LOST" for i in _issues3), str(_issues3))
 
     # --- compare_baseline：集合对比 + 同码次数恶化 + 金标准门控剔除 ---
     global EXPECTATIONS_SHA256
@@ -3194,9 +3247,11 @@ def main():
         print(f"  ... 其余 {len(files) - 5} 个略", flush=True)
     # 对抗语料（子目录不进主队列；主队列全部跑完后追加失败路径测试）
     adv_dir = src / "_adversarial"
-    # 与 run_adversarial 同一筛选（AV 不进失败路径队列），供 stem 消歧与预检计数
+    # 与 run_adversarial 同一筛选（AV 不进失败路径队列、剔除 Windows 噪音文件），
+    # 供 stem 消歧与预检计数
     adv_files = sorted(p for p in adv_dir.iterdir() if p.is_file()
-                       and p.suffix.lower().lstrip(".") not in AV_EXTS) \
+                       and p.suffix.lower().lstrip(".") not in AV_EXTS
+                       and not _is_windows_noise(p)) \
         if adv_dir.is_dir() else []
     if adv_files:
         print(f"[preflight] 对抗语料: {adv_dir}（{len(adv_files)} 个失败路径样本，主队列后追加）",
@@ -3409,8 +3464,12 @@ def main():
             break
 
     # 对抗语料：主队列后追加，结果并入汇总/JSON/基线对比（对抗文件名作 key）；
-    # 默认遇 FAIL 提前终止时同样跳过（与「立即终止」语义一致，--keep-going 才会跑到这里）
-    if not stopped_early and adv_dir.is_dir() and any(p.is_file() for p in adv_dir.iterdir()):
+    # 默认遇 FAIL 提前终止时同样跳过（与「立即终止」语义一致，--keep-going 才会跑到这里）。
+    # 启用门与 run_adversarial 同一筛选（AV/Windows 噪音文件不算样本）。
+    if not stopped_early and adv_dir.is_dir() and any(
+        p.is_file() and p.suffix.lower().lstrip(".") not in AV_EXTS and not _is_windows_noise(p)
+        for p in adv_dir.iterdir()
+    ):
         results.extend(run_adversarial(cli, adv_dir, out_dir, args.timeout, env, tags=tags))
 
     n_fail, n_warn = print_summary(results, stopped_early, early_reason, strict=args.strict)

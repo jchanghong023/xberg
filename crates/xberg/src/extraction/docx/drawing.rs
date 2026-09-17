@@ -508,7 +508,7 @@ pub(crate) fn parse_vml_pict(
                     }
                     "imagedata" => {
                         if image_ref.is_none() {
-                            image_ref = get_attr(e, "id");
+                            image_ref = vml_image_ref(e);
                         }
                         depth += 1;
                     }
@@ -517,7 +517,7 @@ pub(crate) fn parse_vml_pict(
             }
             Ok(Event::Empty(ref e)) => {
                 if e.local_name().as_ref() == "imagedata" && image_ref.is_none() {
-                    image_ref = get_attr(e, "id");
+                    image_ref = vml_image_ref(e);
                 }
             }
             Ok(Event::End(_)) => {
@@ -544,13 +544,74 @@ pub(crate) fn parse_vml_pict(
 }
 
 /// Relationship id targeted by a VML `<v:imagedata r:id="…"/>` element.
+///
+/// The lookup is prefix-qualified: `r:id` is the relationship, while a bare `id`
+/// is VML's core element id — an arbitrary name that must not shadow the
+/// relationship when it comes first in the attribute order. `o:relid` is VML's
+/// native relationship attribute and some legacy writers emit only it; it is
+/// the fallback.
 pub(crate) fn vml_image_ref(e: &BytesStart) -> Option<String> {
-    get_attr(e, "id")
+    namespaced_attr(e, "id").or_else(|| namespaced_attr(e, "relid"))
+}
+
+/// First attribute whose name is `<prefix>:<local>`. A bare name is never a
+/// match: `get_attr`'s local-name matching would let VML's element `id` stand
+/// in for the relationship and lose the real image.
+fn namespaced_attr(e: &BytesStart, local: &str) -> Option<String> {
+    e.attributes().flatten().find_map(|attr| {
+        let key: &str = attr.key.as_ref();
+        // `:` is ASCII, so the byte index from `rfind` is always a char boundary.
+        let separator = key.rfind(':')?;
+        if key[separator + 1..] != *local {
+            return None;
+        }
+        quick_xml::escape::unescape(attr.value.as_ref())
+            .ok()
+            .map(|s| s.into_owned())
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `o:relid` is VML's native relationship attribute and legacy writers may emit
+    /// it instead of `r:id`; both spellings must resolve the image, with `r:id`
+    /// winning when both are present. VML's bare element `id` is neither — it must
+    /// neither be used on its own nor shadow the real relationship when it comes
+    /// first in the attribute order.
+    #[test]
+    fn vml_image_ref_falls_back_to_office_relid() {
+        let mut with_rid = quick_xml::events::BytesStart::new("v:imagedata");
+        with_rid.push_attribute(("r:id", "rId5"));
+        assert_eq!(vml_image_ref(&with_rid).as_deref(), Some("rId5"));
+
+        let mut with_relid = quick_xml::events::BytesStart::new("v:imagedata");
+        with_relid.push_attribute(("o:relid", "rId7"));
+        assert_eq!(vml_image_ref(&with_relid).as_deref(), Some("rId7"));
+
+        let mut both = quick_xml::events::BytesStart::new("v:imagedata");
+        both.push_attribute(("o:relid", "rIdA"));
+        both.push_attribute(("r:id", "rIdB"));
+        assert_eq!(
+            vml_image_ref(&both).as_deref(),
+            Some("rIdB"),
+            "r:id wins when both spellings are present"
+        );
+
+        let mut bare_id_only = quick_xml::events::BytesStart::new("v:imagedata");
+        bare_id_only.push_attribute(("id", "Picture 1"));
+        assert_eq!(vml_image_ref(&bare_id_only), None, "a bare element id is not a relationship");
+
+        let mut bare_before_rid = quick_xml::events::BytesStart::new("v:imagedata");
+        bare_before_rid.push_attribute(("id", "Picture 1"));
+        bare_before_rid.push_attribute(("r:id", "rId9"));
+        assert_eq!(
+            vml_image_ref(&bare_before_rid).as_deref(),
+            Some("rId9"),
+            "a bare element id must not shadow the relationship"
+        );
+    }
 
     /// Helper to parse drawing XML and return the Drawing object.
     fn parse_drawing_from_xml(xml: &[u8]) -> Drawing {

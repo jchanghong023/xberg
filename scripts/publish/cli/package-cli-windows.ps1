@@ -964,14 +964,29 @@ try {
     }
     if ($check.Env.Count -gt 0) { $spawn.Environment = $check.Env }
     $process = Start-Process @spawn
-    [pscustomobject]@{ Name = $check.Name; Process = $process; StdoutFile = $stdoutFile; StderrFile = $stderrFile }
+    [pscustomobject]@{ Name = $check.Name; Process = $process; StdoutFile = $stdoutFile; StderrFile = $stderrFile; Hung = $false }
   }
-  foreach ($item in $running) { $item.Process.WaitForExit() }
+  # A probe that hangs (a model session deadlocked on load, a missing DLL stuck mid-load)
+  # must fail the gate instead of blocking the packaging run until a human kills it. The
+  # window is generous: the smoke probes load RT-DETR/TATR/PaddleOCR from the staged cache.
+  $probeTimeoutMs = 15 * 60 * 1000
+  foreach ($item in $running) {
+    if (-not $item.Process.WaitForExit($probeTimeoutMs)) {
+      & "$env:SystemRoot\System32\taskkill.exe" /PID $item.Process.Id /T /F | Out-Null
+      # Bounded: if the kill itself failed, giving up on the wait beats hanging the gate.
+      $item.Process.WaitForExit(10000) | Out-Null
+      $item.Hung = $true
+    }
+  }
 
   $failedChecks = [System.Collections.Generic.List[string]]::new()
   foreach ($item in $running) {
     $stdout = Get-Content -LiteralPath $item.StdoutFile -Raw -ErrorAction SilentlyContinue
     $stderr = Get-Content -LiteralPath $item.StderrFile -Raw -ErrorAction SilentlyContinue
+    if ($item.Hung) {
+      $failedChecks.Add("$($item.Name) did not finish within $($probeTimeoutMs / 60000) minutes and was killed`n--- stdout ---`n$stdout`n--- stderr ---`n$stderr")
+      continue
+    }
     if ($item.Process.ExitCode -ne 0) {
       $failedChecks.Add("$($item.Name) exited $($item.Process.ExitCode)`n--- stdout ---`n$stdout`n--- stderr ---`n$stderr")
       continue

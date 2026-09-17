@@ -354,25 +354,23 @@ fn collect_sheet_placements<R: Read + Seek>(
         let Some(part) = resolve_relative(parent_dir(worksheet), target) else {
             continue;
         };
-        // First sheet to reference this drawing part owns its walk, and the
-        // gate sits before the ZIP reads so a later sheet sharing the part pays
-        // nothing for it. The placements such a walk records are deduped
-        // first-wins anyway; this is what keeps a shared part's shape text from
-        // appearing twice. (VML writes only first-wins placements, so a repeat
-        // walk is harmless there and needs no gate.)
-        if !is_vml && !visited_parts.insert(part.clone()) {
+        // First sheet to reference this drawing part owns its walk, and the gate sits
+        // before the ZIP reads so a later sheet sharing the part pays nothing for it —
+        // for either kind: a repeated DrawingML walk would double-count shape text,
+        // and a repeated VML walk would pay the decompression again for placements
+        // that are deduped first-wins anyway.
+        if !visited_parts.insert(part.clone()) {
             continue;
         }
-        let Some(part_rels_path) = rels_path_for(&part) else {
-            continue;
-        };
-        let Some(part_rels_xml) = read_member(archive, &part_rels_path, super::MAX_EXCEL_ZIP_MEMBER_SIZE) else {
-            continue;
-        };
-        let part_rels = parse_rels(&part_rels_xml);
-        if part_rels.is_empty() {
-            continue;
-        }
+        // The drawing XML is read even when its own `.rels` is missing or empty: a
+        // shapes-only drawing (a flowchart sheet with no pictures) has no
+        // relationships to declare, and skipping the part here dropped every
+        // shape's text with no diagnostic. The rels map simply comes back empty
+        // and each `a:blip` resolves to nothing.
+        let part_rels = rels_path_for(&part)
+            .and_then(|rels_path| read_member(archive, &rels_path, super::MAX_EXCEL_ZIP_MEMBER_SIZE))
+            .map(|rels_xml| parse_rels(&rels_xml))
+            .unwrap_or_default();
         let Some(xml) = read_member(archive, &part, super::MAX_EXCEL_ZIP_MEMBER_SIZE) else {
             continue;
         };
@@ -428,11 +426,24 @@ fn collect_drawing_placements(
                 )
         });
         let cell = anchor.and_then(from_cell);
-        let description = anchor
-            .and_then(|anchor| {
-                anchor
-                    .descendants()
+        // The description belongs to the blip's own picture: inside a group shape the
+        // anchor's first `cNvPr` in document order is the group's own (`nvGrpSpPr`
+        // precedes its member pictures), which mislabeled every grouped picture with the
+        // group's name. Blips outside any `xdr:pic` (a group fill) keep the anchor's
+        // first `cNvPr` as the closest available description.
+        let description = blip
+            .ancestors()
+            .find(|node| node.is_element() && node.tag_name().name() == "pic")
+            .and_then(|pic| {
+                pic.descendants()
                     .find(|node| node.is_element() && node.tag_name().name() == "cNvPr")
+            })
+            .or_else(|| {
+                anchor.and_then(|anchor| {
+                    anchor
+                        .descendants()
+                        .find(|node| node.is_element() && node.tag_name().name() == "cNvPr")
+                })
             })
             .and_then(|name| name.attribute("descr"))
             .map(str::to_string);
@@ -783,5 +794,80 @@ mod tests {
         // Raw `>` in a paragraph text node: the CommonMark writer escapes it
         // (`\>`) on render; a stored `&gt;` would surface as a literal entity.
         assert_eq!(shapes[0].text, ">", "a connector glyph stays a raw `>`");
+    }
+
+    /// A shapes-only drawing part has no `.rels` of its own (OPC generates relationship
+    /// parts on demand) — the walk must still read the drawing XML and collect every
+    /// shape's text, with an empty rels map resolving each `a:blip` to nothing. The
+    /// previous gating on a present, non-empty `.rels` dropped the whole part.
+    #[test]
+    fn shapes_only_drawing_without_rels_is_still_walked() {
+        use std::io::Write;
+        let mut buffer = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut buffer));
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("xl/worksheets/sheet1.xml", options).unwrap();
+            zip.write_all(b"<worksheet/>").unwrap();
+            zip.start_file("xl/worksheets/_rels/sheet1.xml.rels", options).unwrap();
+            zip.write_all(
+                br#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing" Target="../drawings/drawing1.xml"/></Relationships>"#,
+            )
+            .unwrap();
+            zip.start_file("xl/drawings/drawing1.xml", options).unwrap();
+            zip.write_all(
+                r#"<xdr:wsDr xmlns:xdr="urn:x" xmlns:a="urn:a"><xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:row>2</xdr:row></xdr:from><xdr:sp><xdr:txBody><a:p><a:r><a:t>流程图形状</a:t></a:r></a:p></xdr:txBody></xdr:sp></xdr:twoCellAnchor></xdr:wsDr>"#.as_bytes(),
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&buffer[..])).unwrap();
+        let mut placements = Placements::new();
+        let mut shapes = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        collect_sheet_placements(
+            &mut archive,
+            "xl/worksheets/sheet1.xml",
+            "Sheet1",
+            &mut placements,
+            &mut shapes,
+            &mut visited,
+        );
+        assert_eq!(shapes.len(), 1, "the shape's text must survive without a drawing .rels");
+        assert_eq!(shapes[0].text, "流程图形状");
+        assert!(placements.is_empty());
+    }
+
+    /// A blip inside a group shape must take its description from its own `xdr:pic`'s
+    /// `cNvPr`: the anchor's first `cNvPr` in document order is the group's own
+    /// (`nvGrpSpPr` precedes the member pictures), which mislabeled every grouped
+    /// picture with the group's description.
+    #[test]
+    fn grouped_picture_takes_its_own_description_not_the_groups() {
+        let xml = "<xdr:wsDr xmlns:xdr=\"urn:x\" xmlns:a=\"urn:a\" xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\"><xdr:twoCellAnchor><xdr:from><xdr:col>1</xdr:col><xdr:row>2</xdr:row></xdr:from><xdr:grpSp><xdr:nvGrpSpPr><xdr:cNvPr id=\"1\" name=\"Group 1\" descr=\"group alt\"/></xdr:nvGrpSpPr><xdr:grpSpPr/><xdr:pic><xdr:nvPicPr><xdr:cNvPr id=\"2\" name=\"Picture 2\" descr=\"the grouped picture\"/></xdr:nvPicPr><xdr:blipFill><a:blip r:embed=\"rId1\"/></xdr:blipFill></xdr:pic></xdr:grpSp></xdr:twoCellAnchor></xdr:wsDr>";
+        let mut rels: HashMap<String, Rel> = HashMap::new();
+        rels.insert(
+            "rId1".to_string(),
+            Rel { target: "../media/image1.png".to_string(), kind: "image".to_string() },
+        );
+        let mut placements = Placements::new();
+        let mut shapes = Vec::new();
+        collect_drawing_placements(
+            xml.as_bytes(),
+            "xl/drawings",
+            "Sheet1",
+            &rels,
+            &mut placements,
+            &mut shapes,
+        );
+        let (placement, description) = placements
+            .get("xl/media/image1.png")
+            .expect("the grouped blip is placed through its relationship");
+        assert_eq!(
+            description.as_deref(),
+            Some("the grouped picture"),
+            "a grouped picture carries its own cNvPr description, not the group's"
+        );
+        assert_eq!(placement.cell, Some((2, 1)));
     }
 }

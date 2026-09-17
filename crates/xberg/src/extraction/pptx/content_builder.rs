@@ -189,18 +189,22 @@ impl ContentBuilder {
         }
     }
 
-    /// Escape one table cell for Markdown: a `|` becomes `\|` so the reader
-    /// keeps it inside the cell, and a line break becomes the same `<br>`
+    /// Escape one table cell for Markdown: a `\` is doubled and a `|` becomes `\|`
+    /// so the reader keeps it inside the cell, and a line break becomes the same `<br>`
     /// stand-in the internal renderer uses
     /// ([`crate::rendering::common::CELL_LINE_BREAK`]).
     fn escape_table_cell(cell: &str) -> String {
-        if !cell.contains(['|', '\n', '\r']) {
+        if !cell.contains(['|', '\n', '\r', '\\']) {
             return cell.to_string();
         }
         let mut out = String::with_capacity(cell.len());
         let mut chars = cell.chars().peekable();
         while let Some(ch) = chars.next() {
             match ch {
+                // Doubled first: the reader restores `\|` to `|`, so a literal `\|` in
+                // the cell must leave as `\\` + `\|`; a bare `\|` would come back as a
+                // bare `|` with the backslash gone.
+                '\\' => out.push_str("\\\\"),
                 '|' => out.push_str("\\|"),
                 '\r' => {
                     // Consume the LF of a CRLF pair so it yields one break, not two.
@@ -298,5 +302,20 @@ impl ContentBuilder {
             None
         };
         (content, boundaries, pages)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The cell escaper and the reader (`PptxExtractor::split_table_row`) share a
+    /// contract: `\` is doubled so a literal `\|` survives the round trip instead of
+    /// losing its backslash to the reader's `\|` unescape.
+    #[test]
+    fn escape_table_cell_doubles_backslashes_before_pipes() {
+        assert_eq!(ContentBuilder::escape_table_cell("a|b"), "a\\|b");
+        assert_eq!(ContentBuilder::escape_table_cell("a\\|b"), "a\\\\\\|b");
+        assert_eq!(ContentBuilder::escape_table_cell("plain"), "plain");
     }
 }

@@ -1090,19 +1090,44 @@ fn rewrite_all_content_image_extensions(
 
 /// Replace `image_N.oldext` URLs in pre-rendered content after a re-encode rename.
 ///
-/// `format_renames` entries are `(image position, old format, new format)`; only the
-/// reference of an image that actually changed format is rewritten. A sibling image
+/// Fenced lines are literal text — a listing that shows the very references, or OCR
+/// text that merely looks like one — so the rewrite stops at their boundaries, the
+/// same contract as the CLI's `prefix_image_refs` and the acceptance judge. Only the
+/// reference of an image that actually changed format is rewritten: a sibling image
 /// whose re-encode failed keeps its old extension on disk, so its reference must keep
-/// it too.
-///
-/// Walks on UTF-8 char boundaries via `find`; never indexes the string by raw byte
-/// offset (Chinese content makes unaligned slices panic).
+/// it too. Walks on UTF-8 char boundaries via `find`; never indexes the string by raw
+/// byte offset (Chinese content makes unaligned slices panic).
 fn rewrite_content_image_extensions(content: &mut String, format_renames: &[(u32, String, String)]) {
     if format_renames.is_empty() || content.is_empty() {
         return;
     }
     let mut result = String::with_capacity(content.len());
-    let mut rest = content.as_str();
+    let mut fence = crate::extraction::markdown_utils::FenceTracker::default();
+    for line in content.split_inclusive('\n') {
+        let terminator = if line.ends_with('\n') { "\n" } else { "" };
+        let line_body = line.strip_suffix('\n').unwrap_or(line);
+        let had_cr = line_body.strip_suffix('\r').is_some();
+        let body = line_body.strip_suffix('\r').unwrap_or(line_body);
+        if fence.fenced(body) {
+            result.push_str(line);
+        } else {
+            result.push_str(&rewrite_image_refs_on_unfenced_text(body, format_renames));
+            // The replacement sees the line's own characters only; a CRLF ending keeps its `\r`.
+            if had_cr {
+                result.push('\r');
+            }
+            result.push_str(terminator);
+        }
+    }
+    *content = result;
+}
+
+/// The rewrite itself, applied to one fence-free stretch. A reference never spans a
+/// line break (`image_` + digits + `.ext` holds no whitespace), so per-line splitting
+/// cannot cut a match.
+fn rewrite_image_refs_on_unfenced_text(content: &str, format_renames: &[(u32, String, String)]) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut rest = content;
     while let Some(pos) = rest.find("image_") {
         result.push_str(&rest[..pos]);
         let after_prefix = &rest[pos + "image_".len()..];
@@ -1139,7 +1164,7 @@ fn rewrite_content_image_extensions(content: &mut String, format_renames: &[(u32
         }
     }
     result.push_str(rest);
-    *content = result;
+    result
 }
 
 /// Populate `ExtractedImage::data_base64` when the caller opts in via

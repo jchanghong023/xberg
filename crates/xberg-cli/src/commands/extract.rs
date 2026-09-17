@@ -155,6 +155,9 @@ fn prefix_image_refs(content: &str, dir: &Path) -> String {
             // which rewrites document-supplied (already percent-encoded) relationship targets,
             // this is a raw filesystem path, so encoding `%` cannot double-encode anything.
             '%' => encoded.push_str("%25"),
+            // A literal `#` survives CommonMark destination parsing, but a rendered URL
+            // cuts the destination at it (fragment start), so the image stops loading.
+            '#' => encoded.push_str("%23"),
             // Control characters cannot appear in a Windows file name, but a path handed to the
             // CLI on another platform must not break the marker line either — the library drops
             // them for the same reason.
@@ -1146,5 +1149,14 @@ mod tests {
             prefixed.contains("```text\n![](image_0.png)\n```"),
             "the fenced reference is literal text and must stay verbatim: {prefixed:?}"
         );
+    }
+
+    /// A directory name containing `#` survives CommonMark destination parsing, but the
+    /// rendered URL would cut the destination at it (fragment start) and the image stops
+    /// loading — so `#` is percent-encoded like the other reserved characters.
+    #[test]
+    fn prefix_image_refs_encodes_hash_in_directory() {
+        let prefixed = prefix_image_refs("![](image_0.png)\n", Path::new("a#b"));
+        assert_eq!(prefixed, "![](a%23b/image_0.png)\n");
     }
 }

@@ -2587,12 +2587,12 @@ mod document_counts {
         assert_eq!(result.counts.pages, 2);
     }
 
-    /// After EMF→PNG re-encode, pre-rendered Markdown URLs must be rewritten.
-    /// Must not panic on multi-byte (Chinese) content — only touch `image_N.ext`.
+    /// After EMF→PNG re-encode, pre-rendered Markdown URLs must be rewritten — outside
+    /// fences. Must not panic on multi-byte (Chinese) content — only touch `image_N.ext`.
     #[test]
     fn rewrite_content_image_extensions_updates_urls_without_utf8_panic() {
         let mut content = String::from(
-            "Atpg 后仿真历险记\n\n```text\n![](image_0.emf)\n```\n见 image_12.emf 与 image_3.png\n",
+            "Atpg 后仿真历险记\n\n![](image_0.emf)\n\n见 image_12.emf 与 image_3.png\n",
         );
         super::rewrite_content_image_extensions(
             &mut content,
@@ -2617,15 +2617,34 @@ mod document_counts {
         assert!(content.contains("Atpg 后仿真历险记"), "Chinese text preserved");
     }
 
+    /// A fenced line is literal text — a listing showing the very references, or OCR
+    /// text that merely looks like one — so the rewrite must leave it verbatim and
+    /// still rewrite the reference outside.
+    #[test]
+    fn rewrite_content_image_extensions_skips_code_fences() {
+        let mut content =
+            String::from("见 ![](image_0.emf)\n\n```text\n![](image_0.emf)\n```\n");
+        super::rewrite_content_image_extensions(
+            &mut content,
+            &[(0, "emf".to_string(), "png".to_string())],
+        );
+        assert!(
+            content.starts_with("见 ![](image_0.png)\n\n"),
+            "the unfenced reference must follow the rename; got: {content:?}"
+        );
+        assert!(
+            content.contains("```text\n![](image_0.emf)\n```"),
+            "the fenced literal is text, not a reference; got: {content:?}"
+        );
+    }
+
     /// Only the reference of an image that actually changed format may be rewritten.
     /// A sibling image of the same old format whose re-encode failed keeps the old
     /// extension on disk, so a pattern-global rewrite would point its URL at a file
     /// that does not exist.
     #[test]
     fn rewrite_content_image_extensions_leaves_failed_siblings_alone() {
-        let mut content = String::from(
-            "```text\n![](image_0.emf)\n```\n中间文字\n\n```text\n![](image_7.emf)\n```\n",
-        );
+        let mut content = String::from("![](image_0.emf)\n中间文字\n\n![](image_7.emf)\n");
         // Image 0 re-encoded to PNG; image 7 failed and stays `.emf` on disk.
         super::rewrite_content_image_extensions(
             &mut content,
@@ -2645,7 +2664,7 @@ mod document_counts {
     /// matches — the digits are the lookup key, not the suffix.
     #[test]
     fn rewrite_content_image_extensions_requires_the_recorded_index() {
-        let mut content = String::from("正文 image_5.emf 结尾\n```text\n![](image_9.emf)\n```\n");
+        let mut content = String::from("正文 image_5.emf 结尾\n\nimage_9.emf 尾部\n");
         super::rewrite_content_image_extensions(
             &mut content,
             &[(3, "emf".to_string(), "png".to_string())],

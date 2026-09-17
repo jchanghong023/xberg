@@ -1086,11 +1086,6 @@ pub(crate) fn build_comrak_ast<'a>(
                     continue;
                 }
 
-                // Every image leaves a `text` fenced block holding its marker line (which
-                // carries the path) and, when OCR ran, its recognized text laid out as a grid.
-                // Flat OCR text loses where each line sat — a caption in the picture's
-                // top-right corner came back as an arbitrary line of the stream — while a
-                // fence keeps the reconstructed alignment visible in any renderer. ~keep
                 let ocr_result = render_image_ocr
                     .then_some(image)
                     .flatten()

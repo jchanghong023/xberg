@@ -106,9 +106,10 @@ pub struct PaddleOcrConfig {
     ///
     /// For PP-OCRv6 (`model_version = "pp-ocrv6"`, the default):
     /// - `"small"`: ~9.9MB detection, full 18,708-char CJK+Latin+JA/KO recognition dictionary.
-    ///   A configured `"mobile"` resolves here (the v5 lightweight name).
+    ///   A configured `"mobile"` resolves here (the v5 lightweight name), and so does any
+    ///   unrecognised value — with a warning (see `effective_v6_tier`).
     /// - `"medium"`: ~62MB detection, same dictionary. Higher accuracy, substantially slower on
-    ///   CPU. A legacy `"server"` tier, or any unrecognised value, resolves here.
+    ///   CPU. A legacy `"server"` tier resolves here.
     /// - `"tiny"` (default): ~1.8MB detection, but a reduced 6,904-char (~zh/en) dictionary — it cannot
     ///   read the scripts the other two cover.
     ///
@@ -697,10 +698,14 @@ mod tests {
         assert_eq!(deserialized.model_tier, "server");
     }
 
+    /// A configuration written before `model_tier` existed still deserializes:
+    /// the container-level `#[serde(default)]` fills it from [`Default`], whose
+    /// tier is the fork default (`tiny`). The old assertion pinned the pre-fork
+    /// default (`mobile`) and failed the moment the test ran.
     #[test]
     fn test_model_tier_backward_compat() {
         let json = r#"{"language":"en","det_db_thresh":0.3}"#;
         let config: PaddleOcrConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.model_tier, "mobile");
+        assert_eq!(config.model_tier, "tiny");
     }
 }

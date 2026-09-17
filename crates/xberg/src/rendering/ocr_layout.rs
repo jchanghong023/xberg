@@ -10,9 +10,9 @@
 use crate::types::internal::{ElementKind, InternalDocument};
 
 /// Hard caps so one pathological page (a dense circuit diagram) cannot emit a megabyte of
-/// padding. A line wider than the column cap is truncated so its text still appears; a page
-/// that would need more than the row cap is refused outright (`None`), because a truncated
-/// grid drops the lines past the cap without the caller being able to tell.
+/// padding. A line wider than the column cap, or a page that would need more than the row
+/// cap, refuses the layout outright (`None`): the caller then falls back to the flat OCR
+/// text, because a truncated grid drops glyphs without the caller being able to tell.
 const MAX_COLS: usize = 400;
 const MAX_ROWS: usize = 400;
 
@@ -71,8 +71,8 @@ pub(crate) fn layout_ocr_text(document: &InternalDocument) -> Option<String> {
 
 /// Place `(left, top, height, text)` lines on a monospace grid, or `None` when there is
 /// nothing to place. `None` is also returned when the grid would not hold every line — a row
-/// past `MAX_ROWS`, or a row whose lines would be reordered — so the caller keeps the flat OCR
-/// text instead of a layout that silently lost part of the page.
+/// past `MAX_ROWS`, a line past `MAX_COLS`, or a row whose lines would be reordered — so the
+/// caller keeps the flat OCR text instead of a layout that silently lost part of the page.
 ///
 /// Rows are driven by each line's vertical position over the median line height, columns by
 /// its left edge over half the median line height (one display column), so both axes keep the
@@ -136,13 +136,24 @@ pub(crate) fn layout_boxes(mut items: Vec<(f64, f64, f64, String)>) -> Option<St
     let row_of_item = rank_rows(&indexed, line_height).unwrap_or_else(|| band_rows(&indexed));
 
     // (index, row, column, text, width) ordered top-to-bottom then left-to-right, which is
-    // also the order collisions are resolved in.
+    // also the order collisions are resolved in. The column is the FINAL one: a line that
+    // fits only from the grid's first column is re-based here — before the rows are ordered
+    // and before the same-row order check below, which must see the column the line will
+    // actually print at or a re-based line could slip past it and invert its row's
+    // left-to-right order. A line starting past the last column is re-based to it for the
+    // same reason. Truncating instead would lose the tail's glyphs: the paragraph-level
+    // copy of the same OCR text is deleted downstream precisely on the promise that this
+    // block still carries it.
     let mut placed: Vec<(usize, usize, usize, String, usize)> = indexed
         .into_iter()
         .zip(row_of_item)
         .map(|((index, left, _top, _height, text), row)| {
-            let column = ((left - min_left) / column_px).round().max(0.0) as usize;
+            let mut column = ((left - min_left) / column_px).round().max(0.0) as usize;
             let width = display_width(&text);
+            column = column.min(MAX_COLS.saturating_sub(1));
+            if width > MAX_COLS - column && width <= MAX_COLS {
+                column = 0;
+            }
             (index, row, column, text, width)
         })
         .collect();
@@ -166,26 +177,20 @@ pub(crate) fn layout_boxes(mut items: Vec<(f64, f64, f64, String)>) -> Option<St
 
     let mut grid: Vec<Vec<char>> = Vec::new();
     let mut occupied_rows = 0usize;
-    for (_index, row, mut column, text, width) in placed {
+    for (_index, row, column, text, width) in placed {
         if occupied_rows >= MAX_ROWS {
             // Refuse the layout instead of truncating it: the caller falls back to the flat OCR
             // text, so the lines past the cap still reach the output rather than disappearing
             // from a grid that looks complete.
             return None;
         }
-        // Keep the line inside the grid: a line that would run past the last column is
-        // truncated there (and one starting past it is re-based to column 0) so its text stays
-        // in the block. Dropping it — the previous behaviour — silently lost OCR text from the
-        // markdown while `content` still carried it.
-        column = column.min(MAX_COLS.saturating_sub(1));
-        let mut clipped = truncate_to_columns(&text, width, MAX_COLS - column);
-        if clipped.0.is_empty() {
-            // A single wide glyph cannot fit into the one column left; start the line over at
-            // the grid's first column rather than losing it.
-            column = 0;
-            clipped = truncate_to_columns(&text, width, MAX_COLS);
+        // The column already carries the re-base decided above. A line wider than the whole
+        // grid cannot be kept whole anywhere, so the layout is refused and the caller falls
+        // back to the flat OCR text — the same "refuse rather than lose text" contract as
+        // the row cap above.
+        if width > MAX_COLS {
+            return None;
         }
-        let (text, width) = clipped;
         let mut row_index = row;
         loop {
             if row_index >= MAX_ROWS {
@@ -194,9 +199,6 @@ pub(crate) fn layout_boxes(mut items: Vec<(f64, f64, f64, String)>) -> Option<St
                 return None;
             }
             let needed = column + width;
-            if needed > MAX_COLS {
-                break;
-            }
             let starts_free = grid
                 .get(row_index)
                 .map(|cells| (column..needed).all(|index| cells.get(index).copied().unwrap_or(' ') == ' '))
@@ -251,25 +253,6 @@ pub(crate) fn layout_boxes(mut items: Vec<(f64, f64, f64, String)>) -> Option<St
         .collect::<Vec<_>>()
         .join("\n");
     Some(block)
-}
-
-/// Truncate `text` to at most `available` display columns, returning the kept text and its
-/// width. A wide glyph that would straddle the limit is left out rather than split.
-fn truncate_to_columns(text: &str, width: usize, available: usize) -> (String, usize) {
-    if width <= available {
-        return (text.to_string(), width);
-    }
-    let mut kept = String::new();
-    let mut used = 0usize;
-    for character in text.chars() {
-        let span = char_columns(character);
-        if used + span > available {
-            break;
-        }
-        kept.push(character);
-        used += span;
-    }
-    (kept, used)
 }
 
 /// Median of a non-empty sample; `None` when empty.
@@ -462,13 +445,56 @@ mod tests {
         assert_eq!(block.lines().count(), lines.len(), "one row per line: {block:?}");
     }
 
-    /// A single line wider than the cap is truncated, not dropped.
+    /// A single line wider than the whole grid refuses the layout instead of emitting a
+    /// truncated grid: the paragraph-level copy of the same OCR text is deleted downstream
+    /// precisely on the promise that the fenced block still carries it, so a truncated
+    /// grid would leave the line's tail nowhere at all. `None` makes the caller keep the
+    /// flat OCR text, whose every line is present.
     #[test]
-    fn truncates_a_line_wider_than_the_column_cap() {
+    fn refuses_a_line_wider_than_the_column_cap() {
         let long = "a".repeat(MAX_COLS * 2);
-        let block = layout_boxes(vec![element(&long, 0.0, 0.0, 4000.0, 20.0)]).expect("layout");
+        assert!(
+            layout_boxes(vec![element(&long, 0.0, 0.0, 4000.0, 20.0)]).is_none(),
+            "a line past the column cap must be refused so the caller keeps every glyph"
+        );
+    }
 
-        assert_eq!(display_width(block.lines().next().unwrap()), MAX_COLS);
+    /// A line that fits the grid only from its first column is re-based there whole
+    /// rather than truncated at its original column — same promise as above: the block
+    /// must still carry every glyph of the line.
+    #[test]
+    fn re_bases_a_line_that_fits_only_from_the_first_column() {
+        let wide = "b".repeat(50);
+        // The left label anchors `min_left` at 0, putting the wide line at column 390;
+        // rank pairing shares their row, and the re-based line settles on the next one.
+        let elements = vec![
+            element("anchor", 0.0, 0.0, 0.0, 20.0),
+            element(&wide, 3900.0, 30.0, 0.0, 20.0),
+        ];
+        let block = layout_boxes(elements).expect("layout");
+        assert!(
+            block.contains(&wide),
+            "the line must survive whole (re-based to column 0, not truncated): {block:?}"
+        );
+    }
+
+    /// A re-based line must not print to the LEFT of a line the OCR reported before it
+    /// on the same row: the column it will actually print at has to feed the row's
+    /// order check, or the grid would silently invert the pair. The layout is refused
+    /// instead and the caller falls back to the flat OCR text.
+    #[test]
+    fn refuses_when_a_rebased_line_would_invert_its_row() {
+        // The left anchor pins `min_left` at 0, so the wide line lands at column 390
+        // and is re-based to 0 — ahead of the mid-row label at column 50.
+        let elements = vec![
+            element("anchor", 0.0, 30.0, 0.0, 20.0),
+            element("right side label", 500.0, 0.0, 100.0, 20.0),
+            element(&"b".repeat(50), 3900.0, 0.0, 0.0, 20.0),
+        ];
+        assert!(
+            layout_boxes(elements).is_none(),
+            "a re-based line moving ahead of an earlier line on its row must refuse the layout"
+        );
     }
 
     /// A page that needs more rows than the cap is refused rather than truncated: the previous

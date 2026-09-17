@@ -260,14 +260,15 @@ const V6_UNIFIED_FAMILIES: &[&str] = &["english", "chinese", "latin"];
 /// Maps a configured tier to an effective PP-OCRv6 tier.
 ///
 /// `mobile` maps to `small`, not `medium`. `mobile` is the v5 name for the lightweight tier
-/// (4.7MB detection) and is this config's default, so resolving it to v6 `medium` (62MB) handed
+/// (4.7MB detection) and was this config's default when the remap was introduced (the
+/// current default is `tiny`), so resolving it to v6 `medium` (62MB) handed
 /// every caller who never set `model_tier` the heaviest available model under a name that
 /// promises the lightest — the cause of GH#1602, where a 21-page document took over ten minutes.
 /// `small` (9.9MB detection) is the nearest v6 analogue and, unlike `tiny`, keeps the full
 /// 18,708-char CJK+Latin+JA/KO recognition dictionary, so the remap cannot silently narrow which
 /// scripts a caller can read. `server` keeps mapping to `medium`: it is the v5 name for the
 /// high-accuracy tier, so the largest v6 model is what it asks for. Unrecognised values resolve
-/// to `small` — the documented default tier — and warn, rather than silently loading `medium`
+/// to `small` and warn, rather than silently loading `medium`
 /// (62 MB detector + 76 MB recogniser) off a typo. ~keep
 #[cfg(paddle_ocr)]
 fn effective_v6_tier(tier: &str) -> &str {

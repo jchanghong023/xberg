@@ -1813,7 +1813,9 @@ fn looks_like_standalone_heading_text(text: &str) -> bool {
 /// carry no bounding box would otherwise keep its copy forever. The first page
 /// carrying the text keeps its largest-font occurrence — the genuine chapter
 /// opening or section sidehead that shares its page with the smaller running
-/// header.
+/// header. An opening page that prints no head at all is kept too: a body-area
+/// copy on a page earlier than the text's first margin sighting predates the
+/// head itself, so it can only be the title the head quotes.
 ///
 /// `page_heights` provides the height of each page for margin calculation.
 pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>], page_heights: &[f32]) {
@@ -1822,6 +1824,13 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
     }
 
     let margin_frac = 0.10;
+
+    // Top/bottom-margin membership of a block bbox on `page_idx`'s page, shared by the
+    // collection pass below and the marking pass further down.
+    let in_page_margin = |bbox: (f32, f32, f32, f32), page_idx: usize| -> bool {
+        let page_h = page_heights.get(page_idx).copied().unwrap_or(792.0);
+        bbox.3 > page_h * (1.0 - margin_frac) || bbox.1 < page_h * margin_frac
+    };
 
     let mut text_page_count: ahash::AHashMap<String, usize> = ahash::AHashMap::new();
     let mut alphanum_to_exact: ahash::AHashMap<String, ahash::AHashSet<String>> = ahash::AHashMap::new();
@@ -1836,19 +1845,13 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
     let mut margin_streaks: ahash::AHashMap<String, (usize, usize, usize)> = ahash::AHashMap::new();
 
     for (page_idx, page) in all_pages.iter().enumerate() {
-        let page_h = page_heights.get(page_idx).copied().unwrap_or(792.0);
-        let top_margin_y = page_h * (1.0 - margin_frac);
-        let bottom_margin_y = page_h * margin_frac;
-
         let mut seen: ahash::AHashSet<String> = ahash::AHashSet::new();
         for para in page {
             if para.is_page_furniture {
                 continue;
             }
 
-            let in_margin = para
-                .block_bbox
-                .is_some_and(|(_, bottom, _, top)| top > top_margin_y || bottom < bottom_margin_y);
+            let in_margin = para.block_bbox.is_some_and(|bbox| in_page_margin(bbox, page_idx));
             if !in_margin {
                 continue;
             }
@@ -1927,21 +1930,25 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
     // most four digits — folio range — before giving up on the match. "December
     // 2017" itself always matches verbatim (the fallback is only consulted
     // when the plain form missed), so real year-bearing prose is not stripped.
-    let matches_furniture = |normalized: &str| -> bool {
-        if repeating.contains(normalized) {
-            return true;
+    let matches_furniture = |normalized: &str| -> Option<&String> {
+        if let Some(variant) = repeating.get(normalized) {
+            return Some(variant);
         }
         // Split at the last whitespace char, not at `rfind() + 1`: a multibyte
-        // space (U+00A0, U+3000 — both survive the earlier repairs) would put
-        // the byte offset inside the character and panic the slice.
+        // space (U+00A0, U+3000 — both survive the earlier repairs) would put the
+        // byte offset inside the character and panic the slice. The variant the
+        // folio tail matched is what the caller needs back: a paragraph carrying
+        // one ("RAM and ROM 3") keys differently from the variant itself.
         match normalized.char_indices().rev().find(|&(_, c)| c.is_whitespace()) {
             Some((boundary, whitespace)) => {
                 let tail = &normalized[boundary + whitespace.len_utf8()..];
-                tail.len() <= 4
-                    && tail.chars().all(|c| c.is_ascii_digit())
-                    && repeating.contains(normalized[..boundary].trim_end())
+                if tail.len() <= 4 && tail.chars().all(|c| c.is_ascii_digit()) {
+                    repeating.get(normalized[..boundary].trim_end())
+                } else {
+                    None
+                }
             }
-            None => false,
+            None => None,
         }
     };
 
@@ -1949,13 +1956,19 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
         // Collect matching paragraphs first: removal is global (not
         // margin-confined, mirroring the native pass's exact-match removal),
         // and the first-seen page needs a font-size comparison across its
-        // duplicates before anything is marked.
-        let matching: Vec<(usize, String)> = page
+        // duplicates before anything is marked. Each entry keeps the furniture
+        // variant it matched, so the marking pass below can look up that
+        // variant's first sighting even when the paragraph's own text differs
+        // from it by a folio tail.
+        let matching: Vec<(usize, String, String)> = page
             .iter()
             .enumerate()
             .filter(|(_, para)| !para.is_page_furniture)
-            .map(|(index, para)| (index, paragraph_plain_text(para)))
-            .filter(|(_, text)| matches_furniture(text.trim().to_lowercase().as_str()))
+            .filter_map(|(index, para)| {
+                let text = paragraph_plain_text(para);
+                let normalized = text.trim().to_lowercase();
+                matches_furniture(normalized.as_str()).map(|variant| (index, text, variant.clone()))
+            })
             .collect();
         if matching.is_empty() {
             continue;
@@ -1978,7 +1991,7 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
         let marks_everything = matching.len() == unmarked_total;
 
         let mut best_per_key: ahash::AHashMap<String, (f32, usize)> = ahash::AHashMap::new();
-        for &(index, ref text) in &matching {
+        for &(index, ref text, _) in &matching {
             let key: String = text
                 .trim()
                 .to_lowercase()
@@ -2000,7 +2013,7 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
             best_per_key.values().map(|&(_, index)| index).collect();
         if marks_everything {
             let mut best = (f32::NEG_INFINITY, 0usize);
-            for &(index, _) in &matching {
+            for &(index, _, _) in &matching {
                 let size = page[index].dominant_font_size;
                 if size > best.0 {
                     best = (size, index);
@@ -2009,8 +2022,34 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
             keep_indices.insert(best.1);
         }
 
-        for &(index, _) in &matching {
+        for &(index, _, ref variant) in &matching {
             if keep_indices.contains(&index) {
+                continue;
+            }
+            // A body-area copy on a page earlier than the matched variant's first margin
+            // sighting cannot be the running head — the head was not printed yet. The
+            // first-seen keep above assumes the opening page carries a head copy; a book
+            // whose opening page prints none (the standard convention) has its first
+            // sighting on a LATER page, and without this guard the title itself is
+            // marked, its heading dropped, and `retain_page_furniture_safely` deletes
+            // it. The variant — not the paragraph's own text — carries the key, so a
+            // title with a trailing number ("RAM and ROM 3" against a "RAM and ROM"
+            // head) is kept too. Mid-page parked copies are unaffected: the sighting
+            // that registered the text sat on that page or an earlier one.
+            let before_first_margin_sighting = {
+                let key: String = variant
+                    .trim()
+                    .to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect();
+                first_seen_page.get(&key).is_some_and(|&first| page_idx < first)
+            };
+            if before_first_margin_sighting
+                && page[index]
+                    .block_bbox
+                    .is_some_and(|bbox| !in_page_margin(bbox, page_idx))
+            {
                 continue;
             }
             let para = &mut page[index];
@@ -2774,6 +2813,66 @@ mod tests {
         assert!(pages[2][0].is_page_furniture);
         assert!(pages[3][0].is_page_furniture);
         assert!(!pages[0][1].is_page_furniture);
+    }
+
+    /// A running head that quotes the chapter title but starts only on the page AFTER the
+    /// opening (the standard book convention: the opening page carries no head) must not
+    /// take the title with it. The first margin sighting then sits on a later page, the
+    /// largest-font rescue never applies to the opening page, and the title used to be
+    /// marked as furniture and deleted — losing the chapter from the output entirely.
+    #[test]
+    fn test_cross_page_repeating_keeps_title_when_head_starts_after_opening_page() {
+        let page_heights = vec![792.0; 6];
+        let mut title = make_h1(24.0, "RAM and ROM");
+        title.heading_level = Some(1);
+        title.block_bbox = Some((50.0, 400.0, 300.0, 430.0));
+        let mut body = make_paragraph(12.0, 3);
+        body.block_bbox = Some((50.0, 300.0, 300.0, 330.0));
+        let mut pages = vec![vec![title, body]];
+        for index in 1..6 {
+            pages.push(vec![
+                make_margin_body("RAM and ROM"),
+                make_body_center(&format!("Unique content {index}")),
+            ]);
+        }
+        mark_cross_page_repeating_text(&mut pages, &page_heights);
+        assert!(
+            !pages[0][0].is_page_furniture,
+            "the chapter opening title predates every head copy; deleting it loses the chapter"
+        );
+        assert!(pages[0][0].heading_level.is_some(), "the title keeps its heading level");
+        assert!(!pages[1][0].is_page_furniture, "first-seen page keeps its largest copy");
+        assert!(pages[2][0].is_page_furniture);
+        assert!(pages[5][0].is_page_furniture);
+    }
+
+    /// The same opening-page protection must reach a title carrying a trailing number
+    /// the head lacks: it only matches the head's furniture string through the folio
+    /// tolerance ("RAM and ROM 3" matches "RAM and ROM"), so the guard has to look up
+    /// the matched variant's first sighting, not the title's own key.
+    #[test]
+    fn test_cross_page_repeating_keeps_folio_variant_title_when_head_starts_later() {
+        let page_heights = vec![792.0; 6];
+        let mut title = make_h1(24.0, "RAM and ROM 3");
+        title.heading_level = Some(1);
+        title.block_bbox = Some((50.0, 400.0, 300.0, 430.0));
+        let mut body = make_paragraph(12.0, 3);
+        body.block_bbox = Some((50.0, 300.0, 300.0, 330.0));
+        let mut pages = vec![vec![title, body]];
+        for index in 1..6 {
+            pages.push(vec![
+                make_margin_body("RAM and ROM"),
+                make_body_center(&format!("Unique content {index}")),
+            ]);
+        }
+        mark_cross_page_repeating_text(&mut pages, &page_heights);
+        assert!(
+            !pages[0][0].is_page_furniture,
+            "the numbered chapter title predates every head copy; deleting it loses the chapter"
+        );
+        assert!(pages[0][0].heading_level.is_some(), "the title keeps its heading level");
+        assert!(pages[2][0].is_page_furniture);
+        assert!(pages[5][0].is_page_furniture);
     }
 
     #[test]

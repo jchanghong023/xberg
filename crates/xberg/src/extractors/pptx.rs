@@ -385,8 +385,10 @@ impl PptxExtractor {
     }
 
     /// Split one table row's text (outer pipes already trimmed) on unescaped
-    /// `|`, restoring each `\|` to a literal `|`. A `\` that is not followed by
-    /// a pipe stays in the cell, so an escaped `\|` round-trips as `\\|`.
+    /// `|`, restoring each `\|` to a literal `|` and each doubled `\\` to a
+    /// single `\` — the two spellings `ContentBuilder::escape_table_cell` emits.
+    /// Without the doubling fold, a cell holding one literal backslash (a Windows
+    /// path, say) would gain one on every bake→parse round trip.
     fn split_table_row(row: &str) -> Vec<String> {
         let mut cells = Vec::new();
         let mut cell = String::new();
@@ -396,6 +398,10 @@ impl PptxExtractor {
                 '\\' if chars.peek() == Some(&'|') => {
                     chars.next();
                     cell.push('|');
+                }
+                '\\' if chars.peek() == Some(&'\\') => {
+                    chars.next();
+                    cell.push('\\');
                 }
                 '|' => {
                     cells.push(cell.trim().to_string());
@@ -1474,6 +1480,16 @@ mod tests {
 
         let aligned = PptxExtractor::parse_markdown_table("| H |\n| :---: |\n| v |\n");
         assert_eq!(aligned, vec![vec!["H".to_string()], vec!["v".to_string()]], "alignment colons still mark a separator");
+
+        // The writer doubles a literal backslash, so a cell holding `a\|b` leaves the
+        // builder as `a` + `\\` + `\|` + `b`; the reader must fold both spellings back
+        // or the backslash doubles on every bake→parse round trip.
+        let backslashes = PptxExtractor::parse_markdown_table("| a\\\\\\|b | c\\\\d |\n");
+        assert_eq!(
+            backslashes,
+            vec![vec!["a\\|b".to_string(), "c\\d".to_string()]],
+            "doubled backslashes fold once and the escaped pipe stays a pipe"
+        );
     }
 
     #[test]
