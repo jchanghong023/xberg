@@ -48,6 +48,7 @@
 ## 验收与仓库约定（fork 独有）
 
 - `fulltest.py` / `slowtest.py`（仓库根）：本仓库的验收标准，规则见 AGENTS.md。
+- `testgate.py`（仓库根）：三级测试门入口 fastcheck / fulltest / slowtest——fastcheck（≤60 秒，含 fmt/PS1/判定器自测子集）可由 agent 自主跑，fulltest / slowtest 门须用户逐次授权；阶段构成与远程发布流水线的授权边界见 AGENTS.md「三级测试门」。
 - `AGENTS.md` 入库（上游 `.gitignore` 忽略它，fork 删掉了该条；见 AGENTS.md「仓库性质」）。
 - `.gitignore` 追加 fork 本地产物忽略（打包输出、转换 scratch、`.tmp/`、`.zcode/` 等）。
 - 上游测试：fork 行为改变了上游断言时改断言而不是删测试（如 CLI 批处理错误路径在 Windows 的 `{:?}` 转义渲染、格式/扩展名/MIME 计数常量）；Rust 测试不在本 fork 的 CI 中运行（见 AGENTS.md「测试要求」）。

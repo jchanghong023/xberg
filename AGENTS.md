@@ -21,6 +21,7 @@
 - **agent 可主动跑的类型检查（唯一编译例外）**：改完 Rust 代码后允许（并建议）跑
   `cargo check -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,layout-detection,api`
   ——分钟级、只做类型/借用检查、不产出二进制不跑测试，用于把编译错误挡在交付前（fork 推送到 main 无任何自动编译 CI：上游 `ci-rust.yaml` 的 job 都有 `github.repository == 'xberg-io/xberg'` 守卫，在本 fork 全部 skip）。其余编译类命令仍需用户点名。
+- **fastcheck（agent 可自主跑的快速门，≤60 秒）**：`python testgate.py fastcheck`——三级测试门中唯一无需授权的层级（内容见「三级测试门」一节）：测试脚本语法自检、`fulltest.py --selftest`、打包/CI 关键 PS1 解析、两个干净 crate 的 `cargo fmt --check`；60 秒墙钟硬超时，超时杀进程树判失败、绝不报成功。它只是快速反馈，不代表完整验证；`cargo check` 例外（分钟级）不属于它，仍按上条单独跑。
 - **交付 Rust 改动时必须报告验证状态**：跑了 `cargo check` 就报结果；没跑就必须显式标注「未编译验证」并列出静态审查覆盖点（读过哪些调用方、检查过哪些类型/feature 门控），由用户决定何时编译。禁止在未验证时暗示"已修复"。
 - **验收资产修改必须显式披露**：修改 `fulltest.py` 的判定逻辑/阈值/问题码、`_expectations.json` 的任何键、或重设基线时，必须在回复中**单独列出改动点并给出实测依据**（哪个文件哪次实测值支持这次调整），不允许夹在引擎改动里静默带过。fulltest 报告与基线已记录金标准 sha256 与代码 commit，资产被动过是可对账的。
 - **报告闭环（声称修复前必须核对）**：用户跑完 fulltest 后，后续 agent 会话在声称任何修复生效前，必须先读 `D:\测试转markdown转换效果\测试文档_md_fulltest\_quality-report.json`，逐码核对「与基线对比」的新增/已修复/恶化与自己的声明一致；不一致不得声称已修复，只能报告"已实施、待用户验证"。
@@ -36,6 +37,15 @@
 - **验证状态必须如实区分**：已实现 / 验证通过 / 验证失败 / 未验证（写明未验证范围与原因）。环境、依赖或权限不足时说明未验证部分，不能用"已修复"描述未验证的改动（与「硬性约束」的交付要求一致）。
 - **Windows 上可用的 UT 入口**（均属编译类命令，只在用户点名时运行）：`cargo test -p xberg`、`cargo test -p xberg-cli`，或 `task test:quick`（= `cargo test --locked --lib --workspace --exclude xberg-php --exclude xberg-node --exclude xberg-wasm`，只跑 lib 单测）。`task test` / `task test:ci` 在 `.task/languages/rust.yml` 里只声明了 linux / darwin 平台，在 Windows 上不执行。
 - **现状与缺口（如实记录）**：本 fork 没有自动跑 Rust 测试的 CI（上游 `ci-rust.yaml` 等编译 / 测试 workflow 被仓库守卫 skip，无守卫的 `ci-lint` 只跑治理 / 文档 / 脚本类检查，不编译 Rust、不跑 Rust 测试）；fork 新增模块多数自带 UT（`extraction/visio.rs`、`rendering/ocr_layout.rs`、`extraction/markdown_utils.rs`、`extraction/excel/images.rs`、`crates/xberg-windows-metafile`），但部分模块（如 `transcription/wmf.rs`）没有 UT，只有 fulltest 的 E2E 覆盖；上游 `e2e/` + `fixtures/` 的语言绑定 e2e 在本 fork 不运行、不作为验收依据。`cargo test` 目前是否全绿未经本 fork 验证，不得当成已通过。
+
+## 三级测试门（`testgate.py`，fork 特有）
+
+三级入口统一在仓库根 `testgate.py`，层级语义固定（fastcheck=AI 自主快速反馈；fulltest=当前平台完整本地验证；slowtest=再叠加打包与远程阶段）。三者与验收脚本的称呼区分见末条。
+
+- **fastcheck ＝ `python testgate.py fastcheck`**：agent 可自主执行，无需授权，60 秒墙钟硬超时。内容：`fulltest.py`/`slowtest.py`/`testgate.py` 语法自检 → `fulltest.py --selftest`（判定器自测）→ `package-cli-windows.ps1`/`offline-smoke.ps1`/`verify-windows-dll-closure.ps1` 的 PS1 解析 → `cargo fmt --check -p xberg-cli -p xberg-windows-metafile`。`xberg` crate 有 155 文件量级的既有 fmt 漂移（2026-09-19 实测），批量重排版属用户决策，清理前不进 fastcheck、只在 fulltest 门里如实报红。fastcheck 通过≠完整验证。
+- **fulltest 门 ＝ `python testgate.py fulltest`**：当前平台（Windows）完整本地验证，**仅限用户对本次运行明确授权**。阶段独立汇报、任一 FAIL 即门失败：三 crate `cargo fmt --check` → `cargo build -p xberg-cli`（fork feature 集）→ `python fulltest.py --keep-going`（依赖 build 成功）→ `cargo test`（`-p xberg --features formats-no-heic,analysis,ocr,paddle-ocr,transcription,layout-detection,api`、`-p xberg-cli --no-default-features --features <fork 集>`、`-p xberg-windows-metafile`）→ `cargo clippy`（同三目标，`-D warnings`）。fmt-xberg 与 clippy 各阶段当前是否绿未经本 fork 验证，首次授权运行见真章，红了就是真发现，不得为绿而弱化。
+- **slowtest 门 ＝ `python testgate.py slowtest`**：最高级验证，**仅限用户对本次运行明确授权**。先跑完整 fulltest 门（失败即止，后续阶段记 SKIPPED_PRIOR_FAIL，不在已知失败状态上打包/发布），再跑 `python slowtest.py`（完整打包 + 打包版 fulltest.py）。远程阶段：`build-windows-cli.yml` 会创建带时间戳 tag 的**公开 GitHub Release**（真实发布副作用），因此**只有用户明确授权发布目标并显式加 `--with-release-ci`** 才触发并轮询到最终结论（要求工作区干净且 HEAD 已推到 origin）；默认该阶段记 SKIPPED_NOT_AUTHORIZED，此时只能宣称「本地部分通过」，不得说完整 slowtest 已通过。WSL/跨平台：SKIPPED_NOT_APPLICABLE（本 fork 仅支持 Windows，见「仓库性质」）。该 workflow 只调打包脚本、不回调 testgate，无远程递归。
+- **称呼区分（消歧规则）**：用户点名「fulltest.py / slowtest.py」（带 .py）＝只跑那两个脚本本身，既有语义与验收地位不变；点名「fulltest / slowtest 门」「完整本地验证」「testgate xxx」＝跑对应的门。口语「跑 fulltest」按既有习惯默认指 fulltest.py 脚本。
 
 ## fulltest.py 的作用（本仓库的验收标准）
 
@@ -81,7 +91,7 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 
 ### 顶层目录
 
-- `fork.md`——fork 相对上游的定制清单（见「仓库性质」）；`fulltest.py` / `slowtest.py`——fork 验收标准（见上节）。
+- `fork.md`——fork 相对上游的定制清单（见「仓库性质」）；`fulltest.py` / `slowtest.py`——fork 验收标准（见下节）；`testgate.py`——三级测试门入口（见「三级测试门」）。
 - `scripts/`——`publish/cli/package-cli-windows.ps1`（打包唯一入口，也是 fork feature 集的来源之一）、`publish/cli/offline-smoke.ps1`、`ci/`（PE/DLL 闭包校验）。
 - `.github/workflows/build-windows-cli.yml`——fork 自有的 Windows 打包 CI，仅手动 `workflow_dispatch` 触发。上游编译/测试类 workflow（ci-rust、ci-e2e 等）带仓库守卫在本 fork 全 skip；push 命中路径会自动跑的只有无守卫的 ci-lint / ci-docs / ci-scripts（其余无守卫 workflow 是 workflow_dispatch / release / issue-PR 事件触发，不随 push 跑）。
 - `docs-site/`（Astro + Starlight 文档）、`e2e/` + `fixtures/`、`.ai-rulez/`（ai-rulez 管理的 AI 规则/技能，改规则后需用固定版本的 ai-rulez 重新生成 bundle）。**`e2e/` 与 `fixtures/` 是上游的语言绑定 e2e 资产**（csharp/dart/go/...），本 fork 的验收不走它们（走 fulltest.py），日常不要为它们做适配；merge 上游带进来的改动原样保留即可。
