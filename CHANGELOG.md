@@ -7,10 +7,279 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## [1.2.2] - 2026-09-14
+## [Unreleased]
 
 ### Fixed
 
+- **(pdf): the mixed native-and-OCR path no longer drops every native table on a page OCR never touched.** On a long document where only some pages needed OCR, the mixed path replaced the whole document's table list with just the OCR pages' tables whenever OCR found even one, silently dropping every native table on every other page. Only the tables of pages OCR itself produced a table for are now replaced; a page the mixed path never sent to OCR keeps its native tables. (GH#1670)
+
+## [1.2.5] - 2026-09-18
+
+1.2.4 was tagged but never reached a package registry: its generated binding files still
+named 1.2.3, so its publish run was cancelled. 1.2.5 is the first published release carrying
+the 1.2.4 changes below in addition to its own.
+
+### Fixed
+
+- **(python): a config field holding a nested data-carrying enum is no longer dropped by
+  `from_json` / `to_json`.** The Python DTOs marked every field whose type transitively held
+  a data enum as `#[serde(skip)]` -- `CaptioningConfig.llm` and `ChunkingConfig`'s nested
+  options among them -- so a JSON payload round-tripped through such a config silently lost
+  those fields. Regenerated on alef 0.92.1, whose Python emitter no longer treats a
+  serializable enum wrapper as opaque. (alef#394)
+- **(ppt): a legacy `.ppt`'s embedded OLE objects are extracted.** A Word document or Excel
+  sheet inserted as an object -- the way PowerPoint 97-2003 decks routinely carry a table --
+  lives in the deck's `ExOleObjStg` records, which the extractor walked over as opaque bytes,
+  so the slide came out as its title and nothing else. The `.pptx` path already recursed into
+  `ppt/embeddings/`; the legacy path now does the same: each embedded object's storage is
+  resolved through the persist chain (so a superseded save's copy is never read),
+  decompressed when the record says so, identified by its root stream (`WordDocument`,
+  `Workbook`/`Book`, `PowerPoint Document`, or an OPC `Package`) and extracted into
+  `children` as `slide<N>/oleObject<id>.bin` with the slide whose shape displays it. The
+  decompressed size is bounded by `max_embedded_file_bytes` (falling back to
+  `max_archive_size`), the object count by `max_files_in_archive`, and `max_archive_depth = 0`
+  disables the recursion, as for `.pptx`. Metafile presentation pictures (EMF/WMF) are still
+  not emitted as images. (GH#1660)
+- **(pdf): a ruled table drawn one bar per cell no longer loses all but its last two rows.**
+  Word draws cell borders as per-cell filled bars with a corner square at every crossing, so
+  every vertical rule terminates at every horizontal rule. The section-divider split, which
+  reads a full-width rule that no vertical rule runs through as the boundary between two
+  stacked form sections, therefore treated every internal rule of such a table as a divider,
+  cut the table into one-row pieces and discarded the pieces below the cell minimum -- a
+  12-row table came back as `11 | 290`, `12 | 300`. A rule that every vertical rule stops at
+  carries no section information when the same is true of every other rule on the table, so
+  a table whose internal rules all qualify is now left whole; a form whose sections' rules
+  stop at a minority of the rules still splits. (GH#1656)
+
+## [1.2.4] - 2026-09-18
+
+### Added
+
+- **(llm): `LlmConfig` exposes liter-llm's provider response-byte cap.** liter-llm's
+  `ClientConfigBuilder::max_response_bytes` bounds every HTTP response body read from a
+  provider, but xberg's `LlmConfig` never forwarded it, so downstream products had no way to
+  bound provider responses. `LlmConfig::max_response_bytes` mirrors it: it bounds response
+  bodies on every non-streaming call and the error body read on a failed request (a
+  successful streaming response keeps its own existing frame bounds), and defaults to `None`
+  (unbounded), matching liter-llm. `Some(0)` is rejected by `LlmConfig::validate` rather than
+  reaching liter-llm's own builder. (xberg-io/xberg-enterprise#1568, xberg-io/xberg-enterprise#1861)
+
+### Fixed
+
+- **(pdf): a page-sized background rectangle no longer seeds a whole-page table.** Many
+  Office-to-PDF producers draw a white rectangle over the entire page before anything else.
+  That rectangle passed the table-primitive filter (its `< 1000 pt` bound does not exclude an
+  A4 or Letter page) and, because clustering unions any two primitives whose boxes intersect,
+  pulled every rule on the page -- the real table's borders, the footer rule, a figure's
+  frame, strokes inside a drawing -- into one cluster with the page as its box. The cluster
+  fallback then built a table over the whole page: the heading above the real table became
+  its first row, torn at the table's own column rule, and the first words of the prose below
+  it became its last row, with those words missing from or doubled in the paragraphs that
+  followed. A rectangle covering at least 90 % of the page's MediaBox in both dimensions is now
+  treated as page furniture and dropped before clustering, so the real table's rules cluster
+  on their own and the page comes out as it does without the background. A full-page-width
+  rule (one dimension at page scale) is deliberately still a primitive. (GH#1656)
+- **(pdf): a single-column page of hanging-number headings is no longer read as two columns.**
+  Some producers (Distiller among them) emit the tab between a heading's number and its title
+  as a space-only span in a different font, and leave space-only spans for blank lines. The
+  dense-two-column repair counted those spans as column population and let a blank line's two
+  whitespace spans and a footer split across both margins vote for a gutter, so five headings'
+  tabs plus two lines of nothing met the six-line quorum and the page was emitted
+  column-major: `6`, `6.1`, `6.1.1` as bare numbers and their titles as separate unnumbered
+  headings. Whitespace-only spans no longer count toward the per-side density gate, the
+  gutter vote, the whitespace corridors or the row-pairing guard, and a per-line gap wider
+  than a quarter of the page width is no longer accepted as gutter evidence (a blank line's or
+  a footer's gap; every real gutter measured here is under 10 %). (GH#1655)
+- **(ocr): a configured `security_limits` now reaches the Tesseract image decode.** GH#1554
+  routed `ExtractionConfig::security_limits` onto `OcrConfig` before each OCR call, but the
+  Tesseract backend's `config_to_tesseract` had no field to carry it into and built a fresh
+  default `ExtractionConfig` for the processor, so every Tesseract decode -- standalone
+  images, embedded images, scanned pages and the targeted page fallback alike -- ran under
+  the 100 MiB default no matter what the caller set. A 600 DPI A4 scan was refused with an
+  error naming `104857600 bytes` while both configuration objects said 5 GiB. The internal
+  `TesseractConfig` now carries the limits (outside the cache key: they gate whether a decode
+  runs, never what it produces), the processor prefers them over its synthetic config, and
+  the standalone-image and PDF embedded-image routes inject the caller's limits like the
+  other routes already did. A limit set directly on `OcrConfig` is honoured when
+  `ExtractionConfig` carries none; `ExtractionConfig` still wins when both are set. (GH#1651)
+- **(go): `Register*` no longer leaks its `cgo.Handle` when the C vtable allocation fails.**
+  Every `Register*` wrapper in the Go binding created the handle before allocating the C
+  vtable, and the allocation-failure branch returned without deleting it, keeping the bridge
+  and the caller's implementation reachable for the life of the process. The branch is only
+  reachable when a small `malloc` fails, so this is a resource leak on an error path rather
+  than an exploitable defect; it is fixed in the generator (alef 0.91.6) and regenerated
+  here. Reported by @OvOhao (GHSA-q5pq-8g86-v9j9).
+- **a table's multi-word cell no longer bleeds a trailing word into the next column, a
+  right-aligned amount column split by digit-width drift is folded back together, and a
+  legitimately sparse but independently-headed column (or a sparse first data row) no longer gets
+  the whole table rejected.** Reconstructing a table from word boxes decided each word's column
+  independently by nearest x-position, so a wide cell's own trailing word (e.g. a long
+  description's last word) could resolve to a neighboring column's anchor instead of its own
+  cell's. Column membership for a data row is now decided once per merged cell cluster and applied
+  to every word the cluster contains; a drift-split right-aligned numeric column (mutually
+  exclusive per row, no independent header of its own) is folded into one column; and a section
+  caption sharing a table region with its real header row is dropped. This cell-clustering and
+  column-assignment logic lives in the shared `table_core` module, so it also affects native-PDF
+  word-position table reconstruction, not just OCR. Separately, `pdf`'s shared table post-processor
+  no longer treats an independently-headed but infrequently-populated column (e.g. a bank
+  statement's `DEPOSIT`, populated on a minority of transaction rows) as noise, and no longer folds
+  a sparse first data row (one missing an optional numeric field) into a bogus multi-row header
+  merge with the row after it -- and that header-shortcut no longer stops one row early on a
+  genuine two-row text header, which also fully populates a digit-free first row. The punctuation
+  cell-merge gap this widens for a lone dash/colon glyph is now conditioned on the punctuation
+  genuinely bridging two neighboring words on both sides, so an isolated punctuation cell near a
+  real column boundary (a `-` placeholder, a `:`) no longer fuses two columns' content into one
+  cell. (GH#1649)
+
+## [1.2.3] - 2026-09-16
+
+### Added
+
+- **(ocr): the registry reports each backend's declared languages.** `list_ocr_backends()` returned
+  only names, so a caller validating an OCR language against the installed backends had to maintain
+  a second language table of its own. `list_ocr_backend_capabilities()` returns one
+  `OcrBackendCapabilities` record per registered backend — its name and the languages it reports —
+  ordered by backend name. An empty `supported_languages` means the backend does not enumerate its
+  languages, *not* that it supports none, so `ocr_backend_supports_language()` is provided for
+  callers that need a decision rather than a list. (GH#1643)
+- **(ocr): mixed-page PDF extraction reports one coordinate frame per OCR'd page.** Public
+  `ocr_elements` carry the OCR backend's raster coordinates, but the per-page processed raster size
+  lived only in the page-local result and was discarded before the elements reached the final
+  document. A multi-page consumer was left with the document-level
+  `ocr_processed_image_width`/`ocr_processed_image_height`, which is not authoritative for pages of
+  differing size, preprocessing, or rotation, and so could not normalize a box safely.
+  `metadata.additional.ocr_page_coordinate_frames` now carries one record per OCR page that has
+  public elements — `page_number`, `width`, `height`, `unit: "pixel"`, `origin: "top_left"` — ordered
+  by page number and joined to an element through the element's own `page_number`. No record is
+  emitted for a page whose raster dimensions are absent or invalid. (GH#1645)
+- **(ner): Rust callers can share xberg's process-wide GLiNER backend cache.**
+  `text::ner::gline::get_or_init_backend` performs model initialization on Tokio's blocking pool,
+  returns the same `Arc` for the same model and thread budget, and leaves failed initializations
+  retryable.
+- **(pdf): every hierarchy page now advertises the coordinate frame its boxes live in.** Hierarchy
+  bounding boxes are emitted in raw PDF user space, but nothing named that space, so a consumer
+  could not tell whether a box needed translating by a non-zero MediaBox origin or rotating for a
+  page's `/Rotate`. `metadata.additional.pdf_page_coordinate_frames` now carries one record per
+  page that has hierarchy blocks — `page_number`, `origin_x`/`origin_y` (the MediaBox `llx`/`lly`,
+  which may be non-zero and negative), `width`/`height`, `unit: "point"`,
+  `origin: "bottom_left"`, and `clockwise_rotation` — ordered by page number. `width`/`height` are
+  the MediaBox extent and are deliberately **not** swapped for a 90/270 rotation, because they
+  describe raw user space rather than the displayed frame; this is the opposite convention to
+  `ocr_page_coordinate_frames`, which reports an already-rotated raster, so the two must not be
+  assumed to agree for the same page. A page is omitted entirely, rather than reported with a
+  default, when its `/Rotate` is present but not a valid multiple of 90 or its MediaBox yields no
+  usable extent. (GH#1653, GH#1654)
+
+### Fixed
+
+- **(ocr): an isolated blank quantity cell in an invoice table can be recovered from its own
+  pixels.** A table whose `QTY` column has strong integer support — at least two recognized
+  whole-number quantities — but exactly one blank cell now gets a single targeted retry that
+  re-reads only that cell's bounded pixel region in single-line segmentation mode. The retry never
+  derives a quantity from a price or total column, and any table outside this narrow shape takes
+  the existing fast path unchanged. A header split across two words (`UNIT`/`PRICE`,
+  `LINE`/`TOTAL`) is also reassembled into one header cell when the fragment sits nearer a
+  data-supported column than any standalone column of its own. This OCR quality change ships
+  without a corpus-wide A/B measurement.
+- **(reranker): a cancelled `rerank_async` no longer releases its concurrency permit while its
+  inference is still running.** The permit was held by the awaiting future rather than by the
+  `spawn_blocking` task, and a blocking task cannot be cancelled — dropping its handle merely
+  detaches it. A caller that timed out or dropped therefore returned the permit immediately while the
+  model load and inference it was bounding continued, so repeated abandoned calls could exceed the
+  configured reranker concurrency and keep several models resident after every caller had returned.
+  (GH#1641)
+- **(embeddings, transcription): the same cancelled-permit leak fixed above for the reranker is now
+  fixed for `embed_texts_async` and audio/video transcription.** Both bound a `spawn_blocking`
+  inference call with a concurrency permit held by the awaiting future rather than by the blocking
+  task, so a caller that dropped its future released the permit while the ONNX embedding batch or
+  Whisper inference it was bounding kept running. Transcription is timeout-wrapped by default
+  (`transcription.timeout_ms`), so an expiry there was a live, designed-in path to the same
+  concurrency breach, not a hypothetical one. (GH#1641)
+- **(pdf): a wrapped numbered heading set in a heading-size font no longer loses its second line.**
+  `follows_section`'s two continuation exemptions only recognized a wrap via a hanging indent or via
+  matching right edges, both of which a no-indent heading's short last line fails by construction. A
+  third exemption, `heading_continuation_at_margin`, now recognizes a wrap by measuring the heading's
+  own line against the width of the body column beneath it, the same signal the paragraph-merge pass
+  already uses for a body-sized heading. Independently, the paragraph-gap detector could still cut a
+  continuation these exemptions accepted, because a heading's own line pitch legitimately exceeds the
+  body's and was read as a blank-line break; the gap check is now suppressed at exactly the boundary a
+  continuation exemption already accepted. (GH#1650)
+- **(packaging): the Helm chart is published again.** The chart publish was gated such that a failed
+  Docker build leg skipped it entirely, while the container images themselves published and the
+  release still reported success. No chart was published for 1.1.4, 1.1.5, 1.2.0, 1.2.1 or 1.2.2, so
+  `helm install --version <current>` could not resolve. The chart for 1.2.2 has been published
+  retroactively, and a release now fails loudly if its chart is missing rather than shipping without
+  one.
+- **(node): a JavaScript plugin registered through the Node binding now actually runs.** Every
+  generated Node trait bridge -- `OcrBackend`, `PostProcessor`, `Validator`, `Renderer`,
+  `TokenizerBackend` and the rest -- was structurally unable to call back into JavaScript. It
+  invoked the JS callable directly from whatever Tokio worker thread the pipeline happened to be
+  on, with no N-API handle scope; it never awaited a returned promise, so an `async` method's
+  result was the string `"[object Promise]"`; and it coerced whatever came back to a string before
+  parsing it as JSON, which fails for a plain object as well. The published `.d.ts` had always
+  declared the working contract (`processImage(imageBytes: Uint8Array): Promise<ExtractedDocument>`),
+  so no plugin could have been written against the shipped behaviour. Bridges now hold a
+  `ThreadsafeFunction` created on the JS thread, await the reply through `call_async_catch` (a JS
+  throw surfaces as a plugin error instead of aborting the process), and decode the value without
+  the string round-trip. A handle reference that would otherwise be released off its owning JS
+  thread is leaked rather than freed, since freeing it there corrupts the V8 heap. (GH#1636)
+
+### Changed
+
+- **(pdf): a page whose MediaBox is not rooted at the origin no longer reports the wrong page
+  size.** The native engine's per-page text result took its width and height from the MediaBox
+  upper-right corner instead of its extent, so a page with MediaBox `[10 -100 622 692]` reported
+  622x692 rather than the true 612x792. That figure feeds hierarchy reading-order computation, so
+  a non-zero MediaBox origin could mis-order content, not merely mis-scale it. Pages rooted at
+  `(0, 0)` — the overwhelming majority — are unaffected, since the two expressions agree there.
+  (GH#1653)
+
+- **Upgraded the `crawlberg` dependency to 1.7.0** (from 1.6.4). xberg re-exports crawlberg's
+  crawl types -- `CrawlConfig`, `MapResult`, `SitemapUrl` -- so the pin is part of this crate's
+  public surface. 1.7.0 makes no Rust API changes; its breaking changes are confined to
+  crawlberg's own Java and Swift bindings, which xberg does not consume.
+
+## [1.2.2] - 2026-09-15
+
+### Fixed
+
+- **(pdf): a two-column page is no longer split down the middle of a column because one line
+  crosses its gutter.** The corridor search treated whitespace as "no span's bbox", so a single
+  centred footer, caption, or heading set across both columns closed the page's real gutter for
+  every line on the page. The per-line median then placed the split *inside* the left column, every
+  line it crossed became a band boundary, and the reordered text interleaved the two columns
+  mid-word — producing spliced tokens such as `activamodel` and `demandviating`. A split that six or
+  more lines run through now also considers corridors at most one line crosses, still bounded by the
+  same distance cap and still refused when either side does not read as a column. Measured over 490
+  corpus PDFs: 7 documents change, all of them repairing cross-column splices, and none loses
+  vocabulary. Reported and fixed by Data Polder. (GH#1619)
+- **(pdf): a wrapped numbered heading now closes above the run-in beneath it.** The GH#1634 fix's
+  closing term also required a right-edge test that only applies to the un-indented case. A hanging
+  indent heading's wrap and a run-in sub-heading below it are both short lines by definition, so
+  their right edges land within tolerance of each other by coincidence, which overrode the correct
+  left-edge answer and held the heading open across the run-in and the body under it. (GH#1637)
+- **(ppt): a legacy `.ppt` slide's title is read from the file rather than guessed.** The title came
+  from the first line of the slide's merged text, gated on a second line existing and the first being
+  at most 80 characters — so a title-only slide had no title, a two-line title was truncated to its
+  first line, and a longer title was dropped. The outline collection's own `TextHeaderAtom` states
+  which text is the title; that is now read, with the first-line rule kept only for decks that state
+  no title. (GH#1635)
+- **(ppt): the live save's slides are read, not the oldest save's.** The persist chain resolved the
+  current revision correctly and then scanned the stream for the *first* `SlideListWithText`, which on
+  a deck saved more than once belongs to the earliest save — so edited titles and outline text
+  reverted to a superseded revision. (GH#1639)
+- **(ppt): speaker notes attach to the slide that owns them, and the notes master is no longer one.**
+  The notes master's placeholder text ("Click to edit Master text styles…") was emitted as the first
+  slide's speaker note, and the remaining notes were zipped to slides by position, so every note
+  after a slide without one landed on the wrong slide. Notes are now keyed by the `NotesAtom`'s own
+  `slideIdRef`. (GH#1640)
+- **(release): the `xberg-cli` archives are attached again.** v1.2.0 published 12 assets and
+  v1.2.1 published 54, both with none of the nine `xberg-cli-*` archives, so `mise`, `cargo binstall`
+  and every direct download had nothing to fetch. One matrix leg (the aarch64-musl link) failed, and
+  the upload job required all three CLI build jobs to succeed, so a single leg zeroed the whole asset
+  class — as a *skipped* job, which reports no failure and left both releases looking green. The
+  upload now attaches whatever built, and a following step fails the release when any of the nine is
+  missing. (GH#1638)
 - **(pdf render): `s` (close-and-stroke) is no longer dropped, and no longer floods the next fill.**
   The object-level content parser had arms for every path-painting operator in ISO 32000-1 Table 60
   except `s`, which fell through to an operator every consumer ignores. Two things followed: the
@@ -40,6 +309,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or 1.2.1 releases. The cause was the switch to fat LTO: over the `all` feature set the final
   whole-program link exceeded what the arm64 runner could complete. That build now uses a
   `release-musl` profile with thin LTO; every other target keeps fat LTO.
+- **(php): setting `outputFormat` no longer throws.** Every call that passed an output format —
+  `ExtractionConfig::from_json(json_encode(["outputFormat" => "markdown"]))`, and any
+  `extract`/`extractBatch` carrying a per-input config — raised
+  `invalid type: string "markdown", expected struct OutputFormat`. The generated `Xberg\OutputFormat`
+  class carried a derived serde implementation that read and wrote its own storage shape,
+  `{"type":"markdown"}`, while the core enum is externally tagged and writes a bare string, so no
+  real value ever deserialized. `EntityCategory` and `PiiCategory` carried the same defect.
+  Introduced in 1.2.0 alongside the flat-class change and shipped in three releases.
+- **(wasm): `metadata.format` fields are readable again.** `metadata.format.title` returned `''` and
+  `metadata.format.sheetCount` returned `NaN` for every document, because the value reached
+  JavaScript as a `Map` rather than the plain object `index.d.ts` declares — `serde-wasm-bindgen`
+  renders every serde map that way, and serde's internally tagged enum representation is a map.
+  Property access on a `Map` is `undefined`. Introduced in 1.2.0 with the `FormatMetadata` flatten.
+
+### Changed
+
+- **`extraction::ppt::PptSlideText` carries the slide's stated title and notes.** The struct gains
+  `title: Option<String>` and `notes: Option<String>`, so Rust callers constructing it with an
+  exhaustive struct literal must add the two fields. The type is not exposed through any binding.
+- **Breaking (PHP binding):** `OutputFormat`, `EntityCategory` and `PiiCategory` now serialize to the
+  wire their Rust counterparts emit — `"markdown"` for a fieldless variant and `{"custom":"latex"}`
+  for one carrying a label — instead of the flat `{"type":"markdown"}` object. `from_json` still
+  accepts the object form, so existing input keeps working; output moves.
+- **Breaking (WebAssembly binding):** `metadata.format` — and any other field carrying a flattened,
+  camelCased enum — is now a plain object rather than a `Map`. This is the shape `index.d.ts` has
+  always declared; code that worked around the discrepancy with `.get()` must switch to property
+  access. Fields carrying an enum that is not flattened, such as `chunking.sizing`, keep the
+  `serde-wasm-bindgen` bridge and are unchanged.
+- **Breaking (C#, Dart, Go, Java, Kotlin, Python, Swift bindings):** an enum variant whose name ends
+  in a multi-letter acronym followed by a single lowercase letter is spelled correctly now.
+  `StructuredDataType.RdFa` becomes `Rdfa` (C#, Dart, Go, Swift), Kotlin's `R_D_FA` becomes `RDFA`
+  and `PADDLE_O_C_R` becomes `PADDLE_OCR`, and Python's stub and runtime agree on `RDFA`. Wire
+  values are unchanged — only the identifiers move. Names without that shape (`IOError`,
+  `HTMLParser`, `JSONLD`) are unaffected.
 
 ---
 

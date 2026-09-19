@@ -584,7 +584,7 @@ pub(crate) async fn extract_ooxml_embedded_objects(
 /// Returns `None` when the container can't be opened or none of the supported
 /// streams contains a recognizable payload.
 #[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
-fn extract_ole_embedded_object(data: &[u8], source_name: &str, max_bytes: u64) -> Option<(Vec<u8>, String)> {
+pub(crate) fn extract_ole_embedded_object(data: &[u8], source_name: &str, max_bytes: u64) -> Option<(Vec<u8>, String)> {
     let mut compound_file = cfb::CompoundFile::open(Cursor::new(data)).ok()?;
     let stream_paths = collect_ole_stream_paths(&compound_file);
 
@@ -1055,7 +1055,7 @@ fn read_u32_le(data: &[u8], offset: usize) -> Option<u32> {
 /// (e.g. `excel` without `office`/`hwp`/`email`): OLE objects are always reported
 /// as unidentifiable rather than attempting extraction.
 #[cfg(not(any(feature = "office", feature = "hwp", feature = "email")))]
-fn extract_ole_embedded_object(_data: &[u8], _source_name: &str, _max_bytes: u64) -> Option<(Vec<u8>, String)> {
+pub(crate) fn extract_ole_embedded_object(_data: &[u8], _source_name: &str, _max_bytes: u64) -> Option<(Vec<u8>, String)> {
     None
 }
 

@@ -85,6 +85,7 @@ excel = ["dep:calamine", "dep:roxmltree", "dep:zip", "dep:quick-xml", "tokio-run
 excel-wasm = ["dep:calamine", "dep:roxmltree", "dep:zip"]
 office = [
     "dep:cfb",
+    "dep:flate2",
     "dep:roxmltree",
     "dep:zip",
     "dep:quick-xml",
@@ -1320,7 +1321,7 @@ ndarray = { version = "0.17", optional = true }
 nom-exif = { workspace = true, optional = true }
 num_cpus = { workspace = true }
 once_cell = { workspace = true }
-opentelemetry = { version = "0.32", features = ["trace"], optional = true }
+opentelemetry = { version = "0.32", features = ["trace"], optional = true } # capped by tracing-opentelemetry: 0.33 (latest) still depends on opentelemetry 0.32, so raising these three splits the lock into two `opentelemetry` versions and the layer/tracer types stop matching. `cargo upgrade --incompatible` raises them and leaves this comment behind; re-pin until tracing-opentelemetry moves to 0.33. Verified 2026-09-18. ~keep
 # Bridges the OTel `SdkMeterProvider` to a `prometheus::Registry` for the opt-in `/metrics`
 # endpoint (#1391). 0.32.0 matches the `opentelemetry`/`opentelemetry_sdk` 0.32 pin exactly.
 opentelemetry-prometheus = { version = "0.32", optional = true }
@@ -1356,7 +1357,7 @@ rake = { version = "0.3.6", optional = true }
 rayon = { workspace = true }
 regex = "1.13.1"
 resvg = { workspace = true, optional = true }
-rmcp = { version = "3.3.0", features = [
+rmcp = { version = "3.4.0", features = [
     "server",
     "macros",
     "base64",
@@ -1451,8 +1452,8 @@ xberg-gliner = { workspace = true, optional = true }
 # (xberg-io/xberg#1541). `xberg-libheif` gates every version-dependent call, including a
 # `#[cfg(not(feature = "v1_20"))]` fallback to `heif_image_get_plane_readonly`, so this only
 # gives up newer libheif APIs, not functionality. ~keep
-xberg-libheif = { path = "../xberg-libheif", version = "1.2.2", optional = true, default-features = false, features = ["v1_19"] }
-xberg-libwpd = { path = "../xberg-libwpd", version = "1.2.2", optional = true }
+xberg-libheif = { path = "../xberg-libheif", version = "1.2.5", optional = true, default-features = false, features = ["v1_19"] }
+xberg-libwpd = { path = "../xberg-libwpd", version = "1.2.5", optional = true }
 xberg-native-pdf = { workspace = true, optional = true }
 # No `version` on this path-dep: xberg-tesseract carries `links =
 # "xberg_tesseract"`, and a versioned path-dep makes the maturin sdist
@@ -1512,10 +1513,10 @@ tokenizers = { version = "0.23", default-features = false, features = ["fancy-re
 # why `candle-vlm-ocr` is safe in `full`/`windows-target`. GPU acceleration (cudarc / metal) is
 # strictly opt-in via candle-cuda/metal/mkl/accelerate and must be enabled with platform awareness.
 # CI uses `--features full` which keeps GPU accel off.
-xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.2.2", optional = true }
+xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.2.5", optional = true }
 # PaddleOCR via ONNX Runtime or tract (vendored from paddle-ocr-rs). The backend is selected
 # by the enabling feature (`paddle-ocr-ort` / `paddle-ocr-tract`), never by a default.
-xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.2.2", optional = true, default-features = false }
+xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.2.5", optional = true, default-features = false }
 
 # Desktop / server hosts (Linux + macOS, NOT Android): xberg's direct `ureq` client uses
 # ring-backed rustls plus `platform-verifier`, which trusts the OS certificate store
@@ -1554,13 +1555,13 @@ ureq = { version = "3.4", default-features = false, features = [
     "json",
 ], optional = true }
 # Candle-based VLM OCR backends - pure-Rust transformer inference, not on WASM yet.
-xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.2.2", optional = true }
+xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.2.5", optional = true }
 # PaddleOCR via ONNX Runtime or tract (vendored from paddle-ocr-rs). The backend is selected
 # by the enabling feature (`paddle-ocr-ort` / `paddle-ocr-tract`), never by a default.
-xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.2.2", optional = true, default-features = false }
+xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.2.5", optional = true, default-features = false }
 # Windows GDI/GDI+ rasterization of EMF/WMF metafiles so OCR can run on Office vector
 # images (Visio OLE previews, legacy VML shapes). Windows-only: the crate is `#![cfg(windows)]`.
-xberg-windows-metafile = { path = "../xberg-windows-metafile", version = "1.2.2" }
+xberg-windows-metafile = { path = "../xberg-windows-metafile", version = "1.2.5" }
 # Media Foundation decodes the audio track of Windows Media (ASF/WMV) inputs, which
 # symphonia cannot demux. The high-level `windows` crate is already in the tree at this
 # version, so this adds an edge, not a second copy. See src/transcription/wmf.rs.
@@ -1703,6 +1704,9 @@ qrcode = { version = "0.14", default-features = false, features = ["image"] }
 # static_engine unit tests, without a network fetch.
 safetensors = "0.8"
 serial_test = "3.5.0"
+# Test-only: pins a bundled fixture's bytes by SHA256 so a regression test provably
+# exercises the exact reported sample rather than a substitute. ~keep
+sha2 = { workspace = true }
 syn = { version = "3", features = ["full", "visit"] }
 tar = "^0.4"
 tempfile = { workspace = true }
@@ -1724,6 +1728,10 @@ required-features = ["structured"]
 [[test]]
 name = "structured_live"
 required-features = ["structured", "pdf"]
+
+[[test]]
+name = "llm_response_byte_cap"
+required-features = ["structured"]
 
 [[test]]
 name = "sqlite_geopackage_extraction"

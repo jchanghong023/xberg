@@ -51,7 +51,7 @@ bench-mineru = [
 bench-paddleocr-python = [
     { name = "numpy", specifier = ">=2.0" },
     { name = "paddleocr", marker = "python_full_version < '3.14'", specifier = "==3.7.0" },
-    { name = "paddlepaddle", marker = "python_full_version < '3.14'", specifier = "==3.3.1" },
+    { name = "paddlepaddle", marker = "(python_full_version < '3.14' and platform_machine != 'aarch64') or (python_full_version < '3.14' and sys_platform != 'linux')", specifier = "==3.3.1" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "pymupdf", specifier = "==1.28.2" },
     { name = "setuptools", marker = "python_full_version < '3.14'", specifier = ">=80.9" },
@@ -8188,7 +8188,7 @@ wheels = [
 
 [[package]]
 name = "xberg"
-version = "1.1.6"
+version = "1.2.3"
 source = { editable = "packages/python" }
 
 [package.dev-dependencies]

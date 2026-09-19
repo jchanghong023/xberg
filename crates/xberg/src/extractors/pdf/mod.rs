@@ -111,6 +111,29 @@ fn accepted_mixed_ocr_tables(structured_pages: &ahash::AHashMap<u32, InternalDoc
         .collect()
 }
 
+/// One coordinate frame per OCR page that has both a captured frame (GH#1645) and public
+/// elements -- a page whose elements were all filtered out (margins, quality gate) has
+/// nothing for a consumer to join the frame to, so it is omitted rather than emitted with an
+/// empty element set. Sorted by page number for a deterministic, reader-facing array; the
+/// backing `structured_pages` is an `AHashMap`, whose iteration order is unspecified.
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+pub(crate) fn accepted_mixed_ocr_coordinate_frames(
+    structured_pages: &ahash::AHashMap<u32, InternalDocument>,
+) -> Vec<crate::types::internal::OcrPageCoordinateFrame> {
+    let mut page_numbers = structured_pages.keys().copied().collect::<Vec<_>>();
+    page_numbers.sort_unstable();
+    page_numbers
+        .into_iter()
+        .filter_map(|page_number| structured_pages.get(&page_number))
+        .filter(|page| {
+            page.prebuilt_ocr_elements
+                .as_ref()
+                .is_some_and(|elements| !elements.is_empty())
+        })
+        .filter_map(|page| page.ocr_coordinate_frame)
+        .collect()
+}
+
 #[cfg(feature = "pdf")]
 const PDF_OUTLINES_MARKER: &[u8] = b"/Outlines";
 #[cfg(feature = "pdf")]
@@ -892,6 +915,34 @@ fn replace_tables_with_ocr_output(tables: &mut Vec<crate::types::Table>, mut ocr
 
     ocr_tables.sort_by_key(|table| table.page_number);
     *tables = ocr_tables;
+}
+
+/// Merge OCR tables into the mixed path's table list, replacing only the tables of pages OCR
+/// itself produced a table for.
+///
+/// Unlike [`replace_tables_with_ocr_output`], which is right for full-document OCR (every page
+/// went through OCR, so there is no native page left to preserve), the mixed path sends only
+/// SOME pages to OCR. Before this, the mixed path called `replace_tables_with_ocr_output` too,
+/// which replaced the WHOLE document's table list with only the OCR pages' tables: on a long
+/// document where a handful of scanned pages produced even one OCR table, every native table on
+/// every page OCR never touched was silently dropped (GH#1670). A page whose OCR pass found no
+/// table keeps its native tables untouched, the same as `replace_tables_with_ocr_output` does
+/// when it finds none anywhere.
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+fn merge_mixed_ocr_tables(
+    tables: &mut Vec<crate::types::Table>,
+    structured_pages: &ahash::AHashMap<u32, InternalDocument>,
+) {
+    let mut ocr_tables = accepted_mixed_ocr_tables(structured_pages);
+    if ocr_tables.is_empty() {
+        return;
+    }
+
+    ocr_tables.sort_by_key(|table| table.page_number);
+    let ocr_pages: std::collections::HashSet<u32> = ocr_tables.iter().map(|table| table.page_number).collect();
+    tables.retain(|table| !ocr_pages.contains(&table.page_number));
+    tables.extend(ocr_tables);
+    tables.sort_by_key(|table| table.page_number);
 }
 
 #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-pipeline")))]
@@ -1944,6 +1995,7 @@ impl PdfExtractor {
             pdf_form_fields,
             mut pdf_extraction_warnings,
             pdf_page_labels,
+            pdf_page_coordinate_frames,
         ) = extract_all_from_native_document(
             native_document,
             config,
@@ -1982,6 +2034,12 @@ impl PdfExtractor {
             if let Some(backend) = backend {
                 let mut ocr_config_with_format = ocr_config.clone();
                 ocr_config_with_format.output_format = Some(config.output_format.clone());
+                // GH#1651: this embedded-image route never carried the caller's decode limits,
+                // so every decode ran under `SecurityLimits::default()`. Conditional so a limit
+                // set directly on `OcrConfig` is not replaced by `None`. ~keep
+                if let Some(limits) = config.security_limits.clone() {
+                    ocr_config_with_format.security_limits = Some(limits);
+                }
                 for img in imgs.iter_mut() {
                     if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
                         break;
@@ -2026,6 +2084,8 @@ impl PdfExtractor {
         let mut ocr_tables: Vec<crate::types::Table> = Vec::new();
         #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
         let mut ocr_elements: Vec<crate::types::OcrElement> = Vec::new();
+        #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+        let mut ocr_coordinate_frames: Vec<crate::types::internal::OcrPageCoordinateFrame> = Vec::new();
         #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
         let mut ocr_internal_doc: Option<InternalDocument> = None;
         #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
@@ -2648,7 +2708,8 @@ impl PdfExtractor {
             && let Some(ref accepted_pages) = structured_ocr_pages
         {
             ocr_elements = accepted_mixed_ocr_elements(accepted_pages);
-            replace_tables_with_ocr_output(&mut tables, accepted_mixed_ocr_tables(accepted_pages));
+            merge_mixed_ocr_tables(&mut tables, accepted_pages);
+            ocr_coordinate_frames = accepted_mixed_ocr_coordinate_frames(accepted_pages);
         }
         #[cfg(not(any(feature = "ocr", feature = "ocr-pipeline")))]
         let (mut doc, document_is_structured) = select_native_pdf_document(
@@ -2757,6 +2818,20 @@ impl PdfExtractor {
         // literal they would otherwise have been lost to already exists.
         #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
         doc.metadata.additional.extend(ocr_backend_additional_metadata);
+
+        // GH#1645: one authoritative processed-raster coordinate frame per OCR page with
+        // public elements, so a multi-page consumer can normalize `OcrElement` geometry
+        // without relying on the single document-wide `ocr_processed_image_width/height`
+        // pair, which cannot describe differently sized, preprocessed, or rotated pages.
+        // Rides in `additional` rather than a new public binding type, same as the
+        // `page_labels` key below (issue #66).
+        #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+        if !ocr_coordinate_frames.is_empty() {
+            doc.metadata.additional.insert(
+                std::borrow::Cow::Borrowed(crate::ocr_metadata_keys::OCR_PAGE_COORDINATE_FRAMES_METADATA_KEY),
+                serde_json::json!(ocr_coordinate_frames),
+            );
+        }
 
         // Issue #66: `/PageLabels` — one display label per page, index-aligned
         // with `pdf_metadata.page_structure`/`PageBoundary::page_number`.
@@ -2941,6 +3016,35 @@ impl PdfExtractor {
 
         if let Some(ref mut pages) = final_pages {
             assign_hierarchy_to_pages(pages, &doc);
+        }
+
+        // GH#1653 + GH#1654: one raw-MediaBox coordinate frame per page that ended up with
+        // hierarchy blocks, now that `assign_hierarchy_to_pages` above has populated
+        // `PageContent::hierarchy`. One shared record covers both issues: a consumer needs
+        // the MediaBox origin (which can be non-zero and negative) and the page rotation
+        // together to place a page's raw-space geometry. Rides in `additional` rather than a
+        // new public binding type, same as the `page_labels` key below (issue #66) and
+        // `ocr_page_coordinate_frames` above (GH#1645). ~keep
+        if let Some(ref pages) = final_pages {
+            let pages_with_hierarchy: std::collections::HashSet<u32> = pages
+                .iter()
+                .filter(|page| {
+                    page.hierarchy
+                        .as_ref()
+                        .is_some_and(|hierarchy| !hierarchy.blocks.is_empty())
+                })
+                .map(|page| page.page_number)
+                .collect();
+            let pdf_page_coordinate_frames: Vec<_> = pdf_page_coordinate_frames
+                .into_iter()
+                .filter(|frame| pages_with_hierarchy.contains(&frame.page_number))
+                .collect();
+            if !pdf_page_coordinate_frames.is_empty() {
+                doc.metadata.additional.insert(
+                    std::borrow::Cow::Borrowed("pdf_page_coordinate_frames"),
+                    serde_json::json!(pdf_page_coordinate_frames),
+                );
+            }
         }
 
         doc.prebuilt_pages = final_pages;
@@ -3751,6 +3855,254 @@ mod tests {
         bytes
     }
 
+    /// A PDF of `page_count` pages, each a full-page image `XObject` with no text layer, the
+    /// same scanned-page shape `mixed_native_and_scanned_pdf` uses for its one scanned page,
+    /// repeated. Letter `MediaBox` on every page (612x792pt) so the render batch peak is
+    /// uniform and predictable at the default 150 dpi: about 20.3MB per page.
+    #[cfg(all(feature = "pdf", feature = "ocr"))]
+    fn all_scanned_pages_pdf(page_count: u32) -> Vec<u8> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut document = Document::with_version("1.5");
+        let pages_id = document.new_object_id();
+
+        let image_id = document.add_object(Stream::new(
+            dictionary! {
+                "Type" => "XObject",
+                "Subtype" => "Image",
+                "Width" => 1,
+                "Height" => 1,
+                "ColorSpace" => "DeviceGray",
+                "BitsPerComponent" => 8,
+            },
+            vec![0],
+        ));
+
+        let mut page_ids = Vec::new();
+        for _ in 0..page_count {
+            let scanned_content = Content {
+                operations: vec![
+                    Operation::new("q", vec![]),
+                    Operation::new(
+                        "cm",
+                        vec![612.into(), 0.into(), 0.into(), 792.into(), 0.into(), 0.into()],
+                    ),
+                    Operation::new("Do", vec![Object::Name(b"Scan".to_vec())]),
+                    Operation::new("Q", vec![]),
+                ],
+            };
+            let content_id = document.add_object(Stream::new(
+                dictionary! {},
+                scanned_content.encode().expect("scanned page content must encode"),
+            ));
+            let page_id = document.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => content_id,
+                "Resources" => dictionary! { "XObject" => dictionary! { "Scan" => image_id } },
+                "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+            });
+            page_ids.push(page_id.into());
+        }
+
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => page_ids,
+                "Count" => i64::from(page_count),
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+
+        let mut bytes = Vec::new();
+        document
+            .save_to(&mut bytes)
+            .expect("all-scanned PDF fixture must serialize");
+        bytes
+    }
+
+    /// A single page with a non-origin, negative-origin `MediaBox [10 -100 622 692]` (GH#1653)
+    /// and two font sizes -- a 24pt heading line and a 10pt body paragraph, both at known raw
+    /// user-space positions -- so hierarchy clustering assigns a heading level to the first and
+    /// leaves the second as body text. `rotate` optionally sets `/Rotate` on the page (GH#1654).
+    #[cfg(feature = "pdf")]
+    fn coordinate_frame_test_pdf(rotate: Option<i32>) -> Vec<u8> {
+        use lopdf::content::{Content, Operation};
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut document = Document::with_version("1.5");
+        let pages_id = document.new_object_id();
+        let font_id = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+
+        let content = Content {
+            operations: vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 24.into()]),
+                Operation::new("Td", vec![82.into(), 500.into()]),
+                Operation::new("Tj", vec![Object::string_literal("Coordinate Frame Heading")]),
+                Operation::new("ET", vec![]),
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 10.into()]),
+                Operation::new("Td", vec![82.into(), 460.into()]),
+                Operation::new(
+                    "Tj",
+                    vec![Object::string_literal(
+                        "This is a body paragraph with enough ordinary words to cluster as body text below the heading.",
+                    )],
+                ),
+                Operation::new("ET", vec![]),
+            ],
+        };
+        let content_id = document.add_object(Stream::new(
+            dictionary! {},
+            content.encode().expect("coordinate frame fixture content must encode"),
+        ));
+
+        let mut page_dict = dictionary! {
+            "Type" => "Page",
+            "Parent" => pages_id,
+            "Contents" => content_id,
+            "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+            "MediaBox" => vec![10.into(), (-100).into(), 622.into(), 692.into()],
+        };
+        if let Some(rotate) = rotate {
+            page_dict.set("Rotate", rotate);
+        }
+        let page_id = document.add_object(page_dict);
+
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => vec![page_id.into()],
+                "Count" => 1,
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+
+        let mut bytes = Vec::new();
+        document
+            .save_to(&mut bytes)
+            .expect("coordinate frame fixture PDF must serialize");
+        bytes
+    }
+
+    #[cfg(feature = "pdf")]
+    fn coordinate_frame_extraction_config() -> ExtractionConfig {
+        use crate::core::config::{HierarchyConfig, PdfConfig};
+
+        ExtractionConfig {
+            pdf_options: Some(PdfConfig {
+                hierarchy: Some(HierarchyConfig {
+                    enabled: true,
+                    ..HierarchyConfig::default()
+                }),
+                ..PdfConfig::default()
+            }),
+            ..ExtractionConfig::default()
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "pdf")]
+    async fn pdf_page_coordinate_frame_reports_raw_media_box_origin_and_unswapped_extent() {
+        let content = coordinate_frame_test_pdf(None);
+        let config = coordinate_frame_extraction_config();
+        let extractor = PdfExtractor::new();
+        let result = extractor
+            .extract_content(&content, "application/pdf", &config)
+            .await
+            .expect("coordinate frame fixture must extract");
+
+        let frames = result
+            .metadata
+            .additional
+            .get("pdf_page_coordinate_frames")
+            .expect("pdf_page_coordinate_frames must be present when a page has hierarchy blocks")
+            .as_array()
+            .expect("pdf_page_coordinate_frames must be a JSON array");
+        assert_eq!(frames.len(), 1, "exactly one page has hierarchy blocks");
+
+        let frame = &frames[0];
+        assert_eq!(frame["page_number"], serde_json::json!(1));
+        assert_eq!(frame["origin_x"], serde_json::json!(10.0));
+        assert_eq!(frame["origin_y"], serde_json::json!(-100.0));
+        assert_eq!(frame["width"], serde_json::json!(612.0));
+        assert_eq!(frame["height"], serde_json::json!(792.0));
+        assert_eq!(frame["unit"], serde_json::json!("point"));
+        assert_eq!(frame["origin"], serde_json::json!("bottom_left"));
+        assert_eq!(frame["clockwise_rotation"], serde_json::json!(0));
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "pdf")]
+    async fn pdf_page_coordinate_frame_reports_rotation_without_swapping_extent() {
+        let content = coordinate_frame_test_pdf(Some(90));
+        let config = coordinate_frame_extraction_config();
+        let extractor = PdfExtractor::new();
+        let result = extractor
+            .extract_content(&content, "application/pdf", &config)
+            .await
+            .expect("rotated coordinate frame fixture must extract");
+
+        let frames = result
+            .metadata
+            .additional
+            .get("pdf_page_coordinate_frames")
+            .expect("pdf_page_coordinate_frames must be present when a page has hierarchy blocks")
+            .as_array()
+            .expect("pdf_page_coordinate_frames must be a JSON array");
+        assert_eq!(frames.len(), 1);
+
+        let frame = &frames[0];
+        assert_eq!(frame["clockwise_rotation"], serde_json::json!(90));
+        // Deliberately un-swapped: this describes raw PDF user space, not the displayed frame.
+        assert_eq!(frame["width"], serde_json::json!(612.0));
+        assert_eq!(frame["height"], serde_json::json!(792.0));
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "pdf")]
+    async fn pdf_page_coordinate_frame_omits_page_with_malformed_rotation() {
+        let content = coordinate_frame_test_pdf(Some(135));
+        let config = coordinate_frame_extraction_config();
+        let extractor = PdfExtractor::new();
+        let result = extractor
+            .extract_content(&content, "application/pdf", &config)
+            .await
+            .expect("malformed-rotation fixture must still extract successfully");
+
+        assert!(
+            !result.elements.is_empty(),
+            "extraction must otherwise be unaffected by the malformed /Rotate"
+        );
+
+        match result.metadata.additional.get("pdf_page_coordinate_frames") {
+            None => {}
+            Some(value) => {
+                let frames = value.as_array().expect("pdf_page_coordinate_frames must be an array");
+                assert!(
+                    frames.is_empty(),
+                    "page with malformed /Rotate must be omitted entirely, got {frames:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn flat_plain_text_retains_table_asset_without_duplicate_rendering() {
         const TABLE_TEXT: &str = "Account balance 42";
@@ -3940,6 +4292,68 @@ mod tests {
 
         assert_eq!(tables.len(), 1);
         assert_eq!(tables[0].markdown, "native");
+    }
+
+    /// GH#1670: a mixed-path document where only page 2 goes to OCR must keep the native
+    /// tables of every other page. The bug replaced the whole document's table list with only
+    /// page 2's OCR table, dropping pages 1 and 3 entirely.
+    #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+    #[test]
+    fn mixed_ocr_tables_replace_only_the_pages_ocr_produced_a_table_for() {
+        let native_table = |page_number| crate::types::Table {
+            cells: Vec::new(),
+            markdown: format!("native-page-{page_number}"),
+            page_number,
+            bounding_box: None,
+            ..Default::default()
+        };
+        let mut tables = vec![native_table(1), native_table(2), native_table(3)];
+
+        let mut ocr_page = InternalDocument::new("pdf");
+        ocr_page.tables.push(crate::types::Table {
+            cells: Vec::new(),
+            markdown: "ocr-page-2".to_string(),
+            page_number: 2,
+            bounding_box: None,
+            ..Default::default()
+        });
+        let structured_pages = ahash::AHashMap::from([(2, ocr_page)]);
+
+        merge_mixed_ocr_tables(&mut tables, &structured_pages);
+
+        assert_eq!(
+            tables.len(),
+            3,
+            "pages 1 and 3 were never sent to OCR; their native tables must survive"
+        );
+        assert_eq!(tables[0].markdown, "native-page-1");
+        assert_eq!(
+            tables[1].markdown, "ocr-page-2",
+            "page 2 went to OCR; its native table is superseded"
+        );
+        assert_eq!(tables[2].markdown, "native-page-3");
+    }
+
+    /// A page that goes to OCR but whose OCR pass finds no table must keep its native table,
+    /// the same rule `replace_tables_with_ocr_output` applies when OCR finds nothing anywhere.
+    #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+    #[test]
+    fn a_page_ocr_ran_on_but_found_no_table_for_keeps_its_native_table() {
+        let mut tables = vec![crate::types::Table {
+            cells: Vec::new(),
+            markdown: "native-page-1".to_string(),
+            page_number: 1,
+            bounding_box: None,
+            ..Default::default()
+        }];
+
+        // Page 1 went to OCR (it is a key in structured_pages) but produced no table there.
+        let structured_pages = ahash::AHashMap::from([(1, InternalDocument::new("pdf"))]);
+
+        merge_mixed_ocr_tables(&mut tables, &structured_pages);
+
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0].markdown, "native-page-1");
     }
 
     #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
@@ -4455,6 +4869,70 @@ mod tests {
             Some(CONFIDENCE_MOCK_MEAN_TEXT_CONF as f64 / CONFIDENCE_MOCK_SCALE_MAX),
             "a calibrated backend's raw confidence must be normalized by its own scale"
         );
+    }
+
+    /// xberg#1665: the render batch peak scales with the configured thread budget alone, with
+    /// no notion of `security_limits.max_content_size`. A 4-page batch of Letter (612x792pt)
+    /// pages at the default 150 dpi estimates to about 4 x 20.3MB = 81MB; with
+    /// `max_content_size` set to 50MiB (well above any one page, but below the whole batch),
+    /// the pre-fix code renders and validates the FULL 4-page batch and rejects it outright.
+    /// `force_ocr_pages` is the explicit-request route (`extract_mixed_ocr_native`), which
+    /// keeps a real validation failure a hard error rather than a silent native-text fallback
+    /// (see the `~keep` comment on its call site), so on the base tree this call returns `Err`.
+    /// After the fix the batch shrinks to 2 pages per sub-batch (2 x 20.3MB = 41MB, under the
+    /// limit), so every page still reaches OCR, just across two smaller batches, and the
+    /// thread budget stops being the reason OCR turns off.
+    #[cfg(all(feature = "pdf", feature = "ocr"))]
+    #[tokio::test]
+    #[serial]
+    async fn large_thread_budget_does_not_turn_off_ocr_at_a_fixed_content_limit() {
+        use crate::core::config::{ConcurrencyConfig, OcrConfig, PageConfig};
+        use crate::extractors::security::SecurityLimits;
+
+        const OCR_TEXT: &str = "issue sixteen sixty five recovered scanned page text";
+        let _backend = register_mock_ocr_backend("pdf-1665-batch-peak-thread-budget", OCR_TEXT);
+
+        let config = ExtractionConfig {
+            concurrency: Some(ConcurrencyConfig { max_threads: Some(4) }),
+            force_ocr_pages: Some(vec![1, 2, 3, 4]),
+            security_limits: Some(SecurityLimits {
+                max_content_size: 50 * 1024 * 1024,
+                ..Default::default()
+            }),
+            ocr: Some(OcrConfig {
+                backend: "pdf-1665-batch-peak-thread-budget".to_string(),
+                language: vec!["eng".to_string()],
+                ..Default::default()
+            }),
+            pages: Some(PageConfig {
+                extract_pages: true,
+                ..Default::default()
+            }),
+            use_cache: false,
+            ..Default::default()
+        };
+
+        let result = PdfExtractor::new()
+            .extract_content(&all_scanned_pages_pdf(4), "application/pdf", &config)
+            .await;
+
+        let internal = result.expect(
+            "a thread budget wider than the content limit must still complete: the batch must \
+             shrink, not reject every scanned page",
+        );
+        let pages = internal
+            .prebuilt_pages
+            .as_ref()
+            .expect("extract_pages must produce page contents");
+        assert_eq!(pages.len(), 4, "the fixture has four pages: {pages:?}");
+        for page in pages {
+            assert!(
+                page.content.contains(OCR_TEXT),
+                "page {} must carry OCR'd text, not an empty native fallback: {:?}",
+                page.page_number,
+                page.content
+            );
+        }
     }
 
     /// #1568 -- the mixed / scanned-pages route (`config.force_ocr_pages` ->

@@ -63,7 +63,7 @@
       "content_hash": "blake3:8dc985367288037c7f94179c6f29daba5b10ae52a90be1c63c0d55b6ee44de51"
     },
     ".hermes/package/src/xberg_hermes_plugin/__init__.py": {
-      "content_hash": "blake3:230ebfca3b674d2bd2105d0a86368da5785b4c65ebb712da00b2c8ba949d529a"
+      "content_hash": "blake3:ed95e6b5ea93fff0da7f04d3f31604b6eda5502759773f23d1099125682797f9"
     },
     ".hermes/package/src/xberg_hermes_plugin/hermes.py": {
       "content_hash": "blake3:0e17ccbd3652cd0f7f07b3b26eb28e3c2944109c5f4d71415198822f2e862a9b"
@@ -117,7 +117,7 @@
       "content_hash": "blake3:28060fd14909427c0f77d94c820751454c43bbbfab3ca549427e170b0c662449"
     },
     ".hermes/plugins/xberg/__init__.py": {
-      "content_hash": "blake3:230ebfca3b674d2bd2105d0a86368da5785b4c65ebb712da00b2c8ba949d529a"
+      "content_hash": "blake3:ed95e6b5ea93fff0da7f04d3f31604b6eda5502759773f23d1099125682797f9"
     },
     ".hermes/plugins/xberg/hermes.py": {
       "content_hash": "blake3:0e17ccbd3652cd0f7f07b3b26eb28e3c2944109c5f4d71415198822f2e862a9b"

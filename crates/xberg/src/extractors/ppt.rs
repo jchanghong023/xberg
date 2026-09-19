@@ -33,35 +33,158 @@ impl Default for PptExtractor {
     }
 }
 
+/// Join a title's outline paragraphs -- kept as `\n` inside `PptSlideText::title`, one
+/// `\r` paragraph mark per break -- into the single line a `Slide` node's title is
+/// displayed as (xberg-io/xberg#1635): `"Special Databases:\nREACTIONS"` becomes
+/// `"Special Databases: REACTIONS"`, not two lines that read as two different slides.
+fn join_title_paragraphs(title: &str) -> String {
+    title
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// How many of `body`'s leading lines, joined by a single space and trimmed, equal
+/// `title`. The outline merge always prepends a recovered title at the very front of the
+/// slide's text, and a title the drawing already carried is normally its first shape too --
+/// so this looks from the front, and `0` means the title's lines were not found there.
+fn leading_lines_matching(body: &str, title: &str) -> usize {
+    if title.is_empty() {
+        return 0;
+    }
+    let mut joined = String::new();
+    for (index, line) in body.lines().enumerate() {
+        if !joined.is_empty() {
+            joined.push(' ');
+        }
+        joined.push_str(line.trim());
+        if joined == title {
+            return index + 1;
+        }
+    }
+    0
+}
+
 impl PptExtractor {
-    /// Build an `InternalDocument` from PPT extracted slides, speaker notes,
-    /// and embedded images.
+    /// Recursively extract the deck's embedded OLE objects into `children` (GH#1660),
+    /// mirroring `extraction::ooxml_embedded::extract_ooxml_embedded_objects`: one
+    /// `ArchiveEntry` per object the matching legacy extractor can read, a warning per
+    /// object it cannot. The entry path carries the displaying slide when a shape
+    /// references the object (`slide2/oleObject1.bin`).
+    async fn extract_embedded_objects(
+        content: &[u8],
+        config: &ExtractionConfig,
+    ) -> (Vec<crate::types::ArchiveEntry>, Vec<crate::types::ProcessingWarning>) {
+        const SOURCE: &str = "ppt_embedded_objects";
+        let security_limits = config.security_limits.clone().unwrap_or_default();
+        let max_object_bytes = config
+            .max_embedded_file_bytes
+            .unwrap_or(security_limits.max_archive_size as u64) as usize;
+
+        let (mut objects, mut warnings) =
+            match crate::extraction::ppt::extract_ppt_embedded_objects(content, max_object_bytes) {
+                Ok(parsed) => parsed,
+                Err(e) => {
+                    return (
+                        Vec::new(),
+                        vec![crate::types::ProcessingWarning {
+                            source: Cow::Borrowed(SOURCE),
+                            message: Cow::Owned(format!("Failed to read embedded objects: {e}")),
+                        }],
+                    );
+                }
+            };
+        if objects.len() > security_limits.max_files_in_archive {
+            let skipped = objects.len() - security_limits.max_files_in_archive;
+            warnings.push(crate::types::ProcessingWarning {
+                source: Cow::Borrowed(SOURCE),
+                message: Cow::Owned(format!(
+                    "Skipped {skipped} embedded object(s): max_files_in_archive ({}) reached",
+                    security_limits.max_files_in_archive
+                )),
+            });
+            objects.truncate(security_limits.max_files_in_archive);
+        }
+
+        let mut child_config = config.clone();
+        child_config.max_archive_depth = config.max_archive_depth.saturating_sub(1);
+
+        let mut children = Vec::new();
+        for object in objects {
+            let path = match object.slide_number {
+                Some(slide) => format!("slide{slide}/oleObject{}.bin", object.ex_obj_id),
+                None => format!("oleObject{}.bin", object.ex_obj_id),
+            };
+            let Some((inner_bytes, inner_mime)) = crate::extraction::ooxml_embedded::extract_ole_embedded_object(
+                &object.data,
+                &path,
+                max_object_bytes as u64,
+            )
+            else {
+                warnings.push(crate::types::ProcessingWarning {
+                    source: Cow::Borrowed(SOURCE),
+                    message: Cow::Owned(format!(
+                        "Skipped embedded object '{path}': format identification not supported"
+                    )),
+                });
+                continue;
+            };
+            match crate::core::extractor::extract_bytes(&inner_bytes, &inner_mime, &child_config).await {
+                Ok(result) => children.push(crate::types::ArchiveEntry {
+                    path,
+                    mime_type: inner_mime,
+                    result: Box::new(result),
+                }),
+                Err(e) => warnings.push(crate::types::ProcessingWarning {
+                    source: Cow::Borrowed(SOURCE),
+                    message: Cow::Owned(format!("Failed to extract embedded object '{path}': {e}")),
+                }),
+            }
+        }
+        (children, warnings)
+    }
+
+    /// Build an `InternalDocument` from PPT extracted slides and embedded images.
     ///
-    /// `slides` carries the deck's real per-slide structure (persist order
-    /// and numbering, from `extraction::ppt::extract_texts_from_records`) --
-    /// slide numbers are read from that structure, never re-derived by
-    /// splitting rendered text (#1418).
-    fn build_internal_document(
-        slides: &[PptSlideText],
-        speaker_notes: &[String],
-        images: &[ExtractedImage],
-    ) -> InternalDocument {
+    /// `slides` carries the deck's real per-slide structure (persist order and numbering,
+    /// from `extraction::ppt::extract_texts_from_records`) -- slide numbers are read from
+    /// that structure, never re-derived by splitting rendered text (#1418), and each
+    /// slide's speaker notes come from `PptSlideText::notes`, resolved by `slideIdRef`
+    /// rather than by position among the deck's non-empty notes pages (#1640).
+    fn build_internal_document(slides: &[PptSlideText], images: &[ExtractedImage]) -> InternalDocument {
         let mut builder = InternalDocumentBuilder::new("ppt");
 
-        for (i, slide) in slides.iter().enumerate() {
+        for slide in slides.iter() {
             let trimmed = slide.text.trim();
-            let mut lines = trimmed.lines();
-            let first_line = lines.next().unwrap_or("");
-            let title = if !first_line.is_empty() && first_line.len() <= 80 && lines.clone().next().is_some() {
-                Some(first_line)
-            } else {
-                None
+            // The file's own outline title (#1635) wins when it states one; the first-line
+            // guess below is the fallback for a deck whose title is drawn on the canvas and
+            // never entered in the outline view, which has no outline title to read at all.
+            let (title, header_lines): (Option<String>, usize) = match slide.title.as_deref() {
+                Some(file_title) => {
+                    let joined = join_title_paragraphs(file_title);
+                    let matched = leading_lines_matching(trimmed, &joined);
+                    (Some(joined), matched)
+                }
+                None => {
+                    let mut lines = trimmed.lines();
+                    let first_line = lines.next().unwrap_or("");
+                    if !first_line.is_empty() && first_line.len() <= 80 && lines.clone().next().is_some() {
+                        (Some(first_line.to_string()), 1)
+                    } else {
+                        (None, 0)
+                    }
+                }
             };
-            builder.push_slide(slide.number, title, None);
+            builder.push_slide(slide.number, title.as_deref(), None);
 
             if !trimmed.is_empty() {
-                if title.is_some() {
-                    for line in lines {
+                if title.is_some() && header_lines > 0 {
+                    // Skip the lines the title already accounts for -- whether the outline
+                    // merge prepended them or the drawing already carried them -- so the
+                    // title text is never also emitted as a body paragraph.
+                    for line in trimmed.lines().skip(header_lines) {
                         let lt = line.trim();
                         if !lt.is_empty() {
                             builder.push_paragraph(lt, vec![], None, None);
@@ -79,7 +202,7 @@ impl PptExtractor {
                 builder.push_image(None, image.clone(), image.page_number, None);
             }
 
-            if let Some(notes) = speaker_notes.get(i)
+            if let Some(notes) = slide.notes.as_deref()
                 && !notes.is_empty()
             {
                 let key = format!("slide-{}-notes", slide.number);
@@ -225,9 +348,20 @@ impl InternalDocumentExtractor for PptExtractor {
             None
         };
 
-        let mut doc = Self::build_internal_document(&result.slides, &result.speaker_notes, &result.images);
+        let mut doc = Self::build_internal_document(&result.slides, &result.images);
         doc.mime_type = mime_type.to_string();
         doc.processing_warnings.extend(result.processing_warnings);
+
+        // GH#1660: the legacy counterpart of the `ppt/embeddings/` recursion the `.pptx`
+        // extractor does -- a Word or Excel table inserted as an object lives in an
+        // `ExOleObjStg` and reached the output in no form. ~keep
+        if config.max_archive_depth > 0 {
+            let (children, embed_warnings) = Self::extract_embedded_objects(content, config).await;
+            if !children.is_empty() {
+                doc.children = Some(children);
+            }
+            doc.processing_warnings.extend(embed_warnings);
+        }
         doc.metadata = Metadata {
             title: meta_title,
             subject: meta_subject,
@@ -275,20 +409,26 @@ mod tests {
             PptSlideText {
                 number: 1,
                 text: "First".to_string(),
+                title: None,
+                notes: None,
             },
             // Picture-only: no text at all, so before the fix this slide had no content.
             PptSlideText {
                 number: 2,
                 text: String::new(),
+                title: None,
+                notes: None,
             },
             PptSlideText {
                 number: 3,
                 text: "Third".to_string(),
+                title: None,
+                notes: None,
             },
         ];
         let images = vec![image_on(Some(2), 0), image_on(None, 1)];
 
-        let document = PptExtractor::build_internal_document(&slides, &[], &images);
+        let document = PptExtractor::build_internal_document(&slides, &images);
 
         let order: Vec<String> = document
             .elements
@@ -423,6 +563,105 @@ mod tests {
         }
     }
 
+    /// Slide-element `text` (the title, for `ElementKind::Slide`) for slide `number`, or
+    /// `None` if no such slide element exists.
+    fn slide_element_title(doc: &crate::types::internal::InternalDocument, number: u32) -> Option<String> {
+        doc.elements.iter().find_map(|e| match &e.kind {
+            ElementKind::Slide { number: n } if *n == number => Some(e.text.clone()),
+            _ => None,
+        })
+    }
+
+    /// Paragraph texts, in document order.
+    fn paragraph_texts(doc: &crate::types::internal::InternalDocument) -> Vec<String> {
+        doc.elements
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::Paragraph))
+            .map(|e| e.text.clone())
+            .collect()
+    }
+
+    /// xberg-io/xberg#1635: a slide whose only text is its title -- a picture, a diagram, a
+    /// section divider -- previously guessed `title: None` because the first-line heuristic
+    /// required a *second* line to trust the first as a title. The file's own outline title
+    /// carries no such requirement.
+    #[test]
+    fn should_use_the_outline_title_when_the_slide_has_no_other_text() {
+        let slides = vec![PptSlideText {
+            number: 1,
+            text: "Section Divider".to_string(),
+            title: Some("Section Divider".to_string()),
+            notes: None,
+        }];
+        let doc = PptExtractor::build_internal_document(&slides, &[]);
+
+        assert_eq!(slide_element_title(&doc, 1), Some("Section Divider".to_string()));
+        assert!(
+            paragraph_texts(&doc).is_empty(),
+            "a title-only slide must not also get a body paragraph repeating the title"
+        );
+    }
+
+    /// xberg-io/xberg#1635: a title stored as two outline paragraphs (one PowerPoint `\r`
+    /// break) must reach the node whole, space-joined -- not truncated to its first line
+    /// the way the old first-line heuristic cut `"Special Databases:\nREACTIONS"` down to
+    /// `"Special Databases:"`.
+    #[test]
+    fn should_join_a_two_paragraph_outline_title_instead_of_truncating_it() {
+        let slides = vec![PptSlideText {
+            number: 1,
+            text: "Special Databases:\nREACTIONS\nBody bullet one".to_string(),
+            title: Some("Special Databases:\nREACTIONS".to_string()),
+            notes: None,
+        }];
+        let doc = PptExtractor::build_internal_document(&slides, &[]);
+
+        assert_eq!(
+            slide_element_title(&doc, 1),
+            Some("Special Databases: REACTIONS".to_string())
+        );
+        assert_eq!(
+            paragraph_texts(&doc),
+            vec!["Body bullet one".to_string()],
+            "only the body bullet remains a paragraph; the title's two lines must not appear there too"
+        );
+    }
+
+    /// xberg-io/xberg#1635: the old heuristic dropped a title longer than 80 characters
+    /// outright (`title: None`). An outline title has no such length cap.
+    #[test]
+    fn should_use_an_outline_title_longer_than_eighty_characters() {
+        let long_title = "A section title that runs well past the eighty character heuristic cutoff used before";
+        assert!(long_title.len() > 80, "fixture must exercise the old length cutoff");
+        let slides = vec![PptSlideText {
+            number: 1,
+            text: format!("{long_title}\nBody text"),
+            title: Some(long_title.to_string()),
+            notes: None,
+        }];
+        let doc = PptExtractor::build_internal_document(&slides, &[]);
+
+        assert_eq!(slide_element_title(&doc, 1), Some(long_title.to_string()));
+        assert_eq!(paragraph_texts(&doc), vec!["Body text".to_string()]);
+    }
+
+    /// A deck whose title is drawn on the canvas and never entered in the outline view has
+    /// no outline title to read (`PptSlideText::title` is `None`); the first-line heuristic
+    /// must still apply exactly as before (xberg-io/xberg#1635 fallback contract).
+    #[test]
+    fn should_fall_back_to_the_first_line_heuristic_without_an_outline_title() {
+        let slides = vec![PptSlideText {
+            number: 1,
+            text: "Drawn Title\nDrawn body".to_string(),
+            title: None,
+            notes: None,
+        }];
+        let doc = PptExtractor::build_internal_document(&slides, &[]);
+
+        assert_eq!(slide_element_title(&doc, 1), Some("Drawn Title".to_string()));
+        assert_eq!(paragraph_texts(&doc), vec!["Drawn body".to_string()]);
+    }
+
     /// #1418 root-cause regression at the consumer side: `build_internal_document`
     /// must trust the structured `slides` list, never re-split a slide's own
     /// text on `"\n\n"`. A single slide whose text happens to contain an
@@ -432,8 +671,10 @@ mod tests {
         let slides = vec![PptSlideText {
             number: 1,
             text: "Title\n\nBody".to_string(),
+            title: None,
+            notes: None,
         }];
-        let doc = PptExtractor::build_internal_document(&slides, &[], &[]);
+        let doc = PptExtractor::build_internal_document(&slides, &[]);
 
         let slide_numbers: Vec<u32> = doc
             .elements
@@ -460,17 +701,23 @@ mod tests {
             PptSlideText {
                 number: 1,
                 text: "Slide One".to_string(),
+                title: None,
+                notes: None,
             },
             PptSlideText {
                 number: 2,
                 text: String::new(),
+                title: None,
+                notes: None,
             },
             PptSlideText {
                 number: 3,
                 text: "Slide Three".to_string(),
+                title: None,
+                notes: None,
             },
         ];
-        let doc = PptExtractor::build_internal_document(&slides, &[], &[]);
+        let doc = PptExtractor::build_internal_document(&slides, &[]);
 
         let slide_numbers: Vec<u32> = doc
             .elements
@@ -491,6 +738,8 @@ mod tests {
         let slides = vec![PptSlideText {
             number: 1,
             text: "Slide One".to_string(),
+            title: None,
+            notes: None,
         }];
         let image = ExtractedImage {
             data: bytes::Bytes::from_static(b"\xFF\xD8\xFFfake-jpeg"),
@@ -513,7 +762,7 @@ mod tests {
             qr_codes: None,
             data_base64: None,
         };
-        let doc = PptExtractor::build_internal_document(&slides, &[], std::slice::from_ref(&image));
+        let doc = PptExtractor::build_internal_document(&slides, std::slice::from_ref(&image));
 
         assert_eq!(doc.images.len(), 1);
         assert_eq!(doc.images[0].format, "jpeg");

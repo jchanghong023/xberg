@@ -1671,6 +1671,14 @@ impl ImageExtractor {
         apply_default_whole_image_tesseract_psm(&mut ocr_config_with_format);
         ocr_config_with_format.output_format = Some(config.output_format.clone());
         ocr_config_with_format.acceleration = config.acceleration.clone();
+        // GH#1651: the sibling injection the embedded-image route already does
+        // (`extraction::image_ocr`). Without it a standalone image's OCR decode never sees
+        // the caller's `ExtractionConfig::security_limits`. Assigned conditionally so an
+        // `OcrConfig::security_limits` the caller set directly is not silently replaced by
+        // `None`; `ExtractionConfig` still wins whenever it carries a value. ~keep
+        if let Some(security_limits) = config.security_limits.clone() {
+            ocr_config_with_format.security_limits = Some(security_limits);
+        }
         #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
         let include_words = should_use_layout_ocr(config);
         #[cfg(not(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm"))))]
@@ -2435,7 +2443,7 @@ impl InternalDocumentExtractor for ImageExtractor {
         };
 
         if config.effective_disable_ocr() {
-            let attach_image = if config.needs_image_data() {
+            let attach_image = if config.wants_own_bytes_in_result() {
                 Some(extracted_image)
             } else {
                 None
@@ -2472,7 +2480,7 @@ impl InternalDocumentExtractor for ImageExtractor {
                 Self::mark_ocr_extraction(&mut doc);
                 doc.metadata.format = Some(crate::types::FormatMetadata::Image(image_metadata));
                 doc.mime_type = mime_type.to_string();
-                if config.needs_image_data() {
+                if config.wants_own_bytes_in_result() {
                     // 不在此回填首次整图 OCR：管线共享 OCR 通道会以原始字节再识别
                     // 一次，两条通道的噪声并集才是既有输出形态（DPI 归一化字节与
                     // 原始字节识别结果不同，单通道会丢掉只出现在另一通道的金标准
@@ -2498,7 +2506,7 @@ impl InternalDocumentExtractor for ImageExtractor {
                 Self::mark_ocr_extraction(&mut doc);
                 doc.metadata.format = Some(crate::types::FormatMetadata::Image(image_metadata));
                 doc.mime_type = mime_type.to_string();
-                if config.needs_image_data() {
+                if config.wants_own_bytes_in_result() {
                     // 同上：不回填首次 OCR 结果，保留管线第二识别通道（见上一处注释）。
                     doc.images.push(extracted_image);
                 }
@@ -4782,6 +4790,87 @@ mod tests {
             "doc.images must contain the raw image (regression of #732)"
         );
         assert!(!doc.images[0].data.is_empty(), "image data must be non-empty");
+    }
+
+    /// REV-C6 regression for the #1662 review: OCR alone must NOT put a standalone
+    /// image's own bytes in the result. `needs_image_data` gained an OCR disjunct so
+    /// containers would read embedded images for OCR (#1662); `wants_own_bytes_in_result`
+    /// is the narrower predicate `extractors/image.rs` uses instead, so a standalone
+    /// image's public `images` output stays exactly as it was before #1662 unless the
+    /// caller also asked for image extraction, captioning, or QR codes. `doc.images` must
+    /// stay empty here, in contrast to
+    /// `test_extract_with_ocr_populates_images_for_captioning` immediately above, whose
+    /// only difference is a `captioning` config.
+    #[tokio::test]
+    async fn test_extract_with_ocr_only_does_not_populate_images() {
+        use crate::core::config::OcrConfig;
+        use crate::plugins::{OcrBackend, OcrBackendType, Plugin, register_ocr_backend, unregister_ocr_backend};
+        use crate::types::ExtractedDocument;
+
+        let mut png_buf = std::io::Cursor::new(Vec::new());
+        image::ImageBuffer::<image::Rgb<u8>, _>::from_pixel(1, 1, image::Rgb([255u8, 255, 255]))
+            .write_to(&mut png_buf, image::ImageFormat::Png)
+            .expect("failed to encode test PNG");
+        let png_1x1 = png_buf.into_inner();
+
+        struct EmptyOcrBackend1662;
+
+        #[async_trait::async_trait]
+        impl OcrBackend for EmptyOcrBackend1662 {
+            fn backend_type(&self) -> OcrBackendType {
+                OcrBackendType::Custom
+            }
+            fn supports_language(&self, _: &str) -> bool {
+                true
+            }
+            async fn process_image(&self, _: &[u8], _config: &OcrConfig) -> crate::Result<ExtractedDocument> {
+                Ok(ExtractedDocument {
+                    content: String::new(),
+                    ..Default::default()
+                })
+            }
+        }
+
+        impl Plugin for EmptyOcrBackend1662 {
+            fn name(&self) -> &str {
+                "empty-ocr-1662"
+            }
+            fn version(&self) -> String {
+                "0.0.0".to_string()
+            }
+            fn initialize(&self) -> crate::Result<()> {
+                Ok(())
+            }
+            fn shutdown(&self) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        register_ocr_backend(std::sync::Arc::new(EmptyOcrBackend1662)).unwrap();
+        struct BackendGuard(&'static str);
+        impl Drop for BackendGuard {
+            fn drop(&mut self) {
+                let _ = unregister_ocr_backend(self.0);
+            }
+        }
+        let _guard = BackendGuard("empty-ocr-1662");
+
+        let config = ExtractionConfig {
+            ocr: Some(OcrConfig {
+                backend: "empty-ocr-1662".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let extractor = ImageExtractor::new();
+        let doc = extractor.extract_content(&png_1x1, "image/png", &config).await.unwrap();
+
+        assert!(
+            doc.images.is_empty(),
+            "OCR alone must not echo a standalone image's bytes into the public result: {:?}",
+            doc.images
+        );
     }
 
     /// Full-pipeline regression for #732: InternalDocument.images must survive the

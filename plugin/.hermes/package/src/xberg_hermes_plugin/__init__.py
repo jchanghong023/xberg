@@ -8,5 +8,5 @@
 from . import hermes
 from .hermes import register
 
-__version__ = "1.2.2"
+__version__ = "1.2.5"
 __all__ = ["hermes", "register"]

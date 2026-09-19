@@ -1128,6 +1128,17 @@ const MIN_DENSE_COLUMN_CONTENT_WIDTH_PTS: f32 = 200.0;
 // is the only thing this must not mistake for a column boundary.
 const MIN_DENSE_COLUMN_GUTTER_FRACTION: f32 = 0.02;
 const MIN_DENSE_COLUMN_GUTTER_PTS: f32 = 10.0;
+// GH#1655: a gutter has a maximum plausible width too, not just a minimum. Without a
+// cap, `widest_gap_midpoint` accepts a producer-emitted blank line (two whitespace
+// spans opening a 329.6pt gap) or a footer split across both page margins (a 374.1pt
+// gap between a label and a page number) as legitimate per-line gutter evidence, and
+// both then outvote the page's real content into a false two-column split. 0.25 reuses
+// `MAX_REDIRECT_DISTANCE_FRACTION`'s bound and reasoning below (149pt on A4): the
+// reporter's five genuine hanging-number tab gaps top out at 25.2pt (4.2% of the
+// 595.28pt page), the two junk witnesses are at 55.4% and 62.8%, and this repo's own
+// dense two-column fixtures put their true gutter at 9.8% of page width -- 25% sits
+// with wide margin above every real gutter measured and well below both junk gaps. ~keep
+const MAX_DENSE_COLUMN_GUTTER_FRACTION: f32 = 0.25;
 const MIN_DENSE_COLUMN_SPANS_PER_SIDE: usize = 6;
 // Hanging clause numbers and list labels occupy a narrow x-band beside the
 // column body. If the median gutter estimate lands inside that band, snapping
@@ -1190,6 +1201,15 @@ const MIN_DENSE_COLUMN_SPLIT_LINES: usize = MIN_DENSE_COLUMN_SPANS_PER_SIDE;
 // largest legitimate move measured and ~80pt of margin below the smallest
 // illegitimate one. ~keep
 const MAX_REDIRECT_DISTANCE_FRACTION: f32 = 0.25;
+// A page-wide corridor that exactly one non-furniture line runs through is still a
+// gutter: a centred footer, a caption, or a heading set across both columns crosses
+// the gutter on precisely one line, while a table row or a table-of-contents leader
+// crosses it on every line. Measured on the reporter's 18-page carrier the true gutter
+// (292.51..304.87 on A4) is crossed by no line on 16 pages and by exactly one on the
+// other two -- so a tolerance of one restores exactly that gutter and opens nothing
+// inside a table. Consulted only for a split that `MIN_DENSE_COLUMN_SPLIT_LINES` lines already
+// run through, i.e. one that demonstrably sits inside a column. ~keep
+const MAX_GUTTER_CROSSING_LINES: usize = 1;
 // GH#1545: two regions with different leading (a table on 8.05pt beside prose on
 // 10.45pt) are never grouped into a shared line by `group_into_lines`, so per-line
 // gutter evidence only ever sees each region's *internal* gaps and the median lands
@@ -1272,15 +1292,24 @@ fn group_into_lines(spans: &[xberg_native_pdf::layout::TextSpan], order: &[usize
     lines
 }
 
-/// Widest gap at least `min_gutter` wide between consecutive, left-to-right
-/// sorted `(left, right)` edges, or `None` if nothing reaches it.
+/// Widest gap at least `min_gutter` and at most `max_gutter` wide between
+/// consecutive, left-to-right sorted `(left, right)` edges, or `None` if
+/// nothing reaches it.
 ///
 /// Tracking the running rightmost edge already seen (rather than just the
 /// previous span's right edge) means a span nested inside an earlier one can
 /// never be mistaken for the start of a gap. Shared by the per-line gutter
 /// check below, the only caller left after per-band segmentation replaced the
 /// old single whole-page projection.
-fn widest_gap_midpoint(mut edges: impl Iterator<Item = (f32, f32)>, min_gutter: f32) -> Option<f32> {
+///
+/// GH#1655: `max_gutter` (`MAX_DENSE_COLUMN_GUTTER_FRACTION`) rejects a gap wide
+/// enough that it cannot be a gutter at all -- a blank line's two whitespace spans, or
+/// a footer split across both page margins, each open a gap of several hundred points
+/// on an ordinary page and would otherwise outvote genuine narrow gutters into a false
+/// split. Note this rejects the *widest* candidate outright rather than falling back to
+/// the next-widest one on the same line: a line whose only internal gap is that wide
+/// has no real gutter evidence to offer either way. ~keep
+fn widest_gap_midpoint(mut edges: impl Iterator<Item = (f32, f32)>, min_gutter: f32, max_gutter: f32) -> Option<f32> {
     let (_, mut running_right) = edges.next()?;
     let mut best_gap = 0.0_f32;
     let mut best_split = None;
@@ -1292,7 +1321,22 @@ fn widest_gap_midpoint(mut edges: impl Iterator<Item = (f32, f32)>, min_gutter: 
         }
         running_right = running_right.max(right);
     }
-    if best_gap < min_gutter { None } else { best_split }
+    if best_gap < min_gutter || best_gap > max_gutter {
+        None
+    } else {
+        best_split
+    }
+}
+
+/// True if `span` carries visible text rather than only whitespace.
+///
+/// GH#1655: some PDF producers emit the tab between a hanging number and its heading
+/// (or a blank line) as its own space-only span with its own font change, so it never
+/// merges into a neighbouring span. Such a span occupies an x-range but carries no
+/// content, and must not be treated as column population or as evidence that a line
+/// runs through a gutter. ~keep
+fn span_has_ink(span: &xberg_native_pdf::layout::TextSpan) -> bool {
+    !span.text.trim().is_empty()
 }
 
 /// True if any span on `line` is full-width furniture by
@@ -1321,18 +1365,27 @@ fn line_has_width_furniture(
 /// returns their median split point, robust to the rare line whose own gap
 /// sits a little off from the rest (e.g. a heading whose two sides are
 /// narrower than the body columns beneath it).
+///
+/// GH#1655: a line with no inked span at all -- a producer-emitted blank line made
+/// of two whitespace spans -- is not gutter evidence: its "gap" separates nothing,
+/// not two columns of real content. Filtered here in addition to
+/// `MAX_DENSE_COLUMN_GUTTER_FRACTION` in `widest_gap_midpoint` below, which independently
+/// rejects the same line's gap for being implausibly wide -- either fix alone
+/// already removes it from the vote. ~keep
 fn detect_split_x(spans: &[xberg_native_pdf::layout::TextSpan], lines: &[SpanLine], page_width: f32) -> Option<f32> {
     let min_gutter = (page_width * MIN_DENSE_COLUMN_GUTTER_FRACTION).max(MIN_DENSE_COLUMN_GUTTER_PTS);
+    let max_gutter = page_width * MAX_DENSE_COLUMN_GUTTER_FRACTION;
     let furniture_width = page_width * FULL_WIDTH_FURNITURE_FRACTION;
 
     let mut midpoints: Vec<f32> = lines
         .iter()
         .filter(|&line| !line_has_width_furniture(spans, line, furniture_width))
+        .filter(|&line| line.iter().any(|&index| span_has_ink(&spans[index])))
         .filter_map(|line| {
             let edges = line
                 .iter()
                 .map(|&index| (spans[index].bbox.left(), spans[index].bbox.right()));
-            widest_gap_midpoint(edges, min_gutter)
+            widest_gap_midpoint(edges, min_gutter, max_gutter)
         })
         .collect();
     if midpoints.len() < MIN_DENSE_COLUMN_SPLIT_LINES {
@@ -1370,6 +1423,20 @@ fn detect_split_x(spans: &[xberg_native_pdf::layout::TextSpan], lines: &[SpanLin
 /// its gutter. `MAX_REDIRECT_DISTANCE_FRACTION` bounds how far this pass may move the
 /// split from the incoming (detected/snapped) one; a move past that bound falls back
 /// to `split_x` unchanged rather than relocating into unrelated content.
+///
+/// A corridor is whitespace, and `page_whitespace_corridors` reads whitespace as
+/// "no span's bbox" -- so one line set across the gutter (a centred footer, a
+/// heading spanning both columns) closes the gutter for the whole page, and a split
+/// the per-line median has put *inside* a column then has nothing to be moved to.
+/// That page is not left alone by the reorder: every line the split runs through
+/// becomes a band boundary, and whatever is left between them is reordered against
+/// a split that is not a gutter. So when the split is crossed by
+/// `MIN_DENSE_COLUMN_SPLIT_LINES` lines or more, the search is widened to corridors
+/// that at most `MAX_GUTTER_CROSSING_LINES` lines cross -- still bounded by the
+/// same distance cap, and skipping the hanging-label indents that
+/// `corridor_is_hanging_label_indent` recognises and bounded on both sides by a
+/// column of running text (`both_sides_are_columns`). A split that sits in whitespace,
+/// or that a single heading crosses, never reaches that second search.
 fn redirect_split_out_of_content(
     spans: &[xberg_native_pdf::layout::TextSpan],
     lines: &[SpanLine],
@@ -1384,28 +1451,209 @@ fn redirect_split_out_of_content(
     }
     let furniture_width = page_width * FULL_WIDTH_FURNITURE_FRACTION;
     let min_gutter = (page_width * MIN_DENSE_COLUMN_GUTTER_FRACTION).max(MIN_DENSE_COLUMN_GUTTER_PTS);
-    let Some((left, right)) = page_whitespace_corridors(spans, lines, furniture_width, min_gutter)
-        .into_iter()
-        .max_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0)))
-    else {
-        return split_x;
-    };
-    let candidate = (left + right) / 2.0;
     let max_redirect_distance = page_width * MAX_REDIRECT_DISTANCE_FRACTION;
-    if (candidate - split_x).abs() > max_redirect_distance {
+    let widest_within_reach = |corridors: Vec<(f32, f32)>| {
+        corridors
+            .into_iter()
+            .max_by(|a, b| (a.1 - a.0).total_cmp(&(b.1 - b.0)))
+            .map(|(left, right)| (left + right) / 2.0)
+            .filter(|candidate| (candidate - split_x).abs() <= max_redirect_distance)
+    };
+    if let Some(candidate) = widest_within_reach(page_whitespace_corridors(spans, lines, furniture_width, min_gutter)) {
+        return candidate;
+    }
+
+    // No empty corridor within reach. A split that a single line runs through (a
+    // heading set across both columns) is left where the per-line evidence put it,
+    // as before. A split that `MIN_DENSE_COLUMN_SPLIT_LINES` lines run through is
+    // not in a gutter at all -- it is inside a column, and every one of those lines
+    // is about to become a band boundary -- so the corridor search is widened to
+    // bands that at most `MAX_GUTTER_CROSSING_LINES` lines cross, minus the
+    // hanging-label indents that are wider than a real gutter on every
+    // clause-numbered page (the GH#1603 shape, seen from the corridor's side).
+    if lines_crossing(spans, lines, furniture_width, split_x) < MIN_DENSE_COLUMN_SPLIT_LINES {
         return split_x;
     }
-    candidate
+    let max_label_width = page_width * MAX_DENSE_COLUMN_SPLIT_SNAP_SPAN_FRACTION;
+    let corridors = page_low_occupancy_corridors(spans, lines, furniture_width, min_gutter, MAX_GUTTER_CROSSING_LINES)
+        .into_iter()
+        .filter(|&corridor| !corridor_is_hanging_label_indent(spans, lines, max_label_width, corridor))
+        .filter(|&(left, right)| both_sides_are_columns(spans, lines, furniture_width, (left + right) / 2.0))
+        .collect();
+    widest_within_reach(corridors).unwrap_or(split_x)
 }
 
-/// Every maximal x-interval at least `min_gutter` wide that no non-furniture span
-/// occupies anywhere on the page.
+/// True if the page's non-furniture spans on either side of `x` each form a
+/// column the reorder would accept (`RegionClass::Prose` or `Reference`).
+///
+/// This is the occupancy test a corridor has to pass before a split is moved
+/// into it from inside a column: a gutter separates two columns of running
+/// text, whereas the gap between a table's cells, between a legend's letters
+/// and their captions, or between a narrative column and a chart, separates
+/// content the per-band reorder gates would refuse -- and a split placed there
+/// still reorders whatever band those gates happen to let through. Requiring
+/// both sides to read as columns keeps the widened search on the pages it was
+/// written for.
+fn both_sides_are_columns(
+    spans: &[xberg_native_pdf::layout::TextSpan],
+    lines: &[SpanLine],
+    furniture_width: f32,
+    x: f32,
+) -> bool {
+    let (left, right): (Vec<usize>, Vec<usize>) = lines
+        .iter()
+        .filter(|&line| !line_has_width_furniture(spans, line, furniture_width))
+        .flat_map(|line| line.iter().copied())
+        .filter(|&index| span_has_ink(&spans[index]))
+        .partition(|&index| spans[index].bbox.x < x);
+    xberg_native_pdf::layout::classify_region(spans, &left).is_reorderable_column()
+        && xberg_native_pdf::layout::classify_region(spans, &right).is_reorderable_column()
+}
+
+/// How many non-furniture lines have an inked span written across `x`.
+fn lines_crossing(
+    spans: &[xberg_native_pdf::layout::TextSpan],
+    lines: &[SpanLine],
+    furniture_width: f32,
+    x: f32,
+) -> usize {
+    lines
+        .iter()
+        .filter(|&line| !line_has_width_furniture(spans, line, furniture_width))
+        .filter(|line| {
+            line.iter().any(|&index| {
+                let span = &spans[index];
+                span_has_ink(span) && span.bbox.left() < x && span.bbox.right() > x
+            })
+        })
+        .count()
+}
+
+/// Every maximal x-interval at least `min_gutter` wide that at most
+/// `max_crossing_lines` non-furniture lines run through, counting only spans
+/// that carry ink (a whitespace-only span occupies nothing).
+///
+/// `page_whitespace_corridors` below demands zero occupancy, so one gutter-
+/// crossing line narrower than `furniture_width` -- a centred footer, a
+/// caption, a heading set across both columns -- deletes the gutter from the
+/// corridor list for the whole page. Tolerating a single crossing *line* (not
+/// span: a line emitted as several fragments is still one line) restores
+/// exactly that gutter and nothing else: a table row or a table-of-contents
+/// leader crosses on every line, so a band inside a table never qualifies.
+fn page_low_occupancy_corridors(
+    spans: &[xberg_native_pdf::layout::TextSpan],
+    lines: &[SpanLine],
+    furniture_width: f32,
+    min_gutter: f32,
+    max_crossing_lines: usize,
+) -> Vec<(f32, f32)> {
+    // (left, right, line) of every inked span on a non-furniture line.
+    let extents: Vec<(f32, f32, usize)> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line_has_width_furniture(spans, line, furniture_width))
+        .flat_map(|(line_index, line)| line.iter().map(move |&index| (index, line_index)))
+        .filter(|&(index, _)| span_has_ink(&spans[index]))
+        .map(|(index, line_index)| (spans[index].bbox.left(), spans[index].bbox.right(), line_index))
+        .filter(|(left, right, _)| left.is_finite() && right.is_finite() && right > left)
+        .collect();
+    if extents.is_empty() {
+        return Vec::new();
+    }
+    let mut edges: Vec<f32> = extents.iter().flat_map(|&(left, right, _)| [left, right]).collect();
+    edges.sort_by(f32::total_cmp);
+    edges.dedup();
+
+    // Occupancy of each elementary interval between consecutive edges, as the
+    // number of distinct lines with an inked span covering it; consecutive
+    // low-occupancy intervals merge into one corridor.
+    let mut corridors: Vec<(f32, f32)> = Vec::new();
+    let mut open: Option<f32> = None;
+    let mut crossing_lines: Vec<usize> = Vec::new();
+    for window in edges.windows(2) {
+        let (lo, hi) = (window[0], window[1]);
+        crossing_lines.clear();
+        for &(left, right, line) in &extents {
+            if left < hi && right > lo && !crossing_lines.contains(&line) {
+                crossing_lines.push(line);
+                if crossing_lines.len() > max_crossing_lines {
+                    break;
+                }
+            }
+        }
+        if crossing_lines.len() <= max_crossing_lines {
+            open.get_or_insert(lo);
+        } else if let Some(start) = open.take()
+            && lo - start >= min_gutter
+        {
+            corridors.push((start, lo));
+        }
+    }
+    if let Some(start) = open {
+        let end = *edges.last().expect("edges is non-empty when extents is");
+        if end - start >= min_gutter {
+            corridors.push((start, end));
+        }
+    }
+    corridors
+}
+
+/// True if `corridor` is a hanging-label indent rather than a column gutter:
+/// its left wall is a stack of narrow spans (at most `max_label_width` wide)
+/// that share a left edge, `MIN_DENSE_COLUMN_SPLIT_LINES` or more of them --
+/// the population `aligned_hanging_label_left_edge` snaps a split away from,
+/// seen from the corridor's side.
+///
+/// A gutter's left wall is the ragged right edge of the left column's body
+/// lines: wide spans whose left edges sit at the column margin, not at the
+/// wall. Only the left wall is examined, because a hanging label always
+/// precedes the text it labels; the *right* wall of a real gutter is very
+/// often the right column's own label stack, which must not disqualify it.
+fn corridor_is_hanging_label_indent(
+    spans: &[xberg_native_pdf::layout::TextSpan],
+    lines: &[SpanLine],
+    max_label_width: f32,
+    corridor: (f32, f32),
+) -> bool {
+    let wall = corridor.0;
+    let mut left_edges: Vec<f32> = lines
+        .iter()
+        .filter_map(|line| {
+            line.iter()
+                .filter_map(|&index| {
+                    let bbox = &spans[index].bbox;
+                    (bbox.width > 0.0
+                        && bbox.width <= max_label_width
+                        && bbox.right() <= wall + DENSE_COLUMN_SPLIT_SNAP_X_TOLERANCE_PTS
+                        && bbox.right() >= wall - max_label_width)
+                        .then_some(bbox.left())
+                })
+                .min_by(f32::total_cmp)
+        })
+        .collect();
+    left_edges.sort_by(f32::total_cmp);
+    left_edges.iter().enumerate().any(|(start, &left_edge)| {
+        left_edges[start..]
+            .iter()
+            .take_while(|&&candidate| candidate - left_edge <= DENSE_COLUMN_SPLIT_SNAP_X_TOLERANCE_PTS)
+            .count()
+            >= MIN_DENSE_COLUMN_SPLIT_LINES
+    })
+}
+
+/// Every maximal x-interval at least `min_gutter` wide that no inked, non-furniture
+/// span occupies anywhere on the page.
 ///
 /// This is the whole-page projection the per-line detector above deliberately
 /// replaced, kept here as *corroboration* rather than as the primary signal. Its
 /// known weakness is unchanged — furniture narrower than `furniture_width` that
 /// crosses a gutter closes the corridor — but that only ever removes a candidate,
 /// so a page it cannot read simply falls back to the per-line median.
+///
+/// GH#1655: a whitespace-only span (a tab-stop-as-space-span, a blank line) must not
+/// be able to close a real gutter as "occupied" -- it occupies an x-range but carries
+/// no content, so it is excluded here the same way `page_low_occupancy_corridors`
+/// already excludes it. ~keep
 fn page_whitespace_corridors(
     spans: &[xberg_native_pdf::layout::TextSpan],
     lines: &[SpanLine],
@@ -1416,6 +1664,7 @@ fn page_whitespace_corridors(
         .iter()
         .filter(|&line| !line_has_width_furniture(spans, line, furniture_width))
         .flat_map(|line| line.iter())
+        .filter(|&&index| span_has_ink(&spans[index]))
         .map(|&index| (spans[index].bbox.left(), spans[index].bbox.right()))
         .filter(|(left, right)| left.is_finite() && right.is_finite())
         .collect();
@@ -1556,6 +1805,12 @@ fn build_bands(
 /// too few spans on either side, or that fails the prose/reference
 /// classification, stays in its existing order — a table or form band is not
 /// corrupted by a prose band elsewhere on the same page.
+///
+/// GH#1655: the density gate counts only inked spans, not raw indices -- a stack of
+/// hanging-number tab spaces or blank-line spans on one side must not be able to
+/// manufacture a false quorum. `left`/`right` themselves still carry every span,
+/// whitespace included, into `classify_region` and the emitted order below: only
+/// what gets *counted* changes, not what gets *emitted*, or content would be dropped. ~keep
 fn reorder_band_columns(
     spans: &[xberg_native_pdf::layout::TextSpan],
     band: &[usize],
@@ -1563,7 +1818,9 @@ fn reorder_band_columns(
 ) -> Option<Vec<usize>> {
     let (left, right): (Vec<usize>, Vec<usize>) =
         band.iter().copied().partition(|&index| spans[index].bbox.x < split_x);
-    if left.len() < MIN_DENSE_COLUMN_SPANS_PER_SIDE || right.len() < MIN_DENSE_COLUMN_SPANS_PER_SIDE {
+    let left_ink = left.iter().filter(|&&index| span_has_ink(&spans[index])).count();
+    let right_ink = right.iter().filter(|&&index| span_has_ink(&spans[index])).count();
+    if left_ink < MIN_DENSE_COLUMN_SPANS_PER_SIDE || right_ink < MIN_DENSE_COLUMN_SPANS_PER_SIDE {
         return None;
     }
     let left_reorderable = xberg_native_pdf::layout::classify_region(spans, &left).is_reorderable_column();
@@ -1608,6 +1865,10 @@ fn region_rows(spans: &[xberg_native_pdf::layout::TextSpan], region: &[usize]) -
 /// gutter; two regions that merely sit side by side (a table beside a prose
 /// column, each on its own leading) pair almost none. That is the difference
 /// between a page whose rows carry the meaning and a page whose regions do.
+///
+/// GH#1655: only inked spans count as pairing evidence -- a whitespace span on the
+/// far side of `split_x` (the number-to-title tab of a hanging-number heading) must
+/// not be able to fake a row pairing and suppress a legitimate reorder. ~keep
 fn cross_gutter_row_pairing_fraction(
     spans: &[xberg_native_pdf::layout::TextSpan],
     band: &[usize],
@@ -1620,8 +1881,11 @@ fn cross_gutter_row_pairing_fraction(
     let paired = rows
         .iter()
         .filter(|row| {
-            row.iter().any(|&index| spans[index].bbox.x < split_x)
-                && row.iter().any(|&index| spans[index].bbox.x >= split_x)
+            row.iter()
+                .any(|&index| span_has_ink(&spans[index]) && spans[index].bbox.x < split_x)
+                && row
+                    .iter()
+                    .any(|&index| span_has_ink(&spans[index]) && spans[index].bbox.x >= split_x)
         })
         .count();
     paired as f32 / rows.len() as f32
@@ -4027,6 +4291,554 @@ mod tests {
         assert_eq!(
             checked, 16,
             "all 16 clause numbers in the fixture must have been checked"
+        );
+    }
+
+    const CORRIDOR_PAGE_WIDTH: f32 = 595.32;
+    // Geometry lifted from the reporter's carrier, page 1 (A4): hanging clause numbers at
+    // x=36.0 (left) and x=304.87 (right), body text at 64.34 and 333.19, the left
+    // column's longest lines ending at 292.51, so the true gutter is 292.51..304.87.
+    const CORRIDOR_TRUE_GUTTER_MID_X: f32 = (292.51 + 304.87) / 2.0;
+
+    /// Two clause-numbered columns whose baselines are offset by 1.32pt (above
+    /// `LINE_Y_TOLERANCE_PTS`), so almost no line carries spans from both columns and
+    /// the per-line votes are the two number indents; four coincidentally aligned rows
+    /// vote for the gutter with a midpoint 3.4pt *inside* the left column's longest
+    /// lines. A heading crosses each indent, and a centred footer crosses the gutter --
+    /// one line each, which closes all three as `page_whitespace_corridors` corridors.
+    fn corridor_closed_by_one_footer_line_spans(with_footer: bool) -> Vec<TextSpan> {
+        let mut spans = Vec::new();
+        spans.push(span_with_width(
+            "Article 1 Applicability",
+            36.0,
+            920.0,
+            160.0,
+            11.0,
+            11.0,
+        ));
+        spans.push(span_with_width(
+            "Article 3 Price and payment",
+            304.87,
+            920.0,
+            130.0,
+            11.0,
+            11.0,
+        ));
+        for row in 0..15 {
+            let y = 900.0 - row as f32 * 14.0;
+            let cross = row % 4 == 1 && row < 16; // rows 1, 5, 9, 13 share a baseline
+            let left_width = if cross { 208.96 } else { 228.17 }; // 273.3 vs 292.51
+            spans.push(span_with_width(&format!("1.{}", row + 1), 36.0, y, 11.4, 11.0, 11.0));
+            spans.push(span_with_width(
+                &format!("left clause line {row} continues with ordinary agreement terms"),
+                64.34,
+                y,
+                left_width,
+                11.0,
+                11.0,
+            ));
+            let right_y = if cross { y } else { y - 1.32 };
+            spans.push(span_with_width(
+                &format!("3.{}", row + 1),
+                304.87,
+                right_y,
+                13.4,
+                11.0,
+                11.0,
+            ));
+            spans.push(span_with_width(
+                &format!("right clause line {row} continues with ordinary agreement terms"),
+                333.19,
+                right_y,
+                220.0,
+                11.0,
+                11.0,
+            ));
+        }
+        if with_footer {
+            spans.push(span_with_width(
+                "takes precedence.        \u{a9} 2020 NLdigital",
+                222.89,
+                60.0,
+                149.57,
+                9.0,
+                9.0,
+            ));
+        }
+        spans
+    }
+
+    fn corridor_fixture_lines(spans: &[TextSpan]) -> Vec<SpanLine> {
+        let order = spans_sorted_top_to_bottom(spans);
+        group_into_lines(spans, &order)
+    }
+
+    /// The per-line median lands 3.4pt inside the left column (the fixture reproduces
+    /// the carrier's vote population), the footer closes the gutter as a whitespace
+    /// corridor, and the split is then moved into the gutter through the
+    /// low-occupancy search rather than left inside the column.
+    #[test]
+    fn split_inside_a_column_is_moved_to_a_gutter_one_footer_line_crosses() {
+        let spans = corridor_closed_by_one_footer_line_spans(true);
+        let lines = corridor_fixture_lines(&spans);
+        let furniture_width = CORRIDOR_PAGE_WIDTH * FULL_WIDTH_FURNITURE_FRACTION;
+        let min_gutter = (CORRIDOR_PAGE_WIDTH * MIN_DENSE_COLUMN_GUTTER_FRACTION).max(MIN_DENSE_COLUMN_GUTTER_PTS);
+
+        let detected = detect_split_x(&spans, &lines, CORRIDOR_PAGE_WIDTH).expect("a split is detected");
+        assert!(
+            detected < 292.51 && detected > 280.0,
+            "the fixture must put the median inside the left column's longest lines, got {detected}"
+        );
+        let snapped = snap_split_left_of_hanging_labels(&spans, &lines, CORRIDOR_PAGE_WIDTH, detected);
+        assert_eq!(snapped, detected, "no narrow span straddles the median");
+        assert!(
+            lines_crossing(&spans, &lines, furniture_width, snapped) >= MIN_DENSE_COLUMN_SPLIT_LINES,
+            "the long left lines must run through the split, or the fixture no longer exercises the search"
+        );
+        assert!(
+            page_whitespace_corridors(&spans, &lines, furniture_width, min_gutter).is_empty(),
+            "the footer and the two headings must close every whitespace corridor"
+        );
+        let low_occupancy = page_low_occupancy_corridors(&spans, &lines, furniture_width, min_gutter, 1);
+        assert!(
+            low_occupancy
+                .iter()
+                .any(|&(l, r)| (l - 292.51).abs() < 0.01 && (r - 304.87).abs() < 0.01),
+            "the gutter must come back once one crossing line is tolerated, got {low_occupancy:?}"
+        );
+        let max_label_width = CORRIDOR_PAGE_WIDTH * MAX_DENSE_COLUMN_SPLIT_SNAP_SPAN_FRACTION;
+        let kept: Vec<(f32, f32)> = low_occupancy
+            .iter()
+            .copied()
+            .filter(|&c| !corridor_is_hanging_label_indent(&spans, &lines, max_label_width, c))
+            .collect();
+        assert_eq!(
+            kept.len(),
+            1,
+            "both number indents are label-walled and must be excluded, leaving the gutter: {kept:?}"
+        );
+
+        assert!(
+            both_sides_are_columns(&spans, &lines, furniture_width, CORRIDOR_TRUE_GUTTER_MID_X),
+            "two clause columns must read as columns on both sides of the gutter"
+        );
+
+        let redirected = redirect_split_out_of_content(&spans, &lines, CORRIDOR_PAGE_WIDTH, snapped);
+        assert!(
+            (redirected - CORRIDOR_TRUE_GUTTER_MID_X).abs() < 0.01,
+            "the split must land mid-gutter at {CORRIDOR_TRUE_GUTTER_MID_X}, got {redirected}"
+        );
+
+        // End to end: every clause of Article 1 precedes every clause of Article 3.
+        let mut reordered = spans.clone();
+        assert!(reorder_dense_two_column_page(&mut reordered, CORRIDOR_PAGE_WIDTH));
+        let last_left = reordered.iter().rposition(|s| s.text.starts_with("1.")).unwrap();
+        let first_right = reordered.iter().position(|s| s.text.starts_with("3.")).unwrap();
+        assert!(
+            last_left < first_right,
+            "the left column must be emitted before the right one; the last left clause \
+             number sits at {last_left}, the first right one at {first_right}"
+        );
+    }
+
+    /// Without the footer the gutter is an ordinary whitespace corridor and the
+    /// existing redirect already finds it; the widened search is never consulted and
+    /// the outcome is the same, which is what keeps the change out of every page that
+    /// is repaired today.
+    #[test]
+    fn split_inside_a_column_still_takes_the_whitespace_corridor_when_nothing_crosses_it() {
+        let spans = corridor_closed_by_one_footer_line_spans(false);
+        let lines = corridor_fixture_lines(&spans);
+        let detected = detect_split_x(&spans, &lines, CORRIDOR_PAGE_WIDTH).expect("a split is detected");
+        let redirected = redirect_split_out_of_content(&spans, &lines, CORRIDOR_PAGE_WIDTH, detected);
+        assert!(
+            (redirected - CORRIDOR_TRUE_GUTTER_MID_X).abs() < 0.01,
+            "the whitespace corridor must still win on its own, got {redirected}"
+        );
+    }
+
+    /// A split that a single heading runs through is the ordinary two-column page and
+    /// must be left exactly where the per-line evidence put it.
+    #[test]
+    fn split_crossed_by_one_heading_is_not_redirected() {
+        let mut spans = Vec::new();
+        spans.push(span_with_width(
+            "A heading set across both columns",
+            150.0,
+            920.0,
+            300.0,
+            11.0,
+            11.0,
+        ));
+        for row in 0..8 {
+            let y = 900.0 - row as f32 * 14.0;
+            spans.push(span_with_width("left body text of the row", 36.0, y, 240.0, 11.0, 11.0));
+            spans.push(span_with_width(
+                "right body text of the row",
+                306.0,
+                y,
+                240.0,
+                11.0,
+                11.0,
+            ));
+        }
+        let lines = corridor_fixture_lines(&spans);
+        let furniture_width = CORRIDOR_PAGE_WIDTH * FULL_WIDTH_FURNITURE_FRACTION;
+        let detected = detect_split_x(&spans, &lines, CORRIDOR_PAGE_WIDTH).expect("a split is detected");
+        assert_eq!(
+            lines_crossing(&spans, &lines, furniture_width, detected),
+            1,
+            "only the heading crosses"
+        );
+        let redirected = redirect_split_out_of_content(&spans, &lines, CORRIDOR_PAGE_WIDTH, detected);
+        assert_eq!(redirected, detected, "one crossing line is not grounds for a search");
+    }
+
+    /// A split inside a table's description column is crossed by every row, but the
+    /// gap to the value column is not a gutter: short cells do not read as a column,
+    /// so the widened search declines and the split stays where it was.
+    #[test]
+    fn split_inside_a_table_column_is_not_moved_to_the_cell_gap() {
+        let mut spans = Vec::new();
+        spans.push(span_with_width(
+            "Product list valid for all regions and partners",
+            36.0,
+            920.0,
+            380.0,
+            11.0,
+            11.0,
+        ));
+        for row in 0..12 {
+            let y = 900.0 - row as f32 * 14.0;
+            spans.push(span_with_width(&format!("V-{row:03}"), 36.0, y, 40.0, 11.0, 11.0));
+            spans.push(span_with_width(
+                "software subscription licence per channel for the analytics platform",
+                90.0,
+                y,
+                300.0,
+                11.0,
+                11.0,
+            ));
+            spans.push(span_with_width("$120", 420.0, y, 30.0, 11.0, 11.0));
+            spans.push(span_with_width("$1,200", 480.0, y, 40.0, 11.0, 11.0));
+        }
+        let lines = corridor_fixture_lines(&spans);
+        let furniture_width = CORRIDOR_PAGE_WIDTH * FULL_WIDTH_FURNITURE_FRACTION;
+        // A split placed by hand inside the description column, as a bimodal median can.
+        let split_x = 250.0;
+        assert!(lines_crossing(&spans, &lines, furniture_width, split_x) >= MIN_DENSE_COLUMN_SPLIT_LINES);
+        assert!(
+            !both_sides_are_columns(&spans, &lines, furniture_width, 405.0),
+            "the price cells must not read as a column"
+        );
+        let redirected = redirect_split_out_of_content(&spans, &lines, CORRIDOR_PAGE_WIDTH, split_x);
+        assert_eq!(
+            redirected, split_x,
+            "the cell gap at ~405 is not a gutter; the split must stay"
+        );
+    }
+
+    /// A band inside a table is crossed on every row, so tolerating one crossing line
+    /// opens nothing there.
+    #[test]
+    fn low_occupancy_corridors_open_nothing_inside_a_table() {
+        let mut spans = Vec::new();
+        for row in 0..8 {
+            let y = 900.0 - row as f32 * 14.0;
+            spans.push(span_with_width("cell one", 36.0, y, 100.0, 11.0, 11.0));
+            spans.push(span_with_width(
+                "cell two spanning the middle of the page",
+                150.0,
+                y,
+                300.0,
+                11.0,
+                11.0,
+            ));
+            spans.push(span_with_width("cell three", 470.0, y, 80.0, 11.0, 11.0));
+        }
+        let lines = corridor_fixture_lines(&spans);
+        let furniture_width = CORRIDOR_PAGE_WIDTH * FULL_WIDTH_FURNITURE_FRACTION;
+        let min_gutter = (CORRIDOR_PAGE_WIDTH * MIN_DENSE_COLUMN_GUTTER_FRACTION).max(MIN_DENSE_COLUMN_GUTTER_PTS);
+        let strict = page_whitespace_corridors(&spans, &lines, furniture_width, min_gutter);
+        let tolerant = page_low_occupancy_corridors(&spans, &lines, furniture_width, min_gutter, 1);
+        assert_eq!(
+            strict, tolerant,
+            "the two cell gaps are corridors either way; nothing new opens"
+        );
+        assert_eq!(strict.len(), 2);
+    }
+
+    const GH1655_PAGE_WIDTH: f32 = 595.28;
+    const GH1655_NUMBER_X: f32 = 45.22;
+    const GH1655_TITLE_X: f32 = 80.68;
+
+    struct Gh1655Row {
+        number: &'static str,
+        number_width: f32,
+        gap_to_title: f32,
+        title: &'static str,
+        title_width: f32,
+    }
+
+    const GH1655_ROWS: [Gh1655Row; 5] = [
+        Gh1655Row {
+            number: "6",
+            number_width: 6.6,
+            gap_to_title: 25.2,
+            title: "INBEDRIJFSTELLEN VAN HET TOESTEL",
+            title_width: 200.0,
+        },
+        Gh1655Row {
+            number: "6.1",
+            number_width: 17.0,
+            gap_to_title: 18.4,
+            title: "Vullen en ontluchten van het cv-systeem",
+            title_width: 210.0,
+        },
+        Gh1655Row {
+            number: "6.1.1",
+            number_width: 20.0,
+            gap_to_title: 12.4,
+            title: "CV-systeem",
+            title_width: 70.0,
+        },
+        Gh1655Row {
+            number: "6.1.2",
+            number_width: 20.0,
+            gap_to_title: 12.4,
+            title: "Warmwatervoorziening",
+            title_width: 140.0,
+        },
+        Gh1655Row {
+            number: "6.1.3",
+            number_width: 20.0,
+            gap_to_title: 12.4,
+            title: "Gastoevoer",
+            title_width: 70.0,
+        },
+    ];
+
+    /// GH#1655: reproduces the reporter's carrier -- a single-column page of
+    /// hanging-number headings (`6.1.1` <tab> `CV-systeem`), where the producer emits
+    /// the number-to-title tab as its own space-only span (a font change, so it never
+    /// merges with a neighbour), plus two invisible empty-line spans elsewhere on the
+    /// page and a two-span footer. Coordinates match the reporter's own measurements:
+    /// numbers at x0=45.22, titles at x0=80.68, footer spans at 43.38..169.53 and
+    /// 543.59..553.62, page width 595.28; the five per-row gaps (25.2, 18.4, 12.4,
+    /// 12.4, 12.4) and the blank-line gap (329.6, midpoint 212.2) reproduce the
+    /// reporter's exact measurements.
+    ///
+    /// `include_space_spans` selects the reporter's control page
+    /// (`gh1655_hanging_number_control_page_without_space_spans_is_not_reordered`),
+    /// which omits every space-only span -- the five tab spans and the two blank-line
+    /// spans -- and must behave identically. ~keep
+    fn gh1655_hanging_number_heading_spans(include_space_spans: bool) -> Vec<TextSpan> {
+        let mut spans = Vec::new();
+        for (row, entry) in GH1655_ROWS.iter().enumerate() {
+            let y = 900.0 - row as f32 * 14.0;
+            spans.push(span_with_width(
+                entry.number,
+                GH1655_NUMBER_X,
+                y,
+                entry.number_width,
+                11.0,
+                11.0,
+            ));
+            if include_space_spans {
+                let space_left = GH1655_NUMBER_X + entry.number_width;
+                let space_right = GH1655_TITLE_X - entry.gap_to_title;
+                spans.push(span_with_width(
+                    " ",
+                    space_left,
+                    y,
+                    space_right - space_left,
+                    11.0,
+                    11.0,
+                ));
+            }
+            spans.push(span_with_width(
+                entry.title,
+                GH1655_TITLE_X,
+                y,
+                entry.title_width,
+                11.0,
+                11.0,
+            ));
+        }
+        if include_space_spans {
+            spans.push(span_with_width(" ", 36.0, 830.0, 11.4, 11.0, 11.0));
+            spans.push(span_with_width(" ", 377.0, 830.0, 20.0, 11.0, 11.0));
+        }
+        spans.push(span_with_width("Intergas Verwarming BV", 43.38, 60.0, 126.15, 9.0, 9.0));
+        spans.push(span_with_width("30", 543.59, 60.0, 10.03, 9.0, 9.0));
+        spans
+    }
+
+    /// GH#1655 defect page. Before the fix, all 7 lines (5 heading tabs, the blank
+    /// line, the footer) vote for a split -- meeting `MIN_DENSE_COLUMN_SPLIT_LINES` (6)
+    /// -- and the page is misread as two columns, tearing every number away from its
+    /// own title. After the fix, the blank line is excluded for carrying no ink and the
+    /// footer's 374pt gap is excluded by `MAX_DENSE_COLUMN_GUTTER_FRACTION`, leaving
+    /// only the 5 genuine heading lines -- below quorum -- so `detect_split_x` returns
+    /// `None` and the page is left alone. The `detect_split_x` assertion is the load-
+    /// bearing one: with a 5-heading band this small, `classify_region`'s existing
+    /// Table/row-pairing guards (unrelated to this fix, already covered elsewhere)
+    /// independently refuse the reorder regardless of quorum, so asserting only the
+    /// end-to-end result would pass even with this fix reverted. Asserting
+    /// `detect_split_x` directly proves the quorum fix itself fired. ~keep
+    #[test]
+    fn gh1655_hanging_number_headings_with_tab_spans_and_footer_are_not_reordered() {
+        let spans = gh1655_hanging_number_heading_spans(true);
+        let order = spans_sorted_top_to_bottom(&spans);
+        let lines = group_into_lines(&spans, &order);
+        assert_eq!(
+            lines.len(),
+            7,
+            "fixture must produce exactly the reporter's 7 voting lines"
+        );
+        assert_eq!(
+            detect_split_x(&spans, &lines, GH1655_PAGE_WIDTH),
+            None,
+            "only 5 of the 7 lines are genuine gutter evidence, below the quorum of \
+             MIN_DENSE_COLUMN_SPLIT_LINES -- if this is Some, the ink filter or the \
+             max-gutter cap has regressed"
+        );
+
+        let mut spans = spans;
+        let original = spans.iter().map(|span| span.text.clone()).collect::<Vec<_>>();
+        assert!(
+            !reorder_dense_two_column_page(&mut spans, GH1655_PAGE_WIDTH),
+            "a single-column page of hanging-number headings must not be read as two columns"
+        );
+        assert_eq!(
+            spans.iter().map(|span| span.text.as_str()).collect::<Vec<_>>(),
+            original.iter().map(String::as_str).collect::<Vec<_>>(),
+            "span order must be unchanged when the page is correctly left alone"
+        );
+    }
+
+    /// GH#1655 control page: identical to the defect page but with every space-only
+    /// span omitted (the five tab spans and the two blank-line spans). Must behave the
+    /// same as the defect page -- not reordered. With the blank line gone entirely,
+    /// only `MAX_DENSE_COLUMN_GUTTER_FRACTION` is exercised here (there is no
+    /// whitespace-only line left for the ink filter to remove): pre-fix the footer's
+    /// gap alone is (wrongly) accepted, reaching the 6-line quorum with the 5 headings;
+    /// post-fix it is excluded, leaving 5 lines. ~keep
+    #[test]
+    fn gh1655_hanging_number_control_page_without_space_spans_is_not_reordered() {
+        let spans = gh1655_hanging_number_heading_spans(false);
+        let order = spans_sorted_top_to_bottom(&spans);
+        let lines = group_into_lines(&spans, &order);
+        assert_eq!(lines.len(), 6, "5 headings plus the footer, with no blank line");
+        assert_eq!(
+            detect_split_x(&spans, &lines, GH1655_PAGE_WIDTH),
+            None,
+            "the footer's gap must not count toward the quorum -- if this is Some, \
+             MAX_DENSE_COLUMN_GUTTER_FRACTION has regressed"
+        );
+
+        let mut spans = spans;
+        let original = spans.iter().map(|span| span.text.clone()).collect::<Vec<_>>();
+        assert!(!reorder_dense_two_column_page(&mut spans, GH1655_PAGE_WIDTH));
+        assert_eq!(
+            spans.iter().map(|span| span.text.as_str()).collect::<Vec<_>>(),
+            original.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+    }
+
+    /// GH#1655: `widest_gap_midpoint` must reject a gap that is implausibly wide to be
+    /// a real gutter. The footer gap reproduces the reporter's own measurement (374pt
+    /// on a 595.28pt page = 62.8%, far past `MAX_DENSE_COLUMN_GUTTER_FRACTION`'s 25%).
+    #[test]
+    fn widest_gap_midpoint_rejects_a_gap_wider_than_the_maximum_plausible_gutter() {
+        let min_gutter = (GH1655_PAGE_WIDTH * MIN_DENSE_COLUMN_GUTTER_FRACTION).max(MIN_DENSE_COLUMN_GUTTER_PTS);
+        let max_gutter = GH1655_PAGE_WIDTH * MAX_DENSE_COLUMN_GUTTER_FRACTION;
+        let footer_edges = [(43.38_f32, 169.53_f32), (543.59_f32, 553.62_f32)];
+
+        assert_eq!(
+            widest_gap_midpoint(footer_edges.into_iter(), min_gutter, max_gutter),
+            None,
+            "a 374pt gap on a 595.28pt page must not be accepted as a gutter"
+        );
+    }
+
+    /// Companion negative control: an ordinary two-column gutter well inside the cap
+    /// (`dense_two_column_spans`'s own 60pt gutter on a 612pt page) must still be
+    /// accepted, proving the cap does not also reject real gutters.
+    #[test]
+    fn widest_gap_midpoint_accepts_an_ordinary_two_column_gutter() {
+        const PAGE_WIDTH: f32 = 612.0;
+        let min_gutter = (PAGE_WIDTH * MIN_DENSE_COLUMN_GUTTER_FRACTION).max(MIN_DENSE_COLUMN_GUTTER_PTS);
+        let max_gutter = PAGE_WIDTH * MAX_DENSE_COLUMN_GUTTER_FRACTION;
+        let edges = [(60.0_f32, 260.0_f32), (320.0_f32, 510.0_f32)];
+
+        assert_eq!(
+            widest_gap_midpoint(edges.into_iter(), min_gutter, max_gutter),
+            Some(290.0),
+            "a 60pt gutter on a 612pt page must still be accepted"
+        );
+    }
+
+    /// GH#1655: `reorder_band_columns`'s density gate must count only inked spans, not
+    /// raw indices. The left side below has 5 real prose lines plus 2 whitespace-only
+    /// spans -- 7 raw indices, meeting `MIN_DENSE_COLUMN_SPANS_PER_SIDE` (6) by count
+    /// alone -- but only 5 carry ink, so the gate must still refuse the band even
+    /// though the right side is a clean, reorderable 6-line prose column.
+    #[test]
+    fn reorder_band_columns_ignores_whitespace_spans_toward_the_density_gate() {
+        const SPLIT_X: f32 = 300.0;
+        const LEFT_X: f32 = 60.0;
+        const RIGHT_X: f32 = 320.0;
+        let left_lines = [
+            "The committee reviewed annual budget totals",
+            "and approved new funding for the coming year",
+            "after several rounds of careful review by",
+            "senior staff members from every department",
+            "who evaluated priorities across the whole",
+        ];
+        let right_lines = [
+            "Numerous studies have examined similar",
+            "programs across comparable institutions",
+            "using consistent methodology and controls",
+            "for measuring outcomes over multiple years",
+            "researchers found consistent positive trends",
+            "supporting continued investment going forward",
+        ];
+
+        let mut spans = Vec::new();
+        for (row, text) in left_lines.iter().enumerate() {
+            spans.push(span_with_width(
+                text,
+                LEFT_X,
+                830.0 - row as f32 * 14.0,
+                200.0,
+                11.0,
+                11.0,
+            ));
+        }
+        spans.push(span_with_width(" ", LEFT_X, 830.0 - 5.0 * 14.0, 5.0, 11.0, 11.0));
+        spans.push(span_with_width(" ", LEFT_X, 830.0 - 6.0 * 14.0, 5.0, 11.0, 11.0));
+        for (row, text) in right_lines.iter().enumerate() {
+            spans.push(span_with_width(
+                text,
+                RIGHT_X,
+                830.0 - row as f32 * 14.0,
+                200.0,
+                11.0,
+                11.0,
+            ));
+        }
+        let band: Vec<usize> = (0..spans.len()).collect();
+
+        let left_raw = band.iter().filter(|&&index| spans[index].bbox.x < SPLIT_X).count();
+        assert_eq!(
+            left_raw, 7,
+            "fixture must meet the raw per-side quorum by index count alone"
+        );
+
+        assert!(
+            reorder_band_columns(&spans, &band, SPLIT_X).is_none(),
+            "only 5 of the left side's 7 spans carry ink; the density gate must still refuse the band"
         );
     }
 }

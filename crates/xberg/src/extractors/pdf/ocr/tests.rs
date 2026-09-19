@@ -3351,6 +3351,97 @@ Buffers:           50000 kB
         );
     }
 
+    /// A minimal N-page PDF (no content stream, just a MediaBox per page), built the
+    /// same way `crate::pdf::render::build_minimal_pdf_with_mediabox` builds a one-page
+    /// version: a hand-written Catalog/Pages/Page object graph with its own xref table.
+    #[cfg(all(feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
+    fn build_minimal_multi_page_pdf(page_count: usize) -> Vec<u8> {
+        let mut buf = Vec::<u8>::new();
+        buf.extend_from_slice(b"%PDF-1.4\n");
+        let mut offsets = Vec::new();
+
+        offsets.push(buf.len());
+        buf.extend_from_slice(b"1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj\n");
+
+        offsets.push(buf.len());
+        let kids: String = (0..page_count).map(|i| format!("{} 0 R ", 3 + i)).collect();
+        buf.extend_from_slice(
+            format!(
+                "2 0 obj\n<</Type /Pages /Kids [{}] /Count {}>>\nendobj\n",
+                kids.trim_end(),
+                page_count
+            )
+            .as_bytes(),
+        );
+
+        for i in 0..page_count {
+            offsets.push(buf.len());
+            let obj_num = 3 + i;
+            buf.extend_from_slice(
+                format!(
+                    "{} 0 obj\n<</Type /Page /MediaBox [0 0 200 200] /Parent 2 0 R>>\nendobj\n",
+                    obj_num
+                )
+                .as_bytes(),
+            );
+        }
+
+        let xref_offset = buf.len();
+        let total_objs = 2 + page_count + 1;
+        buf.extend_from_slice(b"xref\n");
+        buf.extend_from_slice(format!("0 {}\n", total_objs).as_bytes());
+        buf.extend_from_slice(b"0000000000 65535 f \n");
+        for off in &offsets {
+            buf.extend_from_slice(format!("{:010} 00000 n \n", off).as_bytes());
+        }
+        buf.extend_from_slice(format!("trailer\n<</Size {} /Root 1 0 R>>\n", total_objs).as_bytes());
+        buf.extend_from_slice(format!("startxref\n{}\n%%EOF\n", xref_offset).as_bytes());
+        buf
+    }
+
+    /// #1690: `render_selected_pages_from_document` must actually dispatch page renders
+    /// across the thread pool, not merely be fast. A wall-clock threshold on a shared
+    /// build box is the flaky test this round already has one of (xberg-enterprise#2786);
+    /// this asserts the MECHANISM instead of its timing consequence, so it cannot flake
+    /// under load -- it either used more than one OS thread to render the batch or it
+    /// did not, independent of how long that took.
+    ///
+    /// The render calls run inside a thread pool this test builds itself (4 threads,
+    /// not the ambient global pool), so the assertion never depends on how many CPUs the
+    /// host reports. 20 pages against 4 pool threads leaves no reasonable path for rayon
+    /// to keep every page on the calling thread: `.par_iter()` on a slice is an
+    /// `IndexedParallelIterator`, whose recursive `join`-based splitting hands half the
+    /// remaining range to a stolen thread whenever one is idle, and this batch has far
+    /// more real per-page rendering work (rasterizing a full page) than the handful of
+    /// pages needed for a work-stealing pool to actually steal.
+    #[cfg(all(feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
+    #[test]
+    #[serial_test::serial]
+    fn parallel_render_dispatches_across_more_than_one_thread() {
+        clear_render_call_thread_ids();
+
+        let page_count = 20;
+        let pdf = build_minimal_multi_page_pdf(page_count);
+        let page_indices: Vec<usize> = (0..page_count).collect();
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(4)
+            .build()
+            .expect("building a dedicated 4-thread pool must succeed");
+        let result = pool.install(|| render_selected_pages_for_ocr(&pdf, &page_indices));
+        assert!(result.is_ok(), "rendering the fixture must succeed: {:?}", result.err());
+        assert_eq!(result.unwrap().len(), page_count, "every requested page must come back");
+
+        let threads = RENDER_CALL_THREAD_IDS.get().unwrap().lock().unwrap();
+        assert!(
+            threads.len() > 1,
+            "expected page renders to be observed on more than one OS thread (mechanism proof \
+             that rendering dispatched in parallel), got {} distinct thread(s): {:?}",
+            threads.len(),
+            *threads
+        );
+    }
+
     #[cfg(all(feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
     #[test]
     fn full_pdf_ocr_reuses_open_document_across_bounded_batches() {
@@ -7814,6 +7905,96 @@ Name: ___
         data.starts_with(&[0xFF, 0xD8])
     }
 
+    /// Two pages: page one is the already-verified single-page embedded-image fixture
+    /// (`single_xobject_fixture_bytes`), page two is a synthetic, deliberately tiny blank
+    /// page with no image XObjects. Built by renumbering both source documents' objects
+    /// into one, the same technique lopdf's own merge example uses, so each page keeps its
+    /// own valid object graph (content stream, resources, XObjects) under one Pages tree.
+    #[cfg(all(feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
+    fn two_page_pdf_one_page_has_embedded_image() -> Vec<u8> {
+        use lopdf::{Document, Object, Stream, dictionary};
+        use std::collections::BTreeMap;
+
+        let doc1 = Document::load_mem(&single_xobject_fixture_bytes()).expect("fixture PDF must parse");
+        let doc2 = {
+            let mut d = Document::with_version("1.5");
+            let pages_id = d.new_object_id();
+            let content_id = d.add_object(Stream::new(dictionary! {}, Vec::new()));
+            let page_id = d.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "MediaBox" => vec![0.into(), 0.into(), 20.into(), 20.into()],
+                "Resources" => dictionary! {},
+                "Contents" => content_id,
+            });
+            d.objects.insert(
+                pages_id,
+                Object::Dictionary(dictionary! {
+                    "Type" => "Pages",
+                    "Kids" => vec![page_id.into()],
+                    "Count" => 1,
+                }),
+            );
+            let catalog_id = d.add_object(dictionary! {
+                "Type" => "Catalog",
+                "Pages" => pages_id,
+            });
+            d.trailer.set("Root", catalog_id);
+            d
+        };
+
+        let mut max_id = 1;
+        let mut documents_pages: BTreeMap<lopdf::ObjectId, Object> = BTreeMap::new();
+        let mut documents_objects: BTreeMap<lopdf::ObjectId, Object> = BTreeMap::new();
+        for mut doc in [doc1, doc2] {
+            doc.renumber_objects_with(max_id);
+            max_id = doc.max_id + 1;
+            for (_, object_id) in doc.get_pages() {
+                documents_pages.insert(object_id, doc.get_object(object_id).unwrap().to_owned());
+            }
+            documents_objects.extend(doc.objects);
+        }
+
+        let mut document = Document::with_version("1.5");
+        for (object_id, object) in documents_objects {
+            document.objects.insert(object_id, object);
+        }
+
+        let pages_id: lopdf::ObjectId = (max_id, 0);
+        max_id += 1;
+        let catalog_id: lopdf::ObjectId = (max_id, 0);
+
+        let mut kids = Vec::new();
+        for (object_id, object) in documents_pages {
+            if let Object::Dictionary(mut dict) = object {
+                dict.set("Parent", pages_id);
+                document.objects.insert(object_id, Object::Dictionary(dict));
+                kids.push(Object::Reference(object_id));
+            }
+        }
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids.clone(),
+                "Count" => kids.len() as i64,
+            }),
+        );
+        document.objects.insert(
+            catalog_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Catalog",
+                "Pages" => pages_id,
+            }),
+        );
+        document.trailer.set("Root", catalog_id);
+        document.max_id = max_id;
+
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("merged fixture PDF must serialize");
+        bytes
+    }
+
     /// #1444, dominant hole: a per-page backend failure propagated straight out of
     /// `extract_with_ocr` with `?`, aborting the whole document *before* the blank-page
     /// image-XObject fallback further down the same loop could ever run. That is exactly the
@@ -7919,6 +8100,227 @@ Name: ___
                 .iter()
                 .any(|w| w.message.contains("OCR of page 1 failed") && w.message.contains(VLM_NO_CONTENT_ERROR)),
             "the backend failure must survive as a warning rather than vanish; got: {warnings:?}"
+        );
+    }
+
+    /// #1673: when the embedded-image retry runs and the backend returns successfully but
+    /// with empty content -- the shape every candle VLM backend takes when it silently
+    /// produces nothing (`tracing::warn!("... output is empty")` and returns `Ok`, not an
+    /// `Err`) -- the page's failure warning must name the retry's own empty outcome rather
+    /// than just repeating the first (page-raster) failure as though nothing else happened.
+    #[cfg(all(feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn should_report_retry_outcome_when_xobject_retry_runs_but_recovers_nothing() {
+        use crate::core::config::OcrConfig;
+        use crate::plugins::{OcrBackend, OcrBackendType, Plugin};
+        use crate::types::ExtractedDocument;
+        use std::sync::Arc;
+
+        const BACKEND_NAME: &str = "page-raster-error-then-empty-retry-test-backend";
+
+        struct FailOnPageRasterThenEmptyBackend;
+
+        #[async_trait::async_trait]
+        impl OcrBackend for FailOnPageRasterThenEmptyBackend {
+            fn backend_type(&self) -> OcrBackendType {
+                OcrBackendType::Custom
+            }
+            fn supports_language(&self, _: &str) -> bool {
+                true
+            }
+            async fn process_image(&self, data: &[u8], _: &OcrConfig) -> crate::Result<ExtractedDocument> {
+                if is_embedded_jpeg(data) {
+                    // The retry runs and returns successfully, but with nothing recovered --
+                    // exactly what candle-glm-ocr does on this kind of input (#1673).
+                    Ok(ExtractedDocument::default())
+                } else {
+                    Err(crate::XbergError::Plugin {
+                        message: VLM_NO_CONTENT_ERROR.to_string(),
+                        plugin_name: "ocr".to_string(),
+                    })
+                }
+            }
+            fn supports_document_processing(&self) -> bool {
+                false
+            }
+        }
+
+        impl Plugin for FailOnPageRasterThenEmptyBackend {
+            fn name(&self) -> &str {
+                BACKEND_NAME
+            }
+            fn version(&self) -> String {
+                "1.0.0".to_string()
+            }
+            fn initialize(&self) -> crate::Result<()> {
+                Ok(())
+            }
+            fn shutdown(&self) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        crate::plugins::register_ocr_backend(Arc::new(FailOnPageRasterThenEmptyBackend)).unwrap();
+
+        let pdf_bytes = single_xobject_fixture_bytes();
+        let config = ExtractionConfig {
+            ocr: Some(OcrConfig {
+                backend: BACKEND_NAME.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = extract_with_ocr(
+            Some(&pdf_bytes),
+            None,
+            #[cfg(feature = "layout-detection")]
+            None,
+            &config,
+            None,
+        )
+        .await;
+
+        crate::plugins::unregister_ocr_backend(BACKEND_NAME).unwrap();
+
+        // The document's only page fails and its embedded-image retry also recovers
+        // nothing, so this is the wholesale "every page failed" path -- an aggregate error,
+        // per `should_error_when_every_page_fails_and_nothing_can_be_recovered`. The defect
+        // this test pins is what that error SAYS: before the fix it names only the first
+        // (page-raster) failure, exactly as if the retry had never been attempted.
+        let error = result
+            .expect_err("every page failed and nothing was recovered, so the document must error")
+            .to_string();
+        assert!(
+            error.contains(VLM_NO_CONTENT_ERROR),
+            "the first failure must still be named; got: {error}"
+        );
+        assert!(
+            error.contains("retry") && error.contains("no text"),
+            "the error must name the embedded-image retry's own empty outcome, not just repeat \
+             the first failure as though the retry were never attempted; got: {error}"
+        );
+    }
+
+    /// #1673, per-page warning branch (the wholesale branch above is
+    /// `should_report_retry_outcome_when_xobject_retry_runs_but_recovers_nothing`; this is
+    /// its sibling). A multi-page document where one page's embedded-image retry runs and
+    /// recovers nothing, while a *different* page succeeds, must still name the failed
+    /// page's own retry outcome in its warning -- and must NOT be treated as the wholesale
+    /// "every page failed" defect, because another page produced real text.
+    #[cfg(all(feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn should_report_retry_outcome_on_one_page_without_wholesale_failure_when_another_page_succeeds() {
+        use crate::core::config::OcrConfig;
+        use crate::plugins::{OcrBackend, OcrBackendType, Plugin};
+        use crate::types::ExtractedDocument;
+        use std::sync::Arc;
+
+        const BACKEND_NAME: &str = "one-empty-retry-one-success-test-backend";
+        // Page one's raster is a real (photographic) page; page two's raster comes from a
+        // synthetic 20x20-point canvas, so its encoded PNG is trivially smaller. That size
+        // gap, not call order -- the pipeline submits both pages' raster calls concurrently
+        // -- is what the mock backend keys on to tell the two pages' raster calls apart.
+        const SMALL_RASTER_MAX_BYTES: usize = 4096;
+        // Comfortably over the ink-probe's MAX_INK_PROBE_TEXT_CHARS (200 non-whitespace
+        // characters) so page two's success is never mistaken for a blank page needing its
+        // own XObject retry.
+        const PAGE_TWO_TEXT: &str = "This page recovered real text directly, so the document overall must not be treated as a wholesale OCR failure. ";
+
+        struct OneEmptyRetryOneSuccessBackend;
+
+        #[async_trait::async_trait]
+        impl OcrBackend for OneEmptyRetryOneSuccessBackend {
+            fn backend_type(&self) -> OcrBackendType {
+                OcrBackendType::Custom
+            }
+            fn supports_language(&self, _: &str) -> bool {
+                true
+            }
+            async fn process_image(&self, data: &[u8], _: &OcrConfig) -> crate::Result<ExtractedDocument> {
+                if is_embedded_jpeg(data) {
+                    // Page one's embedded-image retry: runs, but recovers nothing (#1673).
+                    Ok(ExtractedDocument::default())
+                } else if data.len() < SMALL_RASTER_MAX_BYTES {
+                    // Page two's own raster: succeeds directly, so page two never needs
+                    // the retry at all.
+                    Ok(ExtractedDocument {
+                        content: PAGE_TWO_TEXT.repeat(3),
+                        ..Default::default()
+                    })
+                } else {
+                    // Page one's own (real-page-sized) raster.
+                    Err(crate::XbergError::Plugin {
+                        message: VLM_NO_CONTENT_ERROR.to_string(),
+                        plugin_name: "ocr".to_string(),
+                    })
+                }
+            }
+            fn supports_document_processing(&self) -> bool {
+                false
+            }
+        }
+
+        impl Plugin for OneEmptyRetryOneSuccessBackend {
+            fn name(&self) -> &str {
+                BACKEND_NAME
+            }
+            fn version(&self) -> String {
+                "1.0.0".to_string()
+            }
+            fn initialize(&self) -> crate::Result<()> {
+                Ok(())
+            }
+            fn shutdown(&self) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        crate::plugins::register_ocr_backend(Arc::new(OneEmptyRetryOneSuccessBackend)).unwrap();
+
+        let pdf_bytes = two_page_pdf_one_page_has_embedded_image();
+        let config = ExtractionConfig {
+            ocr: Some(OcrConfig {
+                backend: BACKEND_NAME.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = extract_with_ocr(
+            Some(&pdf_bytes),
+            None,
+            #[cfg(feature = "layout-detection")]
+            None,
+            &config,
+            None,
+        )
+        .await;
+
+        crate::plugins::unregister_ocr_backend(BACKEND_NAME).unwrap();
+
+        let (text, _, _, _, doc, _, _, _, _, _, _) = result
+            .expect("page two recovered real text, so the document must NOT be treated as a wholesale OCR failure");
+        assert!(
+            text.contains(PAGE_TWO_TEXT.trim()),
+            "the successful page's text must survive into the document; got: {text}"
+        );
+
+        let warnings = doc
+            .expect("a per-page failure warning needs an internal document")
+            .processing_warnings;
+        assert!(
+            warnings.iter().any(|w| w.message.contains("OCR of page 1 failed")
+                && w.message
+                    .contains("the retry on the page's embedded image XObjects also returned no text")),
+            "the per-page warning must name the retry's own empty outcome; got: {warnings:?}"
+        );
+        assert!(
+            !warnings.iter().any(|w| w.message.contains("OCR failed on all")),
+            "another page recovered text, so this must stay a per-page warning, not the \
+             wholesale failure message; got: {warnings:?}"
         );
     }
 
@@ -8659,5 +9061,340 @@ Name: ___
             1,
             "text already present verbatim must not be duplicated as a second paragraph"
         );
+    }
+
+    /// GH#1645 fixtures: an `ExtractedDocument` with one OCR-backend word element, ready to
+    /// hand to `build_mixed_ocr_page_document`.
+    #[cfg(feature = "pdf")]
+    fn backend_result_with_one_element(page_number: u32) -> crate::types::ExtractedDocument {
+        crate::types::ExtractedDocument {
+            content: "scanned prose".to_string(),
+            ocr_elements: Some(vec![crate::types::OcrElement {
+                text: "word".to_string(),
+                page_number,
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(feature = "pdf")]
+    fn ocr_config_including_elements() -> crate::core::config::OcrConfig {
+        crate::core::config::OcrConfig {
+            element_config: Some(crate::types::OcrElementConfig {
+                include_elements: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// GH#1645 -- distinct pages must expose distinct coordinate frames, each pinned to its
+    /// own render raster's exact dimensions, with the fixed `unit`/`origin` literals present
+    /// on the serialized JSON. Breaks if the capture reads a document-wide default instead
+    /// of this call's own `image_width_px`/`image_height_px`, or if `unit`/`origin` are
+    /// dropped from the record.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn two_pages_expose_distinct_coordinate_frames() {
+        let public_config = ocr_config_including_elements();
+
+        let mut page1_result = backend_result_with_one_element(1);
+        let (page1_doc, _) = build_mixed_ocr_page_document(
+            &mut page1_result,
+            &public_config,
+            1,
+            1700,
+            2200,
+            612.0,
+            792.0,
+            disabled_page_margins(),
+        )
+        .expect("page 1 backend result must produce a page document");
+
+        let mut page2_result = backend_result_with_one_element(2);
+        let (page2_doc, _) = build_mixed_ocr_page_document(
+            &mut page2_result,
+            &public_config,
+            2,
+            1240,
+            1754,
+            612.0,
+            792.0,
+            disabled_page_margins(),
+        )
+        .expect("page 2 backend result must produce a page document");
+
+        let frame1 = page1_doc
+            .ocr_coordinate_frame
+            .expect("page 1 must have a coordinate frame");
+        let frame2 = page2_doc
+            .ocr_coordinate_frame
+            .expect("page 2 must have a coordinate frame");
+
+        assert_eq!((frame1.page_number, frame1.width, frame1.height), (1, 1700, 2200));
+        assert_eq!((frame2.page_number, frame2.width, frame2.height), (2, 1240, 1754));
+
+        let json1 = serde_json::to_value(frame1).expect("frame must serialize");
+        assert_eq!(json1["unit"], "pixel");
+        assert_eq!(json1["origin"], "top_left");
+    }
+
+    /// GH#1645 -- `accepted_mixed_ocr_coordinate_frames` must sort its output by page
+    /// number rather than trusting `AHashMap` iteration order, which is unspecified.
+    /// Inserting pages out of order (3, then 1, then 2) pins that: removing the explicit
+    /// sort would make this test flaky rather than reliably failing, which is itself
+    /// evidence the sort is load-bearing.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn coordinate_frames_are_ordered_by_page_number() {
+        fn page_with_frame(page_number: u32, width: u32, height: u32) -> crate::types::internal::InternalDocument {
+            let mut doc = crate::types::internal::InternalDocument::new("pdf");
+            doc.prebuilt_ocr_elements = Some(vec![crate::types::OcrElement {
+                text: "word".to_string(),
+                page_number,
+                ..Default::default()
+            }]);
+            doc.ocr_coordinate_frame = Some(crate::types::internal::OcrPageCoordinateFrame::new(
+                page_number,
+                width,
+                height,
+            ));
+            doc
+        }
+
+        let mut structured_pages = ahash::AHashMap::new();
+        structured_pages.insert(3u32, page_with_frame(3, 300, 300));
+        structured_pages.insert(1u32, page_with_frame(1, 100, 100));
+        structured_pages.insert(2u32, page_with_frame(2, 200, 200));
+
+        let frames = crate::extractors::pdf::accepted_mixed_ocr_coordinate_frames(&structured_pages);
+
+        let page_numbers: Vec<u32> = frames.iter().map(|frame| frame.page_number).collect();
+        assert_eq!(
+            page_numbers,
+            vec![1, 2, 3],
+            "frames must be sorted by page number regardless of insertion/iteration order"
+        );
+    }
+
+    /// GH#1645 -- three ways a frame must NOT appear, none of which is "invalid input
+    /// crashes":
+    /// (a) a page with public elements but no captured frame is omitted, not defaulted to
+    ///     a zeroed record;
+    /// (b) `build_mixed_ocr_page_document` itself must not fabricate a frame when both the
+    ///     page-local processed metadata and the render raster are degenerate (0x0);
+    /// (c) a page with a valid frame but no public elements is omitted -- nothing for a
+    ///     consumer to join it to.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn a_page_without_valid_dimensions_does_not_get_a_frame() {
+        {
+            let mut page = crate::types::internal::InternalDocument::new("pdf");
+            page.prebuilt_ocr_elements = Some(vec![crate::types::OcrElement {
+                text: "word".to_string(),
+                page_number: 1,
+                ..Default::default()
+            }]);
+            assert!(page.ocr_coordinate_frame.is_none(), "test setup: no frame captured");
+
+            let mut structured_pages = ahash::AHashMap::new();
+            structured_pages.insert(1u32, page);
+
+            let frames = crate::extractors::pdf::accepted_mixed_ocr_coordinate_frames(&structured_pages);
+            assert!(
+                frames.is_empty(),
+                "a page with no captured frame must not appear in the output"
+            );
+        }
+
+        {
+            let mut result = backend_result_with_one_element(1);
+            let public_config = ocr_config_including_elements();
+
+            let page_doc = build_mixed_ocr_page_document(
+                &mut result,
+                &public_config,
+                1,
+                0,
+                0,
+                1000.0,
+                1000.0,
+                disabled_page_margins(),
+            );
+
+            if let Some((page_doc, _)) = page_doc {
+                assert!(
+                    page_doc.ocr_coordinate_frame.is_none(),
+                    "a degenerate 0x0 raster with no valid processed metadata must not fabricate a frame"
+                );
+            }
+        }
+
+        {
+            let mut page = crate::types::internal::InternalDocument::new("pdf");
+            page.ocr_coordinate_frame = Some(crate::types::internal::OcrPageCoordinateFrame::new(1, 1700, 2200));
+            assert!(
+                page.prebuilt_ocr_elements.is_none(),
+                "test setup: no public elements on this page"
+            );
+
+            let mut structured_pages = ahash::AHashMap::new();
+            structured_pages.insert(1u32, page);
+
+            let frames = crate::extractors::pdf::accepted_mixed_ocr_coordinate_frames(&structured_pages);
+            assert!(
+                frames.is_empty(),
+                "a valid frame with no public elements must not appear in the output"
+            );
+        }
+    }
+
+    /// GH#1645 -- the frame must come from the page-local *processed* raster
+    /// (`OCR_PROCESSED_IMAGE_WIDTH/HEIGHT_METADATA_KEY`), not the rendered raster passed as
+    /// `image_width_px`/`image_height_px`, proving capture happens before that page-local
+    /// metadata is discarded. Deliberately mismatched (1000x1400 processed vs 800x1000
+    /// rendered) so reading the wrong source is distinguishable from reading the right one.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn the_frame_comes_from_the_page_local_processed_raster_not_the_render_raster() {
+        let mut result = backend_result_with_one_element(1);
+        result.metadata.additional.insert(
+            crate::ocr_metadata_keys::OCR_PROCESSED_IMAGE_WIDTH_METADATA_KEY.into(),
+            serde_json::json!(1000),
+        );
+        result.metadata.additional.insert(
+            crate::ocr_metadata_keys::OCR_PROCESSED_IMAGE_HEIGHT_METADATA_KEY.into(),
+            serde_json::json!(1400),
+        );
+        let public_config = ocr_config_including_elements();
+
+        let (page_doc, _) = build_mixed_ocr_page_document(
+            &mut result,
+            &public_config,
+            1,
+            800,
+            1000,
+            1000.0,
+            1000.0,
+            disabled_page_margins(),
+        )
+        .expect("a backend result with elements must produce a page document");
+
+        let frame = page_doc
+            .ocr_coordinate_frame
+            .expect("valid processed metadata must produce a frame");
+        assert_eq!(
+            (frame.width, frame.height),
+            (1000, 1400),
+            "the frame must come from the page-local processed metadata (1000x1400), not the render raster (800x1000)"
+        );
+    }
+
+    /// GH#1645 -- guards the `pipeline.rs` trap where the document-global restructuring
+    /// heuristic rebuilds a page's document and only hand-copied two fields
+    /// (`prebuilt_ocr_elements`, `processing_warnings`) forward, silently dropping the
+    /// coordinate frame on every non-`Plain` mixed-route output. `carry_page_ocr_payload_forward`
+    /// is the single choke point both call sites now use.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn carry_page_ocr_payload_forward_keeps_the_frame() {
+        let mut existing = crate::types::internal::InternalDocument::new("pdf");
+        existing.ocr_coordinate_frame = Some(crate::types::internal::OcrPageCoordinateFrame::new(4, 1700, 2200));
+        existing.prebuilt_ocr_elements = Some(vec![crate::types::OcrElement {
+            text: "word".to_string(),
+            page_number: 4,
+            ..Default::default()
+        }]);
+        existing.processing_warnings = vec![ocr_margin_filter_capability_warning()];
+
+        let mut new_page_doc = crate::types::internal::InternalDocument::new("pdf");
+        assert!(
+            new_page_doc.ocr_coordinate_frame.is_none(),
+            "test setup: the heuristic's freshly rebuilt document starts with no frame"
+        );
+
+        carry_page_ocr_payload_forward(&existing, &mut new_page_doc);
+
+        assert_eq!(
+            new_page_doc.ocr_coordinate_frame, existing.ocr_coordinate_frame,
+            "the frame must survive being carried forward onto the heuristic's rebuilt document"
+        );
+        assert_eq!(
+            new_page_doc.prebuilt_ocr_elements.as_ref().map(Vec::len),
+            Some(1),
+            "OCR elements must also still be carried forward"
+        );
+        assert_eq!(
+            new_page_doc.processing_warnings.len(),
+            1,
+            "processing warnings must also still be carried forward"
+        );
+    }
+
+    // xberg#1665: the render batch peak scales with the configured thread budget, with no
+    // notion of `security_limits.max_content_size`, so a wider thread budget silently trips
+    // the fixed byte ceiling that a narrower one stays under and every page in the rejected
+    // batch is skipped. These test `adapt_batch_size_to_content_limit` directly, against the
+    // issue's own numbers: an A4 page at the 150 dpi default.
+    #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+    #[test]
+    fn adapt_batch_size_to_content_limit_shrinks_a_large_thread_budget_for_a4_pages() {
+        // A4 in points, matching the issue's reproduction (595 x 842pt).
+        let limits = crate::extractors::security::SecurityLimits {
+            max_content_size: 512 * 1024 * 1024,
+            ..Default::default()
+        };
+
+        let batch_size = adapt_batch_size_to_content_limit(32, 595.0, 842.0, None, &limits);
+
+        assert!(
+            batch_size < 32,
+            "a 32-thread budget must be shrunk once its estimated peak crosses max_content_size, got {batch_size}"
+        );
+        assert!(batch_size >= 1, "a shrunk batch must never reach zero pages");
+    }
+
+    #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+    #[test]
+    fn adapt_batch_size_to_content_limit_leaves_a_small_batch_untouched() {
+        let limits = crate::extractors::security::SecurityLimits {
+            max_content_size: 512 * 1024 * 1024,
+            ..Default::default()
+        };
+
+        // 16 A4 pages at 150 dpi stay under the 512 MiB default per the issue's own numbers.
+        let batch_size = adapt_batch_size_to_content_limit(16, 595.0, 842.0, None, &limits);
+
+        assert_eq!(
+            batch_size, 16,
+            "a batch that already fits the content limit must not shrink"
+        );
+    }
+
+    #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+    #[test]
+    fn adapt_batch_size_to_content_limit_never_shrinks_below_one_page() {
+        // A single page whose own estimated peak already exceeds the limit: the batch must
+        // still carry that one page, not disappear to zero (`validate_png_encode_batch_peak`
+        // is what actually rejects an oversized single page; batch sizing must never do it
+        // silently by rounding a legitimate one-page batch down to nothing).
+        let limits = crate::extractors::security::SecurityLimits {
+            max_content_size: 1,
+            ..Default::default()
+        };
+
+        let batch_size = adapt_batch_size_to_content_limit(8, 595.0, 842.0, None, &limits);
+
+        assert_eq!(batch_size, 1);
+    }
+
+    #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+    #[test]
+    fn estimate_png_encode_page_peak_bytes_matches_hand_computed_accounting() {
+        // 100x50 px: source = conversion = 100*50*3 = 15,000; output = 100*50*4 + 262,144 = 282,144.
+        let bytes = estimate_png_encode_page_peak_bytes(100, 50).expect("small dimensions must not overflow");
+
+        assert_eq!(bytes, 15_000 + 15_000 + 282_144);
     }
 }

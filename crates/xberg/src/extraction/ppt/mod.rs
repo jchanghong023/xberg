@@ -5,6 +5,9 @@
 //!
 //! Supports PowerPoint 97, 2000, XP, and 2003 (.ppt) files.
 
+mod embedded;
+pub(crate) use embedded::extract_ppt_embedded_objects;
+
 use crate::error::{Result, XbergError};
 use crate::types::{ExtractedImage, ProcessingWarning};
 use bytes::Bytes;
@@ -12,7 +15,7 @@ use std::borrow::Cow;
 use std::io::Cursor;
 
 /// Warning source tag for `.ppt` extraction diagnostics (#171 convention).
-const PPT_WARNING_SOURCE: &str = "ppt";
+pub(super) const PPT_WARNING_SOURCE: &str = "ppt";
 
 /// Result of PPT text extraction.
 #[cfg_attr(alef, alef(skip))]
@@ -56,6 +59,17 @@ pub struct PptSlideText {
     /// The slide's text (its atoms joined by `\n`). Empty for a slide with
     /// no text.
     pub text: String,
+    /// The slide's title, read from the outline collection's own `TextHeaderAtom` (`Title` /
+    /// `CenterTitle`) rather than guessed from `text`'s first line (xberg-io/xberg#1635).
+    /// `None` when the file states no outline title for this slide -- a deck whose title is
+    /// drawn on the canvas and never entered in the outline view still has one, just not
+    /// here; the consumer's first-line fallback covers that case.
+    pub title: Option<String>,
+    /// This slide's speaker notes, resolved via `NotesAtom.slideIdRef` against the live
+    /// `SlideListWithText` (xberg-io/xberg#1640) -- not by position among the deck's
+    /// non-empty notes pages, which misattributes a note as soon as one slide in between
+    /// has none. `None` when the slide has no notes, or the file cannot be read that way.
+    pub notes: Option<String>,
 }
 
 /// Metadata extracted from PPT files.
@@ -89,7 +103,29 @@ const RT_SLIDE_LIST_WITH_TEXT: u16 = 0x0FF0;
 /// Introduces one slide's entries inside [`RT_SLIDE_LIST_WITH_TEXT`]; the nth such atom starts
 /// the outline records belonging to the nth slide, which is how outline text is attributed. ~keep
 const RT_SLIDE_PERSIST_ATOM: u16 = 0x03F3;
+/// Byte offset of `SlidePersistAtom.slideId` within its 20-byte payload, past
+/// `persistIdRef` (4), `flags` (4) and `numberTexts` (4) (MS-PPT 2.4.14). What
+/// `NotesAtom.slideIdRef` names a notes page's slide by -- a different value than
+/// `persistIdRef`, which only orders the persist directory (xberg-io/xberg#1640). ~keep
+const SLIDE_PERSIST_ATOM_SLIDE_ID_OFFSET: usize = 12;
 const RT_NOTES: u16 = 0x03F0;
+/// Inside an [`RT_NOTES`] container, states which slide the notes page belongs to
+/// (MS-PPT 2.5.7). ~keep
+const RT_NOTES_ATOM: u16 = 0x03F1;
+/// `NotesAtom.slideIdRef` sentinel meaning "this is the notes master", not a per-slide
+/// notes page. Its placeholder text ("Click to edit Master text styles...") must never
+/// reach `speaker_notes` (xberg-io/xberg#1640). ~keep
+const NOTES_MASTER_SLIDE_ID_REF: u32 = 0x8000_0000;
+/// Precedes a text atom inside [`RT_SLIDE_LIST_WITH_TEXT`] and types it (MS-PPT 2.13.33
+/// `TextTypeEnum`); read here only to tell a slide's outline *title* apart from its outline
+/// *body* (xberg-io/xberg#1635). ~keep
+const RT_TEXT_HEADER_ATOM: u16 = 0x0F9F;
+/// `TextHeaderAtom.textType == Title`. ~keep
+const TEXT_TYPE_TITLE: u32 = 0;
+/// `TextHeaderAtom.textType == CenterTitle` -- a title-slide's centred title placeholder.
+/// `5` is `CenterBody` (body text, not a title); confirmed against Apache POI's
+/// `TextHeaderAtom` constants, which the MS-PPT spec text alone does not make obvious. ~keep
+const TEXT_TYPE_CENTER_TITLE: u32 = 6;
 
 /// `OfficeArtBlip` record types for the raster formats a `Pictures` stream
 /// can hold (MS-ODRAW 2.2.23). `RT_BLIP_JPEG_ALT` (0xF02A) is an alternate
@@ -128,6 +164,10 @@ const MAX_OFFICE_ART_DEPTH: usize = 16;
 const RT_USER_EDIT_ATOM: u16 = 0x0FF5;
 /// `PersistDirectoryAtom` -- maps persist ids to stream offsets for one save.
 const RT_PERSIST_DIRECTORY_ATOM: u16 = 0x1772;
+/// The deck's own top-level container, holding (among other things) the live
+/// `SlideListWithText` (MS-PPT 2.4.1). A `.ppt` stream carries one of these per save;
+/// `UserEditAtom.docPersistIdRef` names which one is current (xberg-io/xberg#1639). ~keep
+const RT_DOCUMENT: u16 = 0x03E8;
 
 /// Byte offset of `offsetToCurrentEdit` within the `Current User` stream: an 8-byte
 /// record header, then `size` (4) and `headerToken` (4) precede it (MS-PPT 2.3.2). ~keep
@@ -143,6 +183,11 @@ const PERSIST_COUNT_SHIFT: u32 = 20;
 /// chain is long but finite; this only exists so a corrupt or hostile `offsetLastEdit`
 /// cycle cannot spin forever. Chains longer than this fall back to stream order. ~keep
 const MAX_USER_EDIT_CHAIN: usize = 4096;
+
+/// Depth cap for [`slide_persist_ids_in_presentation_order`]'s descent into nested
+/// containers. Real decks keep `SlideListWithText` a direct child of `DocumentContainer`;
+/// this only stops a hostile self-nesting container from recursing without bound.
+const MAX_SLIDE_LIST_SEARCH_DEPTH: usize = 16;
 
 /// Maximum accepted size for a single embedded picture (100 MB), mirroring
 /// the DOCX/PPTX image cap (`crate::extraction::docx::MAX_IMAGE_FILE_SIZE`).
@@ -202,7 +247,7 @@ pub(crate) fn extract_ppt_text_with_options(
     let (mut slides, loose_texts, speaker_notes) = extract_texts_from_records(
         &ppt_stream,
         include_master_slides,
-        live_slides.as_deref(),
+        live_slides.as_ref(),
         &mut processing_warnings,
     )?;
 
@@ -223,6 +268,8 @@ pub(crate) fn extract_ppt_text_with_options(
         slides.push(PptSlideText {
             number: 1,
             text: loose_texts.join("\n"),
+            title: None,
+            notes: None,
         });
     }
     let slide_count = slides.len();
@@ -230,7 +277,8 @@ pub(crate) fn extract_ppt_text_with_options(
     let images = if extract_images {
         match read_stream(&mut comp, "/Pictures") {
             Ok(pictures_stream) if !pictures_stream.is_empty() => {
-                let slide_numbers = picture_slide_numbers(&ppt_stream, live_slides.as_deref());
+                let slide_numbers =
+                    picture_slide_numbers(&ppt_stream, live_slides.as_ref().map(|l| l.offsets.as_slice()));
                 extract_pictures_from_stream(&pictures_stream, &slide_numbers, &mut processing_warnings)
             }
             _ => Vec::new(),
@@ -251,9 +299,30 @@ pub(crate) fn extract_ppt_text_with_options(
 }
 
 /// Read a little-endian `u32` at `offset`, or `None` if it does not fit in `data`.
-fn read_u32_le(data: &[u8], offset: usize) -> Option<u32> {
+pub(super) fn read_u32_le(data: &[u8], offset: usize) -> Option<u32> {
     let bytes = data.get(offset..offset.checked_add(4)?)?;
     Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+/// The deck's live slides, resolved through the persist chain (#1614, #1639).
+pub(super) struct LiveSlides {
+    /// Live `Slide` container offsets, presentation order (#1614).
+    pub(super) offsets: Vec<usize>,
+    /// Absolute stream offset of the live `SlideListWithText` record header itself -- the
+    /// only occurrence [`extract_texts_from_records`] may harvest outline text (titles
+    /// included) from. An older save's list, or the master/notes lists sharing the same
+    /// record type, must not be read as the presentation's outline (#1639). ~keep
+    outline_record_offset: usize,
+    /// `SlidePersistAtom.slideId` for each live slide, aligned by index with `offsets` --
+    /// what `NotesAtom.slideIdRef` names a notes page's slide by (#1640).
+    slide_ids: Vec<u32>,
+    /// The merged persist directory (persist id -> stream offset, newest save wins), kept
+    /// so other persist-referenced records -- an embedded object's `ExOleObjStg`, named by
+    /// `ExOleObjAtom.persistIdRef` (GH#1660) -- resolve through the same chain. ~keep
+    pub(super) persist: ahash::AHashMap<u32, usize>,
+    /// Payload range `[start, end)` of the live `DocumentContainer` in the stream, so a
+    /// document-level list (`ExObjList`) is read from the current save, not an older one. ~keep
+    pub(super) document_payload: (usize, usize),
 }
 
 /// Resolve the live slide containers, in presentation order, as byte offsets into the
@@ -270,25 +339,30 @@ fn read_u32_le(data: &[u8], offset: usize) -> Option<u32> {
 ///   CurrentUserAtom.offsetToCurrentEdit ─▶ UserEditAtom (0x0FF5)
 ///                                            .offsetPersistDirectory ─▶ PersistDirectoryAtom (0x1772)
 ///                                            .offsetLastEdit         ─▶ the previous save's UserEditAtom
+///                                            .docPersistIdRef        ─▶ the live DocumentContainer
 ///
-/// Document > SlideListWithText (0x0FF0, recInstance 0)
+/// DocumentContainer (0x03E8) > SlideListWithText (0x0FF0, recInstance 0)
 ///   SlidePersistAtom (0x03F3) per slide, in presentation order,
 ///   each naming the persist id of that slide's Slide container
 /// ```
 ///
 /// Persist directories are merged newest-first, so a later save's entry for an id wins
-/// and older revisions of the same object are never reachable.
+/// and older revisions of the same object are never reachable. The slide list itself is
+/// read from the **live** `DocumentContainer` -- resolved the same way, through
+/// `docPersistIdRef` on the newest `UserEditAtom` -- not from the first `SlideListWithText`
+/// the stream happens to contain, which is the oldest save's (#1639).
 ///
 /// Returns `None` whenever the chain cannot be read in full -- absent `Current User`
-/// stream, unparseable atom, offset out of range, or a slide list naming an id no
-/// directory resolves. The caller then keeps stream order, which is what this extractor
-/// did unconditionally before. A partial answer would be worse than the old behaviour:
-/// it would drop real slides. See GH#1614. ~keep
-fn live_slide_offsets(ppt_stream: &[u8], current_user_stream: &[u8]) -> Option<Vec<usize>> {
+/// stream, unparseable atom, offset out of range, an unresolvable `DocumentContainer`, or a
+/// slide list naming an id no directory resolves. The caller then keeps stream order, which
+/// is what this extractor did unconditionally before. A partial answer would be worse than
+/// the old behaviour: it would drop real slides. See GH#1614. ~keep
+pub(super) fn live_slide_offsets(ppt_stream: &[u8], current_user_stream: &[u8]) -> Option<LiveSlides> {
     let first_edit = read_u32_le(current_user_stream, CURRENT_USER_OFFSET_TO_CURRENT_EDIT)? as usize;
 
     // persist id -> stream offset, newest save wins.
     let mut persist: ahash::AHashMap<u32, usize> = ahash::AHashMap::new();
+    let mut document_id: Option<u32> = None;
     let mut next_edit = Some(first_edit);
     let mut hops = 0usize;
 
@@ -304,6 +378,10 @@ fn live_slide_offsets(ppt_stream: &[u8], current_user_stream: &[u8]) -> Option<V
         let content = edit_offset + 8;
         let offset_last_edit = read_u32_le(ppt_stream, content + 8)? as usize;
         let offset_persist_directory = read_u32_le(ppt_stream, content + 12)? as usize;
+        // `docPersistIdRef`: only the FIRST (newest) edit's value matters -- it names the
+        // live `DocumentContainer`, which carries the presentation's own slide list rather
+        // than an earlier save's (#1639). ~keep
+        document_id.get_or_insert(read_u32_le(ppt_stream, content + 16)?);
 
         merge_persist_directory(ppt_stream, offset_persist_directory, &mut persist)?;
 
@@ -316,18 +394,44 @@ fn live_slide_offsets(ppt_stream: &[u8], current_user_stream: &[u8]) -> Option<V
         };
     }
 
-    let slide_ids = slide_persist_ids_in_presentation_order(ppt_stream)?;
-    if slide_ids.is_empty() {
+    let document_offset = *persist.get(&document_id?)?;
+    let document_header = ppt_stream.get(document_offset..document_offset.checked_add(8)?)?;
+    if u16::from_le_bytes([document_header[2], document_header[3]]) != RT_DOCUMENT {
         return None;
     }
-    slide_ids
-        .into_iter()
-        .map(|id| {
-            let offset = *persist.get(&id)?;
+    let document_len = u32::from_le_bytes([
+        document_header[4],
+        document_header[5],
+        document_header[6],
+        document_header[7],
+    ]) as usize;
+    let document_content_start = document_offset.checked_add(8)?;
+    let document_content_end = document_content_start.checked_add(document_len)?;
+    let document_payload = ppt_stream.get(document_content_start..document_content_end)?;
+
+    let (relative_outline_offset, entries) = slide_persist_ids_in_presentation_order(document_payload, 0)?;
+    if entries.is_empty() {
+        return None;
+    }
+    let outline_record_offset = document_content_start + relative_outline_offset;
+
+    let offsets = entries
+        .iter()
+        .map(|&(persist_id, _)| {
+            let offset = *persist.get(&persist_id)?;
             let header = ppt_stream.get(offset..offset.checked_add(8)?)?;
             (u16::from_le_bytes([header[2], header[3]]) == RT_SLIDE).then_some(offset)
         })
-        .collect()
+        .collect::<Option<Vec<usize>>>()?;
+    let slide_ids = entries.iter().map(|&(_, slide_id)| slide_id).collect();
+
+    Some(LiveSlides {
+        offsets,
+        outline_record_offset,
+        slide_ids,
+        persist,
+        document_payload: (document_content_start, document_content_end),
+    })
 }
 
 /// Merge one save's `PersistDirectoryAtom` into `persist` without overwriting an entry a
@@ -364,54 +468,72 @@ fn merge_persist_directory(
     Some(())
 }
 
-/// The persist ids named by the document's `SlideListWithText` (`recInstance` 0), in the
-/// order the deck presents them.
+/// The persist ids named by `container`'s own `SlideListWithText` (`recInstance` 0), in the
+/// order the deck presents them, plus that record's own offset relative to `container`.
 ///
-/// `recInstance` distinguishes the three lists a document can carry -- 0 slides,
-/// 1 master, 2 notes -- and only the first is the presentation's slide order. It is the
-/// top 12 bits of the record header's first `u16`. ~keep
-fn slide_persist_ids_in_presentation_order(ppt_stream: &[u8]) -> Option<Vec<u32>> {
+/// `container` is the **live** `DocumentContainer`'s payload, resolved by the caller
+/// through the persist chain (#1639) -- so an older save's slide list elsewhere in the
+/// stream is never seen. `recInstance` distinguishes the three lists a document can carry
+/// -- 0 slides, 1 master, 2 notes -- and only the first is the presentation's slide order.
+/// It is the top 12 bits of the record header's first `u16`. ~keep
+///
+/// A proper depth-first descent (not a linear walk that never returns to a sibling): a
+/// `SlideListWithText` not found in one child container is looked for in the next.
+///
+/// Each entry is `(persistIdRef, slideId)`: `persistIdRef` resolves the `Slide` container's
+/// stream offset through the persist directory; `slideId` is what `NotesAtom.slideIdRef`
+/// names the slide by, and is a different value (xberg-io/xberg#1640).
+fn slide_persist_ids_in_presentation_order(container: &[u8], depth: usize) -> Option<(usize, Vec<(u32, u32)>)> {
+    if depth > MAX_SLIDE_LIST_SEARCH_DEPTH {
+        return None;
+    }
     let mut pos = 0usize;
-    while pos + 8 <= ppt_stream.len() {
-        let ver_instance = u16::from_le_bytes([ppt_stream[pos], ppt_stream[pos + 1]]);
-        let rec_type = u16::from_le_bytes([ppt_stream[pos + 2], ppt_stream[pos + 3]]);
+    while pos + 8 <= container.len() {
+        let ver_instance = u16::from_le_bytes([container[pos], container[pos + 1]]);
+        let rec_type = u16::from_le_bytes([container[pos + 2], container[pos + 3]]);
         let rec_len = u32::from_le_bytes([
-            ppt_stream[pos + 4],
-            ppt_stream[pos + 5],
-            ppt_stream[pos + 6],
-            ppt_stream[pos + 7],
+            container[pos + 4],
+            container[pos + 5],
+            container[pos + 6],
+            container[pos + 7],
         ]) as usize;
         let content_start = pos + 8;
         let content_end = content_start.checked_add(rec_len)?;
-        if content_end > ppt_stream.len() {
+        if content_end > container.len() {
             return None;
         }
 
         if rec_type == RT_SLIDE_LIST_WITH_TEXT && (ver_instance >> 4) == 0 {
-            let mut ids = Vec::new();
+            let mut entries = Vec::new();
             let mut inner = content_start;
             while inner + 8 <= content_end {
-                let inner_type = u16::from_le_bytes([ppt_stream[inner + 2], ppt_stream[inner + 3]]);
+                let inner_type = u16::from_le_bytes([container[inner + 2], container[inner + 3]]);
                 let inner_len = u32::from_le_bytes([
-                    ppt_stream[inner + 4],
-                    ppt_stream[inner + 5],
-                    ppt_stream[inner + 6],
-                    ppt_stream[inner + 7],
+                    container[inner + 4],
+                    container[inner + 5],
+                    container[inner + 6],
+                    container[inner + 7],
                 ]) as usize;
                 if inner_type == RT_SLIDE_PERSIST_ATOM {
-                    ids.push(read_u32_le(ppt_stream, inner + 8)?);
+                    let persist_id = read_u32_le(container, inner + 8)?;
+                    let slide_id = read_u32_le(container, inner + 8 + SLIDE_PERSIST_ATOM_SLIDE_ID_OFFSET)?;
+                    entries.push((persist_id, slide_id));
                 }
                 inner = inner.checked_add(8)?.checked_add(inner_len)?;
             }
-            return Some(ids);
+            return Some((pos, entries));
         }
 
-        // Descend into containers so a nested SlideListWithText is still found.
-        pos = if (ver_instance & 0x000F) == 0x0F {
-            content_start
-        } else {
-            content_end
-        };
+        if (ver_instance & 0x000F) == 0x0F
+            && let Some((relative, entries)) =
+                slide_persist_ids_in_presentation_order(&container[content_start..content_end], depth + 1)
+        {
+            // `relative` is relative to the nested slice; translate it back into
+            // `container`'s own coordinate space so the caller's offset stays meaningful.
+            return Some((content_start + relative, entries));
+        }
+
+        pos = content_end;
     }
     None
 }
@@ -425,12 +547,72 @@ fn slide_persist_ids_in_presentation_order(ppt_stream: &[u8]) -> Option<Vec<u32>
 ///
 /// When `include_master_slides` is `true`, master slide containers are not
 /// skipped, allowing their placeholder text to appear in the output.
+/// Push one outline atom's cleaned text into `outline_texts[index]`, and -- when
+/// `text_type` names the slide's title (`Title` / `CenterTitle`) and no title has been
+/// captured for this slide yet -- also into `outline_titles[index]` (#1635). The first
+/// title-typed atom wins: an outline states a slide's title once.
+fn record_outline_text(
+    outline_texts: &mut [Vec<String>],
+    outline_titles: &mut [Option<String>],
+    index: usize,
+    text_type: Option<u32>,
+    cleaned: String,
+) {
+    if matches!(text_type, Some(TEXT_TYPE_TITLE | TEXT_TYPE_CENTER_TITLE)) && outline_titles[index].is_none() {
+        outline_titles[index] = Some(cleaned.clone());
+    }
+    outline_texts[index].push(cleaned);
+}
+
+/// Commit one just-closed `RT_NOTES` container's accumulated text into `notes_by_slide`,
+/// keyed by the slide it belongs to (xberg-io/xberg#1640).
+///
+/// The notes master (`slideIdRef == NOTES_MASTER_SLIDE_ID_REF`) is layout, not content, and
+/// is dropped -- the same reason `RT_MAIN_MASTER` is skipped by default. With a resolved
+/// persist chain, `current_notes_slide_id` is looked up in `slide_number_by_id`; a notes
+/// page whose id names no live slide is a stale revision, like a `Slide` container the live
+/// list does not name (#1614), and is dropped too. Without a resolved chain, notes fall back
+/// to the deck's own encounter order via `next_positional_slide_number` -- the old, purely
+/// positional behaviour, now at least skipping the master.
+fn commit_notes(
+    current_notes_texts: &mut Vec<String>,
+    current_notes_slide_id: Option<u32>,
+    slide_number_by_id: &ahash::AHashMap<u32, u32>,
+    next_positional_slide_number: &mut u32,
+    notes_by_slide: &mut std::collections::BTreeMap<u32, String>,
+) {
+    if current_notes_texts.is_empty() {
+        return;
+    }
+    let notes_text = current_notes_texts.join("\n");
+    current_notes_texts.clear();
+    let trimmed = notes_text.trim();
+    if trimmed.is_empty() || current_notes_slide_id == Some(NOTES_MASTER_SLIDE_ID_REF) {
+        return;
+    }
+    let slide_number = if slide_number_by_id.is_empty() {
+        let number = *next_positional_slide_number;
+        *next_positional_slide_number += 1;
+        Some(number)
+    } else {
+        current_notes_slide_id.and_then(|id| slide_number_by_id.get(&id).copied())
+    };
+    if let Some(number) = slide_number {
+        notes_by_slide.insert(number, trimmed.to_string());
+    }
+}
+
 fn extract_texts_from_records(
     data: &[u8],
     include_master_slides: bool,
-    live_slides: Option<&[usize]>,
+    live: Option<&LiveSlides>,
     warnings: &mut Vec<ProcessingWarning>,
 ) -> Result<(Vec<PptSlideText>, Vec<String>, Vec<String>)> {
+    let live_slides = live.map(|l| l.offsets.as_slice());
+    // The only `SlideListWithText` occurrence outline text may be harvested from; `None`
+    // means the persist chain did not resolve, in which case every occurrence is read, as
+    // this extractor always did before #1639.
+    let live_outline_offset = live.map(|l| l.outline_record_offset);
     let mut slides: Vec<PptSlideText> = Vec::new();
     let mut loose_texts = Vec::new();
     let mut current_slide_number: u32 = 0;
@@ -438,14 +620,36 @@ fn extract_texts_from_records(
     let mut in_slide_text = false;
     let mut slide_end: Option<usize> = None;
     let mut current_slide_texts: Vec<String> = Vec::new();
-    let mut speaker_notes = Vec::new();
     let mut in_notes = false;
     let mut notes_end: Option<usize> = None;
     let mut current_notes_texts: Vec<String> = Vec::new();
+    // `NotesAtom.slideIdRef` of the notes container currently open; `None` until its
+    // `NotesAtom` (0x03F1) is read (#1640).
+    let mut current_notes_slide_id: Option<u32> = None;
+    // Speaker notes, keyed by the slide number they belong to -- resolved from
+    // `slideIdRef` when a persist chain is available, positional (skipping the master)
+    // otherwise (xberg-io/xberg#1640).
+    let mut notes_by_slide: std::collections::BTreeMap<u32, String> = std::collections::BTreeMap::new();
+    let mut next_positional_slide_number: u32 = 1;
+    let slide_number_by_id: ahash::AHashMap<u32, u32> = live
+        .map(|l| {
+            l.slide_ids
+                .iter()
+                .enumerate()
+                .map(|(i, &id)| (id, i as u32 + 1))
+                .collect()
+        })
+        .unwrap_or_default();
     // Outline text keyed by slide position, harvested from `SlideListWithText` (#1612).
     let mut outline_texts: Vec<Vec<String>> = Vec::new();
     let mut outline_end: Option<usize> = None;
     let mut outline_slide_index: Option<usize> = None;
+    // The outline's own title, one atom per slide, typed by the `TextHeaderAtom` that
+    // precedes it (#1635) -- `None` where the file's outline states no title.
+    let mut outline_titles: Vec<Option<String>> = Vec::new();
+    // `TextHeaderAtom.textType` of the outline atom about to follow; reset after every text
+    // atom so an untyped run never inherits a stale type from an earlier one. ~keep
+    let mut outline_text_type: Option<u32> = None;
 
     while pos + 8 <= data.len() {
         // A slide/notes container's text only spans its own declared byte
@@ -462,6 +666,8 @@ fn extract_texts_from_records(
             slides.push(PptSlideText {
                 number: current_slide_number,
                 text: current_slide_texts.join("\n"),
+                title: None,
+                notes: None,
             });
             current_slide_texts.clear();
             in_slide_text = false;
@@ -476,14 +682,14 @@ fn extract_texts_from_records(
         if let Some(end) = notes_end
             && pos >= end
         {
-            if !current_notes_texts.is_empty() {
-                let notes_text = current_notes_texts.join("\n");
-                let trimmed = notes_text.trim().to_string();
-                if !trimmed.is_empty() {
-                    speaker_notes.push(trimmed);
-                }
-                current_notes_texts.clear();
-            }
+            commit_notes(
+                &mut current_notes_texts,
+                current_notes_slide_id,
+                &slide_number_by_id,
+                &mut next_positional_slide_number,
+                &mut notes_by_slide,
+            );
+            current_notes_slide_id = None;
             in_notes = false;
             notes_end = None;
         }
@@ -526,6 +732,8 @@ fn extract_texts_from_records(
                     slides.push(PptSlideText {
                         number: current_slide_number,
                         text: current_slide_texts.join("\n"),
+                        title: None,
+                        notes: None,
                     });
                     current_slide_texts.clear();
                 }
@@ -536,17 +744,26 @@ fn extract_texts_from_records(
                 continue;
             }
             RT_NOTES => {
-                if in_notes && !current_notes_texts.is_empty() {
-                    let notes_text = current_notes_texts.join("\n");
-                    let trimmed = notes_text.trim().to_string();
-                    if !trimmed.is_empty() {
-                        speaker_notes.push(trimmed);
-                    }
-                    current_notes_texts.clear();
+                if in_notes {
+                    commit_notes(
+                        &mut current_notes_texts,
+                        current_notes_slide_id,
+                        &slide_number_by_id,
+                        &mut next_positional_slide_number,
+                        &mut notes_by_slide,
+                    );
                 }
                 in_notes = true;
+                current_notes_slide_id = None;
                 notes_end = Some(content_end);
                 pos += 8;
+                continue;
+            }
+            RT_NOTES_ATOM => {
+                if in_notes && let Some(bytes) = data.get(content_start..content_start + 4) {
+                    current_notes_slide_id = Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
+                }
+                pos = content_end;
                 continue;
             }
             RT_MAIN_MASTER if !include_master_slides => {
@@ -554,8 +771,12 @@ fn extract_texts_from_records(
                 continue;
             }
             RT_SLIDE_LIST_WITH_TEXT => {
-                outline_end = Some(content_end);
-                outline_slide_index = None;
+                // Only the live document's own list (#1639); a stale save's, or the
+                // master/notes lists sharing this record type, are skipped.
+                if live_outline_offset.is_none_or(|offset| offset == pos) {
+                    outline_end = Some(content_end);
+                    outline_slide_index = None;
+                }
                 pos += 8;
                 continue;
             }
@@ -564,6 +785,17 @@ fn extract_texts_from_records(
                 outline_slide_index = Some(next);
                 if outline_texts.len() <= next {
                     outline_texts.resize(next + 1, Vec::new());
+                    outline_titles.resize(next + 1, None);
+                }
+                outline_text_type = None;
+                pos = content_end;
+                continue;
+            }
+            RT_TEXT_HEADER_ATOM => {
+                if outline_slide_index.is_some()
+                    && let Some(bytes) = data.get(content_start..content_start + 4)
+                {
+                    outline_text_type = Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]));
                 }
                 pos = content_end;
                 continue;
@@ -582,7 +814,13 @@ fn extract_texts_from_records(
                             // Outline text belongs to a slide, not to `loose_texts` -- which is
                             // discarded whenever any slide exists, and is where every legacy
                             // title used to end up (#1612).
-                            outline_texts[index].push(cleaned);
+                            record_outline_text(
+                                &mut outline_texts,
+                                &mut outline_titles,
+                                index,
+                                outline_text_type,
+                                cleaned,
+                            );
                         } else {
                             if in_notes {
                                 current_notes_texts.push(cleaned.clone());
@@ -594,6 +832,7 @@ fn extract_texts_from_records(
                             }
                         }
                     }
+                    outline_text_type = None;
                 }
                 pos = content_end;
                 continue;
@@ -608,7 +847,13 @@ fn extract_texts_from_records(
                             // Outline text belongs to a slide, not to `loose_texts` -- which is
                             // discarded whenever any slide exists, and is where every legacy
                             // title used to end up (#1612).
-                            outline_texts[index].push(cleaned);
+                            record_outline_text(
+                                &mut outline_texts,
+                                &mut outline_titles,
+                                index,
+                                outline_text_type,
+                                cleaned,
+                            );
                         } else {
                             if in_notes {
                                 current_notes_texts.push(cleaned.clone());
@@ -620,6 +865,7 @@ fn extract_texts_from_records(
                             }
                         }
                     }
+                    outline_text_type = None;
                 }
                 pos = content_end;
                 continue;
@@ -641,16 +887,18 @@ fn extract_texts_from_records(
         slides.push(PptSlideText {
             number: current_slide_number,
             text: current_slide_texts.join("\n"),
+            title: None,
+            notes: None,
         });
     }
 
-    if !current_notes_texts.is_empty() {
-        let notes_text = current_notes_texts.join("\n");
-        let trimmed = notes_text.trim().to_string();
-        if !trimmed.is_empty() {
-            speaker_notes.push(trimmed);
-        }
-    }
+    commit_notes(
+        &mut current_notes_texts,
+        current_notes_slide_id,
+        &slide_number_by_id,
+        &mut next_positional_slide_number,
+        &mut notes_by_slide,
+    );
 
     // Presentation order, not stream order: with a live slide list the walk visits the
     // containers in whatever order the saves left them, and the number assigned above is
@@ -669,6 +917,9 @@ fn extract_texts_from_records(
         let Some(slide) = slides.get_mut(index) else {
             continue;
         };
+        // The file's own outline title (#1635), not the first-line guess the caller falls
+        // back to when this is `None`.
+        slide.title = outline_titles.get(index).cloned().flatten();
         let recovered: Vec<&str> = outline
             .iter()
             .map(String::as_str)
@@ -685,16 +936,24 @@ fn extract_texts_from_records(
         };
     }
 
+    // Every non-empty flat entry, in slide-number order -- kept for the metadata array
+    // consumers already read (`PptExtractionResult::speaker_notes`); the per-slide
+    // attachment below is what fixes the misattribution (#1640).
+    let speaker_notes: Vec<String> = notes_by_slide.values().cloned().collect();
+    for slide in &mut slides {
+        slide.notes = notes_by_slide.remove(&slide.number);
+    }
+
     Ok((slides, loose_texts, speaker_notes))
 }
 
 /// One record header from the PowerPoint/OfficeArt record tree, flattened out of its
 /// containers so callers can filter by type without re-walking.
-struct ArtRecord {
-    rec_instance: u16,
-    rec_type: u16,
-    content_start: usize,
-    content_end: usize,
+pub(super) struct ArtRecord {
+    pub(super) rec_instance: u16,
+    pub(super) rec_type: u16,
+    pub(super) content_start: usize,
+    pub(super) content_end: usize,
 }
 
 /// Collect every record header in `data[start..end]`, descending into containers.
@@ -703,7 +962,7 @@ struct ArtRecord {
 /// children are the records inside its own declared byte range. A `recLen` that would run
 /// past `end` stops the walk at that level rather than over-reading -- the stream is
 /// untrusted, and a truncated tail is the common shape of a salvageable corrupt deck.
-fn collect_art_records(data: &[u8], start: usize, end: usize, depth: usize, out: &mut Vec<ArtRecord>) {
+pub(super) fn collect_art_records(data: &[u8], start: usize, end: usize, depth: usize, out: &mut Vec<ArtRecord>) {
     if depth > MAX_OFFICE_ART_DEPTH {
         return;
     }
@@ -1016,7 +1275,7 @@ fn cp1252_to_char(b: u8) -> char {
 }
 
 /// Read a named stream from the CFB compound file.
-fn read_stream(comp: &mut cfb::CompoundFile<Cursor<&[u8]>>, name: &str) -> Result<Vec<u8>> {
+pub(super) fn read_stream(comp: &mut cfb::CompoundFile<Cursor<&[u8]>>, name: &str) -> Result<Vec<u8>> {
     use std::io::Read;
     let mut stream = comp
         .open_stream(name)
@@ -1206,12 +1465,40 @@ mod tests {
         buf
     }
 
+    /// Build a `TextHeaderAtom` (MS-PPT 2.13.33) declaring the `TextTypeEnum` value the
+    /// text atom that follows is typed as.
+    fn text_header_atom(text_type: u32) -> Vec<u8> {
+        let mut buf = record_header(0x0000, RT_TEXT_HEADER_ATOM, 4);
+        buf.extend_from_slice(&text_type.to_le_bytes());
+        buf
+    }
+
     /// Build a `SlidePersistAtom` naming `persist_id`. Only the leading `persistIdRef`
     /// matters to the reader; the remaining 16 bytes are the documented tail.
     fn slide_persist_atom(persist_id: u32) -> Vec<u8> {
+        slide_persist_atom_with_slide_id(persist_id, 0)
+    }
+
+    /// Build a `SlidePersistAtom` naming both `persist_id` (which resolves the `Slide`
+    /// container's stream offset) and `slide_id` (what `NotesAtom.slideIdRef` names the
+    /// slide by -- #1640). Layout per MS-PPT 2.4.14: `persistIdRef` (4), `flags` (4),
+    /// `numberTexts` (4), `slideId` (4), `reserved2` (4).
+    fn slide_persist_atom_with_slide_id(persist_id: u32, slide_id: u32) -> Vec<u8> {
         let mut buf = record_header(0x0000, RT_SLIDE_PERSIST_ATOM, 20);
         buf.extend_from_slice(&persist_id.to_le_bytes());
-        buf.extend_from_slice(&[0u8; 16]);
+        buf.extend_from_slice(&[0u8; 4]); // flags
+        buf.extend_from_slice(&[0u8; 4]); // numberTexts
+        buf.extend_from_slice(&slide_id.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 4]); // reserved2
+        buf
+    }
+
+    /// Build a `NotesAtom` (MS-PPT 2.5.7): `slideIdRef` (4 bytes), then `slideFlags` (2)
+    /// and `unused` (2) -- neither read here.
+    fn notes_atom(slide_id_ref: u32) -> Vec<u8> {
+        let mut buf = record_header(0x0000, RT_NOTES_ATOM, 8);
+        buf.extend_from_slice(&slide_id_ref.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 4]);
         buf
     }
 
@@ -1227,14 +1514,16 @@ mod tests {
         buf
     }
 
-    /// Build a `UserEditAtom`. `offset_last_edit` is 0 for the first save.
-    fn user_edit_atom(offset_last_edit: u32, offset_persist_directory: u32) -> Vec<u8> {
+    /// Build a `UserEditAtom`. `offset_last_edit` is 0 for the first save. `doc_persist_id_ref`
+    /// is the persist id of this save's live `DocumentContainer` (#1639).
+    fn user_edit_atom(offset_last_edit: u32, offset_persist_directory: u32, doc_persist_id_ref: u32) -> Vec<u8> {
         let mut buf = record_header(0x0000, RT_USER_EDIT_ATOM, 28);
         buf.extend_from_slice(&1u32.to_le_bytes()); // lastSlideIdRef
         buf.extend_from_slice(&[0u8; 4]); // version / minorVersion / majorVersion
         buf.extend_from_slice(&offset_last_edit.to_le_bytes());
         buf.extend_from_slice(&offset_persist_directory.to_le_bytes());
-        buf.extend_from_slice(&[0u8; 12]); // docPersistIdRef, persistIdSeed, lastView, unused
+        buf.extend_from_slice(&doc_persist_id_ref.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 8]); // persistIdSeed, lastView, unused
         buf
     }
 
@@ -1269,24 +1558,31 @@ mod tests {
             RT_SLIDE_LIST_WITH_TEXT,
             &[slide_persist_atom(1), slide_persist_atom(2)].concat(),
         );
-        data.extend_from_slice(&slide_list);
+        let document = container(RT_DOCUMENT, &slide_list);
+        let document_offset = data.len() as u32;
+        data.extend_from_slice(&document);
 
         // Older save: persist id 1 pointed at the stale copy. Newer save: it points at the
-        // live one, and adds id 2.
+        // live one, and adds id 2. Persist id 20 is the `DocumentContainer` itself, named by
+        // both saves' `UserEditAtom.docPersistIdRef` (#1639).
         let old_dir_offset = data.len() as u32;
         data.extend_from_slice(&persist_directory(&[(1, stale_offset)]));
         let new_dir_offset = data.len() as u32;
-        data.extend_from_slice(&persist_directory(&[(1, one_offset), (2, two_offset)]));
+        data.extend_from_slice(&persist_directory(&[
+            (1, one_offset),
+            (2, two_offset),
+            (20, document_offset),
+        ]));
 
         let old_edit_offset = data.len() as u32;
-        data.extend_from_slice(&user_edit_atom(0, old_dir_offset));
+        data.extend_from_slice(&user_edit_atom(0, old_dir_offset, 20));
         let new_edit_offset = data.len() as u32;
-        data.extend_from_slice(&user_edit_atom(old_edit_offset, new_dir_offset));
+        data.extend_from_slice(&user_edit_atom(old_edit_offset, new_dir_offset, 20));
 
         let live =
             live_slide_offsets(&data, &current_user_stream(new_edit_offset)).expect("the persist chain must resolve");
         assert_eq!(
-            live,
+            live.offsets,
             vec![one_offset as usize, two_offset as usize],
             "the stale revision's offset must not appear in the live slide list"
         );
@@ -1335,16 +1631,22 @@ mod tests {
             RT_SLIDE_LIST_WITH_TEXT,
             &[slide_persist_atom(1), slide_persist_atom(2)].concat(),
         );
-        data.extend_from_slice(&slide_list);
+        let document = container(RT_DOCUMENT, &slide_list);
+        let document_offset = data.len() as u32;
+        data.extend_from_slice(&document);
 
         let dir_offset = data.len() as u32;
-        data.extend_from_slice(&persist_directory(&[(1, stream_b), (2, stream_a)]));
+        data.extend_from_slice(&persist_directory(&[
+            (1, stream_b),
+            (2, stream_a),
+            (20, document_offset),
+        ]));
         let edit_offset = data.len() as u32;
-        data.extend_from_slice(&user_edit_atom(0, dir_offset));
+        data.extend_from_slice(&user_edit_atom(0, dir_offset, 20));
 
         let live =
             live_slide_offsets(&data, &current_user_stream(edit_offset)).expect("the persist chain must resolve");
-        assert_eq!(live, vec![stream_b as usize, stream_a as usize]);
+        assert_eq!(live.offsets, vec![stream_b as usize, stream_a as usize]);
 
         let mut warnings = Vec::new();
         let (slides, _, _) = extract_texts_from_records(&data, false, Some(&live), &mut warnings)
@@ -1354,6 +1656,117 @@ mod tests {
             slides.iter().map(|s| (s.number, s.text.as_str())).collect::<Vec<_>>(),
             vec![(1, "appears first"), (2, "appears second")],
             "slide numbers and order come from the slide list, not the byte order"
+        );
+    }
+
+    /// xberg-io/xberg#1639: a `.ppt` stream is append-only, so a deck saved more than once
+    /// carries one `SlideListWithText` per save. The first one in the stream is the
+    /// **oldest** save's; the live save's list -- reached via `docPersistIdRef` on the
+    /// current `UserEditAtom` -- is the presentation's. Reproduces the issue's own example:
+    /// a second save adds a slide, and the first save's list must not be read instead.
+    #[test]
+    fn the_live_document_slide_list_is_read_not_the_first_one_in_the_stream() {
+        let slide_a = container(RT_SLIDE, &text_chars_atom("Slide A"));
+        let mut data = Vec::new();
+        let slide_a_offset = data.len() as u32;
+        data.extend_from_slice(&slide_a);
+
+        let old_slide_list = container(RT_SLIDE_LIST_WITH_TEXT, &slide_persist_atom(4));
+        let old_document = container(RT_DOCUMENT, &old_slide_list);
+        let old_document_offset = data.len() as u32;
+        data.extend_from_slice(&old_document);
+
+        let old_dir_offset = data.len() as u32;
+        data.extend_from_slice(&persist_directory(&[(4, slide_a_offset), (1, old_document_offset)]));
+        let old_edit_offset = data.len() as u32;
+        data.extend_from_slice(&user_edit_atom(0, old_dir_offset, 1));
+
+        let slide_b = container(RT_SLIDE, &text_chars_atom("Slide B"));
+        let slide_b_offset = data.len() as u32;
+        data.extend_from_slice(&slide_b);
+
+        let new_slide_list = container(
+            RT_SLIDE_LIST_WITH_TEXT,
+            &[slide_persist_atom(4), slide_persist_atom(5)].concat(),
+        );
+        let new_document = container(RT_DOCUMENT, &new_slide_list);
+        let new_document_offset = data.len() as u32;
+        data.extend_from_slice(&new_document);
+
+        let new_dir_offset = data.len() as u32;
+        data.extend_from_slice(&persist_directory(&[(5, slide_b_offset), (1, new_document_offset)]));
+        let new_edit_offset = data.len() as u32;
+        data.extend_from_slice(&user_edit_atom(old_edit_offset, new_dir_offset, 1));
+
+        let live =
+            live_slide_offsets(&data, &current_user_stream(new_edit_offset)).expect("the persist chain must resolve");
+        assert_eq!(
+            live.offsets,
+            vec![slide_a_offset as usize, slide_b_offset as usize],
+            "the live document's slide list names both persist ids 4 and 5, not just the first save's 4"
+        );
+
+        let mut warnings = Vec::new();
+        let (slides, _, _) = extract_texts_from_records(&data, false, Some(&live), &mut warnings)
+            .expect("record parsing should succeed");
+        assert_eq!(slides.len(), 2, "the deck added a slide in its second save");
+        assert_eq!(slides[0].text, "Slide A");
+        assert_eq!(slides[1].text, "Slide B");
+    }
+
+    /// xberg-io/xberg#1639, the outline half: the outline-text harvest has the same
+    /// first-in-stream defect as the slide list -- every `SlideListWithText` met while
+    /// walking the whole stream contributed outline text, so a stale save's wording of a
+    /// slide's title could appear beside the live one. Only the live document's own list
+    /// may be harvested.
+    #[test]
+    fn outline_text_is_harvested_only_from_the_live_slide_list() {
+        let slide1 = container(RT_SLIDE, &text_chars_atom("body text"));
+        let mut data = Vec::new();
+        let slide1_offset = data.len() as u32;
+        data.extend_from_slice(&slide1);
+
+        let mut old_outline = Vec::new();
+        old_outline.extend_from_slice(&slide_persist_atom(1));
+        old_outline.extend_from_slice(&text_chars_atom("Old Title"));
+        let old_slide_list = container(RT_SLIDE_LIST_WITH_TEXT, &old_outline);
+        let old_document = container(RT_DOCUMENT, &old_slide_list);
+        let old_document_offset = data.len() as u32;
+        data.extend_from_slice(&old_document);
+
+        let old_dir_offset = data.len() as u32;
+        data.extend_from_slice(&persist_directory(&[(1, slide1_offset), (2, old_document_offset)]));
+        let old_edit_offset = data.len() as u32;
+        data.extend_from_slice(&user_edit_atom(0, old_dir_offset, 2));
+
+        let mut new_outline = Vec::new();
+        new_outline.extend_from_slice(&slide_persist_atom(1));
+        new_outline.extend_from_slice(&text_chars_atom("New Title"));
+        let new_slide_list = container(RT_SLIDE_LIST_WITH_TEXT, &new_outline);
+        let new_document = container(RT_DOCUMENT, &new_slide_list);
+        let new_document_offset = data.len() as u32;
+        data.extend_from_slice(&new_document);
+
+        let new_dir_offset = data.len() as u32;
+        data.extend_from_slice(&persist_directory(&[(1, slide1_offset), (2, new_document_offset)]));
+        let new_edit_offset = data.len() as u32;
+        data.extend_from_slice(&user_edit_atom(old_edit_offset, new_dir_offset, 2));
+
+        let live =
+            live_slide_offsets(&data, &current_user_stream(new_edit_offset)).expect("the persist chain must resolve");
+
+        let mut warnings = Vec::new();
+        let (slides, _, _) = extract_texts_from_records(&data, false, Some(&live), &mut warnings)
+            .expect("record parsing should succeed");
+
+        assert_eq!(slides.len(), 1);
+        assert_eq!(
+            slides[0].text, "New Title\nbody text",
+            "only the live save's outline title is recovered"
+        );
+        assert!(
+            !slides[0].text.contains("Old Title"),
+            "a stale save's outline text must not reach the output"
         );
     }
 
@@ -1498,6 +1911,163 @@ mod tests {
 
         assert_eq!(slides.len(), 1);
         assert_eq!(slides[0].text, "Title Slide\nWith a subtitle");
+    }
+
+    /// xberg-io/xberg#1635: the outline's own `TextHeaderAtom` says which run is the slide's
+    /// title (`Title` = 0) -- not the first line of whatever text ends up on the slide. A
+    /// body-typed atom (`Body` = 1) in the same outline entry must not be mistaken for one.
+    #[test]
+    fn test_extract_texts_reads_the_outline_title_type_not_the_first_line() {
+        let mut outline = Vec::new();
+        outline.extend_from_slice(&record_header(0x0000, RT_SLIDE_PERSIST_ATOM, 0));
+        outline.extend_from_slice(&text_header_atom(TEXT_TYPE_TITLE));
+        outline.extend_from_slice(&text_chars_atom("Search strategy development"));
+        outline.extend_from_slice(&text_header_atom(1)); // Body
+        outline.extend_from_slice(&text_chars_atom("a body bullet, not the title"));
+        let slwt = container(RT_SLIDE_LIST_WITH_TEXT, &outline);
+
+        let slide1 = container(RT_SLIDE, &text_chars_atom("=> FILE HCAPLUS"));
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&slwt);
+        data.extend_from_slice(&slide1);
+
+        let mut warnings = Vec::new();
+        let (slides, _loose, _notes) =
+            extract_texts_from_records(&data, false, None, &mut warnings).expect("record parsing should succeed");
+
+        assert_eq!(slides.len(), 1);
+        assert_eq!(
+            slides[0].title.as_deref(),
+            Some("Search strategy development"),
+            "the Title-typed atom is the title, not the body bullet or the drawing's first line"
+        );
+    }
+
+    /// xberg-io/xberg#1635, negative control: `CenterTitle` is `6`, not `5` -- `5` is
+    /// `CenterBody`, ordinary body text. Reading the wrong value would silently promote a
+    /// slide's body to its title. ~keep
+    #[test]
+    fn test_extract_texts_treats_center_title_as_six_not_five() {
+        let mut center_title = Vec::new();
+        center_title.extend_from_slice(&record_header(0x0000, RT_SLIDE_PERSIST_ATOM, 0));
+        center_title.extend_from_slice(&text_header_atom(TEXT_TYPE_CENTER_TITLE));
+        center_title.extend_from_slice(&text_chars_atom("Refworks"));
+        let mut data = Vec::new();
+        data.extend_from_slice(&container(RT_SLIDE_LIST_WITH_TEXT, &center_title));
+        data.extend_from_slice(&container(RT_SLIDE, &text_chars_atom("some body")));
+
+        let mut warnings = Vec::new();
+        let (slides, _, _) =
+            extract_texts_from_records(&data, false, None, &mut warnings).expect("record parsing should succeed");
+        assert_eq!(
+            slides[0].title.as_deref(),
+            Some("Refworks"),
+            "textType 6 (CenterTitle) is the centred-title placeholder"
+        );
+
+        let mut center_body = Vec::new();
+        center_body.extend_from_slice(&record_header(0x0000, RT_SLIDE_PERSIST_ATOM, 0));
+        center_body.extend_from_slice(&text_header_atom(5));
+        center_body.extend_from_slice(&text_chars_atom("body, not a title"));
+        let mut data5 = Vec::new();
+        data5.extend_from_slice(&container(RT_SLIDE_LIST_WITH_TEXT, &center_body));
+        data5.extend_from_slice(&container(RT_SLIDE, &text_chars_atom("drawn body")));
+
+        let mut warnings5 = Vec::new();
+        let (slides5, _, _) =
+            extract_texts_from_records(&data5, false, None, &mut warnings5).expect("record parsing should succeed");
+        assert_eq!(
+            slides5[0].title, None,
+            "textType 5 is CenterBody, not CenterTitle -- must not become the title"
+        );
+    }
+
+    /// xberg-io/xberg#1640: the notes master is also an `RT_NOTES` container --
+    /// `NotesAtom.slideIdRef == 0x80000000` -- and carries the notes page's layout
+    /// placeholder text, not a slide's speaker notes. It must never reach
+    /// `speaker_notes` or attach to any slide.
+    #[test]
+    fn should_not_treat_the_notes_master_placeholder_as_a_speaker_note() {
+        let mut notes_master = Vec::new();
+        notes_master.extend_from_slice(&notes_atom(NOTES_MASTER_SLIDE_ID_REF));
+        notes_master.extend_from_slice(&text_chars_atom("Click to edit Master text styles"));
+        let notes_master_container = container(RT_NOTES, &notes_master);
+
+        let mut data = Vec::new();
+        data.extend_from_slice(&notes_master_container);
+        data.extend_from_slice(&container(RT_SLIDE, &text_chars_atom("Slide One")));
+
+        let mut warnings = Vec::new();
+        let (slides, _loose, speaker_notes) =
+            extract_texts_from_records(&data, false, None, &mut warnings).expect("record parsing should succeed");
+
+        assert!(
+            speaker_notes.is_empty(),
+            "the notes master's placeholder text must not become a speaker note: {speaker_notes:?}"
+        );
+        assert_eq!(slides.len(), 1);
+        assert_eq!(
+            slides[0].notes, None,
+            "the master placeholder must not attach to slide 1 either"
+        );
+    }
+
+    /// xberg-io/xberg#1640: notes must attach to the slide `NotesAtom.slideIdRef` names,
+    /// resolved through the live `SlidePersistAtom.slideId` -- not to the slide at the same
+    /// position among the deck's non-empty notes pages. Slide 1 has no notes; slide 2's
+    /// note must land on slide 2, not shift onto slide 1.
+    #[test]
+    fn should_attach_notes_to_the_slide_named_by_slide_id_ref_not_position() {
+        let slide1 = container(RT_SLIDE, &text_chars_atom("Slide One"));
+        let slide2 = container(RT_SLIDE, &text_chars_atom("Slide Two"));
+
+        let mut data = Vec::new();
+        let slide1_offset = data.len() as u32;
+        data.extend_from_slice(&slide1);
+        let slide2_offset = data.len() as u32;
+        data.extend_from_slice(&slide2);
+
+        let mut notes2 = Vec::new();
+        notes2.extend_from_slice(&notes_atom(101));
+        notes2.extend_from_slice(&text_chars_atom("Notes for slide two"));
+        data.extend_from_slice(&container(RT_NOTES, &notes2));
+
+        let slide_list = container(
+            RT_SLIDE_LIST_WITH_TEXT,
+            &[
+                slide_persist_atom_with_slide_id(10, 100),
+                slide_persist_atom_with_slide_id(11, 101),
+            ]
+            .concat(),
+        );
+        let document = container(RT_DOCUMENT, &slide_list);
+        let document_offset = data.len() as u32;
+        data.extend_from_slice(&document);
+
+        let dir_offset = data.len() as u32;
+        data.extend_from_slice(&persist_directory(&[
+            (10, slide1_offset),
+            (11, slide2_offset),
+            (99, document_offset),
+        ]));
+        let edit_offset = data.len() as u32;
+        data.extend_from_slice(&user_edit_atom(0, dir_offset, 99));
+
+        let live =
+            live_slide_offsets(&data, &current_user_stream(edit_offset)).expect("the persist chain must resolve");
+
+        let mut warnings = Vec::new();
+        let (slides, _loose, speaker_notes) = extract_texts_from_records(&data, false, Some(&live), &mut warnings)
+            .expect("record parsing should succeed");
+
+        assert_eq!(slides.len(), 2);
+        assert_eq!(
+            slides[0].notes, None,
+            "slide 1 has no notes and must not inherit slide 2's by position"
+        );
+        assert_eq!(slides[1].notes.as_deref(), Some("Notes for slide two"));
+        assert_eq!(speaker_notes, vec!["Notes for slide two".to_string()]);
     }
 
     /// A `Notes` container's text must not bleed into the slide that follows
@@ -1809,6 +2379,52 @@ mod tests {
         );
     }
 
+    /// REV-CB regression for GH#1687 (shares the GH#1662/GH#1686 fix): an OCR-only
+    /// `ExtractionConfig` (no `images.extract_images`, no captioning, no QR codes) must
+    /// still read a `.ppt` OLE container's embedded image out of its `Pictures` stream,
+    /// not skip it. `needs_image_data` gained the OCR disjunct that makes this true
+    /// (#1662); PPT shares that predicate with DOCX, HTML and PPTX through
+    /// `PptExtractor::extract_content`'s `config.needs_image_data()` call (see
+    /// `extractors::ppt`), but until now nothing exercised that call site directly.
+    /// Before the fix, `extract_images` stayed `false` for an OCR-only config, so
+    /// `extract_ppt_text_with_options` never read `/Pictures` at all and
+    /// `InternalDocument::images` stayed empty, silently, with no warning -- the same
+    /// shape `should_return_no_images_when_extract_images_is_false` above proves at the
+    /// lower `extract_ppt_text_with_options(bool)` layer. This test lives here rather
+    /// than in `extractors::ppt`'s own test module because it reuses `build_test_ppt_ole`
+    /// and the blip/record builders already proven above, instead of a second hand-rolled
+    /// OLE/CFB writer for the same container shape.
+    #[tokio::test]
+    async fn should_read_real_embedded_image_bytes_for_ocr_only_config_at_extract_content() {
+        use crate::core::config::{ExtractionConfig, OcrConfig};
+        use crate::core::mime::LEGACY_POWERPOINT_MIME_TYPE;
+        use crate::extractors::ppt::PptExtractor;
+        use crate::plugins::InternalDocumentExtractor;
+
+        let ppt_stream = container(RT_SLIDE, &text_chars_atom("Slide One"));
+        let picture = b"\xFF\xD8\xFFsynthetic-jpeg-bytes";
+        let pictures_stream = blip_record_one_uid(0x46A, RT_BLIP_JPEG, picture);
+        let content = build_test_ppt_ole(&ppt_stream, Some(&pictures_stream));
+
+        let config = ExtractionConfig {
+            ocr: Some(OcrConfig::default()),
+            ..Default::default()
+        };
+
+        let extractor = PptExtractor::new();
+        let internal_doc = extractor
+            .extract_content(&content, LEGACY_POWERPOINT_MIME_TYPE, &config)
+            .await
+            .expect("synthetic OLE container must extract");
+
+        assert_eq!(internal_doc.images.len(), 1, "the single blip must yield one image");
+        assert_eq!(
+            internal_doc.images[0].data.as_ref(),
+            &picture[..],
+            "an OCR-only config must still read the real embedded-image bytes, not skip the Pictures stream"
+        );
+    }
+
     #[test]
     fn should_return_no_images_when_pictures_stream_is_absent() {
         let ppt_stream = container(RT_SLIDE, &text_chars_atom("Slide One"));
@@ -1859,7 +2475,7 @@ mod tests {
         let mut pictures_stream = first_blip.clone();
         pictures_stream.extend_from_slice(&second_blip);
 
-        // `pib` 1 -> the blip at 0, `pib` 2 -> the blip after it.
+        // `pib` is 1-based: 1 -> the blip at offset 0, 2 -> the blip after it. ~keep
         let mut bstore = bse_record(0);
         bstore.extend_from_slice(&bse_record(second_offset));
         let drawing_group = container(0xF001, &bstore);

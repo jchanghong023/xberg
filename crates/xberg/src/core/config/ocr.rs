@@ -500,6 +500,14 @@ pub struct OcrPipelineStage {
 #[allow(dead_code)]
 pub(crate) const SOURCE_DPI_BACKEND_OPTION: &str = "source_dpi";
 
+/// [`OcrConfig::backend_options`] key carrying a page's PDF `/Rotate` value, in degrees.
+///
+/// Stamped per page by the PDF OCR route alongside [`SOURCE_DPI_BACKEND_OPTION`] (see
+/// `crate::extractors::pdf::ocr::pipeline::ocr_config_with_page_rotation_hint`). Declared here
+/// for the same reason: so the producer and any consumer cannot drift apart on the key's spelling.
+#[allow(dead_code)]
+pub(crate) const PAGE_ROTATION_DEGREES_BACKEND_OPTION: &str = "page_rotation_degrees";
+
 fn default_priority() -> u32 {
     100
 }
@@ -891,9 +899,11 @@ pub struct OcrConfig {
     ///
     /// Not user-configurable via config files — injected at runtime from
     /// `ExtractionConfig::security_limits` before each `process_image` call, the same
-    /// pattern [`Self::acceleration`] uses. `ExtractionConfig::security_limits` is the
-    /// single source of truth: this field only ever holds a copy the caller placed here
-    /// immediately before dispatch, so the two cannot drift. A backend consulting a
+    /// pattern [`Self::acceleration`] uses. `ExtractionConfig::security_limits` remains the
+    /// source of truth and overwrites this field whenever it carries a value; a value set
+    /// here directly is honoured only when `ExtractionConfig` carries none, so the two
+    /// cannot drift while a directly-set limit is no longer silently discarded (GH#1651).
+    /// A backend consulting a
     /// `backend_options` override for this call may still let that override win, but in
     /// the absence of one this field is what backends should fall back to instead of
     /// `SecurityLimits::default()`. `None` means "use `SecurityLimits::default()`", never
