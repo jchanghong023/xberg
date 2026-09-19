@@ -73,8 +73,7 @@ pub(crate) fn append_embedded_object_text(document: &mut crate::types::internal:
         // `images` is optional on an extraction result: a caller that asked for no
         // image data (or an extractor that produces none) leaves it empty, and the
         // body's references then simply keep their alt text.
-        let child_images: &[crate::types::ExtractedImage] =
-            child.result.images.as_deref().unwrap_or_default();
+        let child_images: &[crate::types::ExtractedImage] = child.result.images.as_deref().unwrap_or_default();
         let span = child_images
             .iter()
             .map(|image| image.image_index)
@@ -132,11 +131,7 @@ pub(crate) fn append_embedded_object_text(document: &mut crate::types::internal:
 /// assets it cannot carry over. Returns the rewritten body and the child image
 /// indices the body still points at, so the caller stages exactly the assets
 /// the merged output references.
-fn renumber_embedded_image_refs(
-    text: &str,
-    base: u32,
-    images: &[crate::types::ExtractedImage],
-) -> (String, Vec<u32>) {
+fn renumber_embedded_image_refs(text: &str, base: u32, images: &[crate::types::ExtractedImage]) -> (String, Vec<u32>) {
     let mut out = String::with_capacity(text.len());
     let mut referenced: Vec<u32> = Vec::new();
     let bytes = text.as_bytes();
@@ -296,10 +291,10 @@ fn find_markdown_image_parts(s: &str) -> ImageScan<'_> {
     let Some(close_paren) = find_unescaped(after, b')') else {
         return ImageScan::NoTerminator;
     };
-    if let Some(next_opener) = find_unescaped_opener(after) {
-        if next_opener < close_paren {
-            return ImageScan::Malformed;
-        }
+    if let Some(next_opener) = find_unescaped_opener(after)
+        && next_opener < close_paren
+    {
+        return ImageScan::Malformed;
     }
     ImageScan::Parts(alt, &after[1..close_paren], 2 + close_bracket + 1 + close_paren + 1)
 }
@@ -722,7 +717,8 @@ fn native_stream_present<F: Read + std::io::Seek>(
 }
 
 #[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
-fn collect_ole_stream_paths<F: Read + std::io::Seek>(compound_file: &cfb::CompoundFile<F>) -> Vec<std::path::PathBuf> {    compound_file
+fn collect_ole_stream_paths<F: Read + std::io::Seek>(compound_file: &cfb::CompoundFile<F>) -> Vec<std::path::PathBuf> {
+    compound_file
         .walk()
         .filter(|entry| entry.is_stream())
         .take(256)
@@ -758,10 +754,10 @@ fn read_ole_stream(
         }
     }
     for path in stream_paths {
-        if ole_path_matches(path, names) {
-            if let Some(data) = read_ole_stream_path(compound_file, path, max_bytes) {
-                return Some(data);
-            }
+        if ole_path_matches(path, names)
+            && let Some(data) = read_ole_stream_path(compound_file, path, max_bytes)
+        {
+            return Some(data);
         }
     }
     None
@@ -1072,8 +1068,8 @@ mod tests {
     /// searchable, not only on `children`.
     #[test]
     fn append_embedded_object_text_merges_child_content_into_body() {
-        use crate::types::internal::{ElementKind, InternalDocument};
         use crate::types::ExtractedDocument;
+        use crate::types::internal::{ElementKind, InternalDocument};
 
         let child = ExtractedDocument {
             content: "SCAN设计流程介绍\n\n拟制".to_string(),
@@ -1089,11 +1085,7 @@ mod tests {
 
         append_embedded_object_text(&mut doc);
 
-        let texts: Vec<&str> = doc
-            .elements
-            .iter()
-            .map(|element| element.text.as_str())
-            .collect();
+        let texts: Vec<&str> = doc.elements.iter().map(|element| element.text.as_str()).collect();
         assert!(
             texts.iter().any(|text| text.contains("SCAN设计流程介绍")),
             "expected child body in elements, got {texts:?}"
@@ -1149,7 +1141,11 @@ mod tests {
             rewritten.contains("![flow \\] chart](image_2.png)"),
             "the escaped reference is renumbered, got {rewritten}"
         );
-        assert_eq!(referenced, vec![0], "the escaped reference counts as a staging candidate");
+        assert_eq!(
+            referenced,
+            vec![0],
+            "the escaped reference counts as a staging candidate"
+        );
     }
 
     /// A fenced `image_N` reference is example text, not a file reference: it
@@ -1212,8 +1208,7 @@ mod tests {
             image_index: 0,
             ..Default::default()
         }];
-        let (rewritten, referenced) =
-            renumber_embedded_image_refs("![a](unclosed ![c](image_0.png)", 3, &images);
+        let (rewritten, referenced) = renumber_embedded_image_refs("![a](unclosed ![c](image_0.png)", 3, &images);
         assert!(
             rewritten.contains("![c](image_3.png)"),
             "the later reference must be renumbered, got {rewritten}"
@@ -1235,8 +1230,8 @@ mod tests {
     /// to. The base must also not advance past the unused slots.
     #[test]
     fn append_embedded_object_text_skips_orphan_images_of_empty_children() {
-        use crate::types::internal::InternalDocument;
         use crate::types::ExtractedDocument;
+        use crate::types::internal::InternalDocument;
 
         let mut child_result = ExtractedDocument::default();
         child_result.content = "![](image_7.png)".to_string();
@@ -1253,15 +1248,19 @@ mod tests {
         }]);
 
         append_embedded_object_text(&mut doc);
-        assert!(doc.images.is_empty(), "orphan images must not be staged: {:?}", doc.images);
+        assert!(
+            doc.images.is_empty(),
+            "orphan images must not be staged: {:?}",
+            doc.images
+        );
         assert!(doc.elements.is_empty(), "an empty child adds no elements");
     }
 
     /// Blank child payloads must not inject empty captions/raw blocks.
     #[test]
     fn append_embedded_object_text_skips_blank_children() {
-        use crate::types::internal::InternalDocument;
         use crate::types::ExtractedDocument;
+        use crate::types::internal::InternalDocument;
 
         let mut doc = InternalDocument::default();
         doc.children = Some(vec![ArchiveEntry {

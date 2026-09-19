@@ -149,8 +149,7 @@ pub(crate) fn extract_tables_native(doc: &mut NativeDocument) -> Result<(Vec<Tab
             // `1 1 0`-into-`110` row would reach the output unsplit. The rewrite's
             // own gates (3-8 columns, pure-bit merged value, single-bit evidence
             // row, 60% bit-shaped grid) are what make it safe, not the entry point.
-            let split_count =
-                crate::pdf::table_reconstruct::split_merged_truth_table_cells(&mut cells);
+            let split_count = crate::pdf::table_reconstruct::split_merged_truth_table_cells(&mut cells);
             let markdown = if split_count > 0 {
                 table_to_markdown(&cells)
             } else {
@@ -280,8 +279,7 @@ pub(crate) fn extract_tables_bordered(
             // clustered `1 1 0`-into-`110` row would reach the output unsplit.
             // The rewrite has its own truth-table gates; regenerating the
             // markdown keeps the flat field in step with the cells.
-            let split_count =
-                crate::pdf::table_reconstruct::split_merged_truth_table_cells(&mut cells);
+            let split_count = crate::pdf::table_reconstruct::split_merged_truth_table_cells(&mut cells);
             let markdown = if split_count > 0 {
                 table_to_markdown(&cells)
             } else {

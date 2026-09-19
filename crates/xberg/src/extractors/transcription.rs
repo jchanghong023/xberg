@@ -313,7 +313,13 @@ impl TranscriptionExtractor {
             )));
         }
 
-        let pcm = decode_to_pcm(content, mime_type, tcfg.max_bytes, tcfg.max_duration_ms, tcfg.timeout_ms)?;
+        let pcm = decode_to_pcm(
+            content,
+            mime_type,
+            tcfg.max_bytes,
+            tcfg.max_duration_ms,
+            tcfg.timeout_ms,
+        )?;
         let tags = crate::transcription::tags::read_audio_tags(content);
 
         if let Some(max_d) = tcfg.max_duration_ms

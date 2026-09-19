@@ -32,6 +32,13 @@ use reader::CfbReader;
 /// `\x05SummaryInformation` stream (MS-OLEPS), just named for HWP (#105).
 const SUMMARY_INFO_STREAM: &str = "\u{5}HwpSummaryInformation";
 
+/// cfb builds stream paths with `PathBuf`, so their separator is `\` on Windows
+/// and `/` on Unix; normalize before prefix matching while still passing the
+/// original listed path to `read_stream`.
+fn stream_path_matches(path: &str, prefix: &str) -> bool {
+    path.replace('\\', "/").starts_with(prefix)
+}
+
 /// Extract the structured document model from an HWP 5.0 document.
 pub(crate) fn extract_hwp_document(bytes: &[u8]) -> Result<HwpDocument> {
     let mut cfb = CfbReader::from_bytes(bytes)?;
@@ -67,7 +74,7 @@ pub(crate) fn extract_hwp_document(bytes: &[u8]) -> Result<HwpDocument> {
     streams.sort();
 
     for path in streams {
-        if path.starts_with("BodyText/Section") {
+        if stream_path_matches(&path, "BodyText/Section") {
             let section_data = cfb.read_stream(&path)?;
             match parse_body_text(section_data, header.is_compressed(), &path, &mut doc.warnings) {
                 Ok(sections) => doc.sections.extend(sections),
@@ -79,7 +86,7 @@ pub(crate) fn extract_hwp_document(bytes: &[u8]) -> Result<HwpDocument> {
     }
 
     for path in cfb.list_streams() {
-        if path.starts_with("BinData/") {
+        if stream_path_matches(&path, "BinData/") {
             let image_data = cfb.read_stream(&path)?;
             doc.images.push(model::HwpImage {
                 name: path.clone(),

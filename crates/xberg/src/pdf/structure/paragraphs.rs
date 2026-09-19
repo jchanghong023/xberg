@@ -182,8 +182,7 @@ fn boundary_lines_overlap_horizontally(current: &PdfParagraph, next: &PdfParagra
     let (Some(prev_line), Some(next_line)) = (current.lines.last(), next.lines.first()) else {
         return true;
     };
-    let (Some(prev_extent), Some(next_extent)) =
-        (line_upright_x_extent(prev_line), line_upright_x_extent(next_line))
+    let (Some(prev_extent), Some(next_extent)) = (line_upright_x_extent(prev_line), line_upright_x_extent(next_line))
     else {
         return true;
     };
@@ -620,14 +619,8 @@ mod tests {
         // 合并把页签文本焊进节标题，跨页书眉检测（整串精确匹配）随之失效，
         // "RAM Examples" ×12 的书眉残留即由此而来。
         let tab = make_body_paragraph_with_x("RAM Examples", 9.96, 746.0, 467.8, 72.1, true);
-        let sidehead = make_body_paragraph_with_x(
-            "Single Posedge Ports With Write Enable",
-            9.96,
-            718.0,
-            72.0,
-            137.0,
-            true,
-        );
+        let sidehead =
+            make_body_paragraph_with_x("Single Posedge Ports With Write Enable", 9.96, 718.0, 72.0, 137.0, true);
         let mut paragraphs = vec![tab, sidehead];
         merge_continuation_paragraphs(&mut paragraphs);
         assert_eq!(
@@ -668,7 +661,8 @@ mod tests {
     fn test_merge_bold_wrapped_line_within_leading_still_merges() {
         // 反例守卫：真正的粗体换行（约 1.2× 行高）必须照常合并，新的间距
         // 上限不能把 GH#1605 类的粗体标题换行重新拆开。
-        let first = make_body_paragraph_with_x("2.4 Aandachtspunten ten behoeve van de", 12.0, 700.0, 72.0, 235.5, true);
+        let first =
+            make_body_paragraph_with_x("2.4 Aandachtspunten ten behoeve van de", 12.0, 700.0, 72.0, 235.5, true);
         let second = make_body_paragraph_with_x("watertechnische installatie", 12.0, 685.5, 72.0, 176.8, true);
         let mut paragraphs = vec![first, second];
         merge_continuation_paragraphs(&mut paragraphs);
@@ -688,7 +682,11 @@ mod tests {
         ];
         let mut paragraphs = paragraphs_vec;
         merge_continuation_paragraphs(&mut paragraphs);
-        assert_eq!(paragraphs.len(), 1, "overlapping wrapped continuation should still merge");
+        assert_eq!(
+            paragraphs.len(),
+            1,
+            "overlapping wrapped continuation should still merge"
+        );
     }
 
     /// Text of a paragraph's first line, joined from its segments.

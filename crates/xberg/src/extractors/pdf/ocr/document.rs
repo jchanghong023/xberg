@@ -1876,7 +1876,20 @@ pub(super) fn heuristically_restructured_ocr_pages(
             return None;
         }
         let mut filtered_pages = pages.to_vec();
-        crate::pdf::structure::pipeline::strip_repeating_text_from_pages(&mut filtered_pages, page_heights);
+        // Same permission derivation as `FurniturePermissions::from_extraction_config`:
+        // an edge band the config asked to keep (`include_headers`/`include_footers`)
+        // must not feed the cross-page streak detection either.
+        let (strip_top_edges, strip_bottom_edges) = config
+            .content_filter
+            .as_ref()
+            .map(|filter| (!filter.include_headers, !filter.include_footers))
+            .unwrap_or((true, true));
+        crate::pdf::structure::pipeline::strip_repeating_text_from_pages(
+            &mut filtered_pages,
+            page_heights,
+            strip_top_edges,
+            strip_bottom_edges,
+        );
         return Some(crate::pdf::structure::assemble_internal_document(
             filtered_pages,
             collected_tables,

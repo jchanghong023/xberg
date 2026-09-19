@@ -88,6 +88,21 @@ fn hierarchy_cluster_count(config: &ExtractionConfig) -> usize {
         )
 }
 
+/// Whether this extraction should pull image bytes out of the PDF.
+///
+/// An explicit `false` at either level vetoes: `images.extract_images = false` is the
+/// general switch every other extractor honors on its own, and
+/// `pdf_options.extract_images = false` is the PDF-specific one. An OR here would let
+/// the CLI's `--pdf-*` flags materialize `pdf_options` (with `Default`'s `true`) and
+/// silently re-enable extraction the caller had turned off with `--extract-images false`.
+fn pdf_images_requested(config: &ExtractionConfig) -> bool {
+    let pdf_level_opt_out = config
+        .pdf_options
+        .as_ref()
+        .is_some_and(|options| !options.extract_images);
+    config.needs_image_data() && !pdf_level_opt_out
+}
+
 /// Report a table-extraction failure that took out a whole detector pass, not just one page.
 ///
 /// The per-page warnings in `pdf::native::table` cannot cover these: a stage that fails or
@@ -541,8 +556,7 @@ pub(crate) fn extract_all_from_native_document(
         pdf_metadata.page_structure = None;
     }
 
-    let images_extraction_enabled =
-        config.needs_image_data() || config.pdf_options.as_ref().map(|p| p.extract_images).unwrap_or(false);
+    let images_extraction_enabled = pdf_images_requested(config);
 
     let (images, image_positions) = if images_extraction_enabled || ocr_inline_images {
         let max_images = config.images.as_ref().and_then(|i| i.max_images_per_page);
@@ -871,7 +885,7 @@ fn join_pages_with_boundaries(
 #[cfg(test)]
 mod tests {
     use super::{
-        hierarchy_cluster_count, needs_structured_extraction, page_has_exact_text_block,
+        hierarchy_cluster_count, needs_structured_extraction, page_has_exact_text_block, pdf_images_requested,
         retain_segments_inside_page_margins, table_stage_failure_warning,
     };
     use crate::core::config::OutputFormat;
@@ -896,6 +910,43 @@ mod tests {
             hierarchy_cluster_count(&config),
             crate::core::config::HierarchyConfig::default().k_clusters
         );
+    }
+
+    #[test]
+    fn pdf_image_extraction_defaults_on_without_pdf_options() {
+        let config = crate::core::config::ExtractionConfig::default();
+        assert!(pdf_images_requested(&config));
+    }
+
+    #[test]
+    fn pdf_level_extract_images_false_vetoes_default_on_images_section() {
+        // `--pdf-extract-images false` with no `images` section: the general switch still
+        // says "extract" (absent section = defaults), the PDF-level flag must win.
+        let mut config = crate::core::config::ExtractionConfig::default();
+        let mut pdf_options = crate::core::config::PdfConfig::default();
+        pdf_options.extract_images = false;
+        config.pdf_options = Some(pdf_options);
+        assert!(!pdf_images_requested(&config));
+    }
+
+    #[test]
+    fn general_level_extract_images_false_beats_materialized_pdf_default() {
+        // `--extract-images false` plus any other `--pdf-*` flag: the CLI materializes
+        // `pdf_options` with `Default`'s `extract_images = true`; the general opt-out
+        // must still turn extraction off.
+        let mut config = crate::core::config::ExtractionConfig::default();
+        let mut images = crate::core::config::ImageExtractionConfig::default();
+        images.extract_images = false;
+        config.images = Some(images);
+        config.pdf_options = Some(crate::core::config::PdfConfig::default());
+        assert!(!pdf_images_requested(&config));
+    }
+
+    #[test]
+    fn explicit_pdf_level_true_keeps_default_extraction_on() {
+        let mut config = crate::core::config::ExtractionConfig::default();
+        config.pdf_options = Some(crate::core::config::PdfConfig::default());
+        assert!(pdf_images_requested(&config));
     }
 
     #[test]

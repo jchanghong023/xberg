@@ -1765,6 +1765,12 @@ fn detect_ole2_package<R: Read + Seek>(mut reader: R, limits: &SecurityLimits) -
         "00020810-0000-0000-c000-000000000046" | "00020820-0000-0000-c000-000000000046" => LEGACY_EXCEL_MIME_TYPE,
         "00020906-0000-0000-c000-000000000046" => LEGACY_WORD_MIME_TYPE,
         "64818d10-4f9b-11cf-86ea-00aa00b929e8" => LEGACY_POWERPOINT_MIME_TYPE,
+        // Legacy .vsd does not carry a distinctive root CLSID on every producer's
+        // files, but its native root stream names the format — the same judgement
+        // the OLE embedded-object path (`ooxml_embedded::identify_ole_container_mime`)
+        // applies. Without this arm, content-based detection cannot route a .vsd to
+        // the Visio extractor at all.
+        _ if compound_file.exists("VisioDocument") || compound_file.exists("/VisioDocument") => VISIO_MIME_TYPE,
         _ => return None,
     };
     Some(mime_type.to_string())
@@ -2456,6 +2462,9 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         let config = crate::core::config::ExtractionConfig {
             use_cache: false,
+            // The fork's default output format is Markdown (upstream: Plain, see
+            // fork.md); pin Plain so this routing test keeps its upstream assertion.
+            output_format: crate::core::config::formats::OutputFormat::Plain,
             ..Default::default()
         };
 

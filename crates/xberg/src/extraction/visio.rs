@@ -41,7 +41,10 @@ pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Resu
                 continue;
             }
             let path = entry.path();
-            if path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.eq_ignore_ascii_case("VisioDocument"))
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("VisioDocument"))
             {
                 found.push(path.to_path_buf());
             }
@@ -62,7 +65,9 @@ pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Resu
     let stream = stream.ok_or_else(|| {
         XbergError::parsing(format!(
             "Failed to open VisioDocument stream: {}",
-            open_error.map(|error| error.to_string()).unwrap_or_else(|| "no such stream".to_string())
+            open_error
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "no such stream".to_string())
         ))
     })?;
 
@@ -132,9 +137,7 @@ pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Resu
         )));
     }
     if parser.depth_exhausted {
-        return Err(XbergError::parsing(
-            "Visio stream nesting exceeds the safety limit",
-        ));
+        return Err(XbergError::parsing("Visio stream nesting exceeds the safety limit"));
     }
     if parser.pointer_limit_exhausted {
         return Err(XbergError::parsing(
@@ -156,10 +159,7 @@ pub(crate) fn extract_visio_text(content: &[u8], max_stream_size: usize) -> Resu
 /// The legacy tolerance that function keeps for `.xls` does not apply here: a
 /// Visio Drawing package that reaches this point was already identified as a
 /// readable ZIP by its magic bytes.
-fn validate_package_container<R: Read + Seek>(
-    archive: &mut zip::ZipArchive<R>,
-    limits: &SecurityLimits,
-) -> Result<()> {
+fn validate_package_container<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, limits: &SecurityLimits) -> Result<()> {
     if archive.len() > limits.max_files_in_archive {
         return Err(XbergError::validation(format!(
             "Visio package declares {} entries, which exceeds the configured limit of {} \
@@ -217,7 +217,11 @@ pub(crate) fn extract_visio_package_text(content: &[u8], limits: &SecurityLimits
                 "Visio package part '{name}' exceeds configured limit of {max_stream_size} bytes"
             )));
         }
-        let mut xml = String::with_capacity(file.size() as usize);
+        // The ZIP central directory's declared size is attacker-controlled and only
+        // checked against the full cap above; clamp the preallocation to what the
+        // shared budget could still admit (same idiom as the CFB reader), so a tiny
+        // part lying about its size cannot make the reader reserve the whole cap.
+        let mut xml = String::with_capacity((file.size() as usize).min(remaining));
         // A part that cannot be read (I/O error, non-UTF-8 bytes) must not hide
         // its siblings: the part failures above and below both skip the part,
         // and a damaged master must not cost the pages' text. Only the budget
@@ -460,12 +464,12 @@ impl<'a> VisioParser<'a> {
             // (VSDDocumentStructure.h constants): each pointer kind carries its
             // count at a different offset into the container.
             let count_offset = match parent.kind {
-                0x14 => 130,        // VSD_TRAILER_STREAM
-                0x15 => 66,         // VSD_PAGE
-                0x18 => 46,         // VSD_FONT_LIST
-                0x1a => 18,         // VSD_STYLES
-                0x1d | 0x4e => 30,  // VSD_STENCILS / VSD_SHAPE_FOREIGN
-                0x1e => 54,         // VSD_STENCIL_PAGE
+                0x14 => 130,       // VSD_TRAILER_STREAM
+                0x15 => 66,        // VSD_PAGE
+                0x18 => 46,        // VSD_FONT_LIST
+                0x1a => 18,        // VSD_STYLES
+                0x1d | 0x4e => 30, // VSD_STENCILS / VSD_SHAPE_FOREIGN
+                0x1e => 54,        // VSD_STENCIL_PAGE
                 kind if kind > 0x45 => 30,
                 _ => 10,
             };
@@ -599,7 +603,7 @@ fn parse_pointer(data: &[u8], offset: usize, version: u16) -> Option<Pointer> {
             kind: (read_u16(data, offset)? & 0x00ff) as u32,
             offset: read_u32(data, offset + 8)? as usize,
             length: read_u32(data, offset + 12)? as usize,
-            format: (read_u16(data, offset + 2)? & 0x00ff) as u16,
+            format: read_u16(data, offset + 2)? & 0x00ff,
         })
     }
 }
@@ -785,10 +789,7 @@ enum VisioLzwError {
     Malformed(XbergError),
 }
 
-fn decode_visio_lzw(
-    data: &[u8],
-    max_size: usize,
-) -> std::result::Result<Vec<u8>, VisioLzwError> {
+fn decode_visio_lzw(data: &[u8], max_size: usize) -> std::result::Result<Vec<u8>, VisioLzwError> {
     let mut dictionary = [0u8; LZW_DICTIONARY_SIZE];
     let mut output = Vec::with_capacity(data.len().min(max_size));
     let mut output_position = 0usize;
@@ -884,16 +885,32 @@ mod tests {
     /// else nothing.
     #[test]
     fn v6_chunk_trailer_matches_the_reference() {
-        assert_eq!(chunk_trailer_len(0x64, 0, 0, 0, 6), 8, "0x64 is in the v6 set (the old set8 missed it)");
+        assert_eq!(
+            chunk_trailer_len(0x64, 0, 0, 0, 6),
+            8,
+            "0x64 is in the v6 set (the old set8 missed it)"
+        );
         assert_eq!(chunk_trailer_len(0x73, 0, 0, 0, 6), 8);
         assert_eq!(chunk_trailer_len(0x76, 0, 0, 0, 6), 8);
         assert_eq!(chunk_trailer_len(0x2c, 0, 0, 0, 6), 8);
         assert_eq!(chunk_trailer_len(0x0d, 0, 0, 0, 6), 8);
-        assert_eq!(chunk_trailer_len(0x0e, 0, 0, 0, 6), 0, "a text chunk with no list has no trailer");
-        assert_eq!(chunk_trailer_len(0x0e, 7, 0, 0, 6), 8, "a non-zero list always carries one");
+        assert_eq!(
+            chunk_trailer_len(0x0e, 0, 0, 0, 6),
+            0,
+            "a text chunk with no list has no trailer"
+        );
+        assert_eq!(
+            chunk_trailer_len(0x0e, 7, 0, 0, 6),
+            8,
+            "a non-zero list always carries one"
+        );
         assert_eq!(chunk_trailer_len(0x1f, 9, 0, 0, 6), 0, "OLE data never has a trailer");
         assert_eq!(chunk_trailer_len(0xc9, 0, 0, 0, 6), 0);
-        assert_eq!(chunk_trailer_len(0x74, 0, 0, 0, 6), 0, "0x74/0x75 are outside the v6 set");
+        assert_eq!(
+            chunk_trailer_len(0x74, 0, 0, 0, 6),
+            0,
+            "0x74/0x75 are outside the v6 set"
+        );
     }
 
     /// The v11+ computation mirrors `VSDParser::getChunkHeader`: the 8-byte

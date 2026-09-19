@@ -3458,7 +3458,12 @@ pub(crate) fn extract_document_structure_from_segments(
     split_colon_semicolon_run_in_lists(&mut all_page_paragraphs);
 
     if strip_repeating_text {
-        mark_cross_page_repeating_text(&mut all_page_paragraphs, &page_heights);
+        mark_cross_page_repeating_text(
+            &mut all_page_paragraphs,
+            &page_heights,
+            !include_headers,
+            !include_footers,
+        );
         mark_cross_page_repeating_short_text(&mut all_page_paragraphs);
     }
     if !include_watermarks {
@@ -5224,8 +5229,13 @@ fn document_content_width(all_pages: &[Vec<PdfParagraph>]) -> f32 {
 /// GH#1623's fix, which restricts that pass to paragraphs a detected table
 /// actually carries. ~keep
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
-pub(crate) fn strip_repeating_text_from_pages(pages: &mut [Vec<PdfParagraph>], page_heights: &[f32]) {
-    mark_cross_page_repeating_text(pages, page_heights);
+pub(crate) fn strip_repeating_text_from_pages(
+    pages: &mut [Vec<PdfParagraph>],
+    page_heights: &[f32],
+    strip_top_edges: bool,
+    strip_bottom_edges: bool,
+) {
+    mark_cross_page_repeating_text(pages, page_heights, strip_top_edges, strip_bottom_edges);
     mark_cross_page_repeating_short_text(pages);
     for page in pages.iter_mut() {
         retain_page_furniture_safely(page);
@@ -5790,9 +5800,7 @@ fn collect_unique_outline_matches(
 /// anything else keeps the old ambiguity refusal. A copy without a bounding box
 /// cannot be placed and never wins disambiguation.
 fn unique_outline_paragraph_index(page: &[PdfParagraph], indices: &[usize], page_height: f32) -> Option<usize> {
-    let Some(&single) = indices.first() else {
-        return None;
-    };
+    let &single = indices.first()?;
     if indices.len() == 1 {
         return Some(single);
     }
@@ -9303,7 +9311,10 @@ where new shares are issued;";
 
         recover_headings_from_outline(&mut pages, &[], &entries);
 
-        assert_eq!(pages[0][0].heading_level, None, "margin running-head copy stays body text");
+        assert_eq!(
+            pages[0][0].heading_level, None,
+            "margin running-head copy stays body text"
+        );
         assert_eq!(pages[0][1].heading_level, Some(3), "depth 1 + default offset 2");
     }
 

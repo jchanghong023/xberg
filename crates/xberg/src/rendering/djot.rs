@@ -146,9 +146,7 @@ pub(crate) fn render_djot(doc: &InternalDocument) -> String {
                 let desc = crate::extraction::markdown_utils::sanitize_image_alt_text(
                     image.and_then(|img| img.description.clone()),
                 )
-                .or_else(|| {
-                    crate::extraction::markdown_utils::sanitize_image_alt_text(Some(elem.text.clone()))
-                })
+                .or_else(|| crate::extraction::markdown_utils::sanitize_image_alt_text(Some(elem.text.clone())))
                 .map(|alt| escape_image_alt(&alt))
                 .unwrap_or_default();
 

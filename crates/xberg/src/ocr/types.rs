@@ -351,70 +351,6 @@ pub struct BatchItemResult {
     pub error: Option<String>,
 }
 
-/// Resolve an OCR language code to the tessdata pack name Tesseract ships.
-///
-/// Lives here rather than in the `ocr`-gated download module because every
-/// Tesseract backend — native and WASM — and the config layer resolve user
-/// language codes through it, and those callers compile under wider feature
-/// combinations than `feature = "ocr"` alone. Pure mapping, no I/O.
-///
-/// In builds with none of those feature combinations the function has no
-/// caller, which is expected rather than an oversight — hence the targeted
-/// `allow` instead of mirroring the callers' feature list here and drifting
-/// with it.
-#[cfg_attr(
-    not(any(
-        feature = "ocr",
-        feature = "ocr-wasm",
-        feature = "ocr-pipeline",
-        paddle_ocr,
-        all(feature = "liter-llm", not(target_arch = "wasm32")),
-    )),
-    allow(dead_code)
-)]
-pub(crate) fn tesseract_language_name(code: &str) -> String {
-    let lowered = code.trim().to_ascii_lowercase();
-    match lowered.as_str() {
-        // Chinese packs are chosen by script, not by language.
-        "zh" | "zh-cn" | "zh-hans" | "zho" | "chs" | "chi" => "chi_sim",
-        "zh-tw" | "zh-hk" | "zh-hant" | "cht" => "chi_tra",
-        // ISO 639-1 → the ISO 639-2/T name Tesseract uses.
-        "en" => "eng",
-        "de" => "deu",
-        "fr" => "fra",
-        "es" => "spa",
-        "it" => "ita",
-        "pt" => "por",
-        "nl" => "nld",
-        "pl" => "pol",
-        "ru" => "rus",
-        "ja" => "jpn",
-        "ko" => "kor",
-        "ar" => "ara",
-        "hi" => "hin",
-        "th" => "tha",
-        "vi" => "vie",
-        "tr" => "tur",
-        "sv" => "swe",
-        "da" => "dan",
-        "fi" => "fin",
-        "no" => "nor",
-        "cs" => "ces",
-        "el" => "ell",
-        "he" => "heb",
-        "hu" => "hun",
-        "ro" => "ron",
-        "uk" => "ukr",
-        "id" => "ind",
-        "fa" => "fas",
-        "ur" => "urd",
-        "bg" => "bul",
-        // Already a pack name (or an unmapped code): pass through untouched.
-        other => other,
-    }
-    .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -677,23 +613,5 @@ mod tests {
         assert!(!internal_config.tessedit_use_primary_params_model);
         assert!(!internal_config.textord_space_size_is_variable);
         assert!(internal_config.thresholding_method);
-    }
-
-    #[test]
-    fn maps_iso_codes_to_the_pack_tesseract_ships() {
-        assert_eq!(tesseract_language_name("zh"), "chi_sim");
-        assert_eq!(tesseract_language_name("zh-TW"), "chi_tra");
-        assert_eq!(tesseract_language_name("chi"), "chi_sim");
-        assert_eq!(tesseract_language_name("en"), "eng");
-        assert_eq!(tesseract_language_name("de"), "deu");
-        assert_eq!(tesseract_language_name("ja"), "jpn");
-    }
-
-    #[test]
-    fn leaves_pack_names_and_unknown_codes_untouched() {
-        assert_eq!(tesseract_language_name("eng"), "eng");
-        assert_eq!(tesseract_language_name("chi_sim"), "chi_sim");
-        assert_eq!(tesseract_language_name("xyz"), "xyz");
-        assert_eq!(tesseract_language_name("  fra  "), "fra");
     }
 }

@@ -520,6 +520,44 @@ pub(crate) fn acquire_artifact_file_lock(path: &Path) -> Result<ArtifactFileLock
     acquire_artifact_file_lock_with_timeout(path, model_download_timeout())
 }
 
+/// Whether `error` reports lock contention (another handle holds the artifact
+/// lock, so waiting can still succeed) rather than a real I/O failure.
+///
+/// fs2 0.4.3 maps the Unix `EWOULDBLOCK` family to `ErrorKind::WouldBlock`, but
+/// on Windows it returns `LockFileEx`'s raw `ERROR_LOCK_VIOLATION` (33) unmapped
+/// and std's `decode_error_kind` only maps the socket `WSAEWOULDBLOCK` spelling —
+/// without this check, Windows lock contention fails the acquisition outright
+/// instead of retrying, e.g. when concurrent test binaries publish to the same
+/// shared model cache. ~keep
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(
+        paddle_ocr,
+        layout_detection,
+        auto_rotate,
+        feature = "ner-onnx",
+        feature = "candle-paddleocr-vl",
+        feature = "transcription",
+        feature = "chunking-tokenizers",
+        feature = "onnx-runtime",
+        feature = "static-embeddings"
+    )
+))]
+fn is_lock_contention(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        const ERROR_LOCK_VIOLATION: i32 = 33;
+        error.raw_os_error() == Some(ERROR_LOCK_VIOLATION)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
 #[cfg(all(
     not(target_arch = "wasm32"),
     any(
@@ -564,10 +602,10 @@ pub(crate) fn acquire_artifact_file_lock_with_timeout(
                     path: path.to_path_buf(),
                 });
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && started.elapsed() < timeout => {
+            Err(error) if is_lock_contention(&error) && started.elapsed() < timeout => {
                 std::thread::sleep(LOCK_RETRY_INTERVAL.min(timeout.saturating_sub(started.elapsed())));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if is_lock_contention(&error) => {
                 return Err(format!(
                     "Timed out after {}s waiting for model-cache lock {}",
                     timeout.as_secs_f64(),
@@ -2203,6 +2241,27 @@ mod hf_cache_tests {
 
         drop(first);
         acquire_artifact_file_lock_with_timeout(&path, Duration::from_secs(1)).unwrap();
+    }
+
+    /// Windows regression: fs2 returns `ERROR_LOCK_VIOLATION` (33) unmapped from
+    /// `try_lock_exclusive`, which must be treated as retryable contention — a
+    /// waiter has to outlast the holder and succeed, not fail with "os error 33".
+    #[test]
+    fn artifact_file_lock_waits_for_peer_release() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("artifact-wait.lock");
+        let held = acquire_artifact_file_lock_with_timeout(&path, Duration::from_secs(1)).unwrap();
+
+        let waiter_path = path.clone();
+        let waiter = std::thread::spawn(move || {
+            acquire_artifact_file_lock_with_timeout(&waiter_path, Duration::from_secs(10)).unwrap();
+        });
+        // Let the waiter hit contention at least once before the holder releases.
+        std::thread::sleep(Duration::from_millis(200));
+        drop(held);
+        waiter
+            .join()
+            .expect("waiter must acquire the lock after the holder releases it");
     }
 }
 

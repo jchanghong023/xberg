@@ -1,14 +1,14 @@
+<!--
+AI-RULEZ :: GENERATED FILE — DO NOT EDIT
+Content-Hash: blake3:16ffcd4c85b6aa409e6281d715df8a66f589c8e551721644ec0021bfa9985e6f
+Source-Hash: blake3:8436911387ca6e92e089da7c4165303e587d88cbff8b705ce66d7cd4eaaa5497
+Schema-Version: v1
+-->
+
 ---
 name: extracting-keywords
 description: Use when extracting keywords (YAKE/RAKE) from documents — and, secondarily, when detecting document language or generating embeddings for RAG and search. Covers the keyword config (and its feature gating), `--detect-language`, and the standalone `embed` command with real flags.
 ---
-
-<!--
-AI-RULEZ :: GENERATED FILE — DO NOT EDIT
-Content-Hash: blake3:0da13ce50f1fef8c192e912e7c2b0d039209a7b676829abe13f4fc86b5ea20bc
-Source-Hash: blake3:5f5a598889c48eafed824c3d233459b3a360278d1175be7d6c4267d3aaf96d87
-Schema-Version: v1
--->
 
 # Extracting keywords, language, and embeddings
 

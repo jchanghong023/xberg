@@ -319,12 +319,7 @@ impl EngineSlots {
                 message: "PaddleOCR engine slot pool closed".to_string(),
                 plugin_name: "paddle-ocr".to_string(),
             })?;
-        let id = self
-            .free
-            .lock()
-            .ok()
-            .and_then(|mut free| free.pop_front())
-            .unwrap_or(0);
+        let id = self.free.lock().ok().and_then(|mut free| free.pop_front()).unwrap_or(0);
         Ok(EngineSlot {
             id,
             free: Arc::clone(&self.free),
@@ -604,6 +599,11 @@ impl PaddleOcrBackend {
         })?
     }
 
+    // Single-caller `spawn_blocking` helper: every argument is a distinct
+    // dependency of engine construction (manager, two init pools, model family,
+    // config, acceleration, slot, thread budget) — bundling them into a
+    // parameter-bag struct would only move the list, not shrink it.
+    #[allow(clippy::too_many_arguments)]
     fn get_or_init_engine_for_family_blocking(
         model_manager: &ModelManager,
         shared_paths: &InitPool<SharedModelPaths>,
@@ -1899,7 +1899,10 @@ mod tests {
         for budget in [1usize, 2, 4, 8, 12, 16, 32, 64] {
             let (slots, intra) = paddle_engine_layout(budget);
             assert!(slots >= 1 && intra >= 1);
-            assert!(slots * intra <= budget.max(1), "budget {budget} -> {slots}x{intra} oversubscribes");
+            assert!(
+                slots * intra <= budget.max(1),
+                "budget {budget} -> {slots}x{intra} oversubscribes"
+            );
         }
     }
 

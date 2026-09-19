@@ -455,8 +455,8 @@ pub(crate) async fn process_images_with_ocr(
                 // `emf`/`wmf` while the header is subtly invalid; that mismatch must fail
                 // loudly instead of being fed to the backend as an opaque blob.
                 let detected = crate::extraction::image_format::detect_image_format(&image.data);
-                let is_metafile = matches!(detected.as_ref(), "emf" | "wmf")
-                    || matches!(image.format.as_ref(), "emf" | "wmf");
+                let is_metafile =
+                    matches!(detected.as_ref(), "emf" | "wmf") || matches!(image.format.as_ref(), "emf" | "wmf");
                 let prepared: bytes::Bytes = if is_metafile {
                     tokio::task::spawn_blocking(move || {
                         prepare_image_for_ocr(&image, &image_config, &security_limits)
@@ -468,10 +468,7 @@ pub(crate) async fn process_images_with_ocr(
                         source: None,
                     })?
                     .map_err(|error| crate::XbergError::Ocr {
-                        message: format!(
-                            "metafile rasterization failed at {}: {}",
-                            error.stage, error.reason
-                        ),
+                        message: format!("metafile rasterization failed at {}: {}", error.stage, error.reason),
                         source: None,
                     })?
                 } else {

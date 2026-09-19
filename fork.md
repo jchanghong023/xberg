@@ -28,7 +28,7 @@
 - **xlsx 内嵌图片**：提取并 OCR（`extraction/excel/images.rs`，fork 新增）。验收：表格内嵌图片落盘并被 OCR。
 - **OOXML/OLE 内嵌对象**：内嵌 Word OLE 文本合并进宿主文档、PPTX OLE/PresentationML fallback 图片抽取（`extraction/ooxml_embedded.rs`）。验收：内嵌 OLE 文本出现在宿主文档对应位置，fallback 图片被抽出。
 - **PPTX 质量**：标题/演讲者备注读取与归属守卫（`extractors/pptx.rs`、`extraction/pptx/`）。验收：标题与备注归属到正确幻灯片，不串页、不重复。
-- **PDF 质量大改**：表格重建（`pdf/table_reconstruct.rs`）、原生文本抽取（`pdf/native/text.rs`）、结构分类/段落/页眉页脚剔除（`pdf/structure/`）。验收：有原生文本的页面不做破坏性整页 OCR 回退（原生文本保留），表格按重建结果输出、页眉页脚被剔除。
+- **PDF 质量大改**：表格重建（`pdf/table_reconstruct.rs`）、原生文本抽取（`pdf/native/text.rs`）、结构分类/段落/页眉页脚剔除（`pdf/structure/`）。验收：有原生文本的页面不做破坏性整页 OCR 回退（原生文本保留），表格按重建结果输出、页眉页脚被剔除；`content_filter.include_headers/include_footers` 在扁平文本与结构化两条路径上一致生效（跨页页眉/页脚的 streak 剔除同样受其约束）。
 - **Windows Media 转写**：Media Foundation 读 ASF/WMV 音轨，解码失败回退外部 ffmpeg（`transcription/container.rs`、`transcription/wmf.rs`，fork 新增）。验收：`.wmv`/`.asf` 能转写出音轨文本；MF 读不了的文件回退 ffmpeg 后仍能出文本。
 - **Markdown 渲染**：图片 alt 路径清理、图片 marker 独立段落与 OCR 文本围栏等输出修复（`rendering/markdown.rs`、`rendering/comrak_bridge.rs`、`extraction/markdown_utils.rs`）。验收：输出不残留本地路径垃圾，改动围栏内文本的改写不发生。
 

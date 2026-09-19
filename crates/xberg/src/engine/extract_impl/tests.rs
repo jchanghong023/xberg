@@ -97,11 +97,17 @@ async fn extract_file_uri_accepts_localhost_host() {
         .unwrap();
 
     let config = ExtractionConfig::default();
+    // Build the RFC 8089 shape for both platforms: a Windows drive path needs the
+    // leading slash and forward separators (`file://localhost/C:/...`), otherwise
+    // the drive colon turns the host into `localhostc` plus a garbage port.
+    let path_str = path.display().to_string();
+    let uri = if path_str.starts_with('/') {
+        format!("file://localhost{path_str}")
+    } else {
+        format!("file://localhost/{}", path_str.replace('\\', "/"))
+    };
     let output = crate::engine::Engine::new_default()
-        .extract(
-            ExtractInput::from_uri(format!("file://localhost{}", path.display())),
-            &config,
-        )
+        .extract(ExtractInput::from_uri(uri), &config)
         .await
         .unwrap();
 

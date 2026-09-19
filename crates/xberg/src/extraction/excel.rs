@@ -317,11 +317,7 @@ pub(crate) fn read_excel_bytes(data: &[u8], file_extension: &str, limits: &Secur
         // directory must not reject them. Every other extension — including unknown ones the
         // auto-detector may read as a ZIP — is accounted for in full.
         let extension = file_extension.to_lowercase();
-        validate_zip_container(
-            Cursor::new(data),
-            limits,
-            extension == ".xls" || extension == ".xla",
-        )?;
+        validate_zip_container(Cursor::new(data), limits, extension == ".xls" || extension == ".xla")?;
     }
     #[cfg(not(feature = "excel"))]
     let _ = limits;
@@ -1637,8 +1633,7 @@ mod tests {
     #[cfg(feature = "excel")]
     #[test]
     fn cfb_reader_probe_recognizes_a_legacy_workbook() {
-        let legacy = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../test_documents/xls/test_excel.xls");
+        let legacy = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_documents/xls/test_excel.xls");
         let Ok(file) = std::fs::File::open(&legacy) else {
             eprintln!("skipping: fixture not present at {legacy:?}");
             return;
@@ -1967,7 +1962,10 @@ mod tests {
         assert!(markdown.contains("| A | B |"), "data row must survive: {markdown}");
         assert!(markdown.contains("| C | D |"), "data row must survive: {markdown}");
         assert_eq!(
-            cells.iter().filter(|row| row.iter().all(|cell| cell.trim().is_empty())).count(),
+            cells
+                .iter()
+                .filter(|row| row.iter().all(|cell| cell.trim().is_empty()))
+                .count(),
             0,
             "cells grid must not carry empty rows: {cells:?}"
         );

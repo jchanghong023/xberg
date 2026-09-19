@@ -911,7 +911,12 @@ try {
     @{
       Name = "version"
       Exe = $verifyPwsh
-      Args = @("-NoProfile", "-Command", '$env:PATH = $env:XBERG_PROBE_PATH; & $env:XBERG_PROBE_EXE --version; exit $LASTEXITCODE')
+      # `if (-not $? ...)` is load-bearing: when CreateProcess itself fails (bad
+      # architecture, truncated PE — exactly the rot this gate exists to catch),
+      # `&` writes a non-terminating error and `$LASTEXITCODE` is never assigned,
+      # so a bare `exit $LASTEXITCODE` exits 0 and the gate waved corrupt binaries
+      # through to compress/upload/publish.
+      Args = @("-NoProfile", "-Command", '$env:PATH = $env:XBERG_PROBE_PATH; & $env:XBERG_PROBE_EXE --version; if (-not $? -or $null -eq $LASTEXITCODE) { exit 1 }; exit $LASTEXITCODE')
       Env = @{ XBERG_PROBE_PATH = $cleanPath; XBERG_PROBE_EXE = $StageExe }
     }
     @{
@@ -995,6 +1000,17 @@ try {
     if ($item.Process.ExitCode -ne 0) {
       $failedChecks.Add("$($item.Name) exited $($item.Process.ExitCode)`n--- stdout ---`n$stdout`n--- stderr ---`n$stderr")
       continue
+    }
+    # Exit code 0 alone proves less than it seems: the child is a pwsh wrapper
+    # around the staged exe, so assert the `--version` payload itself — the
+    # first non-empty line must be `xberg <semver>`. A wrapper bug or a hijacked
+    # exe that prints anything else must not pass this gate.
+    if ($item.Name -eq "version") {
+      $versionLine = @("$stdout" -split "`r?`n" | Where-Object { $_ -ne "" } | Select-Object -First 1)
+      if (-not $versionLine -or $versionLine -notmatch '^xberg[ -]?\d+(\.\d+)+') {
+        $failedChecks.Add("version probe printed an unexpected banner (expected 'xberg <semver>'):`n$stdout`n--- stderr ---`n$stderr")
+        continue
+      }
     }
     Write-Host "  $($item.Name): exit 0"
     foreach ($line in @("$stdout" -split "`r?`n" | Where-Object { $_ -ne "" })) {

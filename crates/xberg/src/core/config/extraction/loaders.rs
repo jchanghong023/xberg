@@ -196,7 +196,10 @@ impl ExtractionConfig {
     fn find_config_in_dir(dir: &Path) -> Option<PathBuf> {
         const CONFIG_BASENAMES: [&str; 4] = ["xberg.toml", "xberg.yaml", "xberg.yml", "xberg.json"];
 
-        CONFIG_BASENAMES.iter().map(|basename| dir.join(basename)).find(|candidate| candidate.exists())
+        CONFIG_BASENAMES
+            .iter()
+            .map(|basename| dir.join(basename))
+            .find(|candidate| candidate.exists())
     }
 }
 

@@ -160,7 +160,10 @@ fn decode_via_ffmpeg(
         .arg("-ar")
         .arg("16000");
     if let Some(limit_ms) = max_duration_ms {
-        command.arg("-t").arg(format!("{:.3}", limit_ms.saturating_add(FFMPEG_DURATION_MARGIN_MS) as f64 / 1000.0));
+        command.arg("-t").arg(format!(
+            "{:.3}",
+            limit_ms.saturating_add(FFMPEG_DURATION_MARGIN_MS) as f64 / 1000.0
+        ));
     }
     command
         .arg("-f")
@@ -187,7 +190,11 @@ fn decode_via_ffmpeg(
         })
     });
 
-    let deadline = timeout_ms.map(|ms| std::time::Instant::now() + std::time::Duration::from_millis(ms));
+    // `checked_add`: a timeout large enough to overflow `Instant` (a `u64::MAX`
+    // "no timeout" sentinel, say) must degrade to "wait indefinitely", not panic
+    // this worker thread — the same saturation the size math below applies.
+    let deadline =
+        timeout_ms.and_then(|ms| std::time::Instant::now().checked_add(std::time::Duration::from_millis(ms)));
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -195,7 +202,10 @@ fn decode_via_ffmpeg(
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(crate::XbergError::transcription(format!("cannot wait for {}: {e}", ffmpeg.display())));
+                return Err(crate::XbergError::transcription(format!(
+                    "cannot wait for {}: {e}",
+                    ffmpeg.display()
+                )));
             }
         }
         if let Some(deadline) = deadline
@@ -222,34 +232,49 @@ fn decode_via_ffmpeg(
         )));
     }
 
-    let wav = std::fs::read(&output.path)
-        .map_err(|e| crate::XbergError::transcription(format!("ffmpeg produced no audio: {e}")))?;
     // `max_bytes` documents the *input* size (and is enforced on it before this path runs),
     // while the WAV `-t` above produced is decoded audio (16 kHz mono s16 = 32 000 B/s), so a
     // plain cap would reject valid in-budget input -- a 20-minute file at a 32 MiB cap writes a
     // 38 MB WAV. Let the duration budget raise the ceiling to what it needs, exactly as
     // `wmf::decode_file` does; with `max_duration_ms = None` the byte cap stays the only bound.
-    let duration_bytes = max_duration_ms
-        .map(|ms| ms.saturating_add(FFMPEG_DURATION_MARGIN_MS).saturating_mul(32_000) / 1000);
+    let duration_bytes =
+        max_duration_ms.map(|ms| ms.saturating_add(FFMPEG_DURATION_MARGIN_MS).saturating_mul(32_000) / 1000);
     let wav_limit = match (max_bytes, duration_bytes) {
         (Some(bytes), Some(needed)) => Some(bytes.max(needed)),
         (budget, _) => budget,
     };
+    // Both budget checks run on the file's size BEFORE it is read into memory: the
+    // decoded WAV grows linearly with the source duration, so loading first turned
+    // the caps into post-hoc reports while the whole file sat in RAM. Reading is
+    // still bounded afterwards by `decode_audio_to_pcm`'s own limit (TOCTOU guard).
+    let wav_len = std::fs::metadata(&output.path)
+        .map_err(|e| crate::XbergError::transcription(format!("ffmpeg produced no audio: {e}")))?
+        .len();
     // A WAV past the duration-derived allowance means the source ran longer
     // than `max_duration_ms` (the `-t` above truncated it to the margin, and
     // the 44-byte header tips it over): report the duration overflow, not a
     // byte limit the user never configured — the generic size error below
     // would quote the raised, duration-derived ceiling.
     if let Some(allowed) = duration_bytes
-        && wav.len() as u64 > allowed
+        && wav_len > allowed
     {
         return Err(crate::XbergError::transcription(format!(
             "decoded audio runs past transcription.max_duration_ms ({} ms): WAV is {} bytes, duration allowance {} bytes",
             max_duration_ms.unwrap_or_default(),
-            wav.len(),
+            wav_len,
             allowed
         )));
     }
+    if let Some(limit) = wav_limit
+        && wav_len > limit
+    {
+        return Err(crate::XbergError::transcription(format!(
+            "decoded audio exceeds the transcription byte budget ({} bytes): WAV is {} bytes",
+            limit, wav_len
+        )));
+    }
+    let wav = std::fs::read(&output.path)
+        .map_err(|e| crate::XbergError::transcription(format!("ffmpeg produced no audio: {e}")))?;
     decode_audio_to_pcm(&wav, wav_limit)
 }
 
@@ -320,7 +345,10 @@ impl TempInput {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
         let salt = RandomState::new().build_hasher().finish();
-        std::env::temp_dir().join(format!("xberg-media-{}-{sequence}-{salt:016x}.{suffix}", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "xberg-media-{}-{sequence}-{salt:016x}.{suffix}",
+            std::process::id()
+        ))
     }
 
     /// Create a fresh scratch file, refusing to reuse a name that already
@@ -398,8 +426,14 @@ mod tests {
     fn decoder_override_accepts_the_documented_values_and_rejects_typos() {
         assert!(matches!(parse_forced_decoder(""), Ok(None)));
         assert!(matches!(parse_forced_decoder("auto"), Ok(None)));
-        assert!(matches!(parse_forced_decoder(" MF "), Ok(Some(ForcedDecoder::MediaFoundation))));
-        assert!(matches!(parse_forced_decoder("Ffmpeg"), Ok(Some(ForcedDecoder::Ffmpeg))));
+        assert!(matches!(
+            parse_forced_decoder(" MF "),
+            Ok(Some(ForcedDecoder::MediaFoundation))
+        ));
+        assert!(matches!(
+            parse_forced_decoder("Ffmpeg"),
+            Ok(Some(ForcedDecoder::Ffmpeg))
+        ));
 
         // A typo must not silently fall back to `auto`: an operator pinning a
         // mechanism has to learn that the pin was not understood.

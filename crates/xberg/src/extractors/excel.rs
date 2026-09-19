@@ -244,8 +244,10 @@ impl ExcelExtractor {
             .collect();
         for picture in pictures.iter_mut() {
             if picture.sheet_index.is_none() {
-                picture.sheet_index =
-                    picture.sheet_name.as_deref().and_then(|name| page_by_sheet_name.get(name).copied());
+                picture.sheet_index = picture
+                    .sheet_name
+                    .as_deref()
+                    .and_then(|name| page_by_sheet_name.get(name).copied());
             }
         }
 
@@ -365,12 +367,8 @@ impl ExcelExtractor {
             // Excel lives entirely in them. The sheet is one table element, so a shape
             // has no cell-level element to sit inside and follows the sheet it is
             // anchored to, in reading order.
-            let sheet_shape_count = Self::push_sheet_shapes(
-                &mut builder,
-                &mut shapes,
-                &page_by_sheet_name,
-                page_number,
-            );
+            let sheet_shape_count =
+                Self::push_sheet_shapes(&mut builder, &mut shapes, &page_by_sheet_name, page_number);
             // A sheet with no cells is blank only while nothing is anchored to it: a picture
             // or a diagram the page carries is content, and every other extractor clears
             // `is_blank` when it attaches one. Leaving `Some(true)` here made consumers that
@@ -416,13 +414,10 @@ impl ExcelExtractor {
         page_number: u32,
     ) -> usize {
         let mut pushed = 0;
-        while shapes.last().is_some_and(|shape| {
-            page_by_sheet_name
-                .get(shape.sheet_name.as_str())
-                .copied()
-                .unwrap_or(0)
-                == page_number
-        }) {
+        while shapes
+            .last()
+            .is_some_and(|shape| page_by_sheet_name.get(shape.sheet_name.as_str()).copied().unwrap_or(0) == page_number)
+        {
             let shape = shapes.pop().expect("the last shape was just inspected");
             let page = (page_number > 0).then_some(page_number);
             builder.push_paragraph(&shape.text, Vec::new(), page, None);
@@ -1115,10 +1110,7 @@ mod tests {
     /// 15-byte `max_content_size` no matter which entry point is taken.
     #[test]
     fn charge_workbook_budget_counts_cells_and_shape_text() {
-        let workbook = make_workbook(vec![make_sheet(
-            "Sheet1",
-            Some(vec![vec!["abcdefghij".to_string()]]),
-        )]);
+        let workbook = make_workbook(vec![make_sheet("Sheet1", Some(vec![vec!["abcdefghij".to_string()]]))]);
         let shapes = vec![XlsxShapeText {
             text: "0123456789".to_string(),
             sheet_name: "Sheet1".to_string(),
@@ -1602,7 +1594,11 @@ mod tests {
             .filter(|(_, element)| matches!(element.kind, ElementKind::Image { .. }))
             .map(|(position, _)| position)
             .collect();
-        assert_eq!(image_elements.len(), 1, "every image must be referenced by exactly one element");
+        assert_eq!(
+            image_elements.len(),
+            1,
+            "every image must be referenced by exactly one element"
+        );
         let ElementKind::Image { image_index } = doc.elements[image_elements[0]].kind else {
             panic!("expected an image element");
         };
@@ -1619,7 +1615,10 @@ mod tests {
             "the picture must follow the sheet it is anchored to"
         );
 
-        let pages = doc.prebuilt_pages.as_ref().expect("excel extraction always builds pages");
+        let pages = doc
+            .prebuilt_pages
+            .as_ref()
+            .expect("excel extraction always builds pages");
         assert_eq!(pages[0].image_indices, vec![image_index]);
     }
 }

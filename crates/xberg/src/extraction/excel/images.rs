@@ -261,7 +261,11 @@ fn read_member<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str, lim
         return None;
     }
     if u64::try_from(data.len()).unwrap_or(u64::MAX) > declared {
-        tracing::warn!(part = name, declared, "spreadsheet part outgrew its declared size; skipped");
+        tracing::warn!(
+            part = name,
+            declared,
+            "spreadsheet part outgrew its declared size; skipped"
+        );
         return None;
     }
     Some(data)
@@ -271,17 +275,14 @@ fn read_member<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, name: &str, lim
 /// recording where each media part is anchored and the text of every floating
 /// shape. First placement wins, and the walk is sheet-ordered then
 /// part-name-ordered, so the result is deterministic.
-fn collect_drawing_data<R: Read + Seek>(
-    archive: &mut zip::ZipArchive<R>,
-) -> (Placements, Vec<XlsxShapeText>) {
+fn collect_drawing_data<R: Read + Seek>(archive: &mut zip::ZipArchive<R>) -> (Placements, Vec<XlsxShapeText>) {
     let mut placements = Placements::new();
     let mut shapes = Vec::new();
     let mut visited_parts = std::collections::HashSet::new();
     let Some(workbook_xml) = read_member(archive, "xl/workbook.xml", super::MAX_EXCEL_ZIP_MEMBER_SIZE) else {
         return (placements, shapes);
     };
-    let Some(workbook_rels_xml) =
-        read_member(archive, "xl/_rels/workbook.xml.rels", super::MAX_EXCEL_ZIP_MEMBER_SIZE)
+    let Some(workbook_rels_xml) = read_member(archive, "xl/_rels/workbook.xml.rels", super::MAX_EXCEL_ZIP_MEMBER_SIZE)
     else {
         return (placements, shapes);
     };
@@ -447,15 +448,13 @@ fn collect_drawing_placements(
             })
             .and_then(|name| name.attribute("descr"))
             .map(str::to_string);
-        placements
-            .entry(media)
-            .or_insert((
-                Placement {
-                    sheet_name: sheet_name.to_string(),
-                    cell,
-                },
-                description,
-            ));
+        placements.entry(media).or_insert((
+            Placement {
+                sheet_name: sheet_name.to_string(),
+                cell,
+            },
+            description,
+        ));
     }
 
     for shape in document
@@ -559,15 +558,13 @@ fn collect_vml_placements(
             .and_then(|anchor| anchor.text())
             .and_then(vml_cell);
         let description = shape.attribute("alt").map(str::to_string);
-        placements
-            .entry(media)
-            .or_insert((
-                Placement {
-                    sheet_name: sheet_name.to_string(),
-                    cell,
-                },
-                description,
-            ));
+        placements.entry(media).or_insert((
+            Placement {
+                sheet_name: sheet_name.to_string(),
+                cell,
+            },
+            description,
+        ));
     }
 }
 
@@ -691,11 +688,7 @@ fn resolve_relative(base_dir: &str, target: &str) -> Option<String> {
             name => stack.push(name),
         }
     }
-    if stack.is_empty() {
-        None
-    } else {
-        Some(stack.join("/"))
-    }
+    if stack.is_empty() { None } else { Some(stack.join("/")) }
 }
 
 /// Decode a part as UTF-8 text for `roxmltree`, tolerating a leading BOM.
@@ -706,11 +699,7 @@ fn xml_text(xml: &[u8]) -> Option<&str> {
 
 /// Read an attribute by namespace and local name, independent of the document's
 /// prefix choice.
-fn attribute<'a, 'input>(
-    node: &roxmltree::Node<'a, 'input>,
-    namespace: &str,
-    local: &str,
-) -> Option<&'a str> {
+fn attribute<'a, 'input>(node: &roxmltree::Node<'a, 'input>, namespace: &str, local: &str) -> Option<&'a str> {
     node.attribute((namespace, local))
 }
 
@@ -848,7 +837,10 @@ mod tests {
         let mut rels: HashMap<String, Rel> = HashMap::new();
         rels.insert(
             "rId1".to_string(),
-            Rel { target: "../media/image1.png".to_string(), kind: "image".to_string() },
+            Rel {
+                target: "../media/image1.png".to_string(),
+                kind: "image".to_string(),
+            },
         );
         let mut placements = Placements::new();
         let mut shapes = Vec::new();

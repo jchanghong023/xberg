@@ -823,7 +823,10 @@ mod tests {
     #[test]
     fn test_repair_contextual_ligatures_leaves_hash_alone() {
         assert_eq!(repair_contextual_ligatures("#nancial"), "#nancial");
-        assert_eq!(repair_contextual_ligatures("#clock_sequential_patterns"), "#clock_sequential_patterns");
+        assert_eq!(
+            repair_contextual_ligatures("#clock_sequential_patterns"),
+            "#clock_sequential_patterns"
+        );
     }
 
     #[test]
@@ -834,7 +837,10 @@ mod tests {
 
     #[test]
     fn test_repair_contextual_ligatures_multiple() {
-        assert_eq!(repair_contextual_ligatures("ef!cient and #nancial"), "efficient and #nancial");
+        assert_eq!(
+            repair_contextual_ligatures("ef!cient and #nancial"),
+            "efficient and #nancial"
+        );
     }
 
     #[test]

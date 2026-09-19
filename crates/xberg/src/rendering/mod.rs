@@ -8,7 +8,6 @@
 //! - `render_plain` — Plain text (no formatting)
 
 pub(crate) mod common;
-pub(crate) mod ocr_layout;
 mod comrak_bridge;
 mod djot;
 mod doctags;
@@ -18,6 +17,7 @@ mod html;
 pub mod html_styled;
 mod json;
 mod markdown;
+pub(crate) mod ocr_layout;
 mod plain;
 
 pub(crate) use djot::render_djot;
@@ -43,11 +43,7 @@ pub use json::render_json;
 pub(crate) fn ocr_duplicate_indices(texts: &[&str], ocr_contents: &[&str]) -> Vec<bool> {
     let mut repeats = vec![false; texts.len()];
     for content in ocr_contents {
-        let expected: Vec<&str> = content
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty())
-            .collect();
+        let expected: Vec<&str> = content.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
         if expected.is_empty() {
             continue;
         }
@@ -121,10 +117,7 @@ pub(crate) fn ocr_duplicate_indices(texts: &[&str], ocr_contents: &[&str]) -> Ve
 /// invisible OCR content is the only occurrence and must survive — those callers pass `true`.
 /// The markdown fence path and the plain renderer print the recognized text unconditionally,
 /// so their dedup passes `false`.
-pub(crate) fn image_ocr_contents(
-    doc: &crate::types::internal::InternalDocument,
-    respect_ocr_flags: bool,
-) -> Vec<&str> {
+pub(crate) fn image_ocr_contents(doc: &crate::types::internal::InternalDocument, respect_ocr_flags: bool) -> Vec<&str> {
     if respect_ocr_flags && !(doc.ocr_text_only || doc.append_ocr_text) {
         return Vec::new();
     }
@@ -174,4 +167,3 @@ mod tests {
         assert_eq!(repeats, vec![true, true, false]);
     }
 }
-

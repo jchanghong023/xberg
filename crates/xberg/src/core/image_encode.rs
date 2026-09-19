@@ -197,16 +197,21 @@ pub(crate) fn re_encode(
 /// can drop unreferenced images, leaving the positions dense while the field has gaps, and a
 /// position-keyed rename then missed its reference or collided with another image's number.
 /// `re_encode` never touches the field, so recording it after the call is exact.
+/// The staging triple [`re_encode_images`] returns: the re-encoded images, the
+/// `image_N` extension renames the content's references must follow, and the
+/// warnings collected along the way.
+pub(crate) type ReencodedImages = (
+    Vec<ExtractedImage>,
+    Vec<(u32, String, String)>,
+    Vec<crate::types::ProcessingWarning>,
+);
+
 pub(crate) fn re_encode_images(
     mut images: Vec<ExtractedImage>,
     target: ImageOutputFormat,
     limits: &SecurityLimits,
     image_config: &crate::core::config::extraction::ImageExtractionConfig,
-) -> (
-    Vec<ExtractedImage>,
-    Vec<(u32, String, String)>,
-    Vec<crate::types::ProcessingWarning>,
-) {
+) -> ReencodedImages {
     let mut format_renames: Vec<(u32, String, String)> = Vec::new();
     let mut warnings = Vec::new();
     for image in images.iter_mut() {

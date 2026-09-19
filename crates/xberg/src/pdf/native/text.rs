@@ -2157,8 +2157,7 @@ mod tests {
         let body_line = "Installation Guide";
         let mut pages: Vec<String> = (0..8)
             .map(|page| {
-                let mut lines: Vec<String> =
-                    (0..5).map(|line| format!("body {page}.{line}")).collect();
+                let mut lines: Vec<String> = (0..5).map(|line| format!("body {page}.{line}")).collect();
                 // Middle of the page: outside the first/last three edge lines,
                 // so it never becomes a furniture candidate itself.
                 lines.insert(2, body_line.to_string());
@@ -2184,20 +2183,19 @@ mod tests {
     /// threshold or the edge-zone window.
     #[test]
     fn short_edge_lines_and_small_documents_are_left_alone() {
-        let mut numbered: Vec<String> = (0..8)
-            .map(|page| format!("page body {page}\n\n{page}\n"))
-            .collect();
+        let mut numbered: Vec<String> = (0..8).map(|page| format!("page body {page}\n\n{page}\n")).collect();
         strip_repeated_edge_furniture(&mut numbered, FurniturePermissions::default());
         assert!(
-            numbered.iter().enumerate().all(|(page, text)| text.contains(&page.to_string())),
+            numbered
+                .iter()
+                .enumerate()
+                .all(|(page, text)| text.contains(&page.to_string())),
             "page numbers must survive: {numbered:?}"
         );
 
         let mut tiny: Vec<String> = (0..3)
             .map(|page| {
-                format!(
-                    "A repeated long footer line that would be furniture on a longer document.\nbody {page}\n"
-                )
+                format!("A repeated long footer line that would be furniture on a longer document.\nbody {page}\n")
             })
             .collect();
         let before = tiny.clone();

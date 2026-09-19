@@ -62,8 +62,12 @@ impl fmt::Display for PdfBackend {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PdfConfig {
-    /// Extract images from PDF
-    #[serde(default)]
+    /// Extract images from PDF.
+    ///
+    /// Defaults to `true` (matching [`PdfConfig::default`]); an explicit `false` vetoes
+    /// image extraction at the PDF level even when the general `images` section (or its
+    /// absent-section default) would allow it.
+    #[serde(default = "default_true")]
     pub extract_images: bool,
 
     /// Extract tables from PDF.

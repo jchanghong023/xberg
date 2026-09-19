@@ -198,13 +198,12 @@ pub(crate) fn render_markdown(doc: &InternalDocument) -> String {
         output = output
             .lines()
             .filter(|line| {
-                tracker.fenced(line)
-                    || {
-                        let trimmed = line.trim();
-                        !trimmed.starts_with("<!--")
-                            || !trimmed.ends_with("-->")
-                            || marker_re.as_ref().is_some_and(|re| re.is_match(trimmed))
-                    }
+                tracker.fenced(line) || {
+                    let trimmed = line.trim();
+                    !trimmed.starts_with("<!--")
+                        || !trimmed.ends_with("-->")
+                        || marker_re.as_ref().is_some_and(|re| re.is_match(trimmed))
+                }
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -505,7 +504,7 @@ mod tests {
 
         let rendered = render_markdown(&doc);
         assert!(
-            rendered.contains("\n##选通processor sib\n"),
+            rendered.starts_with("##选通processor sib\n"),
             "expected the `##` marker to be unescaped: {rendered}"
         );
         assert!(
@@ -525,10 +524,24 @@ mod tests {
     fn leading_multi_hash_marker_rejects_heading_shaped_followers() {
         assert_eq!(leading_multi_hash_marker("\\#\\#选通"), Some(2));
         assert_eq!(leading_multi_hash_marker("\\#\\#\\#x"), Some(3));
-        assert_eq!(leading_multi_hash_marker("\\#\\# spaced"), None, "blank after hashes could become a heading");
-        assert_eq!(leading_multi_hash_marker("\\#\\#\\ttabbed"), None);
-        assert_eq!(leading_multi_hash_marker("\\#\\#."), None, "dot form belongs to the numbered-marker branch");
-        assert_eq!(leading_multi_hash_marker("\\#06-18"), None, "single hash stays #1292-escaped");
+        assert_eq!(
+            leading_multi_hash_marker("\\#\\# spaced"),
+            None,
+            "blank after hashes could become a heading"
+        );
+        // `"\\t"` in a Rust literal is backslash+`t`, not a tab — the follower
+        // under test here is a real TAB character.
+        assert_eq!(leading_multi_hash_marker("\\#\\#\ttabbed"), None);
+        assert_eq!(
+            leading_multi_hash_marker("\\#\\#."),
+            None,
+            "dot form belongs to the numbered-marker branch"
+        );
+        assert_eq!(
+            leading_multi_hash_marker("\\#06-18"),
+            None,
+            "single hash stays #1292-escaped"
+        );
         assert_eq!(leading_multi_hash_marker("plain text"), None);
     }
 
@@ -678,13 +691,23 @@ mod tests {
     #[test]
     fn render_markdown_keeps_fenced_bodies_verbatim() {
         let mut b = InternalDocumentBuilder::new("test");
-        b.push_paragraph("Research title 7 arXiv:2401.12345v2 [cs.CL] 9 Jan 2024", vec![], None, None);
+        b.push_paragraph(
+            "Research title 7 arXiv:2401.12345v2 [cs.CL] 9 Jan 2024",
+            vec![],
+            None,
+            None,
+        );
         b.push_raw_block(
             "text",
             "```text\nkeep \\_ \\[ escapes, &#10; entities, \\#\\#选通\n\n\nand arXiv:2401.9999.999 markers too\n```",
             None,
         );
-        b.push_paragraph("Later prose watermark 8 arXiv:2401.5555v1 [cs.CL] 9 Jan 2024", vec![], None, None);
+        b.push_paragraph(
+            "Later prose watermark 8 arXiv:2401.5555v1 [cs.CL] 9 Jan 2024",
+            vec![],
+            None,
+            None,
+        );
         let doc = b.build();
         let rendered = render_markdown(&doc);
 

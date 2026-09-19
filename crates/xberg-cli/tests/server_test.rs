@@ -119,14 +119,25 @@ language = "eng"
 #[cfg(not(coverage))]
 #[test]
 fn test_serve_command_help() {
-    let build_status = Command::new("cargo")
-        .args(["build", "--bin", "xberg", "--features", "all"])
-        .status()
-        .expect("Failed to build binary");
+    // When the current build already carries the `api` feature (this fork's test
+    // gate always does), test the binary cargo just built via CARGO_BIN_EXE_xberg
+    // instead of spawning `cargo build --features all`: `all` pulls in `heic`,
+    // whose libheif-sys has no build path on a stock Windows toolchain (#1361),
+    // so the inner rebuild — and with it this test — would always fail there.
+    // (cfg!, not option_env!: cargo does not expose CARGO_FEATURE_* when
+    // compiling test targets, but --cfg feature flags do reach them.)
+    let binary = if cfg!(feature = "api") {
+        PathBuf::from(env!("CARGO_BIN_EXE_xberg"))
+    } else {
+        let build_status = Command::new("cargo")
+            .args(["build", "--bin", "xberg", "--features", "all"])
+            .status()
+            .expect("Failed to build binary");
+        assert!(build_status.success(), "Failed to build xberg binary");
+        xberg_debug_binary()
+    };
 
-    assert!(build_status.success(), "Failed to build xberg binary");
-
-    let output = Command::new(xberg_debug_binary())
+    let output = Command::new(&binary)
         .args(["serve", "--help"])
         .output()
         .expect("Failed to execute command");
@@ -143,14 +154,22 @@ fn test_serve_command_help() {
 #[cfg(not(coverage))]
 #[test]
 fn test_mcp_command_help() {
-    let build_status = Command::new("cargo")
-        .args(["build", "--bin", "xberg", "--features", "all"])
-        .status()
-        .expect("Failed to build binary");
+    // Same Windows constraint as `test_serve_command_help`: the fallback rebuild
+    // uses `--features mcp` rather than `all` because `all` also enables `heic`,
+    // which cannot build on stock Windows (#1361); `mcp --help` needs no other
+    // extra feature, so this keeps the test's purpose on every platform.
+    let binary = if cfg!(feature = "mcp") {
+        PathBuf::from(env!("CARGO_BIN_EXE_xberg"))
+    } else {
+        let build_status = Command::new("cargo")
+            .args(["build", "--bin", "xberg", "--features", "mcp"])
+            .status()
+            .expect("Failed to build binary");
+        assert!(build_status.success(), "Failed to build xberg binary");
+        xberg_debug_binary()
+    };
 
-    assert!(build_status.success(), "Failed to build xberg binary");
-
-    let output = Command::new(xberg_debug_binary())
+    let output = Command::new(&binary)
         .args(["mcp", "--help"])
         .output()
         .expect("Failed to execute command");

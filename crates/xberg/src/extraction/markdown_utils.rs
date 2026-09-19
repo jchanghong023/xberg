@@ -78,6 +78,24 @@ impl FenceTracker {
     }
 }
 
+/// One full-line markdown image marker, `![alt](target)` (empty alt included).
+/// Shape only — this is the lift's decision predicate, reused to recognize the
+/// renderer's marker paragraphs ahead of an OCR fence.
+fn is_image_marker_line(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with("![") && line.contains("](") && line.ends_with(')')
+}
+
+/// Last non-blank line of `chunk`, or `""` when the chunk is all whitespace.
+fn last_nonempty_line(chunk: &str) -> &str {
+    chunk
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("")
+}
+
 /// Move a markdown image marker out of the `text` fence it was baked into.
 ///
 /// The PPTX content builder writes a picture's placeholder into the same code block as the
@@ -90,16 +108,30 @@ impl FenceTracker {
 /// than three backticks — what a renderer writes when the fenced body itself holds backticks —
 /// is matched from its first backtick and re-opened with that same run.
 ///
-/// Accepted trade-off: the first line alone decides, so a fence whose genuine content starts
-/// with a full marker shape (an OCR'd Markdown tutorial, say) loses that line from the fence.
-/// The builder's baked-in marker and such a first line are indistinguishable at this stage,
-/// and the corpus contains no fence of that shape.
+/// A fence whose marker-shaped first line directly follows an image-marker paragraph is
+/// left alone: that is the renderer's own output shape — each image's marker is its own
+/// paragraph immediately followed by the ` ```text ` fence holding its OCR text — so a
+/// first line that reads like a marker there is OCR content (a screenshot of Markdown,
+/// or of this tool's own output), not a builder-baked placeholder. Hoisting it would
+/// rewrite fenced text, drop the fence's first line, and mint a live image reference
+/// the renderer never wrote; the pair must survive verbatim.
+///
+/// Remaining trade-off: the first line alone decides for fences with no marker paragraph
+/// in front, so a fence whose genuine content starts with a full marker shape (an OCR'd
+/// Markdown tutorial reaching the extractor raw, say) still loses that line from the
+/// fence — the builder's baked-in marker and such a first line are indistinguishable at
+/// that stage.
 pub fn lift_image_markers_out_of_fences(content: &mut String) {
     if !content.contains("```text") {
         return;
     }
     let mut out = String::with_capacity(content.len());
     let mut rest = content.as_str();
+    // Last non-empty line of the source the scan has already consumed. `rest` jumps
+    // between "```text" matches, so the text right before a fence may be either still
+    // ahead in `rest` (unconsumed) or already behind it; the guard below needs the
+    // original source line either way, never the lift's rewritten output.
+    let mut prev_source_line = "";
     // Whether `rest` begins at a real line start. The skip paths below slice `rest` at
     // arbitrary byte offsets; a slice cut mid-line has no newline behind its first
     // match, and without this flag the line-start check below would mistake the same
@@ -126,10 +158,12 @@ pub fn lift_image_markers_out_of_fences(content: &mut String) {
                 let indent = &rest[index + 1..position];
                 indent.len() <= 3 && indent.bytes().all(|byte| byte == b' ')
             }
-            None => rest_starts_at_line_start && {
-                let indent = &rest[..position];
-                indent.len() <= 3 && indent.bytes().all(|byte| byte == b' ')
-            },
+            None => {
+                rest_starts_at_line_start && {
+                    let indent = &rest[..position];
+                    indent.len() <= 3 && indent.bytes().all(|byte| byte == b' ')
+                }
+            }
         };
         let body_start = if at_line_start {
             match rest[opening_end..].strip_prefix("\r\n") {
@@ -141,10 +175,9 @@ pub fn lift_image_markers_out_of_fences(content: &mut String) {
             None
         };
         let body_start = match body_start {
-            Some(start) => {
-                start + rest[start..].len() - rest[start..].trim_start_matches(['\r', '\n']).len()
-            }
+            Some(start) => start + rest[start..].len() - rest[start..].trim_start_matches(['\r', '\n']).len(),
             None => {
+                prev_source_line = last_nonempty_line(&rest[..opening_end]);
                 out.push_str(&rest[..opening_end]);
                 rest = &rest[opening_end..];
                 rest_starts_at_line_start = false;
@@ -154,7 +187,13 @@ pub fn lift_image_markers_out_of_fences(content: &mut String) {
         let body = &rest[body_start..];
         let first_line_end = body.find('\n').map_or(body.len(), |index| index + 1);
         let first_line = body[..first_line_end].trim_end_matches(['\r', '\n']).trim();
-        let is_marker = first_line.starts_with("![") && first_line.contains("](") && first_line.ends_with(')');
+        // The source line immediately above this fence, read from the original text
+        // (still ahead in `rest`, or the tracked tail of what the scan consumed).
+        let preceding_line = {
+            let ahead = last_nonempty_line(&rest[..position]);
+            if ahead.is_empty() { prev_source_line } else { ahead }
+        };
+        let is_marker = is_image_marker_line(first_line) && !is_image_marker_line(preceding_line);
         if !is_marker {
             out.push_str(&rest[..body_start]);
             // The fence's body is literal content: skip past its closing line
@@ -170,6 +209,7 @@ pub fn lift_image_markers_out_of_fences(content: &mut String) {
                 }
             }
             out.push_str(&body[..consumed]);
+            prev_source_line = last_nonempty_line(&rest[..body_start + consumed]);
             rest = &body[consumed..];
             rest_starts_at_line_start = true;
             continue;
@@ -202,6 +242,7 @@ pub fn lift_image_markers_out_of_fences(content: &mut String) {
             Some(end) if rest[..inter_body_end].trim().is_empty() => {
                 // The marker was the fence's only content: drop the fence with
                 // its closer instead of re-opening an empty one.
+                prev_source_line = last_nonempty_line(&rest[..end]);
                 rest = &rest[end..];
                 rest_starts_at_line_start = true;
             }
@@ -225,6 +266,7 @@ pub fn lift_image_markers_out_of_fences(content: &mut String) {
                 out.push_str(&"`".repeat(opener_backticks));
                 out.push_str("text\n");
                 out.push_str(&rest[..end]);
+                prev_source_line = last_nonempty_line(&rest[..end]);
                 rest = &rest[end..];
                 rest_starts_at_line_start = true;
             }
@@ -271,7 +313,7 @@ fn looks_like_filesystem_path(value: &str) -> bool {
     // Path-like with a trailing image extension (e.g. `media/image1.png`, `../media/x.emf`).
     let lower = value.to_ascii_lowercase();
     matches!(
-        lower.rsplit(|c| c == '/' || c == '\\').next(),
+        lower.rsplit(['/', '\\']).next(),
         Some(name)
             if name.ends_with(".png")
                 || name.ends_with(".jpg")
@@ -300,8 +342,14 @@ mod tests {
             None
         );
         assert_eq!(sanitize_image_alt_text(Some("media/image1.emf".to_string())), None);
-        assert_eq!(sanitize_image_alt_text(Some("海思-修".to_string())), Some("海思-修".to_string()));
-        assert_eq!(sanitize_image_alt_text(Some("  BD21298_  ".to_string())), Some("BD21298_".to_string()));
+        assert_eq!(
+            sanitize_image_alt_text(Some("海思-修".to_string())),
+            Some("海思-修".to_string())
+        );
+        assert_eq!(
+            sanitize_image_alt_text(Some("  BD21298_  ".to_string())),
+            Some("BD21298_".to_string())
+        );
         assert_eq!(sanitize_image_alt_text(None), None);
         assert_eq!(sanitize_image_alt_text(Some("   ".to_string())), None);
     }
@@ -375,12 +423,40 @@ mod tests {
     /// swallowed the rest of the document on re-parse.
     #[test]
     fn text_fence_inside_a_lifted_marker_fence_stays_literal() {
-        let mut content =
-            String::from("```text\n![](image_0.png)\n```text\n![](image_1.png)\n```\n");
+        let mut content = String::from("```text\n![](image_0.png)\n```text\n![](image_1.png)\n```\n");
         lift_image_markers_out_of_fences(&mut content);
         assert_eq!(
             content, "![](image_0.png)\n\n```text\n```text\n![](image_1.png)\n```\n",
             "only the outer marker is lifted; the inner ```text and its marker stay verbatim"
+        );
+    }
+
+    /// The renderer's output shape — an image-marker paragraph immediately followed by
+    /// the OCR fence — must survive verbatim even when the OCR text's first line is
+    /// itself a full marker line (a screenshot of Markdown, or of this tool's own
+    /// output). Hoisting it would rewrite fenced text, drop the fence's first line, and
+    /// mint a live reference the renderer never wrote.
+    #[test]
+    fn renderer_marker_fence_pair_is_never_lifted() {
+        let source = String::from("![](image_0.png)\n\n```text\n![](image_1.png)\nmore OCR text\n```\n");
+        let mut content = source.clone();
+        lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(
+            content, source,
+            "the renderer's marker paragraph + OCR fence pair must stay byte-identical"
+        );
+    }
+
+    /// Consecutive baked fences must both lift: the first hoisted marker must not be
+    /// mistaken (via the source-line tracking) for a renderer marker-paragraph + fence
+    /// pair belonging to the second fence.
+    #[test]
+    fn consecutive_baked_fences_both_lift() {
+        let mut content = String::from("```text\n![](image_1.png)\n```\n```text\n![](image_2.png)\n```\n");
+        lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(
+            content, "![](image_1.png)\n\n![](image_2.png)\n\n",
+            "each baked fence loses its fence and keeps its marker"
         );
     }
 

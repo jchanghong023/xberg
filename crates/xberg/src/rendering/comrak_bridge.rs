@@ -1064,8 +1064,13 @@ pub(crate) fn build_comrak_ast<'a>(
                         parent.append(ocr_para);
                     } else {
                         let para = mk(arena, NodeValue::Paragraph);
-                        let img_node =
-                            mk(arena, NodeValue::Image(Box::new(NodeLink { url, title: String::new() })));
+                        let img_node = mk(
+                            arena,
+                            NodeValue::Image(Box::new(NodeLink {
+                                url,
+                                title: String::new(),
+                            })),
+                        );
                         img_node.append(mk_text(arena, &desc));
                         para.append(img_node);
                         parent.append(para);
@@ -1082,9 +1087,7 @@ pub(crate) fn build_comrak_ast<'a>(
                                 .and_then(|img| img.ocr_result.as_ref())
                                 .is_some_and(|result| !result.content.is_empty());
                         if append_ocr {
-                            let ocr_result = image
-                                .and_then(|img| img.ocr_result.as_ref())
-                                .unwrap();
+                            let ocr_result = image.and_then(|img| img.ocr_result.as_ref()).unwrap();
                             let ocr_para = mk(arena, NodeValue::Paragraph);
                             ocr_para.append(mk_text(arena, &ocr_result.content));
                             parent.append(ocr_para);
@@ -1115,8 +1118,7 @@ pub(crate) fn build_comrak_ast<'a>(
                             // ride along into the output, so CRLF-only content
                             // is normalized here, matching the layout path's
                             // per-line handling.
-                            (!text.is_empty())
-                                .then(|| text.replace("\r\n", "\n").replace('\r', "\n"))
+                            (!text.is_empty()).then(|| text.replace("\r\n", "\n").replace('\r', "\n"))
                         })
                 });
                 // Every image leaves its marker line — the markdown image carrying the path the
@@ -1281,7 +1283,17 @@ pub(crate) fn build_comrak_ast<'a>(
             }
 
             ElementKind::RawBlock => {
-                let raw = mk(arena, NodeValue::Raw(elem_text.to_string()));
+                // comrak emits `NodeValue::Raw` verbatim with no block
+                // separation: without a trailing newline the raw block's last
+                // line (typically a closing ``` fence) glues onto the following
+                // paragraph, and the merged line is no longer a bare closer —
+                // every fence-aware prose pass after the first raw block would
+                // treat the rest of the document as fence content (verbatim).
+                let mut raw_text = elem_text.to_string();
+                if !raw_text.ends_with('\n') {
+                    raw_text.push('\n');
+                }
+                let raw = mk(arena, NodeValue::Raw(raw_text));
                 parent.append(raw);
             }
 
@@ -1492,14 +1504,8 @@ mod tests {
         // A literal `%` must itself be encoded or the `%5C` it would ride with
         // decodes ambiguously; `[`/`]` are encoded so other Markdown flavors
         // and link tooling cannot read them as reference-link syntax.
-        assert_eq!(
-            sanitize_marker_url(r"100%\shot].png"),
-            "100%25%5Cshot%5D.png"
-        );
-        assert_eq!(
-            sanitize_marker_url("img [1].png"),
-            "img%20%5B1%5D.png"
-        );
+        assert_eq!(sanitize_marker_url(r"100%\shot].png"), "100%25%5Cshot%5D.png");
+        assert_eq!(sanitize_marker_url("img [1].png"), "img%20%5B1%5D.png");
     }
 
     #[test]
@@ -1882,7 +1888,9 @@ mod tests {
         // table markdown lives in `content` alone, and the flag declares that.
         let mut grid_doc = InternalDocument::new("test");
         let mut line = crate::types::internal::InternalElement::text(
-            ElementKind::OcrText { level: OcrElementLevel::Line },
+            ElementKind::OcrText {
+                level: OcrElementLevel::Line,
+            },
             "prose line",
             0,
         );
@@ -2010,7 +2018,10 @@ mod tests {
         let mut doc = doc_with_ocr_image(None);
         doc.images[0].description = Some(r"C:\Users\author\x.png".to_string());
         let html = render_html(&doc);
-        assert!(!html.contains("Users"), "the host path must not reach the alt attribute: {html:?}");
+        assert!(
+            !html.contains("Users"),
+            "the host path must not reach the alt attribute: {html:?}"
+        );
         assert!(html.contains(r#"alt="""#), "the alt attribute stays, emptied: {html:?}");
 
         let mut doc = doc_with_ocr_image(None);
@@ -2041,8 +2052,14 @@ mod tests {
         doc.images.push(doc_image());
 
         let out = render(&doc);
-        assert!(!out.contains("```text"), "a fence must not appear inside a list: {out:?}");
-        assert!(out.contains("![](image_0.png)"), "the image must stay a live reference: {out:?}");
+        assert!(
+            !out.contains("```text"),
+            "a fence must not appear inside a list: {out:?}"
+        );
+        assert!(
+            out.contains("![](image_0.png)"),
+            "the image must stay a live reference: {out:?}"
+        );
         assert!(
             out.contains("before the picture") && out.contains("after the picture"),
             "the surrounding item text must survive: {out:?}"
@@ -2067,10 +2084,16 @@ mod tests {
         doc.images.push(doc_image());
 
         let out = render(&doc);
-        assert!(!out.contains("```text"), "a fence must not appear inside a quote: {out:?}");
+        assert!(
+            !out.contains("```text"),
+            "a fence must not appear inside a quote: {out:?}"
+        );
         assert!(out.contains("![](image_0.png)"), "got: {out:?}");
         for line in out.lines().filter(|line| !line.trim().is_empty()) {
-            assert!(line.starts_with("> "), "every line must stay inside the quote: {line:?}");
+            assert!(
+                line.starts_with("> "),
+                "every line must stay inside the quote: {line:?}"
+            );
         }
     }
 

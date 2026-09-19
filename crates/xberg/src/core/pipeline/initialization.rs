@@ -710,6 +710,21 @@ mod tests {
         let clear_result = crate::plugins::clear_post_processors();
         release_sender.send(()).unwrap();
         initialize_thread.join().unwrap().unwrap();
+        // `clear_post_processors` refuses while any extraction holds the registry —
+        // concurrent (non-serial) tests in this binary legitimately do, and the
+        // error message itself names retrying as the contract. Retry for a
+        // bounded window so the recovery check below is what can fail, not a
+        // race with an unrelated test's extraction.
+        let mut clear_result = clear_result;
+        const CLEAR_ATTEMPTS: usize = 50;
+        const CLEAR_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+        for _ in 0..CLEAR_ATTEMPTS {
+            if clear_result.is_ok() {
+                break;
+            }
+            std::thread::sleep(CLEAR_RETRY_DELAY);
+            clear_result = crate::plugins::clear_post_processors();
+        }
         clear_result.unwrap();
 
         let names = crate::plugins::registry::get_post_processor_registry().read().list();

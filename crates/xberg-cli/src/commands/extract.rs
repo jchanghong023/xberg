@@ -117,6 +117,15 @@ fn write_extracted_images(images: &[ExtractedImage], output_dir: &Path) -> Resul
     Ok(())
 }
 
+/// Whether any extracted image actually carries bytes. Placeholder entries (empty
+/// `data`, e.g. relationship-only `.bin` stubs) are skipped by [`write_extracted_images`],
+/// so they must not gate directory creation or reference prefixing either: a `doc_N`
+/// directory holding no files, or references pointing into a directory nothing was
+/// written to, are both worse than the untouched references.
+fn has_writable_images(images: &[ExtractedImage]) -> bool {
+    images.iter().any(|image| !image.data.is_empty())
+}
+
 /// Directory a batch result's extracted images are written to.
 ///
 /// Always namespaced by the result's position in `results` — the only self-proving unique key —
@@ -238,7 +247,12 @@ pub fn extract_command(
             if let Some(images) = &result.images {
                 let dir = output_dir.as_deref().unwrap_or(Path::new("."));
                 write_extracted_images(images, dir)?;
-                if let Some(explicit) = output_dir.as_deref() {
+                // Prefix only when bytes were (or will be) written: an all-placeholder
+                // image list writes no files, and references into an empty directory
+                // are worse than the untouched ones.
+                if has_writable_images(images)
+                    && let Some(explicit) = output_dir.as_deref()
+                {
                     // The renderer names each image by file name, which only resolves when the
                     // text is written *into* the directory the files went to. With an explicit
                     // `--output-dir` the references carry that directory instead, so the written
@@ -280,7 +294,11 @@ pub fn extract_command(
             if let Some(images) = &result.images {
                 let dir = output_dir.as_deref().unwrap_or(Path::new("."));
                 write_extracted_images(images, dir)?;
-                if let Some(explicit) = output_dir.as_deref() {
+                // Prefix only when bytes were (or will be) written — same rationale as
+                // the Text path above.
+                if has_writable_images(images)
+                    && let Some(explicit) = output_dir.as_deref()
+                {
                     // Same contract as the Text path and batch TOON: with an explicit
                     // `--output-dir` the content's references carry that directory, so the
                     // envelope's content finds its pictures wherever it lands.
@@ -355,10 +373,10 @@ pub fn batch_command(
                     xberg::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut lifted);
                     content = std::borrow::Cow::Owned(lifted);
                 }
-                // The empty-vector guard mirrors the Toon path below: `Some(vec![])`
-                // (image extraction enabled, but this document has no picture bytes)
-                // must not leave an empty `doc_N` directory behind.
-                if let Some(images) = result.images.as_deref().filter(|images| !images.is_empty()) {
+                // The no-writable-bytes guard mirrors the Toon path below: `Some(vec![])`
+                // (image extraction enabled, but this document has no picture bytes) and an
+                // all-placeholder list alike must not leave an empty `doc_N` directory behind.
+                if let Some(images) = result.images.as_deref().filter(|images| has_writable_images(images)) {
                     let base = output_dir.as_deref().unwrap_or(Path::new("."));
                     let dir = batch_image_dir(base, i);
                     std::fs::create_dir_all(&dir).context("Failed to create the batch image directory")?;
@@ -391,7 +409,7 @@ pub fn batch_command(
                 {
                     xberg::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut result.content);
                 }
-                if result.images.as_ref().is_some_and(|images| !images.is_empty()) {
+                if result.images.as_ref().is_some_and(|images| has_writable_images(images)) {
                     let base = output_dir.as_deref().unwrap_or(Path::new("."));
                     let dir = batch_image_dir(base, i);
                     std::fs::create_dir_all(&dir).context("Failed to create the batch image directory")?;

@@ -146,10 +146,7 @@ fn image_ocr_quality_score(text: &str) -> f64 {
 }
 
 #[cfg(any(test, all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm"))))]
-fn select_image_ocr_result(
-    region_doc: InternalDocument,
-    whole: Result<WholeImageOcr>,
-) -> WholeImageOcr {
+fn select_image_ocr_result(region_doc: InternalDocument, whole: Result<WholeImageOcr>) -> WholeImageOcr {
     let whole = match whole {
         Ok(whole) => whole,
         Err(error) => {
@@ -1576,9 +1573,7 @@ fn should_use_layout_ocr(config: &ExtractionConfig) -> bool {
     // `{"layout": {}}` got no layout detection and no diagnostic). The hard
     // opt-outs (`disable_ocr` / `ocr.enabled = false`) and structured-markdown
     // backends remain the gates.
-    config.layout.is_some()
-        && !config.effective_disable_ocr()
-        && !ocr_backend_emits_structured_markdown(config)
+    config.layout.is_some() && !config.effective_disable_ocr() && !ocr_backend_emits_structured_markdown(config)
 }
 
 #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
@@ -2496,8 +2491,7 @@ impl InternalDocumentExtractor for ImageExtractor {
                 not(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))
             ))]
             {
-                let WholeImageOcr { document: mut doc, .. } =
-                    self.extract_with_ocr(content, mime_type, config).await?;
+                let WholeImageOcr { document: mut doc, .. } = self.extract_with_ocr(content, mime_type, config).await?;
                 if let Some(ocr_config) = config.ocr.as_ref() {
                     apply_public_image_ocr_element_policy(&mut doc, ocr_config);
                 }
@@ -4148,14 +4142,10 @@ mod tests {
     #[test]
     fn should_retain_cached_whole_image_when_region_ocr_fails() {
         let mut whole = whole_image_ocr_document("cached whole-image text");
-        whole
-            .document
-            .metadata
-            .additional
-            .insert(
-                std::borrow::Cow::Borrowed("ocr_candidate"),
-                serde_json::json!("whole-image"),
-            );
+        whole.document.metadata.additional.insert(
+            std::borrow::Cow::Borrowed("ocr_candidate"),
+            serde_json::json!("whole-image"),
+        );
 
         let retained = cached_whole_image_after_layout_error(
             &Ok(whole),
@@ -4286,10 +4276,13 @@ mod tests {
             std::borrow::Cow::Borrowed("ocr_candidate"),
             serde_json::Value::String("whole-image".to_string()),
         );
-        whole.document.processing_warnings.push(crate::types::ProcessingWarning {
-            source: std::borrow::Cow::Borrowed("ocr"),
-            message: std::borrow::Cow::Borrowed("whole-image warning"),
-        });
+        whole
+            .document
+            .processing_warnings
+            .push(crate::types::ProcessingWarning {
+                source: std::borrow::Cow::Borrowed("ocr"),
+                message: std::borrow::Cow::Borrowed("whole-image warning"),
+            });
 
         let selected = select_image_ocr_result(layout, Ok(whole));
 
@@ -4341,9 +4334,12 @@ mod tests {
             alphanumeric_token_retention(&internal_document_text(&layout), &internal_document_text(&whole)),
             1.0
         );
-        let selected = select_image_ocr_result(layout, Ok(whole_image_ocr_document(
-            "Quarterly revenue increased while operating expenses remained stable.",
-        )));
+        let selected = select_image_ocr_result(
+            layout,
+            Ok(whole_image_ocr_document(
+                "Quarterly revenue increased while operating expenses remained stable.",
+            )),
+        );
 
         assert_eq!(
             internal_document_text(&selected.document),

@@ -110,7 +110,9 @@ pub(crate) fn layout_boxes(mut items: Vec<(f64, f64, f64, String)>) -> Option<St
         return None;
     }
 
-    let line_height = median(items.iter().map(|item| item.2)).filter(|height| *height > 0.0).unwrap_or(12.0);
+    let line_height = median(items.iter().map(|item| item.2))
+        .filter(|height| *height > 0.0)
+        .unwrap_or(12.0);
     // A display column is half an em: Latin glyphs average ~0.5 em, a CJK glyph is 1 em wide
     // and occupies two columns, so the same divisor places both scripts correctly.
     let column_px = (line_height / 2.0).max(1.0);
@@ -166,7 +168,7 @@ pub(crate) fn layout_boxes(mut items: Vec<(f64, f64, f64, String)>) -> Option<St
             (index, row, column, text, width)
         })
         .collect();
-    placed.sort_by(|a, b| (a.1, a.2).cmp(&(b.1, b.2)));
+    placed.sort_by_key(|a| (a.1, a.2));
 
     // A reconstruction that reorders the lines sharing one row would invent a different
     // document (`-mbist $ijtag` where the OCR reported `-ijtag`, `$ijtag`, `-mbist`, `$mbist`),
@@ -241,7 +243,10 @@ pub(crate) fn layout_boxes(mut items: Vec<(f64, f64, f64, String)>) -> Option<St
     let rendered: Vec<String> = grid
         .iter()
         .map(|cells| {
-            let text: String = cells.iter().map(|cell| if *cell == '\0' { ' ' } else { *cell }).collect();
+            let text: String = cells
+                .iter()
+                .map(|cell| if *cell == '\0' { ' ' } else { *cell })
+                .collect();
             text.trim_end().to_string()
         })
         .collect();
@@ -258,7 +263,13 @@ pub(crate) fn layout_boxes(mut items: Vec<(f64, f64, f64, String)>) -> Option<St
         .unwrap_or(0);
     let block = rendered[first..=last]
         .iter()
-        .map(|row| if row.len() >= margin { row[margin..].to_string() } else { row.clone() })
+        .map(|row| {
+            if row.len() >= margin {
+                row[margin..].to_string()
+            } else {
+                row.clone()
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
     Some(block)
@@ -307,13 +318,18 @@ fn band_rows(indexed: &[(usize, f64, f64, f64, String)]) -> Vec<usize> {
 fn rank_rows(indexed: &[(usize, f64, f64, f64, String)], line_height: f64) -> Option<Vec<usize>> {
     let gap = line_height.max(1.0);
     let mut by_left: Vec<usize> = (0..indexed.len()).collect();
-    by_left.sort_by(|a, b| indexed[*a].1.partial_cmp(&indexed[*b].1).unwrap_or(std::cmp::Ordering::Equal));
+    by_left.sort_by(|a, b| {
+        indexed[*a]
+            .1
+            .partial_cmp(&indexed[*b].1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mut columns: Vec<Vec<usize>> = Vec::new();
     for item in by_left {
-        let starts_column = columns.last().is_none_or(|column| {
-            indexed[item].1 - indexed[*column.last().expect("column is never empty")].1 >= gap
-        });
+        let starts_column = columns
+            .last()
+            .is_none_or(|column| indexed[item].1 - indexed[*column.last().expect("column is never empty")].1 >= gap);
         if starts_column {
             columns.push(vec![item]);
         } else {
@@ -325,7 +341,12 @@ fn rank_rows(indexed: &[(usize, f64, f64, f64, String)], line_height: f64) -> Op
     // 0.0/2.0/1.0), and pairing the left-sorted ranks crossed lines that never shared a row.
     // `indexed` arrives sorted by top and this sort is stable, so equal tops keep that order.
     for column in &mut columns {
-        column.sort_by(|a, b| indexed[*a].2.partial_cmp(&indexed[*b].2).unwrap_or(std::cmp::Ordering::Equal));
+        column.sort_by(|a, b| {
+            indexed[*a]
+                .2
+                .partial_cmp(&indexed[*b].2)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
     let count = columns.first()?.len();
     if columns.len() < 2 || count == 0 || columns.iter().any(|column| column.len() != count) {
@@ -361,8 +382,14 @@ mod tests {
         let block = layout_boxes(elements).expect("layout");
 
         let lines: Vec<&str> = block.lines().collect();
-        let left_line = lines.iter().position(|line| line.contains("top left")).expect("top left");
-        let right_line = lines.iter().position(|line| line.contains("top right")).expect("top right");
+        let left_line = lines
+            .iter()
+            .position(|line| line.contains("top left"))
+            .expect("top left");
+        let right_line = lines
+            .iter()
+            .position(|line| line.contains("top right"))
+            .expect("top right");
         let bottom_line = lines.iter().position(|line| line.contains("bottom")).expect("bottom");
 
         assert_eq!(left_line, 0, "top-left label belongs on the first row: {block:?}");
@@ -438,9 +465,14 @@ mod tests {
     /// every line past it was dropped, so the block silently lost recognized text.
     #[test]
     fn keeps_every_line_of_a_multi_line_paragraph() {
-        let lines: Vec<&str> = (0..8).map(|_| "recognized paragraph line with sixty characters xxxxxxxx").collect();
+        let lines: Vec<&str> = (0..8)
+            .map(|_| "recognized paragraph line with sixty characters xxxxxxxx")
+            .collect();
         let paragraph = lines.join("\n");
-        assert!(display_width(&paragraph) > MAX_COLS, "the paragraph must exceed the column cap");
+        assert!(
+            display_width(&paragraph) > MAX_COLS,
+            "the paragraph must exceed the column cap"
+        );
 
         let elements = vec![element(&paragraph, 0.0, 0.0, 800.0, 96.0)];
         let block = layout_boxes(elements).expect("layout");
@@ -564,8 +596,14 @@ mod tests {
 
         let block = layout_boxes(vec![label_one, value_one, label_two, value_two]).expect("layout");
         let lines: Vec<&str> = block.lines().collect();
-        let ijtag_row = lines.iter().position(|line| line.contains("-ijtag")).expect("-ijtag kept");
-        let mbist_row = lines.iter().position(|line| line.contains("-mbist")).expect("-mbist kept");
+        let ijtag_row = lines
+            .iter()
+            .position(|line| line.contains("-ijtag"))
+            .expect("-ijtag kept");
+        let mbist_row = lines
+            .iter()
+            .position(|line| line.contains("-mbist"))
+            .expect("-mbist kept");
         assert!(
             lines[ijtag_row].contains("$ijtag"),
             "the value must sit on its own label's row: {block:?}"

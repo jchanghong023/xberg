@@ -346,8 +346,8 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
     #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
     // `disable_ocr` and `ocr.enabled = false` are hard switches: an explicit opt-out must
     // never get image OCR, however `images.run_ocr_on_images` (on by default) is set. ~keep
-    let image_ocr_enabled = config.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true)
-        && !config.effective_disable_ocr();
+    let image_ocr_enabled =
+        config.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true) && !config.effective_disable_ocr();
     #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
     if image_ocr_enabled && !doc.images.is_empty() {
         let image_positions = image_ocr_positions(&doc);
@@ -489,12 +489,8 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
         {
             // The re-encode loop is CPU/GDI-bound; on the async pipeline it runs on the
             // blocking pool so a large rasterization cannot stall a runtime worker.
-            image_format_renames = apply_output_format_pass_offload(
-                &mut result,
-                image_cfg,
-                config.security_limits.as_ref(),
-            )
-            .await?;
+            image_format_renames =
+                apply_output_format_pass_offload(&mut result, image_cfg, config.security_limits.as_ref()).await?;
         }
         #[cfg(not(feature = "tokio-runtime"))]
         {
@@ -944,12 +940,8 @@ fn apply_output_format_pass_with_security_limits(
     let security_limits = security_limits.unwrap_or(&default_security_limits);
     let mut format_renames = Vec::new();
     if let Some(images) = result.images.take() {
-        let (images, renames, warnings) = crate::core::image_encode::re_encode_images(
-            images,
-            config.output_format,
-            security_limits,
-            config,
-        );
+        let (images, renames, warnings) =
+            crate::core::image_encode::re_encode_images(images, config.output_format, security_limits, config);
         result.images = Some(images);
         result.processing_warnings.extend(warnings);
         rewrite_all_content_image_extensions(result, &renames);
@@ -1073,10 +1065,7 @@ fn rewrite_tree_image_extensions(
 /// `formatted_content` (swapped into `content` by `apply_output_format` at the very end),
 /// and the per-page content (rendered before this pass and never touched afterwards).
 #[cfg(feature = "image-encode")]
-fn rewrite_all_content_image_extensions(
-    result: &mut ExtractedDocument,
-    format_renames: &[(u32, String, String)],
-) {
+fn rewrite_all_content_image_extensions(result: &mut ExtractedDocument, format_renames: &[(u32, String, String)]) {
     rewrite_content_image_extensions(&mut result.content, format_renames);
     if let Some(formatted) = result.formatted_content.as_mut() {
         rewrite_content_image_extensions(formatted, format_renames);
@@ -1119,9 +1108,8 @@ fn rewrite_content_image_extensions(content: &mut String, format_renames: &[(u32
             // contain a marker mid-text. The carve-out is a deliberate superset of
             // the lift's reach — any fence language, any position — because the
             // marker's target file exists under the new name either way.
-            let marker_line = body.trim_start().starts_with("![")
-                && body.contains("](")
-                && body.trim_end().ends_with(')');
+            let marker_line =
+                body.trim_start().starts_with("![") && body.contains("](") && body.trim_end().ends_with(')');
             if marker_line {
                 result.push_str(&rewrite_image_refs_on_unfenced_text(body, format_renames));
                 if had_cr {

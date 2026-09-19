@@ -1,14 +1,14 @@
+<!--
+AI-RULEZ :: GENERATED FILE — DO NOT EDIT
+Content-Hash: blake3:a99b1f1f5d3a97fce435d15cb1ae5de99a6d5d38f344a3a25f6784621edd1b98
+Source-Hash: blake3:8436911387ca6e92e089da7c4165303e587d88cbff8b705ce66d7cd4eaaa5497
+Schema-Version: v1
+-->
+
 ---
 name: extracting-tables
 description: Use when extracting tabular data from PDFs, spreadsheets, or images. Covers layout-aware table detection, table model selection, output formats (markdown / JSON cells), and known limits.
 ---
-
-<!--
-AI-RULEZ :: GENERATED FILE — DO NOT EDIT
-Content-Hash: blake3:7667a52a8674605a45cc61b67e7879a0104d5e86c0d82b4bde5ced9e6e3463a8
-Source-Hash: blake3:5f5a598889c48eafed824c3d233459b3a360278d1175be7d6c4267d3aaf96d87
-Schema-Version: v1
--->
 
 # Extracting tables
 

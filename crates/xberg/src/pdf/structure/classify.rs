@@ -1756,6 +1756,15 @@ fn looks_like_title_continuation(prev: &PdfParagraph, next: &PdfParagraph) -> bo
     if prev_text.trim_end().ends_with(['.', '!', '?', ':']) {
         return false;
     }
+    // When both lines carry baseline geometry, a same-page H1 far below the
+    // previous one is a separate heading, not a wrapped title line — enforce
+    // the same adjacency cap the opener chain uses. Lines without geometry
+    // (baseline 0) keep the word-count-only decision.
+    let prev_geometry = prev.lines.last().map(|l| l.baseline_y != 0.0).unwrap_or(false);
+    let next_geometry = next.lines.first().map(|l| l.baseline_y != 0.0).unwrap_or(false);
+    if prev_geometry && next_geometry && !heading_lines_vertically_adjacent(prev, next, 2.5) {
+        return false;
+    }
     let prev_wc = prev_text.split_whitespace().count();
     let next_wc = next_text.split_whitespace().count();
     prev_wc <= 4 && next_wc <= 4
@@ -1818,7 +1827,18 @@ fn looks_like_standalone_heading_text(text: &str) -> bool {
 /// head itself, so it can only be the title the head quotes.
 ///
 /// `page_heights` provides the height of each page for margin calculation.
-pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>], page_heights: &[f32]) {
+///
+/// `strip_top_edges` / `strip_bottom_edges` carry `content_filter.include_headers` /
+/// `include_footers` (negated, same contract as [`crate::pdf::native::text::FurniturePermissions`]):
+/// a band the caller asked to keep does not count as a margin sighting, so a running
+/// header confined to it never builds a streak — mirroring how the flat-text pass zeroes
+/// that band's width under the same permissions.
+pub(super) fn mark_cross_page_repeating_text(
+    all_pages: &mut [Vec<PdfParagraph>],
+    page_heights: &[f32],
+    strip_top_edges: bool,
+    strip_bottom_edges: bool,
+) {
     if all_pages.len() < 4 {
         return;
     }
@@ -1826,10 +1846,12 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
     let margin_frac = 0.10;
 
     // Top/bottom-margin membership of a block bbox on `page_idx`'s page, shared by the
-    // collection pass below and the marking pass further down.
+    // collection pass below and the marking pass further down. Protected bands never
+    // match, keeping their sightings out of the streak counts.
     let in_page_margin = |bbox: (f32, f32, f32, f32), page_idx: usize| -> bool {
         let page_h = page_heights.get(page_idx).copied().unwrap_or(792.0);
-        bbox.3 > page_h * (1.0 - margin_frac) || bbox.1 < page_h * margin_frac
+        (strip_bottom_edges && bbox.3 > page_h * (1.0 - margin_frac))
+            || (strip_top_edges && bbox.1 < page_h * margin_frac)
     };
 
     let mut text_page_count: ahash::AHashMap<String, usize> = ahash::AHashMap::new();
@@ -2009,8 +2031,7 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
                 }
             }
         }
-        let mut keep_indices: ahash::AHashSet<usize> =
-            best_per_key.values().map(|&(_, index)| index).collect();
+        let mut keep_indices: ahash::AHashSet<usize> = best_per_key.values().map(|&(_, index)| index).collect();
         if marks_everything {
             let mut best = (f32::NEG_INFINITY, 0usize);
             for &(index, _, _) in &matching {
@@ -2692,7 +2713,11 @@ mod tests {
             make_h1_at(24.0, "Annual Report of the Board of Directors", 123.0),
         ];
         merge_consecutive_h1s(&mut page);
-        assert_eq!(page.len(), 2, "a non-label two-word H1 must not absorb a long title line");
+        assert_eq!(
+            page.len(),
+            2,
+            "a non-label two-word H1 must not absorb a long title line"
+        );
     }
 
     #[test]
@@ -2807,7 +2832,7 @@ mod tests {
             vec![make_margin_body("Page 1 of 10"), make_body_center("Unique content C")],
             vec![make_margin_body("Page 1 of 10"), make_body_center("Unique content D")],
         ];
-        mark_cross_page_repeating_text(&mut pages, &page_heights);
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
         assert!(!pages[0][0].is_page_furniture, "first occurrence must not be furniture");
         assert!(pages[1][0].is_page_furniture);
         assert!(pages[2][0].is_page_furniture);
@@ -2835,7 +2860,7 @@ mod tests {
                 make_body_center(&format!("Unique content {index}")),
             ]);
         }
-        mark_cross_page_repeating_text(&mut pages, &page_heights);
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
         assert!(
             !pages[0][0].is_page_furniture,
             "the chapter opening title predates every head copy; deleting it loses the chapter"
@@ -2865,7 +2890,7 @@ mod tests {
                 make_body_center(&format!("Unique content {index}")),
             ]);
         }
-        mark_cross_page_repeating_text(&mut pages, &page_heights);
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
         assert!(
             !pages[0][0].is_page_furniture,
             "the numbered chapter title predates every head copy; deleting it loses the chapter"
@@ -2887,7 +2912,7 @@ mod tests {
             body.block_bbox = Some((50.0, 400.0, 300.0, 420.0));
             pages.push(vec![h, body]);
         }
-        mark_cross_page_repeating_text(&mut pages, &page_heights);
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
         assert!(!pages[0][0].is_page_furniture, "first occurrence must not be furniture");
         assert!(pages[1][0].is_page_furniture);
         assert!(pages[1][0].heading_level.is_none());
@@ -2923,7 +2948,7 @@ mod tests {
                 make_body_center("Section content F"),
             ],
         ];
-        mark_cross_page_repeating_text(&mut pages, &page_heights);
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
         assert!(
             !pages[0][0].is_page_furniture,
             "first occurrence of copyright notice must be preserved"
@@ -3866,7 +3891,7 @@ mod tests {
         let mut pages: Vec<Vec<PdfParagraph>> = (0..6)
             .map(|_| vec![make_margin_body(title), make_body_center("body text here")])
             .collect();
-        mark_cross_page_repeating_text(&mut pages, &page_heights);
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
 
         assert!(
             !pages[0][0].is_page_furniture,
@@ -3881,6 +3906,41 @@ mod tests {
                 "body text on page {i} must not be furniture"
             );
         }
+    }
+
+    /// `content_filter.include_headers = true` must protect a top-band running header
+    /// from the cross-page majority/streak rule, mirroring how the flat-text pass
+    /// zeroes that band's width under the same permission.
+    #[test]
+    fn test_cross_page_repeating_text_respects_include_headers() {
+        fn make_top_margin(text: &str) -> PdfParagraph {
+            let mut p = make_paragraph(12.0, 1);
+            p.lines[0].segments[0].text = text.to_string();
+            p.block_bbox = Some((50.0, 10.0, 300.0, 30.0));
+            p
+        }
+        let page_heights = vec![792.0_f32; 6];
+        let header = "Analysis of Thermodynamic Properties";
+
+        let mut pages: Vec<Vec<PdfParagraph>> = (0..6)
+            .map(|_| vec![make_top_margin(header), make_body_center("body text here")])
+            .collect();
+        mark_cross_page_repeating_text(&mut pages, &page_heights, false, true);
+        for (i, page) in pages.iter().enumerate() {
+            assert!(
+                !page[0].is_page_furniture,
+                "top-band header must be preserved with include_headers (page {i})"
+            );
+        }
+
+        let mut pages: Vec<Vec<PdfParagraph>> = (0..6)
+            .map(|_| vec![make_top_margin(header), make_body_center("body text here")])
+            .collect();
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
+        assert!(
+            pages[1][0].is_page_furniture,
+            "top-band header is furniture again once include_headers is off"
+        );
     }
 
     /// Short-text tier-2 detection must also exempt the first occurrence of repeating text.

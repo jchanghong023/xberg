@@ -214,8 +214,8 @@ impl PptxExtractor {
                         rest.iter().partition(|line| line.trim_start().starts_with('|'));
 
                     let push_lines = |builder: &mut InternalDocumentBuilder,
-                                          lines: &[&str],
-                                          budget: &mut SecurityBudget|
+                                      lines: &[&str],
+                                      budget: &mut SecurityBudget|
                      -> Result<()> {
                         for line in lines {
                             let line = line.trim();
@@ -257,8 +257,7 @@ impl PptxExtractor {
                     // same ceiling the write side applies to `a:pPr/@lvl`: the reader
                     // sees arbitrary text, and a multi-megabyte indent would otherwise
                     // open millions of list containers.
-                    let depth = ((line.len() - line.trim_start().len())
-                        / crate::extraction::pptx::LIST_INDENT.len())
+                    let depth = ((line.len() - line.trim_start().len()) / crate::extraction::pptx::LIST_INDENT.len())
                         .min(crate::extraction::pptx::MAX_LIST_NESTING_LEVEL as usize);
                     let raw = line.trim_start();
                     let list_match = if let Some(item_text) = raw.strip_prefix("- ") {
@@ -311,8 +310,7 @@ impl PptxExtractor {
                             builder.push_list_item(item_text, ordered, vec![], Some(*slide_num), None);
                         }
                     } else {
-                        let (line_text, line_formulas) =
-                            Self::split_line_math(line, &forms, formulas, plain_output);
+                        let (line_text, line_formulas) = Self::split_line_math(line, &forms, formulas, plain_output);
                         let lt = line_text.trim();
                         if lt.is_empty() && line_formulas.is_empty() {
                             while open_lists.pop().is_some() {
@@ -536,7 +534,12 @@ fn strip_repeated_decoration_images(doc: &mut InternalDocument) {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
-    let slide_count = doc.elements.iter().filter_map(|element| element.page).max().unwrap_or(0);
+    let slide_count = doc
+        .elements
+        .iter()
+        .filter_map(|element| element.page)
+        .max()
+        .unwrap_or(0);
     if slide_count < 3 {
         return;
     }
@@ -565,7 +568,10 @@ fn strip_repeated_decoration_images(doc: &mut InternalDocument) {
         image.data.hash(&mut hasher);
         let hash = hasher.finish();
         hash_by_index.insert(image_index as u32, hash);
-        slides_per_hash.entry(hash).or_default().extend(referencing.iter().copied());
+        slides_per_hash
+            .entry(hash)
+            .or_default()
+            .extend(referencing.iter().copied());
     }
     let decoration_hashes: std::collections::HashSet<u64> = slides_per_hash
         .into_iter()
@@ -628,10 +634,7 @@ fn promote_baked_image_references(doc: &mut InternalDocument) {
         }
 
         let mut cursor = 0usize;
-        let leftover = |text: &str,
-                            cursor: &mut usize,
-                            end: usize,
-                            elem: &crate::types::internal::InternalElement| {
+        let leftover = |text: &str, cursor: &mut usize, end: usize, elem: &crate::types::internal::InternalElement| {
             let slice = text[*cursor..end].trim();
             *cursor = end;
             if slice.is_empty() {
@@ -805,9 +808,7 @@ fn take_image_for_target(
     images
         .iter()
         .enumerate()
-        .find(|(index, image)| {
-            unused(*index) && image.source_path.as_deref().is_some_and(|path| path.trim() == target)
-        })
+        .find(|(index, image)| unused(*index) && image.source_path.as_deref().is_some_and(|path| path.trim() == target))
         .map(|(index, _)| index)
         .or_else(|| {
             if !target.is_empty() {
@@ -1025,14 +1026,13 @@ impl InternalDocumentExtractor for PptxExtractor {
             // already opened from the file) just to look for `ppt/embeddings/`.
             match crate::core::io::open_file_bytes(path) {
                 Ok(content) => {
-                    let (children, embed_warnings) =
-                        crate::extraction::ooxml_embedded::extract_ooxml_embedded_objects(
-                            &content,
-                            "ppt/embeddings/",
-                            "pptx",
-                            config,
-                        )
-                        .await;
+                    let (children, embed_warnings) = crate::extraction::ooxml_embedded::extract_ooxml_embedded_objects(
+                        &content,
+                        "ppt/embeddings/",
+                        "pptx",
+                        config,
+                    )
+                    .await;
                     if !children.is_empty() {
                         doc.children = Some(children);
                         crate::extraction::ooxml_embedded::append_embedded_object_text(&mut doc);
@@ -1413,7 +1413,11 @@ mod tests {
             .filter(|e| matches!(e.kind, ElementKind::ListItem { .. }))
             .map(|e| e.text.as_str())
             .collect();
-        assert_eq!(items, vec!["outer", "inner"], "the pure-formula item leaves no empty item");
+        assert_eq!(
+            items,
+            vec!["outer", "inner"],
+            "the pure-formula item leaves no empty item"
+        );
 
         let math: Vec<&str> = doc
             .elements
@@ -1431,7 +1435,9 @@ mod tests {
         assert_eq!(list_starts, 2, "the nested item's list is a list inside the outer one");
 
         assert!(
-            !doc.elements.iter().any(|e| e.kind == ElementKind::Paragraph && e.text.trim() == "-"),
+            !doc.elements
+                .iter()
+                .any(|e| e.kind == ElementKind::Paragraph && e.text.trim() == "-"),
             "the formula's list marker must not fall out as a stray paragraph"
         );
     }
@@ -1444,8 +1450,8 @@ mod tests {
 
         let content = "# Real Title\n\n### Notes:\n# not a title\nsecond note line\n";
         let mut budget = SecurityBudget::with_defaults();
-        let doc = PptxExtractor::build_internal_document(&[(1, content.to_string())], 1, &[], false, &mut budget)
-            .unwrap();
+        let doc =
+            PptxExtractor::build_internal_document(&[(1, content.to_string())], 1, &[], false, &mut budget).unwrap();
 
         let headings: Vec<&str> = doc
             .elements
@@ -1453,7 +1459,11 @@ mod tests {
             .filter(|e| matches!(e.kind, ElementKind::Heading { .. }))
             .map(|e| e.text.as_str())
             .collect();
-        assert_eq!(headings, vec!["Real Title"], "the note's `#` line must not become a heading");
+        assert_eq!(
+            headings,
+            vec!["Real Title"],
+            "the note's `#` line must not become a heading"
+        );
 
         let note_kept = doc
             .elements
@@ -1472,12 +1482,14 @@ mod tests {
         use crate::types::internal::ElementKind;
 
         let slide_contents = vec![
-            (1u32, "# Slide One\n\n### Notes:\nfirst note\n\n# also note text\n".to_string()),
+            (
+                1u32,
+                "# Slide One\n\n### Notes:\nfirst note\n\n# also note text\n".to_string(),
+            ),
             (2u32, "# Slide Two\n".to_string()),
         ];
         let mut budget = SecurityBudget::with_defaults();
-        let doc = PptxExtractor::build_internal_document(&slide_contents, 2, &[], false, &mut budget)
-            .unwrap();
+        let doc = PptxExtractor::build_internal_document(&slide_contents, 2, &[], false, &mut budget).unwrap();
 
         let headings: Vec<&str> = doc
             .elements
@@ -1500,12 +1512,19 @@ mod tests {
         let cells = PptxExtractor::parse_markdown_table("| A | B |\n| --- | --- |\n| a\\|b | x---y |\n");
         assert_eq!(
             cells,
-            vec![vec!["A".to_string(), "B".to_string()], vec!["a|b".to_string(), "x---y".to_string()]],
+            vec![
+                vec!["A".to_string(), "B".to_string()],
+                vec!["a|b".to_string(), "x---y".to_string()]
+            ],
             "the escaped pipe stays in its cell and the --- cell stays a cell"
         );
 
         let aligned = PptxExtractor::parse_markdown_table("| H |\n| :---: |\n| v |\n");
-        assert_eq!(aligned, vec![vec!["H".to_string()], vec!["v".to_string()]], "alignment colons still mark a separator");
+        assert_eq!(
+            aligned,
+            vec![vec!["H".to_string()], vec!["v".to_string()]],
+            "alignment colons still mark a separator"
+        );
 
         // The writer doubles a literal backslash, so a cell holding `a\|b` leaves the
         // builder as `a` + `\\` + `\|` + `b`; the reader must fold both spellings back
@@ -2076,7 +2095,9 @@ mod tests {
             });
             doc.push_element(
                 InternalElement::text(
-                    ElementKind::Image { image_index: logo_index },
+                    ElementKind::Image {
+                        image_index: logo_index,
+                    },
                     "BD21298_",
                     0,
                 )
@@ -2091,7 +2112,14 @@ mod tests {
             ..Default::default()
         });
         doc.push_element(
-            InternalElement::text(ElementKind::Image { image_index: diagram_index }, "chart", 0).with_page(2),
+            InternalElement::text(
+                ElementKind::Image {
+                    image_index: diagram_index,
+                },
+                "chart",
+                0,
+            )
+            .with_page(2),
         );
         let rare_index = doc.images.len() as u32;
         for slide in 1u32..=2u32 {
@@ -2102,8 +2130,14 @@ mod tests {
                 ..Default::default()
             });
             doc.push_element(
-                InternalElement::text(ElementKind::Image { image_index: rare_index }, "rare", 0)
-                    .with_page(slide),
+                InternalElement::text(
+                    ElementKind::Image {
+                        image_index: rare_index,
+                    },
+                    "rare",
+                    0,
+                )
+                .with_page(slide),
             );
         }
 
@@ -2281,9 +2315,7 @@ mod tests {
 
         let mut doc = InternalDocument::new("pptx");
         // Slide 1: the broken placeholder (empty target, no image of its own).
-        doc.push_element(
-            InternalElement::text(ElementKind::Paragraph, "![]()", 0).with_page(1),
-        );
+        doc.push_element(InternalElement::text(ElementKind::Paragraph, "![]()", 0).with_page(1));
         // Slide 2: its own real placeholder for the deck's only image.
         doc.push_element(
             InternalElement::text(ElementKind::Paragraph, "![chart](../media/image9.png)", 0).with_page(2),
@@ -2313,9 +2345,7 @@ mod tests {
         // The fallback itself survives on the placeholder's own slide: a broken
         // placeholder still takes an unused image of its own page.
         let mut doc = InternalDocument::new("pptx");
-        doc.push_element(
-            InternalElement::text(ElementKind::Paragraph, "![]()", 0).with_page(1),
-        );
+        doc.push_element(InternalElement::text(ElementKind::Paragraph, "![]()", 0).with_page(1));
         doc.images = vec![ExtractedImage {
             format: Cow::Borrowed("png"),
             image_index: 0,

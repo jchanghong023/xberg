@@ -492,24 +492,25 @@ fn post_process_table_inner(
     // text, so a data row merely *ending* in a cross-reference ("... or
     // Table 3-1.") never matches. Dropped at the grid entrance so every later
     // header/flow check sees the caption-free table. ~keep
+    //
+    // Only when non-caption rows survive the drop: a grid whose EVERY row opens
+    // with the anchor is itself the document's table-of-tables / cross-reference
+    // listing (its first column legitimately carries `Table N-M.` values), not a
+    // real grid with an absorbed caption band — dropping them all used to reject
+    // the whole listing here.
     if table.len() >= 2 {
-        let before = table.len();
-        table.retain(|row| !is_caption_row(row));
-        if table.len() < before {
-            tracing::debug!(
-                target: "xberg::table_reconstruct",
-                dropped_caption_rows = before - table.len(),
-                "post_process_table_inner: dropped caption rows from grid"
-            );
+        let caption_rows = table.iter().filter(|row| is_caption_row(row)).count();
+        if caption_rows > 0 && caption_rows < table.len() {
+            let before = table.len();
+            table.retain(|row| !is_caption_row(row));
+            if table.len() < before {
+                tracing::debug!(
+                    target: "xberg::table_reconstruct",
+                    dropped_caption_rows = before - table.len(),
+                    "post_process_table_inner: dropped caption rows from grid"
+                );
+            }
         }
-    }
-    if table.is_empty() {
-        tracing::debug!(
-            target: "xberg::table_reconstruct",
-            reason = "empty_after_caption_drop",
-            "post_process_table_inner: rejected table"
-        );
-        return None;
     }
 
     // Truth-table merged cells: a value row like `1 1 0` whose three words
@@ -2034,15 +2035,25 @@ pub(crate) fn looks_like_verilog_declaration_grid(table_cells: &[Vec<String>]) -
 /// separated, as PDF TOC dot rows usually are) optionally followed by a page
 /// number, with no other characters. `". . . . . 279"` qualifies; `"..."`,
 /// `"3.4.1"` and `"see section 2"` do not.
+///
+/// A leader run must also exist: at least one whitespace-separated token that
+/// is nothing but dots. Version and build numbers (`"1.2.3.4.5"`,
+/// `"2024.1.2.3.4"`) clear the character filter on digits alone, but every one
+/// of their tokens carries digits too, so they do not qualify — a whole table
+/// was once rejected because its version column looked like a TOC.
 fn is_dot_leader_cell(cell: &str) -> bool {
     let trimmed = cell.trim();
     let dot_count = trimmed.chars().filter(|c| *c == '.').count();
     if dot_count < 4 {
         return false;
     }
-    trimmed
+    if !trimmed
         .chars()
         .all(|c| c == '.' || c.is_whitespace() || c.is_ascii_digit())
+    {
+        return false;
+    }
+    trimmed.split_whitespace().any(|token| token.chars().all(|c| c == '.'))
 }
 
 /// Maximum total caption-title characters (anchor excluded) a
@@ -2067,11 +2078,8 @@ fn is_caption_row(row: &[String]) -> bool {
     let Some(title_in_anchor) = strip_caption_anchor(anchor) else {
         return false;
     };
-    let title_chars = title_in_anchor.chars().count()
-        + cells[1..]
-            .iter()
-            .map(|cell| cell.chars().count())
-            .sum::<usize>();
+    let title_chars =
+        title_in_anchor.chars().count() + cells[1..].iter().map(|cell| cell.chars().count()).sum::<usize>();
     title_chars <= CAPTION_ROW_MAX_TITLE_CHARS
 }
 
@@ -2331,16 +2339,18 @@ const TRUTH_TABLE_MIN_BITSTRING_CELL_PERCENT: usize = 60;
 /// Whether one reconstructed row reads as a Verilog port/attribute declaration
 /// line. See [`looks_like_verilog_declaration_grid`] for the five shapes.
 fn is_verilog_declaration_row(row: &[String]) -> bool {
-    let cells: Vec<&str> = row.iter().map(|cell| cell.trim()).filter(|cell| !cell.is_empty()).collect();
+    let cells: Vec<&str> = row
+        .iter()
+        .map(|cell| cell.trim())
+        .filter(|cell| !cell.is_empty())
+        .collect();
     if cells.is_empty() {
         return false;
     }
     let joined = cells.join(" ");
 
     // 1. Assignment row: `nonscan_model = FD2P;`
-    if cells.iter().any(|cell| cell.contains('='))
-        && joined.contains(';')
-    {
+    if cells.iter().any(|cell| cell.contains('=')) && joined.contains(';') {
         return true;
     }
 
@@ -2355,18 +2365,12 @@ fn is_verilog_declaration_row(row: &[String]) -> bool {
     {
         let bytes = joined.as_bytes();
         for i in 1..bytes.len() {
-            if bytes[i] == b')'
-                && bytes[i - 1].is_ascii_alphanumeric()
-                && joined[i + 1..]
-                    .trim_start()
-                    .starts_with('(')
+            if bytes[i] == b')' && bytes[i - 1].is_ascii_alphanumeric() && joined[i + 1..].trim_start().starts_with('(')
             {
                 let group = joined[i + 1..].trim_start().trim_start_matches('(');
                 if let Some(end) = group.find(')') {
                     let inner = &group[..end];
-                    if inner.trim().is_empty()
-                        || (end <= 32 && !inner.chars().any(char::is_whitespace))
-                    {
+                    if inner.trim().is_empty() || (end <= 32 && !inner.chars().any(char::is_whitespace)) {
                         return true;
                     }
                 }
@@ -2380,10 +2384,11 @@ fn is_verilog_declaration_row(row: &[String]) -> bool {
     //    data rows ("input | Clock (rising) | ...", no semicolon in any
     //    column) from counting as declaration evidence regardless of which
     //    column Direction sits in.
-    if let Some(first) = joined.split_whitespace().next() {
-        if matches!(first, "input" | "output" | "inout" | "parameter") && joined.contains(';') {
-            return true;
-        }
+    if let Some(first) = joined.split_whitespace().next()
+        && matches!(first, "input" | "output" | "inout" | "parameter")
+        && joined.contains(';')
+    {
+        return true;
     }
 
     // 4. Bare scaffolding cell: a lone `(` or `)` opening/closing a stanza.
@@ -4378,7 +4383,10 @@ mod tests {
             vec!["input (din_1) ( )".into(), "".into()],
             vec!["input (din_0) ( )".into(), "".into()],
         ];
-        assert!(looks_like_code_listing(&port_list), "port(attribute) rows must read as a code listing");
+        assert!(
+            looks_like_code_listing(&port_list),
+            "port(attribute) rows must read as a code listing"
+        );
 
         let bit_range_ports = vec![
             vec!["output".into(), "[Bits-1 : 0] Q;".into()],
@@ -5112,9 +5120,35 @@ mod tests {
         ];
         let processed = post_process_table(table, true, false).expect("real table must survive");
         assert_eq!(processed[0], row(&["cell_type", "Description"]));
-        assert!(processed
-            .iter()
-            .all(|r| !r.iter().any(|c| c.contains("Table 3-1"))));
+        assert!(processed.iter().all(|r| !r.iter().any(|c| c.contains("Table 3-1"))));
+    }
+
+    /// A grid whose every row opens with a `Table N-M.` anchor is a table-of-tables /
+    /// cross-reference listing, not a real grid with an absorbed caption band: it must
+    /// survive caption processing intact instead of being dropped empty and rejected.
+    #[test]
+    fn all_caption_grid_survives_as_a_listing() {
+        let table = vec![
+            row(&["Table 2-1.", "Supported formats"]),
+            row(&["Table 3-4.", "Pin attributes"]),
+            row(&["Figure 5-2.", "Scan chain overview"]),
+        ];
+        let processed = post_process_table(table, true, false).expect("listing must survive");
+        assert_eq!(processed.len(), 3, "no row of the listing may be dropped");
+    }
+
+    /// Version and build numbers are not TOC dot leaders: they clear the character
+    /// filter on digits alone, but carry no whitespace-separated all-dot token. A
+    /// version column used to push a whole table past the 60% dot-band rejection.
+    #[test]
+    fn version_number_cells_are_not_dot_leaders() {
+        assert!(!is_dot_leader_cell("1.2.3.4.5"));
+        assert!(!is_dot_leader_cell("2024.1.2.3.4"));
+        assert!(!is_dot_leader_cell("1.2.3.4.5 6.7.8.9.0"));
+        // Real leader bands keep qualifying.
+        assert!(is_dot_leader_cell(". . . . . 279"));
+        assert!(is_dot_leader_cell("...."));
+        assert!(is_dot_leader_cell(". . . . 12"));
     }
 
     #[test]
@@ -5177,7 +5211,10 @@ mod tests {
         // Title-case long header + no hanging rows: a genuine (if verbose)
         // header must survive.
         let table = vec![
-            row(&["Signal", "Minimum pulse width requirements for the input pins of this cell"]),
+            row(&[
+                "Signal",
+                "Minimum pulse width requirements for the input pins of this cell",
+            ]),
             row(&["CK", "1.0"]),
             row(&["SE", "2.0"]),
         ];
@@ -5296,10 +5333,7 @@ mod tests {
         // "000" cannot cover columns 0-2 while column 2 itself carries "1":
         // the anchor contradicts the reading-order prediction, so the split
         // point would be a guess.
-        let mut contradictory = vec![
-            row(&["A", "B", "C", "D"]),
-            row(&["", "000", "1", ""]),
-        ];
+        let mut contradictory = vec![row(&["A", "B", "C", "D"]), row(&["", "000", "1", ""])];
         assert_eq!(split_merged_truth_table_cells(&mut contradictory), 0);
         assert_eq!(contradictory[1], row(&["", "000", "1", ""]));
 
@@ -5311,10 +5345,7 @@ mod tests {
         assert_eq!(split_merged_truth_table_cells(&mut two_clusters), 0);
 
         // Non-bit content (letters with a space) blocks the row entirely.
-        let mut mixed = vec![
-            row(&["A", "B", "C", "D"]),
-            row(&["", "00X", "", "L 1"]),
-        ];
+        let mut mixed = vec![row(&["A", "B", "C", "D"]), row(&["", "00X", "", "L 1"])];
         assert_eq!(split_merged_truth_table_cells(&mut mixed), 0);
     }
 
@@ -5346,12 +5377,18 @@ mod tests {
     #[test]
     fn verilog_comment_rows_and_combined_grids() {
         let signal = |cells: &[&str]| is_verilog_declaration_row(&row(cells));
-        assert!(signal(&["//", "The data being output from the core to the PAD (outside world) thru"]));
+        assert!(signal(&[
+            "//",
+            "The data being output from the core to the PAD (outside world) thru"
+        ]));
         assert!(signal(&["//", "this I/O pad."]));
 
         // Tessent L10962: comment rows + `input data_out;` -> 3/3 signals.
         let grid = vec![
-            row(&["//", "The data being output from the core to the PAD (outside world) thru"]),
+            row(&[
+                "//",
+                "The data being output from the core to the PAD (outside world) thru",
+            ]),
             row(&["//", "this I/O pad."]),
             row(&["input", "data_out;"]),
         ];

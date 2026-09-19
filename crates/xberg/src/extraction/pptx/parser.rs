@@ -112,7 +112,9 @@ fn parse_group(node: &Node, xml_str: &str) -> Result<Vec<SlideElement>> {
             match parse_graphic_frame(node)? {
                 Some(GraphicFrameContent::Table(table)) => elements.push(SlideElement::Table(table, position)),
                 Some(GraphicFrameContent::Chart(chart)) => elements.push(SlideElement::Chart(chart, position)),
-                Some(GraphicFrameContent::SmartArt(diagram)) => elements.push(SlideElement::SmartArt(diagram, position)),
+                Some(GraphicFrameContent::SmartArt(diagram)) => {
+                    elements.push(SlideElement::SmartArt(diagram, position))
+                }
                 None => {
                     // OLE object frames (`…/graphicData` uri `…/ole`) carry their rendered
                     // preview as a DrawingML blip inside the `mc:Fallback` branch; the
@@ -519,7 +521,10 @@ fn parse_list(tx_body_node: &Node, xml_str: &str) -> Result<ListElement> {
         // writer emitted its `- ` and the second-stage parser then read the bare
         // marker as the paragraph `-`, which the renderer escapes to a lone `\-` line.
         // A bullet with no text and no math carries nothing to keep.
-        if runs.iter().all(|run| run.text.trim().is_empty() && run.math_latex.is_none()) {
+        if runs
+            .iter()
+            .all(|run| run.text.trim().is_empty() && run.math_latex.is_none())
+        {
             continue;
         }
 

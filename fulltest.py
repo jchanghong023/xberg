@@ -48,7 +48,9 @@ from collections import Counter
 from pathlib import Path
 
 # ---------------------------------------------------------------- 默认配置
-REPO = Path(r"D:\code1111111111\xberg")
+# 仓库根 = 本脚本所在目录（曾硬编码为 D:\code1111111111\xberg，仓库移动到 E:\xberg 后
+# 该路径变成空目录，e2e 门在预检就报「找不到 CLI」）。测试语料与输出仍在 D:\ 上。
+REPO = Path(__file__).resolve().parent
 DEFAULT_CLI = REPO / "target" / "debug" / "xberg.exe"
 # 打包目录只用来提供模型缓存（HF_HUB_CACHE）和 DLL 搜索路径；测试永远只用本地编译的 CLI
 PKG_DIR = REPO / "xberg-cli-x86_64-pc-windows-msvc"

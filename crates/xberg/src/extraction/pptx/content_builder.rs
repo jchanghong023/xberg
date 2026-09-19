@@ -238,7 +238,7 @@ impl ContentBuilder {
     pub(super) fn add_image_with_desc(&mut self, _image_id: &str, description: Option<&str>, target: &str) {
         if !self.plain {
             let alt = description
-                .map(|d| Self::escape_alt_text(&d.replace('\n', " ").replace('\r', "").trim()))
+                .map(|d| Self::escape_alt_text(d.replace('\n', " ").replace('\r', "").trim()))
                 .unwrap_or_default();
             let src = if target.is_empty() {
                 String::new()

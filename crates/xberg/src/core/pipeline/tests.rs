@@ -429,10 +429,28 @@ async fn lifecycle_wait_keeps_async_runtime_schedulable() {
     let (started_sender, started_receiver) = mpsc::channel();
     let (release_sender, release_receiver) = mpsc::channel();
     let update_thread = std::thread::spawn(move || {
-        with_post_processor_suppressed("async-runtime-test", || {
-            started_sender.send(()).unwrap();
-            Ok::<_, crate::XbergError>(release_receiver.recv().unwrap())
-        })
+        // A concurrent (non-serial) test's extraction can hold the registry when
+        // this mutation first runs; `with_post_processor_suppressed` then refuses
+        // before the closure starts (its contract says to retry). Only return
+        // once the closure has actually been entered — otherwise the started
+        // signal never fires and this test fails on an unrelated race.
+        loop {
+            let mut started = false;
+            let result = with_post_processor_suppressed("async-runtime-test", || {
+                started_sender.send(()).unwrap();
+                started = true;
+                Ok::<_, crate::XbergError>(release_receiver.recv().unwrap())
+            });
+            if started {
+                return result;
+            }
+            match result {
+                Err(crate::XbergError::Other(message)) if message.contains("retry the lifecycle mutation") => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
     });
     started_receiver.recv().unwrap();
 
@@ -2591,9 +2609,7 @@ mod document_counts {
     /// fences. Must not panic on multi-byte (Chinese) content — only touch `image_N.ext`.
     #[test]
     fn rewrite_content_image_extensions_updates_urls_without_utf8_panic() {
-        let mut content = String::from(
-            "Atpg 后仿真历险记\n\n![](image_0.emf)\n\n见 image_12.emf 与 image_3.png\n",
-        );
+        let mut content = String::from("Atpg 后仿真历险记\n\n![](image_0.emf)\n\n见 image_12.emf 与 image_3.png\n");
         super::rewrite_content_image_extensions(
             &mut content,
             &[
@@ -2622,12 +2638,8 @@ mod document_counts {
     /// still rewrite the reference outside.
     #[test]
     fn rewrite_content_image_extensions_skips_code_fences() {
-        let mut content =
-            String::from("见 ![](image_0.emf)\n\n```text\nsee ![](image_0.emf) below\n```\n");
-        super::rewrite_content_image_extensions(
-            &mut content,
-            &[(0, "emf".to_string(), "png".to_string())],
-        );
+        let mut content = String::from("见 ![](image_0.emf)\n\n```text\nsee ![](image_0.emf) below\n```\n");
+        super::rewrite_content_image_extensions(&mut content, &[(0, "emf".to_string(), "png".to_string())]);
         assert!(
             content.starts_with("见 ![](image_0.png)\n\n"),
             "the unfenced reference must follow the rename; got: {content:?}"
@@ -2644,12 +2656,8 @@ mod document_counts {
     /// marker embedded in longer listing text stays literal.
     #[test]
     fn rewrite_content_image_extensions_rewrites_a_whole_line_marker_inside_a_fence() {
-        let mut content =
-            String::from("```text\n![](image_0.emf)\n```\nsee ![](image_0.emf)\n");
-        super::rewrite_content_image_extensions(
-            &mut content,
-            &[(0, "emf".to_string(), "png".to_string())],
-        );
+        let mut content = String::from("```text\n![](image_0.emf)\n```\nsee ![](image_0.emf)\n");
+        super::rewrite_content_image_extensions(&mut content, &[(0, "emf".to_string(), "png".to_string())]);
         assert!(
             content.contains("```text\n![](image_0.png)\n```"),
             "the whole-line marker inside the fence follows the rename: {content:?}"
@@ -2668,10 +2676,7 @@ mod document_counts {
     fn rewrite_content_image_extensions_leaves_failed_siblings_alone() {
         let mut content = String::from("![](image_0.emf)\n中间文字\n\n![](image_7.emf)\n");
         // Image 0 re-encoded to PNG; image 7 failed and stays `.emf` on disk.
-        super::rewrite_content_image_extensions(
-            &mut content,
-            &[(0, "emf".to_string(), "png".to_string())],
-        );
+        super::rewrite_content_image_extensions(&mut content, &[(0, "emf".to_string(), "png".to_string())]);
         assert!(
             content.contains("![](image_0.png)"),
             "the renamed image's URL must follow the new file; got: {content}"
@@ -2687,10 +2692,7 @@ mod document_counts {
     #[test]
     fn rewrite_content_image_extensions_requires_the_recorded_index() {
         let mut content = String::from("正文 image_5.emf 结尾\n\nimage_9.emf 尾部\n");
-        super::rewrite_content_image_extensions(
-            &mut content,
-            &[(3, "emf".to_string(), "png".to_string())],
-        );
+        super::rewrite_content_image_extensions(&mut content, &[(3, "emf".to_string(), "png".to_string())]);
         assert!(
             content.contains("image_5.emf") && content.contains("image_9.emf"),
             "unrenamed indices must keep their extension; got: {content}"
@@ -2701,12 +2703,10 @@ mod document_counts {
     /// there, the reference is inside a fence, where no markdown reader fetches or draws it.
     #[test]
     fn image_marker_is_lifted_out_of_the_fence_around_it() {
-        let mut content =
-            String::from("前言\n\n```text\n![](image_3.png)\n-flag value\n-other value\n```\n\n后记\n");
+        let mut content = String::from("前言\n\n```text\n![](image_3.png)\n-flag value\n-other value\n```\n\n后记\n");
         crate::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut content);
         assert_eq!(
-            content,
-            "前言\n\n![](image_3.png)\n\n```text\n-flag value\n-other value\n```\n\n后记\n",
+            content, "前言\n\n![](image_3.png)\n\n```text\n-flag value\n-other value\n```\n\n后记\n",
             "the marker must be its own paragraph and the fence must keep the listing"
         );
     }

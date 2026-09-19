@@ -494,8 +494,7 @@ fn strip_furniture_from_structured_document(
         let trimmed = element.text.trim();
         // Exact matching, the same way the flat-text pass works: a paragraph
         // that merely contains a furniture string is real content and stays.
-        trimmed.chars().count() >= crate::pdf::native::text::FURNITURE_MIN_LINE_CHARS
-            && furniture.contains(trimmed)
+        trimmed.chars().count() >= crate::pdf::native::text::FURNITURE_MIN_LINE_CHARS && furniture.contains(trimmed)
     };
     let keep: Vec<bool> = document.elements.iter().map(|e| !is_stripped(e)).collect();
     // new_index_before[i] = how many KEPT elements sit before i — exactly the
@@ -518,9 +517,7 @@ fn strip_furniture_from_structured_document(
     document.relationships.retain(|relationship| {
         let source = relationship.source as usize;
         match &relationship.target {
-            crate::types::internal::RelationshipTarget::Index(target) => {
-                kept(source) && kept(*target as usize)
-            }
+            crate::types::internal::RelationshipTarget::Index(target) => kept(source) && kept(*target as usize),
             crate::types::internal::RelationshipTarget::Key(_) => kept(source),
         }
     });
@@ -598,8 +595,7 @@ fn furniture_from_consecutive_page_paragraphs(
 
     // Same consecutive-run bar as the edge-zone pass; plus a document-wide
     // share bar so a header that is only ever paragraph #4 still gets caught.
-    let min_share =
-        ((total_pages as f64) * crate::pdf::native::text::furniture_min_page_fraction()).ceil() as usize;
+    let min_share = ((total_pages as f64) * crate::pdf::native::text::furniture_min_page_fraction()).ceil() as usize;
     let min_share = min_share.max(crate::pdf::native::text::furniture_min_pages());
     for (line, hits) in page_hits {
         let run = best_streak.get(line).copied().unwrap_or(0);
@@ -2355,8 +2351,9 @@ impl PdfExtractor {
                             // heuristic asked for OCR. ~keep
                             let information_loss =
                                 ocr::destructive_ocr_information_loss(&native_text, &ocr_text, &thresholds);
-                            if !native_text.trim().is_empty() && information_loss.is_some() {
-                                let (native_alnum, ocr_alnum) = information_loss.expect("checked as present");
+                            if !native_text.trim().is_empty()
+                                && let Some((native_alnum, ocr_alnum)) = information_loss
+                            {
                                 tracing::warn!(
                                     native_alnum,
                                     ocr_alnum,
@@ -3140,12 +3137,26 @@ mod tests {
         strip_furniture_from_structured_document(&mut doc, crate::pdf::native::text::FurniturePermissions::default());
 
         assert_eq!(doc.elements.len(), 10, "8 headers stripped, everything else stays");
-        assert_eq!(doc.relationships.len(), 2, "the header-anchored relationship is dropped");
+        assert_eq!(
+            doc.relationships.len(),
+            2,
+            "the header-anchored relationship is dropped"
+        );
         let caption_rel = &doc.relationships[0];
-        assert_eq!(caption_rel.source, 8, "the caption lands after the 8 surviving body lines");
-        assert_eq!(caption_rel.target, RelationshipTarget::Index(9), "the table follows the caption");
+        assert_eq!(
+            caption_rel.source, 8,
+            "the caption lands after the 8 surviving body lines"
+        );
+        assert_eq!(
+            caption_rel.target,
+            RelationshipTarget::Index(9),
+            "the table follows the caption"
+        );
         let body_rel = &doc.relationships[1];
-        assert_eq!(body_rel.source, 7, "page-8 body is the last survivor before the caption");
+        assert_eq!(
+            body_rel.source, 7,
+            "page-8 body is the last survivor before the caption"
+        );
         assert_eq!(body_rel.target, RelationshipTarget::Index(8));
     }
 
@@ -3262,14 +3273,13 @@ mod tests {
         let mut structured = InternalDocument::new("pdf");
         structured.push_element(InternalElement::text(ElementKind::Heading { level: 1 }, represented, 0));
 
-        let (selected, is_structured) =
-            select_native_pdf_document(
-                &native_text,
-                "application/pdf",
-                Some(structured),
-                None,
-                crate::pdf::native::text::FurniturePermissions::default(),
-            );
+        let (selected, is_structured) = select_native_pdf_document(
+            &native_text,
+            "application/pdf",
+            Some(structured),
+            None,
+            crate::pdf::native::text::FurniturePermissions::default(),
+        );
 
         assert!(!is_structured);
         assert_eq!(selected.elements.len(), 1);
@@ -3283,14 +3293,13 @@ mod tests {
         let mut structured = InternalDocument::new("pdf");
         structured.push_element(InternalElement::text(ElementKind::Heading { level: 1 }, represented, 0));
 
-        let (selected, is_structured) =
-            select_native_pdf_document(
-                &native_text,
-                "application/pdf",
-                Some(structured),
-                None,
-                crate::pdf::native::text::FurniturePermissions::default(),
-            );
+        let (selected, is_structured) = select_native_pdf_document(
+            &native_text,
+            "application/pdf",
+            Some(structured),
+            None,
+            crate::pdf::native::text::FurniturePermissions::default(),
+        );
 
         assert!(is_structured);
         assert!(matches!(selected.elements[0].kind, ElementKind::Heading { level: 1 }));
@@ -3306,12 +3315,12 @@ mod tests {
         });
 
         let (_, is_structured) = select_native_pdf_document(
-                &native_text,
-                "application/pdf",
-                Some(structured),
-                None,
-                crate::pdf::native::text::FurniturePermissions::default(),
-            );
+            &native_text,
+            "application/pdf",
+            Some(structured),
+            None,
+            crate::pdf::native::text::FurniturePermissions::default(),
+        );
 
         assert!(is_structured);
     }
@@ -3321,14 +3330,13 @@ mod tests {
         let mut structured = InternalDocument::new("pdf");
         structured.push_element(InternalElement::text(ElementKind::Heading { level: 1 }, "Title", 0));
 
-        let (selected, is_structured) =
-            select_native_pdf_document(
-                "Title and body",
-                "application/pdf",
-                Some(structured),
-                None,
-                crate::pdf::native::text::FurniturePermissions::default(),
-            );
+        let (selected, is_structured) = select_native_pdf_document(
+            "Title and body",
+            "application/pdf",
+            Some(structured),
+            None,
+            crate::pdf::native::text::FurniturePermissions::default(),
+        );
 
         assert!(is_structured);
         assert!(matches!(selected.elements[0].kind, ElementKind::Heading { level: 1 }));
@@ -5033,12 +5041,13 @@ mod tests {
                 result.err()
             );
 
-            let extraction_result = result.unwrap();
-            let extraction_result = crate::extraction::derive::derive_extraction_result(
-                extraction_result,
-                true,
-                crate::core::config::OutputFormat::Plain,
-            );
+            // Page markers are injected by the pipeline stage
+            // (`core::pipeline` reads `pages.insert_page_markers`), never by the
+            // extractor itself, so the assertion must run on pipeline output —
+            // deriving the extractor's document directly can never contain them.
+            let extraction_result = crate::core::pipeline::run_pipeline(result.unwrap(), &config)
+                .await
+                .expect("pipeline run with page markers should succeed");
             let marker_placeholder = "<!-- PAGE ";
             if extraction_result.content.len() > 100 {
                 assert!(

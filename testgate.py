@@ -44,9 +44,9 @@ FEATURES_LIB = "formats-no-heic,analysis,ocr,paddle-ocr,transcription,layout-det
 
 FASTCHECK_BUDGET_SECONDS = 60.0
 
-# xberg crate 存在既有 fmt 漂移（2026-09-19 实测 155 个文件有 diff），批量重排版
-# 属用户决策；未清理前不进 fastcheck（否则快速门永久红），只进 fulltest 门。
-FMT_FASTCHECK_CRATES = ["xberg-cli", "xberg-windows-metafile"]
+# 2026-09-19 已执行 cargo fmt -p xberg 清掉 155 文件量级的既有漂移（用户授权的
+# 批量重排版），三 crate 全部纳入 fastcheck，防漂移回潮。
+FMT_FASTCHECK_CRATES = ["xberg", "xberg-cli", "xberg-windows-metafile"]
 
 PS1_PARSE_TARGETS = [
     "scripts/publish/cli/package-cli-windows.ps1",
@@ -72,24 +72,46 @@ UNVERIFIED = "UNVERIFIED"
 # ---------------------------------------------------------------- 命令执行
 
 def _kill_tree(proc):
-    """终止整个进程树（fastcheck 超时用；不留孤儿子进程）。"""
+    """终止整个进程树（fastcheck 超时用；不留孤儿子进程）。
+
+    taskkill 可能失败（进程已退出但句柄仍被持有、权限不足等）。失败后回退
+    `proc.kill()`，且等待有界 —— 杀进程路径一旦变成无界等待，超时的 stage 会
+    挂住整门而不是按 TIMEOUT 收场，与 60 秒硬超时的承诺不符。
+    """
     if os.name == "nt":
-        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
-                       capture_output=True)
+        killed = subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                                capture_output=True).returncode == 0
     else:  # pragma: no cover — 本 fork 仅 Windows，保底分支
+        killed = True
+        try:
+            proc.kill()
+        except OSError:
+            killed = False
+    if not killed:
+        # taskkill 失败时的最后手段：只杀直接子进程（孤儿子进程尽力而为）。
         try:
             proc.kill()
         except OSError:
             pass
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        # kill 后 10 秒仍不退出：放弃等待，交由调用方按 TIMEOUT 判失败。
+        pass
 
 
-def run_cmd(cmd, deadline=None):
+def run_cmd(cmd, deadline=None, env=None):
     """运行命令，输出直接透传。返回 (returncode, timed_out)。"""
     shown = " ".join(str(c) for c in cmd)
     if len(shown) > 160:  # pwsh -Command 内联脚本这类超长参数只回显开头
         shown = shown[:160] + " …(截断)"
     print(f"  $ {shown}", flush=True)
-    proc = subprocess.Popen([str(c) for c in cmd], cwd=str(REPO))
+    try:
+        proc = subprocess.Popen([str(c) for c in cmd], cwd=str(REPO), env=env)
+    except OSError as exc:
+        # 缺 pwsh/python 之类：报清晰的一行而不是整门 traceback。
+        print(f"  ! 无法启动 {cmd[0]}：{exc}", flush=True)
+        return 1, False
     if deadline is None:
         return proc.wait(), False
     while True:
@@ -98,7 +120,6 @@ def run_cmd(cmd, deadline=None):
         except subprocess.TimeoutExpired:
             if time.monotonic() > deadline:
                 _kill_tree(proc)
-                proc.wait()
                 return None, True
 
 
@@ -199,9 +220,11 @@ FULLTEST_STAGES = [
     ("build-cli", ["cargo", "build", "-p", "xberg-cli", "--no-default-features",
                    "--features", FEATURES_FORK], []),
     ("e2e-fulltest.py", [sys.executable, REPO / "fulltest.py", "--keep-going"], ["build-cli"]),
-    ("test-xberg", ["cargo", "test", "-p", "xberg", "--features", FEATURES_LIB], []),
+    ("test-documents-corpus", None, []),  # 内置检查：见 gate_fulltest 特殊分支
+    ("test-xberg", ["cargo", "test", "-p", "xberg", "--features", FEATURES_LIB],
+     ["test-documents-corpus"]),
     ("test-xberg-cli", ["cargo", "test", "-p", "xberg-cli", "--no-default-features",
-                        "--features", FEATURES_FORK], []),
+                        "--features", FEATURES_FORK], ["test-documents-corpus"]),
     ("test-xberg-windows-metafile", ["cargo", "test", "-p", "xberg-windows-metafile"], []),
     ("clippy-xberg", ["cargo", "clippy", "-p", "xberg", "--features", FEATURES_LIB,
                       "--", "-D", "warnings"], []),
@@ -210,6 +233,39 @@ FULLTEST_STAGES = [
     ("clippy-xberg-windows-metafile", ["cargo", "clippy", "-p", "xberg-windows-metafile",
                                        "--", "-D", "warnings"], []),
 ]
+
+# test_documents 子模块的二进制语料不进 git（corpus.lock.json 锁 693 个对象，从公开
+# bucket 拉取，见 test_documents/scripts/fetch_corpus.py）。缺语料时 50+ 个测试只报
+# "fixture not found"，极难归因——test 阶段前先对清单做存在性预检（只查路径，不验哈
+# 希，秒级；哈希由 fetch 脚本自身保证）。首次拉取约 618 MB：
+#   cd test_documents && python scripts/fetch_corpus.py
+CORPUS_MANIFEST = REPO / "test_documents" / "corpus.lock.json"
+
+
+def _corpus_missing_paths():
+    import json
+    try:
+        manifest = json.loads(CORPUS_MANIFEST.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [f"无法读取 {CORPUS_MANIFEST}：{exc}"]
+    root = CORPUS_MANIFEST.parent
+    return [rel for rel in manifest.get("objects", {})
+            if not (root / rel).is_file()]
+
+# test 阶段首次编译时按 .cargo/config.toml 的 jobs=28 并行会在本机耗尽页面文件
+# （os error 1455，2026-09-19 实测；CARGO_BUILD_JOBS=8 重跑成功）。只压编译并行度，
+# 测试线程数不动——覆盖语义不变。.cargo/config.toml 由 alef 生成（DO NOT EDIT），
+# 故用环境变量在门内覆盖，而不是改全局配置。
+TEST_BUILD_JOBS = "8"
+TEST_STAGE_PREFIX = "test-"
+
+
+def _stage_env(name):
+    if name.startswith(TEST_STAGE_PREFIX):
+        merged = dict(os.environ)
+        merged["CARGO_BUILD_JOBS"] = TEST_BUILD_JOBS
+        return merged
+    return None
 
 
 def gate_fulltest():
@@ -221,7 +277,18 @@ def gate_fulltest():
             print(f"[fulltest] {name}: {SKIPPED_PRIOR_FAIL}", flush=True)
             continue
         ts = time.monotonic()
-        rc, _ = run_cmd(cmd)
+        if name == "test-documents-corpus":
+            missing = _corpus_missing_paths()
+            statuses[name] = FAIL if missing else PASS
+            detail = ""
+            if missing:
+                shown = ", ".join(missing[:5])
+                detail = (f"缺 {len(missing)} 个语料对象（如 {shown}）；"
+                          f"修复：cd test_documents && python scripts/fetch_corpus.py")
+            print(f"[fulltest] {name}: {statuses[name]}, {time.monotonic()-ts:.1f}s"
+                  + (f" — {detail}" if detail else ""), flush=True)
+            continue
+        rc, _ = run_cmd(cmd, env=_stage_env(name))
         statuses[name] = PASS if rc == 0 else FAIL
         print(f"[fulltest] {name}: {statuses[name]}, {time.monotonic()-ts:.0f}s", flush=True)
 
@@ -242,6 +309,9 @@ def _release_ci_gate():
     """
     if shutil.which("gh") is None:
         return UNVERIFIED, "gh CLI 不可用"
+    repo = _fork_repo()
+    if repo is None:
+        return UNVERIFIED, "无法从 origin remote 解析 fork 仓库（gh 调用必须显式 -R，见 _fork_repo）"
     rc, out = _git(["status", "--porcelain"])
     if out.strip():
         return FAIL, "工作区不干净（远程 CI 测的不是本地改动），先提交并推送"
@@ -253,24 +323,33 @@ def _release_ci_gate():
     if subprocess.run(["gh", "auth", "status"], capture_output=True).returncode != 0:
         return UNVERIFIED, "gh 未认证"
 
-    print(f"  $ gh workflow run {RELEASE_WORKFLOW} --ref {branch.strip()}", flush=True)
-    _, before = _gh_json(["run", "list", "--workflow", RELEASE_WORKFLOW,
-                          "--branch", branch.strip(), "--limit", "1"])
+    print(f"  $ gh workflow run {RELEASE_WORKFLOW} -R {repo} --ref {branch.strip()}", flush=True)
+    _, before = _gh_json(["run", "list", "-R", repo, "--workflow", RELEASE_WORKFLOW,
+                          "--branch", branch.strip(), "--limit", "1",
+                          "--json", "databaseId"])
     run_before = before[0]["databaseId"] if before else None
-    rc = subprocess.run(["gh", "workflow", "run", RELEASE_WORKFLOW, "--ref", branch.strip()]).returncode
-    if rc != 0:
-        return FAIL, f"gh workflow run 退出码 {rc}"
+    run_p = subprocess.run(["gh", "workflow", "run", "-R", repo, RELEASE_WORKFLOW,
+                            "--ref", branch.strip()], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace")
+    if run_p.returncode != 0:
+        lines = [ln for ln in (run_p.stderr or run_p.stdout or "").splitlines() if ln.strip()]
+        return FAIL, (f"gh workflow run 退出码 {run_p.returncode}"
+                      + (f"：{lines[-1].strip()}" if lines else ""))
 
     t0 = time.monotonic()
     run_id = None
     while time.monotonic() - t0 < RELEASE_CI_WAIT_SECONDS:
         time.sleep(30)
-        _, runs = _gh_json(["run", "list", "--workflow", RELEASE_WORKFLOW,
-                            "--branch", branch.strip(), "--limit", "5"])
-        fresh = [r for r in runs if run_before is None or r["databaseId"] > run_before]
+        _, runs = _gh_json(["run", "list", "-R", repo, "--workflow", RELEASE_WORKFLOW,
+                            "--branch", branch.strip(), "--limit", "5",
+                            "--json", "databaseId,status,conclusion"])
+        fresh = [r for r in (runs or []) if run_before is None or r["databaseId"] > run_before]
         if fresh:
             run_id = fresh[0]["databaseId"]
-            _, cur = _gh_json(["run", "view", str(run_id)])
+            _, cur = _gh_json(["run", "view", "-R", repo, str(run_id),
+                               "--json", "status,conclusion"])
+            if not isinstance(cur, dict):
+                continue  # 单次查询失败：等下一轮轮询
             status = cur.get("status")
             print(f"  [release-ci] run {run_id}: {status} / {cur.get('conclusion')}", flush=True)
             if status == "completed":
@@ -287,14 +366,41 @@ def _git(args):
     return p.returncode, p.stdout
 
 
+def _fork_repo():
+    """origin remote 对应的 OWNER/REPO（gh 调用的显式 -R 目标）。
+
+    本检出同时有 origin（fork）与 upstream；gh 在本目录解析到哪个仓库取决于
+    remote 解析顺序（本机实测解析到 upstream 的 xberg-io/xberg），而
+    build-windows-cli.yml 只存在于 fork —— 不显式 -R 时 run list 直接 404，
+    `gh workflow run` 也必失败。
+    """
+    rc, url = _git(["remote", "get-url", "origin"])
+    url = url.strip()
+    if rc != 0 or not url:
+        return None
+    if "/github.com/" in url:  # https://github.com/<owner>/<repo>(.git)
+        tail = url.rsplit("/github.com/", 1)[-1]
+    else:  # git@github.com:<owner>/<repo>(.git)
+        tail = url.split(":")[-1]
+    tail = tail.removesuffix("/").removesuffix(".git")
+    return tail or None
+
+
 def _gh_json(args):
+    """运行 gh 并把 `--json` 输出解析为 Python 对象（对象或数组，按 gh 返回原样）。
+
+    rc != 0 或输出不是合法 JSON（漏带 --json 时 gh 打印人读文本）都返回
+    (rc, None)，由调用方决定如何呈现；绝不把半截文本当数据用。
+    """
     p = subprocess.run(["gh"] + args, cwd=str(REPO), capture_output=True, text=True,
                        encoding="utf-8", errors="replace")
     if p.returncode != 0:
-        return p.returncode, []
+        return p.returncode, None
     import json
-    data = json.loads(p.stdout or "[]")
-    return 0, (data if isinstance(data, list) else [data])
+    try:
+        return 0, json.loads(p.stdout)
+    except json.JSONDecodeError:
+        return 1, None
 
 
 def gate_slowtest(with_release_ci):
@@ -322,11 +428,19 @@ def gate_slowtest(with_release_ci):
     print(f"[slowtest] wsl-cross-platform: {SKIPPED_NOT_APPLICABLE}（本 fork 仅支持 Windows）", flush=True)
 
     if with_release_ci:
-        ts = time.monotonic()
-        status, detail = _release_ci_gate()
-        statuses["release-ci"] = status
-        print(f"[slowtest] release-ci: {status}, {time.monotonic()-ts:.0f}s"
-              + (f" — {detail}" if detail else ""), flush=True)
+        local_failed = [n for n, st in statuses.items() if st != PASS and st != SKIPPED_NOT_APPLICABLE]
+        if local_failed:
+            # 本地验证已失败时不得触发真实发布流水线（远程阶段浪费资源且会在
+            # 已知失败状态上制造公开 Release）。修复后重跑本门再触发。
+            statuses["release-ci"] = SKIPPED_PRIOR_FAIL
+            print(f"[slowtest] release-ci: {SKIPPED_PRIOR_FAIL}"
+                  f" — 本地阶段未全绿（{', '.join(local_failed)}），不触发发布流水线", flush=True)
+        else:
+            ts = time.monotonic()
+            status, detail = _release_ci_gate()
+            statuses["release-ci"] = status
+            print(f"[slowtest] release-ci: {status}, {time.monotonic()-ts:.0f}s"
+                  + (f" — {detail}" if detail else ""), flush=True)
     else:
         statuses["release-ci"] = SKIPPED_NOT_AUTHORIZED
         print(f"[slowtest] release-ci: {SKIPPED_NOT_AUTHORIZED}"

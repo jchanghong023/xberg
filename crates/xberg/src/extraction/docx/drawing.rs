@@ -515,10 +515,8 @@ pub(crate) fn parse_vml_pict(
                     _ => depth += 1,
                 }
             }
-            Ok(Event::Empty(ref e)) => {
-                if e.local_name().as_ref() == "imagedata" && image_ref.is_none() {
-                    image_ref = vml_image_ref(e);
-                }
+            Ok(Event::Empty(ref e)) if e.local_name().as_ref() == "imagedata" && image_ref.is_none() => {
+                image_ref = vml_image_ref(e);
             }
             Ok(Event::End(_)) => {
                 budget.leave();
@@ -601,7 +599,11 @@ mod tests {
 
         let mut bare_id_only = quick_xml::events::BytesStart::new("v:imagedata");
         bare_id_only.push_attribute(("id", "Picture 1"));
-        assert_eq!(vml_image_ref(&bare_id_only), None, "a bare element id is not a relationship");
+        assert_eq!(
+            vml_image_ref(&bare_id_only),
+            None,
+            "a bare element id is not a relationship"
+        );
 
         let mut bare_before_rid = quick_xml::events::BytesStart::new("v:imagedata");
         bare_before_rid.push_attribute(("id", "Picture 1"));
