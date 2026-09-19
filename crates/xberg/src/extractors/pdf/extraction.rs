@@ -89,13 +89,32 @@ fn hierarchy_cluster_count(config: &ExtractionConfig) -> usize {
         )
 }
 
+/// Whether extracted-image MARKERS may be injected into the content.
+///
+/// Distinct from [`pdf_images_requested`]: reading the bytes also happens for
+/// embedded-image OCR / captioning / QR when `extract_images = false`
+/// (`needs_image_data`), but the caller opted out of image OUTPUT — dangling
+/// `![](image_N.ext)` references to files that are never written are exactly
+/// regression #796, so placeholder injection follows the output gate
+/// (`wants_own_bytes_in_result`) instead.
+pub(crate) fn pdf_image_output_requested(config: &ExtractionConfig) -> bool {
+    let pdf_level_opt_out = config
+        .pdf_options
+        .as_ref()
+        .is_some_and(|options| !options.extract_images);
+    config.wants_own_bytes_in_result() && !pdf_level_opt_out
+}
+
 /// Whether this extraction should pull image bytes out of the PDF.
 ///
-/// An explicit `false` at either level vetoes: `images.extract_images = false` is the
-/// general switch every other extractor honors on its own, and
-/// `pdf_options.extract_images = false` is the PDF-specific one. An OR here would let
-/// the CLI's `--pdf-*` flags materialize `pdf_options` (with `Default`'s `true`) and
-/// silently re-enable extraction the caller had turned off with `--extract-images false`.
+/// The general level goes through `needs_image_data()`: `images.extract_images`
+/// alone does NOT veto when embedded-image OCR/captioning/QR still consume the
+/// bytes (`runs_ocr_on_embedded_images`, GH#1662) — the pipeline's
+/// `drop_opted_out_images` keeps such entries out of the public result
+/// afterwards. `pdf_options.extract_images = false` is the PDF-specific veto on
+/// top: an OR of the two levels would let the CLI's `--pdf-*` flags materialize
+/// `pdf_options` (with `Default`'s `true`) and silently re-enable extraction the
+/// caller had turned off with `--extract-images false`.
 fn pdf_images_requested(config: &ExtractionConfig) -> bool {
     let pdf_level_opt_out = config
         .pdf_options
@@ -676,8 +695,8 @@ pub(crate) fn extract_all_from_native_document(
             "native structure: extracted segments for heading detection"
         );
 
-        let inject_placeholders =
-            images_extraction_enabled && config.images.as_ref().map(|c| c.inject_placeholders).unwrap_or(false);
+        let inject_placeholders = pdf_image_output_requested(config)
+            && config.images.as_ref().map(|c| c.inject_placeholders).unwrap_or(false);
 
         match crate::pdf::structure::extract_document_structure_from_segments(
             all_page_segments,
@@ -969,13 +988,30 @@ mod tests {
     fn general_level_extract_images_false_beats_materialized_pdf_default() {
         // `--extract-images false` plus any other `--pdf-*` flag: the CLI materializes
         // `pdf_options` with `Default`'s `extract_images = true`; the general opt-out
-        // must still turn extraction off.
-        let mut config = crate::core::config::ExtractionConfig::default();
-        let mut images = crate::core::config::ImageExtractionConfig::default();
-        images.extract_images = false;
-        config.images = Some(images);
+        // must still turn extraction off. `run_ocr_on_images = false` makes it a FULL
+        // opt-out — with embedded-image OCR left on (the default), bytes are still
+        // read for OCR and the pipeline's `drop_opted_out_images` keeps them
+        // out of the result, so reading alone is no longer "extraction".
+        let mut config = crate::core::config::ExtractionConfig {
+            images: Some(crate::core::config::ImageExtractionConfig {
+                extract_images: false,
+                run_ocr_on_images: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         config.pdf_options = Some(crate::core::config::PdfConfig::default());
         assert!(!pdf_images_requested(&config));
+
+        config.images = Some(crate::core::config::ImageExtractionConfig {
+            extract_images: false,
+            run_ocr_on_images: true,
+            ..Default::default()
+        });
+        assert!(
+            pdf_images_requested(&config),
+            "OCR still consumes the bytes; the opt-out that matters for output is the strip"
+        );
     }
 
     #[test]

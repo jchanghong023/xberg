@@ -7,6 +7,9 @@
 //! and predictable: `ElementKind::Formula`/`Citation` render as
 //! `"{text}\n\n"`, `ElementKind::Paragraph` renders as `"{text}\n\n"`, so the
 //! resulting `extraction.content` string can be asserted on exactly.
+//!
+//! fork 默认 Markdown 渲染（fork.md）：公式为 `$$…$$` 块、引用 key 为脚注定义 `[^key]:`、
+//! 引用块为 `> ` 前缀、标题带 `#`；断言按实际 Markdown 形态写（上游按 Plain 写）。
 
 #![allow(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)] // ~keep: test/bench binaries print by design; org logging policy exempts tests
 #![cfg(feature = "office")]
@@ -28,7 +31,7 @@ async fn should_extract_multiline_display_math_as_its_own_formula_block() {
         .expect("Typst extraction should succeed");
 
     assert_eq!(
-        extraction.content, "Text before.\n\na^2 + b^2 = c^2\n\nText after.",
+        extraction.content, "Text before.\n\n$$a^2 + b^2 = c^2$$\n\nText after.\n",
         "multi-line display math should be captured as its own formula block, not merged into paragraph text"
     );
 }
@@ -43,7 +46,7 @@ async fn should_extract_single_line_display_math_distinct_from_surrounding_prose
         .expect("Typst extraction should succeed");
 
     assert_eq!(
-        extraction.content, "Text before.\n\na^2 + b^2 = c^2\n\nText after.",
+        extraction.content, "Text before.\n\n$$a^2 + b^2 = c^2$$\n\nText after.\n",
         "single-line display math block should still be captured as a formula block"
     );
 }
@@ -58,7 +61,7 @@ async fn should_not_lose_display_math_body_spanning_many_lines() {
         .expect("Typst extraction should succeed");
 
     assert_eq!(
-        extraction.content, "x = 1 \\\\ y = 2 \\\\ z = x + y",
+        extraction.content, "$$x = 1 \\\\ y = 2 \\\\ z = x + y$$\n",
         "every line of a multi-line display math block must survive, as LaTeX line breaks"
     );
 }
@@ -77,7 +80,7 @@ async fn should_extract_figure_image_reference_and_caption_as_a_pairing() {
         .expect("Typst extraction should succeed");
 
     assert_eq!(
-        extraction.content, "[Image: diagram.png]\n\nSystem architecture overview",
+        extraction.content, "[Image: diagram.png]\n\nSystem architecture overview\n",
         "figure image path and caption text must both be extracted, with the caption preserved verbatim"
     );
     assert!(
@@ -97,7 +100,7 @@ async fn should_extract_single_line_figure_caption() {
         .expect("Typst extraction should succeed");
 
     assert_eq!(
-        extraction.content, "[Image: chart.png]\n\nQuarterly results",
+        extraction.content, "[Image: chart.png]\n\nQuarterly results\n",
         "single-line #figure(...) must still pair the image reference with its caption"
     );
 }
@@ -112,7 +115,7 @@ async fn should_extract_cite_function_call_as_citation_reference() {
         .expect("Typst extraction should succeed");
 
     assert_eq!(
-        extraction.content, "This follows prior work [smith2020] closely.\n\nsmith2020",
+        extraction.content, "This follows prior work [smith2020] closely.\n\n[^smith2020]:\n    smith2020\n",
         "a #cite(<key>) reference must be recognized and surfaced, not left as raw Typst source"
     );
     assert!(
@@ -132,7 +135,7 @@ async fn should_extract_at_key_citation_shorthand() {
         .expect("Typst extraction should succeed");
 
     assert_eq!(
-        extraction.content, "As shown by [jones2021], the effect is significant.\n\njones2021",
+        extraction.content, "As shown by [jones2021], the effect is significant.\n\n[^jones2021]:\n    jones2021\n",
         "an @key citation shorthand must be recognized and surfaced, not left as raw Typst source"
     );
 }
@@ -147,7 +150,8 @@ async fn should_extract_multiple_citations_in_one_paragraph() {
         .expect("Typst extraction should succeed");
 
     assert_eq!(
-        extraction.content, "See [a2020] and also [b2021] for background.\n\na2020\n\nb2021",
+        extraction.content,
+        "See [a2020] and also [b2021] for background.\n\n[^a2020]:\n    a2020\n\n[^b2021]:\n    b2021\n",
         "both citation forms in the same paragraph must be extracted in encounter order"
     );
 }
@@ -166,7 +170,7 @@ async fn should_treat_bibliography_directive_as_skipped_not_leaked_text() {
         "raw #bibliography(...) directive must not leak into extracted content: {}",
         extraction.content
     );
-    assert_eq!(extraction.content, "References\nDone.");
+    assert_eq!(extraction.content, "# References\n\nDone.\n");
 }
 
 #[tokio::test]
@@ -179,8 +183,8 @@ async fn should_extract_quote_block_content() {
         .expect("Typst extraction should succeed");
 
     assert_eq!(
-        extraction.content, "  This is a memorable quotation.",
-        "#quote[...] content must be extracted as indented quoted text, not raw Typst source"
+        extraction.content, "> This is a memorable quotation.\n",
+        "#quote[...] content must be extracted as quoted text, not raw Typst source"
     );
 }
 
@@ -194,7 +198,7 @@ async fn should_extract_term_description_list_entry() {
         .expect("Typst extraction should succeed");
 
     assert_eq!(
-        extraction.content, "RAM: Random Access Memory",
+        extraction.content, "RAM\n\n: Random Access Memory\n",
         "/ term: description syntax must be recognized as a definition list entry"
     );
 }

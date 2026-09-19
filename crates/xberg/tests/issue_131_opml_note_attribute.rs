@@ -53,8 +53,9 @@ async fn should_not_include_note_text_when_outline_has_no_underscore_note_attrib
         .await
         .expect("Should extract OPML without _note attribute");
 
+    // fork 默认 Markdown 渲染（fork.md）：outline 项渲染为带 `#` 前缀的标题；上游断言按 Plain 写
     assert_eq!(
-        result.content, "Item Without Note",
+        result.content, "# Item Without Note\n",
         "Extracted content should be exactly the outline text with no note appended"
     );
 }
@@ -107,8 +108,9 @@ async fn should_surface_note_when_outline_has_no_text_attribute() {
         .await
         .expect("Should extract OPML with empty-text outline carrying a _note");
 
+    // fork 默认 Markdown 渲染（fork.md）：`_note` 仍以正文段落保留（见下方断言），子项渲染为标题；上游断言按 Plain 写
     assert_eq!(
-        result.content, "Orphan note with no text\n\nChild Item",
+        result.content, "Orphan note with no text\n\n# Child Item\n",
         "Note on an empty-text outline should surface, and its child must still be extracted"
     );
 }

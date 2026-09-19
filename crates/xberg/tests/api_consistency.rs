@@ -281,10 +281,24 @@ fn test_extraction_config_no_unknown_fields_in_default() {
 fn test_extraction_config_needs_image_processing() {
     let mut config = ExtractionConfig::default();
 
+    // Fork default: image extraction is ON when the `images` section is absent
+    // (fork.md), so the default config DOES need image processing. The negative
+    // case requires the explicit opt-out — including `run_ocr_on_images`, since
+    // embedded-image OCR is on by default too.
+    assert!(
+        config.needs_image_processing(),
+        "Fork default extracts images, so default config needs image processing"
+    );
+    config.images = Some(xberg::ImageExtractionConfig {
+        extract_images: false,
+        run_ocr_on_images: false,
+        ..Default::default()
+    });
     assert!(
         !config.needs_image_processing(),
-        "Default config should not need image processing"
+        "Full opt-out (extract_images and run_ocr_on_images both false) needs no processing"
     );
+    config.images = None;
 
     config.ocr = Some(xberg::OcrConfig {
         backend: "tesseract".to_string(),

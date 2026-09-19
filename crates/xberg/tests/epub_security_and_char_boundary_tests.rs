@@ -215,9 +215,10 @@ async fn test_ordinary_epub_extracts_exact_content() {
         .await
         .expect("a well-formed EPUB must still extract successfully");
 
+    // fork 默认 Markdown 渲染（fork.md）：段落渲染带尾换行；上游断言按 Plain 写
     assert_eq!(
         content(&document),
-        "Hello world.",
+        "Hello world.\n",
         "an ordinary chapter's extracted text must match exactly, not merely be non-empty"
     );
 }

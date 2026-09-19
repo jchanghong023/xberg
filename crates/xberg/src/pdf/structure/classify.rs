@@ -1848,10 +1848,15 @@ pub(super) fn mark_cross_page_repeating_text(
     // Top/bottom-margin membership of a block bbox on `page_idx`'s page, shared by the
     // collection pass below and the marking pass further down. Protected bands never
     // match, keeping their sightings out of the streak counts.
+    //
+    // `block_bbox` is `(left, bottom, right, top)` in PDF bottom-up coordinates (the
+    // same convention `paragraph_position_ratios` inverts with `1.0 - y/page_h` and
+    // `adapters::pdf_block_bbox` produces for OCR pages): a HEADER has its TOP edge
+    // (`.3`) near the page top, a FOOTER its BOTTOM edge (`.1`) near the page bottom.
     let in_page_margin = |bbox: (f32, f32, f32, f32), page_idx: usize| -> bool {
         let page_h = page_heights.get(page_idx).copied().unwrap_or(792.0);
-        (strip_bottom_edges && bbox.3 > page_h * (1.0 - margin_frac))
-            || (strip_top_edges && bbox.1 < page_h * margin_frac)
+        (strip_top_edges && bbox.3 > page_h * (1.0 - margin_frac))
+            || (strip_bottom_edges && bbox.1 < page_h * margin_frac)
     };
 
     let mut text_page_count: ahash::AHashMap<String, usize> = ahash::AHashMap::new();
@@ -3913,7 +3918,15 @@ mod tests {
     /// zeroes that band's width under the same permission.
     #[test]
     fn test_cross_page_repeating_text_respects_include_headers() {
+        /// `block_bbox` is (left, bottom, right, top) in PDF bottom-up coordinates:
+        /// a header on a 792pt page has its top edge near 792, a footer near 0.
         fn make_top_margin(text: &str) -> PdfParagraph {
+            let mut p = make_paragraph(12.0, 1);
+            p.lines[0].segments[0].text = text.to_string();
+            p.block_bbox = Some((50.0, 762.0, 300.0, 782.0));
+            p
+        }
+        fn make_bottom_margin(text: &str) -> PdfParagraph {
             let mut p = make_paragraph(12.0, 1);
             p.lines[0].segments[0].text = text.to_string();
             p.block_bbox = Some((50.0, 10.0, 300.0, 30.0));
@@ -3921,6 +3934,7 @@ mod tests {
         }
         let page_heights = vec![792.0_f32; 6];
         let header = "Analysis of Thermodynamic Properties";
+        let footer = "Prepared by the thermodynamics working group";
 
         let mut pages: Vec<Vec<PdfParagraph>> = (0..6)
             .map(|_| vec![make_top_margin(header), make_body_center("body text here")])
@@ -3940,6 +3954,27 @@ mod tests {
         assert!(
             pages[1][0].is_page_furniture,
             "top-band header is furniture again once include_headers is off"
+        );
+
+        // The footer band is the mirror case: with include_footers on, a bottom-band
+        // streak must survive even though headers are being stripped in the same call.
+        let mut pages: Vec<Vec<PdfParagraph>> = (0..6)
+            .map(|_| vec![make_body_center("body text here"), make_bottom_margin(footer)])
+            .collect();
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, false);
+        for (i, page) in pages.iter().enumerate() {
+            assert!(
+                !page[1].is_page_furniture,
+                "bottom-band footer must be preserved with include_footers (page {i})"
+            );
+        }
+        let mut pages: Vec<Vec<PdfParagraph>> = (0..6)
+            .map(|_| vec![make_body_center("body text here"), make_bottom_margin(footer)])
+            .collect();
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
+        assert!(
+            pages[1][1].is_page_furniture,
+            "bottom-band footer is furniture again once include_footers is off"
         );
     }
 

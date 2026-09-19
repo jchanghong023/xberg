@@ -670,7 +670,18 @@ fn test_no_decompression_when_images_disabled() {
     let path = test_documents_dir().join("pdf/embedded_images_tables.pdf");
     assert!(path.exists(), "missing fixture: {}", path.display());
 
-    let config = ExtractionConfig::default();
+    // Upstream's default is extract_images=false; this fork flips the absent-section
+    // default to EXTRACT (fork.md), and embedded-image OCR is on by default too. The
+    // #985 skip path is only reached with a full opt-out, so spell both switches out.
+    use xberg::core::config::ImageExtractionConfig;
+    let config = ExtractionConfig {
+        images: Some(ImageExtractionConfig {
+            extract_images: false,
+            run_ocr_on_images: false,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt
         .block_on(extract_uri_document(&path, None, &config))
@@ -752,7 +763,17 @@ fn test_no_decompression_trace_when_images_disabled() {
     let subscriber = tracing_subscriber::registry().with(filter).with(capture_clone);
 
     let result = tracing::subscriber::with_default(subscriber, || {
-        let config = ExtractionConfig::default();
+        // Same fork-default adjustment as `test_no_decompression_when_images_disabled`:
+        // a full opt-out (extraction AND embedded-image OCR) is what reaches the skip path.
+        use xberg::core::config::ImageExtractionConfig;
+        let config = ExtractionConfig {
+            images: Some(ImageExtractionConfig {
+                extract_images: false,
+                run_ocr_on_images: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

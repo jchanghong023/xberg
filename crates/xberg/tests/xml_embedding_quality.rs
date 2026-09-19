@@ -17,8 +17,9 @@ async fn test_xml_preserves_hierarchy() {
     let result = extract_bytes_document(xml, "application/xml", &config).await.unwrap();
 
     assert!(result.content.contains("PLANT"));
-    assert!(result.content.contains("  COMMON\n    Bloodroot"));
-    assert!(result.content.contains("  ZONE\n    4"));
+    // fork 默认 Markdown 渲染（fork.md）：层级由标题井号深度表达，值为其后段落
+    assert!(result.content.contains("### COMMON\n\nBloodroot"));
+    assert!(result.content.contains("### ZONE\n\n4"));
 }
 
 /// Deeper nesting should produce deeper indentation.
@@ -29,7 +30,8 @@ async fn test_xml_indentation_shows_nesting() {
 
     let result = extract_bytes_document(xml, "application/xml", &config).await.unwrap();
 
-    assert!(result.content.contains("    grandchild\n      Deep"));
+    // fork 默认 Markdown 渲染（fork.md）：嵌套深度由标题井号层级表达
+    assert!(result.content.contains("#### grandchild\n\nDeep"));
 }
 
 /// Attributes should appear inline with the element label, in any order.

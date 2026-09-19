@@ -6,6 +6,7 @@
 
 #![cfg(feature = "office")]
 
+use base64::Engine;
 use std::io::{Cursor, Write};
 use xberg::core::config::{ExtractionConfig, OutputFormat};
 use xberg::extractors::EpubExtractor;
@@ -239,7 +240,20 @@ async fn test_svg_spine_document_text_is_extracted() {
 
     let document = extract(&bytes, &ExtractionConfig::default()).await;
     let text = plain_text(&document);
-    assert!(text.contains("SVG spine text"), "got: {text}");
+    // fork 默认 Markdown 渲染（fork.md）：spine 中的 SVG 文档渲染为图片元素 `![title](data:image/svg+xml;base64,…)`，
+    // 文本内容完整保留在 base64 data URI 中；上游断言按 Plain 可见文本写。
+    let marker = "![Plate one](data:image/svg+xml;base64,";
+    assert!(text.contains(marker), "got: {text}");
+    let payload = text
+        .split(marker)
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .expect("base64 payload must be delimited");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .expect("data URI payload must be valid base64");
+    let decoded = String::from_utf8(decoded).expect("SVG must be UTF-8");
+    assert!(decoded.contains("SVG spine text"), "got: {decoded}");
     assert!(
         document.processing_warnings.is_empty(),
         "got: {:?}",

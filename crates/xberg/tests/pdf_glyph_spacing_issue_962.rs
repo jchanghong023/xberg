@@ -307,10 +307,17 @@ fn test_coalesced_content_is_coherent() {
 }
 
 /// Two real text lines (30pt y gap) must remain as two separate lines after the fix.
+///
+/// fork 默认 Markdown 渲染会把同段内的换行折叠为空格（实测两行输出为
+/// `FirstLine SecondLine`），行数断言无法反映提取层行为；本用例钉的是 #962
+/// glyph-spacing 修复（提取层）契约，显式用 Plain 输出跑以保留行数断言语义（fork.md）。
 #[test]
 fn test_two_line_pdf_stays_two_lines() {
     let pdf = make_two_line_pdf();
-    let config = ExtractionConfig::default();
+    let config = ExtractionConfig {
+        output_format: xberg::core::config::OutputFormat::Plain,
+        ..Default::default()
+    };
     let result = extract_bytes_document_blocking(&pdf, "application/pdf", &config)
         .expect("two-line PDF should extract without error");
 
@@ -411,6 +418,9 @@ fn test_5pt_jitter_coalesced() {
 /// MAX_GLYPH_JITTER_PT detection ceiling (5 pt) and above the COALESCE_THRESHOLD
 /// (5 pt), so no same-line x-disorder events can occur and reconstruction is skipped.
 /// This guards against false positives on poetry, code columns, and similar layouts.
+/// fork 默认 Markdown 渲染会把同段内的换行折叠为空格，行数断言无法反映提取层行为；
+/// 本用例钉的是「fragmentation repair 不得激活」的提取层契约，显式用 Plain 输出跑
+/// 以保留行数断言语义（fork.md）。
 #[test]
 fn test_genuine_single_char_lines_not_collapsed() {
     let stream = "BT /F1 12 Tf 1 0 0 1 72.00 700.00 Tm (A) Tj ET\n\
@@ -419,7 +429,10 @@ fn test_genuine_single_char_lines_not_collapsed() {
                   BT /F1 12 Tf 1 0 0 1 72.00 640.00 Tm (D) Tj ET\n\
                   BT /F1 12 Tf 1 0 0 1 72.00 620.00 Tm (E) Tj ET\n";
     let pdf = assemble_single_page_pdf(stream);
-    let config = ExtractionConfig::default();
+    let config = ExtractionConfig {
+        output_format: xberg::core::config::OutputFormat::Plain,
+        ..Default::default()
+    };
     let result = extract_bytes_document_blocking(&pdf, "application/pdf", &config)
         .expect("single-char-per-line PDF should extract without error");
 

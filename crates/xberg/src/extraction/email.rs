@@ -865,7 +865,23 @@ fn direct_child_storage_paths<F: std::io::Read + std::io::Seek>(
         .into_iter()
         .filter(|e| e.is_storage() && e.name().starts_with(name_prefix))
         .map(|e| e.path().to_string_lossy().into_owned())
-        .filter(|path| path.rsplit_once('/').map(|(parent, _)| parent) == Some(message_root))
+        .filter(|path| {
+            // `cfb` renders entry paths with `\` storage separators (plus a leading
+            // root separator), while `message_root` and the paths this module joins
+            // use `/`. Comparing the last `/` segment against `message_root` therefore
+            // matched the leading root slash for EVERY entry — flattening nested
+            // embedded-message storages onto the parent as if they were direct
+            // children (and bypassing the nesting-depth budget entirely). Normalize
+            // both sides before comparing.
+            let normalized = path.replace('\\', "/");
+            let parent = normalized
+                .rsplit_once('/')
+                .map(|(parent, _)| parent.trim_start_matches('/').to_string())
+                .unwrap_or_default();
+            let root = message_root.replace('\\', "/");
+            let root = root.trim_start_matches('/');
+            parent == root
+        })
         .collect()
 }
 

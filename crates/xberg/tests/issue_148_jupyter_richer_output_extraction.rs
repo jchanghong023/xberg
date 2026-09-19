@@ -95,8 +95,10 @@ fn should_extract_full_traceback_for_error_output() {
         "expected the error name and value in content, got: {:?}",
         result.content
     );
+    // fork 默认 Markdown 渲染（fork.md）：`<`/`>` 转义为 `\<`/`\>`（渲染等价）；上游断言按 Plain 写
     assert!(
-        result.content.contains("Traceback (most recent call last)") && result.content.contains("line 1, in <module>"),
+        result.content.contains("Traceback (most recent call last)")
+            && result.content.contains(r"line 1, in \<module\>"),
         "expected the full traceback (both lines) in content through the richer output path, got: {:?}",
         result.content
     );

@@ -54,9 +54,10 @@ This is the email body content.";
 
     assert!(result.metadata.created_at.is_some());
 
-    assert!(result.content.contains("Subject: Test Email Subject"));
-    assert!(result.content.contains("From: sender@example.com"));
-    assert!(result.content.contains("To: recipient@example.com"));
+    // fork 默认 Markdown 渲染（fork.md）：邮件头字段渲染为 `**字段**: 值`；上游断言按 Plain 写
+    assert!(result.content.contains("**Subject**: Test Email Subject"));
+    assert!(result.content.contains("**From**: sender@example.com"));
+    assert!(result.content.contains("**To**: recipient@example.com"));
     assert!(result.content.contains("This is the email body content"));
 }
 
@@ -393,7 +394,8 @@ async fn test_msg_basic_extraction() {
         .await
         .expect("Should extract MSG successfully");
 
-    assert!(result.content.contains("Subject: Test Email"));
+    // fork 默认 Markdown 渲染（fork.md）：邮件头字段渲染为 `**字段**: 值`；上游断言按 Plain 写
+    assert!(result.content.contains("**Subject**: Test Email"));
     assert!(result.content.contains("Test Email"));
 
     let email_meta = match result.metadata.format.as_ref().expect("format") {

@@ -174,7 +174,13 @@ pub(crate) mod test_support {
     /// unguarded consumer could need, or (better) avoid mutating the global registry at all and
     /// use a local `DocumentExtractorRegistry::new()` (or equivalent) instead.
     /// Maximum attempts before a registry clear is treated as genuinely stuck.
-    const REGISTRY_CLEAR_ATTEMPTS: usize = 100;
+    ///
+    /// 250 × 20 ms = 5 s: the whole-suite run (7 000+ tests, default test threads =
+    /// logical cores) can have enough overlapping extraction leases to starve a 2 s
+    /// window — observed as guard-acquisition panics under full-suite load, not as a
+    /// stuck registry. Matches the clear retry window of the keyword-recovery test in
+    /// `core::pipeline::initialization`.
+    const REGISTRY_CLEAR_ATTEMPTS: usize = 250;
 
     /// Delay between attempts, long enough for a concurrent extraction to drop its snapshot lease.
     const REGISTRY_CLEAR_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);

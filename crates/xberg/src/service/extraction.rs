@@ -30,7 +30,8 @@ use super::request::{ExtractionRequest, ExtractionSource};
 /// let svc = ExtractionService::new();
 /// let req = ExtractionRequest::bytes(b"hello".as_slice(), "text/plain", ExtractionConfig::default());
 /// let result = svc.oneshot(req).await?;
-/// assert_eq!(result.content, "hello");
+/// // fork 默认 Markdown 渲染（fork.md）：段落输出带尾随换行
+/// assert_eq!(result.content, "hello\n");
 /// # Ok(())
 /// # }
 /// ```

@@ -125,6 +125,13 @@ pub(crate) fn re_encode(
             image.data = Bytes::from(sanitized.into_bytes());
             return Ok(true);
         }
+        // Windows metafiles convert to PNG even under `Native`: no Markdown
+        // preview renders an `.emf`/`.wmf` reference (the reason the GDI
+        // rasterizer exists), so "keep the native bytes" would only leave a
+        // dead reference on disk. Every other format keeps its bytes.
+        if is_windows_metafile(image) {
+            return re_encode_metafile(image, ImageOutputFormat::Png, image_config, limits);
+        }
         return Ok(false);
     }
 
@@ -316,12 +323,17 @@ fn is_untranslatable(format: &str) -> bool {
     }
 }
 
+/// Whether a declared format string names a Windows metafile (EMF/WMF).
+pub(crate) fn is_metafile_format(format: &str) -> bool {
+    format.eq_ignore_ascii_case("emf") || format.eq_ignore_ascii_case("wmf")
+}
+
 /// Whether the image is a Windows metafile (EMF/WMF) by declared format string.
 ///
 /// Office extractors set `format` from magic bytes; relying on that string keeps
 /// this path free of the `office`-gated format detector.
 fn is_windows_metafile(image: &ExtractedImage) -> bool {
-    image.format.eq_ignore_ascii_case("emf") || image.format.eq_ignore_ascii_case("wmf")
+    is_metafile_format(&image.format)
 }
 
 /// Rasterize EMF/WMF to pixels via the Windows GDI path, then encode to `target`.
@@ -901,6 +913,29 @@ mod tests {
         assert!(matches!(result, Ok(false)), "Native must return Ok(false)");
         assert_eq!(image.data, original_data, "bytes must be untouched");
         assert_eq!(image.format.as_ref(), "png", "format must be untouched");
+    }
+
+    /// `Native` must not swallow metafiles: an `.emf` declared image routes to the
+    /// GDI rasterizer even without a configured `output_format`, because no
+    /// Markdown preview renders an `.emf` reference. The bytes here are not a
+    /// playable metafile, so the rasterizer reports a decode failure — the point
+    /// under test is that the call reaches it instead of returning `Ok(false)`.
+    #[test]
+    fn native_target_still_routes_metafiles_to_the_rasterizer() {
+        let mut image = make_image(Bytes::from_static(&[0x01, 0x00, 0x00, 0x00]), "emf");
+        let result = re_encode_default(&mut image, ImageOutputFormat::Native);
+        assert!(
+            matches!(
+                result,
+                Err(EncodeWarning::DecodeFailed { .. }) | Err(EncodeWarning::Undecodable { .. })
+            ),
+            "Native must route metafiles to the rasterizer; got {result:?}"
+        );
+        assert_eq!(
+            image.format.as_ref(),
+            "emf",
+            "a failed rasterize leaves the entry untouched"
+        );
     }
 
     #[test]

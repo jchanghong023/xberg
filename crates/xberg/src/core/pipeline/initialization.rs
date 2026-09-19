@@ -707,16 +707,19 @@ mod tests {
             initialize_processor_cache()
         });
         reached_receiver.recv().unwrap();
-        let clear_result = crate::plugins::clear_post_processors();
-        release_sender.send(()).unwrap();
-        initialize_thread.join().unwrap().unwrap();
         // `clear_post_processors` refuses while any extraction holds the registry —
         // concurrent (non-serial) tests in this binary legitimately do, and the
-        // error message itself names retrying as the contract. Retry for a
-        // bounded window so the recovery check below is what can fail, not a
-        // race with an unrelated test's extraction.
-        let mut clear_result = clear_result;
-        const CLEAR_ATTEMPTS: usize = 50;
+        // error message itself names retrying as the contract. The retry MUST
+        // happen while the initialize thread is still parked in the hook: the
+        // property under test is that the clear's `BUILTIN_REGISTRATION_REQUIRED`
+        // flag is visible to the initialize thread's registration check, so it
+        // re-registers the built-ins. Retrying after `join` instead makes the
+        // last successful clear the final writer — an emptied registry nobody
+        // repopulates — and the assertion then depends on an unrelated test's
+        // extraction racing to recover, which flakes under load. The hook parks
+        // the thread indefinitely, so a wider window cannot deadlock.
+        let mut clear_result = crate::plugins::clear_post_processors();
+        const CLEAR_ATTEMPTS: usize = 250;
         const CLEAR_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
         for _ in 0..CLEAR_ATTEMPTS {
             if clear_result.is_ok() {
@@ -725,6 +728,8 @@ mod tests {
             std::thread::sleep(CLEAR_RETRY_DELAY);
             clear_result = crate::plugins::clear_post_processors();
         }
+        release_sender.send(()).unwrap();
+        initialize_thread.join().unwrap().unwrap();
         clear_result.unwrap();
 
         let names = crate::plugins::registry::get_post_processor_registry().read().list();

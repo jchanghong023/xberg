@@ -392,10 +392,14 @@ fn test_ocr_backend_used_for_image_extraction() {
         extraction_result.content
     );
 
+    // Fork dual-channel standalone-image OCR (see the `~keep`-style note in
+    // `extractors/image.rs`): the whole-image pass OCRs the DPI-normalized bytes and
+    // the pipeline pass re-OCRs the original bytes — the union of both readings is
+    // the established output shape the golden tokens depend on. Two calls, one backend.
     assert_eq!(
         backend.call_count.load(Ordering::SeqCst),
-        1,
-        "OCR backend was not called exactly once"
+        2,
+        "OCR backend must run both the whole-image and pipeline OCR channels"
     );
 
     {
@@ -670,7 +674,8 @@ fn test_switching_between_ocr_backends() {
             .content
             .contains("BACKEND ONE OUTPUT")
     );
-    assert_eq!(backend1.call_count.load(Ordering::SeqCst), 1);
+    // Same fork dual-channel contract as `test_ocr_backend_used_for_image_extraction`.
+    assert_eq!(backend1.call_count.load(Ordering::SeqCst), 2);
     assert_eq!(backend2.call_count.load(Ordering::SeqCst), 0);
 
     let ocr_config2 = OcrConfig {
@@ -693,8 +698,9 @@ fn test_switching_between_ocr_backends() {
             .content
             .contains("BACKEND TWO OUTPUT")
     );
-    assert_eq!(backend1.call_count.load(Ordering::SeqCst), 1);
-    assert_eq!(backend2.call_count.load(Ordering::SeqCst), 1);
+    // Fork dual channel: backend-2 takes over both OCR passes for the second run.
+    assert_eq!(backend1.call_count.load(Ordering::SeqCst), 2);
+    assert_eq!(backend2.call_count.load(Ordering::SeqCst), 2);
 
     {
         let mut reg = registry.write();

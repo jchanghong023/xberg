@@ -11847,6 +11847,7 @@ dependencies = [
  "tracing-subscriber",
  "tree-sitter-language-pack",
  "ureq 3.4.2",
+ "windows-sys 0.61.2",
  "xberg",
 ]
 

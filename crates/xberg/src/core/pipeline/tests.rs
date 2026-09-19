@@ -2297,6 +2297,38 @@ mod output_format_pass_tests {
         );
     }
 
+    /// Under `output_format = Native` the pass runs whenever a metafile is
+    /// present (metafiles always convert to PNG); the sibling raster image is
+    /// left untouched. The emf bytes here are not playable, so the expected
+    /// outcome is a warning plus an untouched entry — what matters is that the
+    /// pass did not skip on `Native`.
+    #[test]
+    fn native_target_runs_the_pass_for_metafiles() {
+        let png = make_png_bytes();
+        let mut result = ExtractedDocument {
+            images: Some(vec![
+                make_image(Bytes::from_static(&[0x01, 0x00, 0x00, 0x00]), "emf"),
+                make_image(png.clone(), "png"),
+            ]),
+            ..Default::default()
+        };
+
+        let cfg = ImageExtractionConfig {
+            output_format: ImageOutputFormat::Native,
+            ..Default::default()
+        };
+
+        apply_output_format_pass(&mut result, &cfg);
+
+        let images = result.images.as_ref().expect("images must be present");
+        assert_eq!(images[0].format.as_ref(), "emf", "undrawable metafile stays untouched");
+        assert_eq!(images[1].data, png, "Native leaves raster bytes untouched");
+        assert!(
+            !result.processing_warnings.is_empty(),
+            "the pass must run under Native when a metafile is present (warning proves it)"
+        );
+    }
+
     /// With the `svg` feature: an SVG image is rasterized to the target format
     /// (PNG here) via `resvg`/`usvg`.  No warning is pushed — the encode succeeds.
     #[cfg(feature = "svg")]
@@ -2779,6 +2811,88 @@ mod document_counts {
         assert!(
             tree_result.internal_document.is_some(),
             "an extension-only change is not divergence; the element tree must survive"
+        );
+    }
+}
+
+/// `drop_opted_out_images`: an opted-out caller must get an empty `doc.images`
+/// before derivation (regression #796's contract), while captioning — like image
+/// extraction — legitimately needs the entries, and an explicit
+/// `pdf_options.ocr_inline_images` ask keeps them too.
+#[test]
+fn opted_out_images_are_dropped_before_derivation() {
+    use crate::core::config::ImageExtractionConfig;
+    use crate::types::internal::{ElementKind, InternalElement};
+
+    let mut doc = crate::types::internal::InternalDocument::new("pdf");
+    doc.push_element(InternalElement::text(ElementKind::Paragraph, "body", 0));
+    doc.images.push(crate::types::ExtractedImage {
+        data: bytes::Bytes::from_static(b"png-bytes"),
+        format: Cow::Borrowed("png"),
+        ..Default::default()
+    });
+
+    super::drop_opted_out_images(&mut doc, &Default::default());
+    assert!(
+        !doc.images.is_empty(),
+        "default config asks for image extraction: entries stay"
+    );
+
+    let config = ExtractionConfig {
+        images: Some(ImageExtractionConfig {
+            extract_images: false,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    super::drop_opted_out_images(&mut doc, &config);
+    assert!(
+        doc.images.is_empty(),
+        "opted-out extraction must drop the entries (regression #796)"
+    );
+
+    let captioning = ExtractionConfig {
+        images: Some(ImageExtractionConfig {
+            extract_images: false,
+            ..Default::default()
+        }),
+        captioning: Some(crate::core::config::captioning::CaptioningConfig {
+            llm: Default::default(),
+            prompt: None,
+            min_image_area: crate::core::config::captioning::CaptioningConfig::default_min_image_area(),
+        }),
+        ..Default::default()
+    };
+    super::drop_opted_out_images(&mut doc, &captioning);
+    // (entries were already dropped above; re-populate to prove the captioning keep)
+    doc.images.push(crate::types::ExtractedImage {
+        data: bytes::Bytes::from_static(b"png-bytes"),
+        format: Cow::Borrowed("png"),
+        ..Default::default()
+    });
+    super::drop_opted_out_images(&mut doc, &captioning);
+    assert!(
+        !doc.images.is_empty(),
+        "captioning consumes the entries: the drop must not apply"
+    );
+
+    #[cfg(feature = "pdf")]
+    {
+        let inline_ocr = ExtractionConfig {
+            images: Some(ImageExtractionConfig {
+                extract_images: false,
+                ..Default::default()
+            }),
+            pdf_options: Some(crate::core::config::PdfConfig {
+                ocr_inline_images: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        super::drop_opted_out_images(&mut doc, &inline_ocr);
+        assert!(
+            !doc.images.is_empty(),
+            "an explicit ocr_inline_images ask keeps the entries in the result"
         );
     }
 }

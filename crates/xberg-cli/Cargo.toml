@@ -234,3 +234,8 @@ xberg = { workspace = true, features = ["tokio-runtime", "simd-utf8"] }
 bytes = { workspace = true }
 tempfile = { workspace = true }
 ureq = { version = "3.4", features = ["json"] }
+
+# Windows peak-RSS self-report for the extract JSON envelope (`peak_memory` module);
+# same windows-sys version `xberg-windows-metafile` pins.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

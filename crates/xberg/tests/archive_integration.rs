@@ -32,7 +32,8 @@ async fn test_zip_basic_extraction() {
 
     assert!(result.content.contains("ZIP Archive"));
     assert!(result.content.contains("test.txt"));
-    assert!(result.content.contains("Hello from ZIP!"));
+    // fork 默认 Markdown 渲染（fork.md）：`!` 转义为 `\!`（CommonMark 防图片语法）；上游断言按 Plain 写
+    assert!(result.content.contains(r"Hello from ZIP\!"));
 
     assert!(result.metadata.format.is_some());
     let archive_meta = match result.metadata.format.as_ref().expect("Operation failed") {
@@ -171,7 +172,8 @@ async fn test_tar_extraction() {
 
     assert!(result.content.contains("TAR Archive"));
     assert!(result.content.contains("test.txt"));
-    assert!(result.content.contains("Hello from TAR!"));
+    // fork 默认 Markdown 渲染（fork.md）：`!` 转义为 `\!`；上游断言按 Plain 写
+    assert!(result.content.contains(r"Hello from TAR\!"));
 
     assert!(result.metadata.format.is_some());
     let archive_meta = match result.metadata.format.as_ref().expect("Operation failed") {
@@ -555,7 +557,8 @@ fn test_archive_extraction_sync() {
 
     assert!(result.content.contains("ZIP Archive"));
     assert!(result.content.contains("test.txt"));
-    assert!(result.content.contains("Hello from ZIP!"));
+    // fork 默认 Markdown 渲染（fork.md）：`!` 转义为 `\!`；上游断言按 Plain 写
+    assert!(result.content.contains(r"Hello from ZIP\!"));
 
     assert!(result.metadata.format.is_some(), "Should have archive metadata");
     let archive_meta = match result.metadata.format.as_ref().expect("Operation failed") {

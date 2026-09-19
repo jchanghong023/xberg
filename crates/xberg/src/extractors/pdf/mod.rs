@@ -436,6 +436,14 @@ fn structured_native_token_coverage(document: &InternalDocument, native_text: &s
     Some(matched as f64 / native_token_count as f64)
 }
 
+/// A structured-document paragraph: its text plus its vertical extent
+/// `(bottom edge, top edge)` in PDF bottom-up points, when the element carries
+/// geometry (`push_paragraph_element` copies it from `PdfParagraph::block_bbox`).
+type StructuredPageParagraph = (String, Option<(f64, f64)>);
+
+/// One physical page's paragraph list for the furniture detectors.
+type StructuredPage = (u32, Vec<StructuredPageParagraph>);
+
 /// Drop running header/footer paragraphs from a structured native document.
 ///
 /// The structured document is built straight from the PDF's spans, so the
@@ -453,7 +461,9 @@ fn structured_native_token_coverage(document: &InternalDocument, native_text: &s
 ///    header often sits *below* the top-3 paragraph window in the structured
 ///    document (page number, book title and section title occupy those slots),
 ///    so edge-zone detection misses it even though the exact string repeats on
-///    every page of the chapter.
+///    every page of the chapter. Streak sightings are confined to the edge
+///    bands the config allows to strip (`include_headers`/`include_footers`),
+///    the same rule `classify::mark_cross_page_repeating_text` applies.
 fn strip_furniture_from_structured_document(
     document: &mut InternalDocument,
     permissions: crate::pdf::native::text::FurniturePermissions,
@@ -466,27 +476,53 @@ fn strip_furniture_from_structured_document(
     // run there, the same way the flat path's page list keeps physically
     // consecutive pages adjacent. (The edge-zone detector above still walks the
     // paragraph-page list by position — its cross-hole behavior is unchanged.)
-    let mut paragraphs_by_page = ahash::AHashMap::<u32, Vec<String>>::new();
+    // Each entry also carries the paragraph's vertical extent as
+    // (bottom edge, top edge) in PDF bottom-up points — the values
+    // `push_paragraph_element` copied from `PdfParagraph::block_bbox` — so the
+    // streak detector can tell a top-band header from a bottom-band footer.
+    let mut paragraphs_by_page: ahash::AHashMap<u32, Vec<StructuredPageParagraph>> = ahash::AHashMap::new();
     for element in document.elements.iter() {
         if !matches!(element.kind, ElementKind::Paragraph) {
             continue;
         }
         let page = element.page.unwrap_or(0);
-        paragraphs_by_page.entry(page).or_default().push(element.text.clone());
+        let edges = element.bbox.as_ref().map(|bbox| (bbox.y0, bbox.y1));
+        paragraphs_by_page
+            .entry(page)
+            .or_default()
+            .push((element.text.clone(), edges));
     }
     let mut page_keys: Vec<&u32> = paragraphs_by_page.keys().collect();
     page_keys.sort_unstable();
     let page_line_lists: Vec<Vec<String>> = page_keys
         .iter()
-        .filter_map(|page| paragraphs_by_page.get(*page).cloned())
+        .filter_map(|page| {
+            paragraphs_by_page
+                .get(*page)
+                .map(|lines| lines.iter().map(|(text, _)| text.clone()).collect())
+        })
         .collect();
     let mut furniture = crate::pdf::native::text::furniture_from_page_lines(&page_line_lists, permissions);
-    // The consecutive-page detector has no positional evidence to separate a
-    // running header from a footer, so — like the structure pipeline's
-    // `mark_cross_page_repeating_text` — it is gated only by
-    // `strip_repeating_text`, not by the per-band include flags.
+    // Page height per the structure pipeline's own estimate (`page_heights` in
+    // `extract_document_structure_from_segments`): the highest content top,
+    // floored at US-Letter height. The streak detector's edge bands are
+    // fractions of this height.
+    let page_heights: ahash::AHashMap<u32, f32> = paragraphs_by_page
+        .iter()
+        .map(|(&page, lines)| {
+            let content_top = lines
+                .iter()
+                .filter_map(|(_, edges)| edges.map(|(bottom, top)| (top.max(bottom)) as f32))
+                .fold(0.0_f32, f32::max);
+            (page, content_top.max(792.0))
+        })
+        .collect();
+    // The consecutive-page detector counts sightings only inside an edge band the
+    // config asked to strip — the same per-band gating as the structure
+    // pipeline's `mark_cross_page_repeating_text`, so `include_headers` /
+    // `include_footers` hold on this path too.
     if permissions.strip_repeating_text {
-        let tagged: Vec<(u32, Vec<String>)> = page_keys
+        let tagged: Vec<StructuredPage> = page_keys
             .iter()
             .filter_map(|page| paragraphs_by_page.get(*page).cloned().map(|lines| (**page, lines)))
             .collect();
@@ -498,7 +534,12 @@ fn strip_furniture_from_structured_document(
             .filter_map(|element| element.page)
             .max()
             .unwrap_or(0) as usize;
-        furniture.extend(furniture_from_consecutive_page_paragraphs(&tagged, total_pages));
+        furniture.extend(furniture_from_consecutive_page_paragraphs(
+            &tagged,
+            total_pages,
+            &permissions,
+            &page_heights,
+        ));
     }
     if furniture.is_empty() {
         return;
@@ -566,11 +607,21 @@ fn strip_furniture_from_structured_document(
 /// in the arithmetic — a run must be consecutive in the document, and the
 /// share bar is a fraction of the whole document, or a figure-heavy document
 /// would judge furniture against a shrunken denominator.
+///
+/// Sightings only count inside an edge band `permissions` allows to strip
+/// (`include_headers`/`include_footers`), mirroring
+/// `classify::mark_cross_page_repeating_text`'s `in_page_margin`. A paragraph
+/// without geometry cannot be attributed to a band and is not a sighting.
 fn furniture_from_consecutive_page_paragraphs(
-    pages: &[(u32, Vec<String>)],
+    pages: &[StructuredPage],
     total_pages: usize,
+    permissions: &crate::pdf::native::text::FurniturePermissions,
+    page_heights: &ahash::AHashMap<u32, f32>,
 ) -> std::collections::HashSet<String> {
     use crate::pdf::native::text::FURNITURE_MIN_LINE_CHARS;
+
+    // Same 10% edge band `classify::mark_cross_page_repeating_text` uses.
+    const MARGIN_FRAC: f32 = 0.10;
 
     let mut furniture = std::collections::HashSet::new();
     // A page-count floor, not a per-page line count: `pages` is one paragraph list
@@ -581,13 +632,26 @@ fn furniture_from_consecutive_page_paragraphs(
         return furniture;
     }
 
-    // Per page: set of trimmed paragraph strings long enough to be furniture.
+    // (bottom edge, top edge) is in PDF bottom-up points: a HEADER's top edge
+    // sits near the page height, a FOOTER's bottom edge near 0.
+    let in_enabled_band = |page_number: u32, edges: Option<(f64, f64)>| -> bool {
+        let Some((bottom, top)) = edges else {
+            return false;
+        };
+        let page_h = page_heights.get(&page_number).copied().unwrap_or(792.0);
+        (permissions.strip_top_edges && (top as f32) > page_h * (1.0 - MARGIN_FRAC))
+            || (permissions.strip_bottom_edges && (bottom as f32) < page_h * MARGIN_FRAC)
+    };
+
+    // Per page: set of trimmed paragraph strings long enough to be furniture,
+    // sighted inside a strippable edge band.
     let per_page: Vec<std::collections::HashSet<&str>> = pages
         .iter()
-        .map(|(_, lines)| {
+        .map(|(page_number, lines)| {
             lines
                 .iter()
-                .map(|line| line.trim())
+                .filter(|(_, edges)| in_enabled_band(*page_number, *edges))
+                .map(|(text, _)| text.trim())
                 .filter(|line| line.chars().count() >= FURNITURE_MIN_LINE_CHARS)
                 .collect()
         })
@@ -2664,8 +2728,21 @@ impl PdfExtractor {
             );
         }
 
-        let mut final_pages =
-            assign_tables_and_images_to_pages(page_contents, &tables, images.as_deref().unwrap_or(&[]));
+        // Page-level image indices follow the OUTPUT gate, not the read gate: bytes read
+        // for OCR (needs_image_data) must not leave `image_indices` pointing at entries
+        // the caller opted out of (#796's contract extends to pages[].image_indices).
+        let pages_images: Vec<crate::types::ExtractedImage> = if images.is_some()
+            && (extraction::pdf_image_output_requested(config)
+                || config
+                    .pdf_options
+                    .as_ref()
+                    .is_some_and(|options| options.ocr_inline_images))
+        {
+            images.clone().unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let mut final_pages = assign_tables_and_images_to_pages(page_contents, &tables, pages_images.as_slice());
 
         let pre_formatted_output: Option<String> = None;
 
@@ -3200,9 +3277,30 @@ mod tests {
         use crate::types::document_structure::RelationshipKind;
         use crate::types::internal::{ElementKind, InternalElement, Relationship, RelationshipTarget};
 
+        // (bottom edge, top edge) in PDF bottom-up points on a 792pt page: the
+        // running header sits in the top margin band, body lines mid-page — the
+        // structured assembly always carries geometry, so the band-gated streak
+        // detector sees the header where it physically lives.
+        let header = |text: &str, page: u32| {
+            let mut element = InternalElement::text(ElementKind::Paragraph, text, 0);
+            element.page = Some(page);
+            element.bbox = Some(crate::types::extraction::BoundingBox {
+                x0: 50.0,
+                y0: 762.0,
+                x1: 500.0,
+                y1: 780.0,
+            });
+            element
+        };
         let paragraph = |text: &str, page: u32| {
             let mut element = InternalElement::text(ElementKind::Paragraph, text, 0);
             element.page = Some(page);
+            element.bbox = Some(crate::types::extraction::BoundingBox {
+                x0: 50.0,
+                y0: 300.0,
+                x1: 500.0,
+                y1: 320.0,
+            });
             element
         };
 
@@ -3211,7 +3309,7 @@ mod tests {
         // the header repeats on 8 physically consecutive pages, so the
         // consecutive-page detector registers it as furniture.
         for page in 1u32..=8 {
-            doc.push_element(paragraph("Chapter 12 running header line", page));
+            doc.push_element(header("Chapter 12 running header line", page));
             doc.push_element(paragraph(&format!("Unique body content for page {page}"), page));
         }
         let caption_index = doc.push_element(paragraph("Table 3-1.Cell_types summary", 8));
@@ -3290,6 +3388,93 @@ mod tests {
         assert_eq!(doc.relationships.len(), 1);
         assert_eq!(doc.relationships[0].source, caption_index);
         assert_eq!(doc.relationships[0].target, RelationshipTarget::Index(table_index));
+    }
+
+    /// `content_filter.include_headers` / `include_footers` must hold on the
+    /// structured-native path's cross-page streak detector exactly as they do on
+    /// the flat path and the structure pipeline: a band the config asked to keep
+    /// contributes no sightings, so its repeating furniture survives.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn structured_furniture_streak_respects_include_bands() {
+        use crate::types::extraction::BoundingBox;
+        use crate::types::internal::{ElementKind, InternalElement};
+
+        let placed = |text: &str, page: u32, bottom: f64, top: f64| {
+            let mut element = InternalElement::text(ElementKind::Paragraph, text, 0);
+            element.page = Some(page);
+            element.bbox = Some(BoundingBox {
+                x0: 50.0,
+                y0: bottom,
+                x1: 500.0,
+                y1: top,
+            });
+            element
+        };
+        let header = "Chapter 12 Configuration Space Exploration running head";
+        let footer = "Configuration Space Exploration — page footer rule";
+        let build = || {
+            let mut doc = crate::types::internal::InternalDocument::new("pdf");
+            for page in 1u32..=8 {
+                // The header sits 4th and the footer 4th-from-last on each page —
+                // both OUTSIDE the 3-line edge-zone windows, so only the streak
+                // detector can reach them and this test exercises its band gating.
+                let spacer = |text: String| placed(&text, page, 500.0, 520.0);
+                doc.push_element(spacer(format!("Above header filler alpha {page}")));
+                doc.push_element(spacer(format!("Above header filler beta {page}")));
+                doc.push_element(spacer(format!("Above header filler gamma {page}")));
+                doc.push_element(placed(header, page, 762.0, 780.0));
+                doc.push_element(spacer(format!("Unique body content for page {page}")));
+                doc.push_element(spacer(format!("Below body filler delta {page}")));
+                doc.push_element(placed(footer, page, 12.0, 30.0));
+                doc.push_element(spacer(format!("Below footer filler epsilon {page}")));
+                doc.push_element(spacer(format!("Below footer filler zeta {page}")));
+                doc.push_element(spacer(format!("Below footer filler eta {page}")));
+            }
+            doc
+        };
+
+        // include_headers on: the top-band streak survives, the bottom-band one strips.
+        let mut doc = build();
+        strip_furniture_from_structured_document(
+            &mut doc,
+            crate::pdf::native::text::FurniturePermissions {
+                strip_repeating_text: true,
+                strip_top_edges: false,
+                strip_bottom_edges: true,
+            },
+        );
+        let texts: Vec<&str> = doc.elements.iter().map(|e| e.text.as_str()).collect();
+        assert!(
+            texts.contains(&header),
+            "include_headers must keep the top-band running header on the structured path"
+        );
+        assert!(
+            !texts.contains(&footer),
+            "the bottom-band footer streak still strips when include_footers is off"
+        );
+        assert_eq!(texts.len(), 72, "10 lines per page minus the 8 stripped footers");
+
+        // include_footers on: the mirror case.
+        let mut doc = build();
+        strip_furniture_from_structured_document(
+            &mut doc,
+            crate::pdf::native::text::FurniturePermissions {
+                strip_repeating_text: true,
+                strip_top_edges: true,
+                strip_bottom_edges: false,
+            },
+        );
+        let texts: Vec<&str> = doc.elements.iter().map(|e| e.text.as_str()).collect();
+        assert!(
+            !texts.contains(&header),
+            "the top-band header streak still strips when include_headers is off"
+        );
+        assert!(
+            texts.contains(&footer),
+            "include_footers must keep the bottom-band footer on the structured path"
+        );
+        assert_eq!(texts.len(), 72, "10 lines per page minus the 8 stripped headers");
     }
 
     #[cfg(feature = "pdf")]

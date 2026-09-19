@@ -58,7 +58,8 @@ async fn test_extract_file_basic() {
     let output = result.expect("Operation failed");
     let result = successful_single_result(&output);
 
-    assert_text_content(&result.content, "Hello, Xberg!");
+    // fork 默认 Markdown 渲染（fork.md）：`!` 转义为 `\!`（渲染等价）；上游断言按 Plain 写
+    assert_text_content(&result.content, r"Hello, Xberg\!");
     assert_eq!(result.mime_type, "text/plain");
     assert!(result.chunks.is_none(), "Chunks should be None without chunking config");
     assert!(result.detected_languages.is_none(), "Language detection not enabled");

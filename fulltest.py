@@ -57,7 +57,7 @@ PKG_DIR = REPO / "xberg-cli-x86_64-pc-windows-msvc"
 DEFAULT_SRC = Path(r"D:\测试转markdown转换效果\测试文档")
 DEFAULT_OUT = Path(r"D:\测试转markdown转换效果\测试文档_md_fulltest")
 
-AV_EXTS = {"mp4", "wmv", "mov", "mkv", "m4a", "mp3", "wav", "webm", "flv", "avi"}
+AV_EXTS = {"mp4", "wmv", "asf", "mov", "mkv", "m4a", "mp3", "wav", "webm", "flv", "avi"}
 IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"}
 # 测试语料以中文为主；whisper-tiny 无提示时常见英文幻觉，验收固定 zh
 TRANSCRIPTION_CFG = {"enabled": True, "model": "tiny", "language": "zh"}
@@ -1915,7 +1915,12 @@ def judge_xlsx_cell_folding(src_file: Path, md_text: str, issues, exp):
         for line in md_lines:
             if head not in line or tail not in line:
                 continue
-            seg = line[line.find(head):line.find(tail) + len(tail)]
+            head_at, tail_at = line.find(head), line.find(tail)
+            if tail_at < head_at:
+                # 尾段锚点的首现排在首段锚点之前（如另一单元格恰好引用了尾段文本）：
+                # 该行不是本单元格的渲染行，负切片会把空串判成"折叠"，跳过看下一行
+                continue
+            seg = line[head_at:tail_at + len(tail)]
             if not br_re.search(seg):     # 中间没有换行标记 → 确实被折叠
                 folded += 1
             break
@@ -2123,16 +2128,23 @@ def expect_for(name: str) -> dict:
     return (files or {}).get(name) or {}
 
 
-def load_baseline(path: Path) -> dict:
+def load_baseline(path: Path):
+    """加载回归基线。返回 (dict, status)；status ∈ {"ok","missing","corrupt"}。
+
+    文件缺失与文件存在但解析失败必须可区分：报告闭环流程读的是报告文件，
+    把"损坏"报成"未找到"会让后续 agent 以为从未生成过基线。
+    """
     if not path.is_file():
         print(f"[baseline] 未找到 {path}，跳过回归对比", flush=True)
-        return {}
+        return {}, "missing"
     try:
         data = json.loads(path.read_text("utf-8"))
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            raise ValueError(f"基线顶层必须是对象，实际是 {type(data).__name__}")
+        return data, "ok"
     except Exception as e:
         print(f"[baseline] 解析失败 {path}: {e}（跳过回归对比）", flush=True)
-        return {}
+        return {}, "corrupt"
 
 
 def _git_info() -> dict:
@@ -3600,13 +3612,17 @@ def main():
     n_fail, n_warn = print_summary(results, stopped_early, early_reason, strict=args.strict)
 
     # 回归对比：只呈现在报告里，不追加 issue、不影响 verdict
-    prev_baseline = load_baseline(Path(args.baseline))
+    prev_baseline, baseline_status = load_baseline(Path(args.baseline))
     regression = (compare_baseline(prev_baseline, JSON_RESULTS,
                                    bool(EXPECTATIONS.get("files")))
                   if prev_baseline else None)
     if regression is None:
         emit("\n## 与基线对比")
-        emit("  （未找到基线文件，未做回归对比；用 --save-baseline 生成）")
+        if baseline_status == "corrupt":
+            emit(f"  （基线文件 {args.baseline} 存在但解析失败，未做回归对比；"
+                 "终端日志有具体错误。修复或确认后用 --save-baseline [--force] 重设）")
+        else:
+            emit("  （未找到基线文件，未做回归对比；用 --save-baseline 生成）")
     else:
         emit(f"\n## 与基线对比（基线: {args.baseline}，"
              f"生成于 {prev_baseline.get('generated_at') or '未知时间'}）")

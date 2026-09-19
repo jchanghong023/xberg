@@ -102,8 +102,9 @@ mod docx {
             .await
             .expect("extraction should succeed");
 
+        // fork 默认 Markdown 渲染（fork.md）：`<`/`>` 转义为 `\<`/`\>`（渲染等价）；上游断言按 Plain 写
         assert!(
-            result.content.contains("Falafel & Hummus <combo> 5>3"),
+            result.content.contains(r"Falafel & Hummus \<combo\> 5\>3"),
             "body text must keep &, <, > entities; got: {:?}",
             result.content
         );
@@ -184,8 +185,9 @@ mod xml_family {
             .await
             .expect("extraction should succeed");
 
+        // fork 默认 Markdown 渲染（fork.md）：`<`/`>` 转义为 `\<`/`\>`（渲染等价）；上游断言按 Plain 写
         assert!(
-            result.content.contains("Cats & Dogs <tag> 5>3 em\u{2014}dash"),
+            result.content.contains("Cats & Dogs \\<tag\\> 5\\>3 em\u{2014}dash"),
             "generic XML text must keep entities and char refs; got: {:?}",
             result.content
         );
@@ -202,8 +204,9 @@ mod xml_family {
             .await
             .expect("extraction should succeed");
 
+        // fork 默认 Markdown 渲染（fork.md）：`<`/`>` 转义为 `\<`/`\>`（渲染等价）；上游断言按 Plain 写
         assert!(
-            result.content.contains("Profits & losses <audited> 5>3"),
+            result.content.contains(r"Profits & losses \<audited\> 5\>3"),
             "DocBook para text must keep entities; got: {:?}",
             result.content
         );
@@ -222,8 +225,9 @@ mod xml_family {
             .await
             .expect("extraction should succeed");
 
+        // fork 默认 Markdown 渲染（fork.md）：`<`/`>` 转义为 `\<`/`\>`（渲染等价）；上游断言按 Plain 写
         assert!(
-            result.content.contains("Expression <0.05 & significant, 5>3"),
+            result.content.contains(r"Expression \<0.05 & significant, 5\>3"),
             "JATS body text must keep entities; got: {:?}",
             result.content
         );

@@ -397,7 +397,8 @@ fn test_resource_large_text_file() {
     // survive verbatim (modulo the trailing-newline strip every plain-text extraction does).
     let extracted = result.expect("11.8MB of plain text is well under every default security limit");
     let expected = large_text.trim_end_matches(['\n', '\r']);
-    assert_text_content(&extracted.content, expected);
+    // fork 默认 Markdown 渲染（fork.md）：段内软换行折叠为空格，其余内容逐字保留
+    assert_text_content(&extracted.content, &expected.replace('\n', " "));
 }
 
 #[test]

@@ -324,9 +324,14 @@ def _release_ci_gate():
         return UNVERIFIED, "gh 未认证"
 
     print(f"  $ gh workflow run {RELEASE_WORKFLOW} -R {repo} --ref {branch.strip()}", flush=True)
-    _, before = _gh_json(["run", "list", "-R", repo, "--workflow", RELEASE_WORKFLOW,
-                          "--branch", branch.strip(), "--limit", "1",
-                          "--json", "databaseId"])
+    before_rc, before = _gh_json(["run", "list", "-R", repo, "--workflow", RELEASE_WORKFLOW,
+                                  "--branch", branch.strip(), "--limit", "1",
+                                  "--json", "databaseId"])
+    if before_rc != 0 or before is None:
+        # 快照查询失败与「从未跑过」不可区分：若按无历史处理，后续轮询会把全部
+        # 历史 run 当作本轮新 run，最旧判定路径会用旧 run 的 conclusion 冒充本轮结论。
+        return UNVERIFIED, ("无法获取触发前的 run 快照（gh run list 失败），"
+                            "无法界定本轮新 run，中止 release-ci 判定")
     run_before = before[0]["databaseId"] if before else None
     run_p = subprocess.run(["gh", "workflow", "run", "-R", repo, RELEASE_WORKFLOW,
                             "--ref", branch.strip()], capture_output=True, text=True,

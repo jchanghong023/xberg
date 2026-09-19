@@ -4855,9 +4855,18 @@ mod tests {
         }
         let _guard = BackendGuard("empty-ocr-1662");
 
+        // `extract_images: false` is spelled out even though this is the upstream
+        // default: this fork flips the absent-`images`-section default to EXTRACT
+        // (fork.md), under which a standalone image's bytes legitimately ride the
+        // result. The property under test is the narrower one — OCR ALONE, with
+        // extraction explicitly off, must not echo the bytes.
         let config = ExtractionConfig {
             ocr: Some(OcrConfig {
                 backend: "empty-ocr-1662".to_string(),
+                ..Default::default()
+            }),
+            images: Some(crate::core::config::ImageExtractionConfig {
+                extract_images: false,
                 ..Default::default()
             }),
             ..Default::default()

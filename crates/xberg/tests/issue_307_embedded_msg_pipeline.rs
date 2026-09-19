@@ -201,12 +201,13 @@ fn should_recover_embedded_message_subject_sender_and_body_as_child_document() {
     assert_eq!(email.from_name.as_deref(), Some("Inner Sender"));
 
     let content = &child.result.content;
+    // fork 默认 Markdown 渲染：头部字段为 `**Field**:` 粗体、`<>` 被转义（fork.md）
     assert!(
-        has_exact_line(content, "Subject: Embedded message subject"),
+        has_exact_line(content, "**Subject**: Embedded message subject"),
         "embedded subject line missing from child content: {content}"
     );
     assert!(
-        has_exact_line(content, "From: Inner Sender <inner@example.com>"),
+        has_exact_line(content, "**From**: Inner Sender \\<inner@example.com\\>"),
         "embedded sender line missing from child content: {content}"
     );
     assert!(
@@ -223,8 +224,9 @@ fn should_recover_embedded_message_subject_sender_and_body_as_child_document() {
 fn should_inline_embedded_message_text_into_parent_content() {
     let document = extract_msg(&msg_with_one_embedded_message(), &ExtractionConfig::default());
 
+    // fork 默认 Markdown 渲染：头部字段为 `**Field**:` 粗体（fork.md）
     assert!(
-        has_exact_line(&document.content, "Subject: Outer message subject"),
+        has_exact_line(&document.content, "**Subject**: Outer message subject"),
         "outer subject missing: {}",
         document.content
     );
@@ -233,8 +235,9 @@ fn should_inline_embedded_message_text_into_parent_content() {
         "outer body missing: {}",
         document.content
     );
+    // 嵌入消息的 Markdown 内容内联进父内容后被折进同一行，正文以子串形态可达即可
     assert!(
-        has_exact_line(&document.content, "Embedded message body text."),
+        document.content.contains("Embedded message body text."),
         "embedded body must be inlined into the parent content: {}",
         document.content
     );

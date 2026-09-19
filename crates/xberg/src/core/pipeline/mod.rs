@@ -442,6 +442,10 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
         }
     };
 
+    // Before the element-tree snapshot AND derivation: the opted-out entries must be
+    // absent from `internal_document` too, or ElementBased consumers still see them.
+    drop_opted_out_images(&mut doc, config);
+
     let doc_for_elements = if config.result_format == crate::types::ResultFormat::ElementBased {
         Some(doc.clone())
     } else {
@@ -741,6 +745,8 @@ pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -
         }
     };
 
+    // Same ordering as `run_pipeline`: drop before the element-tree snapshot.
+    drop_opted_out_images(&mut doc, config);
     let doc_for_elements = if config.result_format == crate::types::ResultFormat::ElementBased {
         Some(doc.clone())
     } else {
@@ -913,6 +919,29 @@ fn apply_output_format_pass(
     apply_output_format_pass_with_security_limits(result, config, None)
 }
 
+/// Drop `result.images`-to-be when the caller opted out of image output, BEFORE
+/// derivation. OCR, captioning and QR reading pull embedded-image bytes into the
+/// entries (that is `needs_image_data`'s OCR disjunct, GH#1662) and have already
+/// consumed them by this point; an opted-out caller must then see an empty list
+/// everywhere — `images`, `pages[].image_indices`, chunk indices — so the entries
+/// are removed from the document before any of those are derived. This is the
+/// same boundary `wants_own_bytes_in_result` draws for standalone images, and
+/// regression #796's `extract_images = false` → empty `images` contract.
+/// `pdf_options.ocr_inline_images = true` is an explicit ask to surface inline
+/// images and keeps them.
+fn drop_opted_out_images(doc: &mut crate::types::internal::InternalDocument, config: &ExtractionConfig) {
+    #[cfg(feature = "pdf")]
+    let inline_ocr_forced = config
+        .pdf_options
+        .as_ref()
+        .is_some_and(|options| options.ocr_inline_images);
+    #[cfg(not(feature = "pdf"))]
+    let inline_ocr_forced = false;
+    if !config.wants_own_bytes_in_result() && !inline_ocr_forced {
+        doc.images.clear();
+    }
+}
+
 #[cfg(all(feature = "image-encode", any(not(feature = "tokio-runtime"), test)))]
 fn apply_output_format_pass_with_security_limits(
     result: &mut ExtractedDocument,
@@ -921,12 +950,21 @@ fn apply_output_format_pass_with_security_limits(
 ) -> Vec<(u32, String, String)> {
     use crate::core::config::extraction::ImageOutputFormat;
 
-    #[cfg(not(feature = "svg"))]
-    if matches!(config.output_format, ImageOutputFormat::Native) {
-        return Vec::new();
-    }
+    // `Native` skips the pass entirely — except metafiles, which convert to PNG
+    // even under `Native` (no Markdown preview renders `.emf`/`.wmf` refs), and
+    // (svg feature) SVGs pending sanitization.
     #[cfg(feature = "svg")]
-    if matches!(config.output_format, ImageOutputFormat::Native) && !config.svg.sanitize {
+    let svg_sanitizing = config.svg.sanitize;
+    #[cfg(not(feature = "svg"))]
+    let svg_sanitizing = false;
+    if matches!(config.output_format, ImageOutputFormat::Native)
+        && !svg_sanitizing
+        && !result.images.as_ref().is_some_and(|images| {
+            images
+                .iter()
+                .any(|image| crate::core::image_encode::is_metafile_format(&image.format))
+        })
+    {
         return Vec::new();
     }
 
@@ -970,12 +1008,20 @@ async fn apply_output_format_pass_offload(
 ) -> crate::Result<Vec<(u32, String, String)>> {
     use crate::core::config::extraction::ImageOutputFormat;
 
-    #[cfg(not(feature = "svg"))]
-    if matches!(config.output_format, ImageOutputFormat::Native) {
-        return Ok(Vec::new());
-    }
+    // Same skip rule as the sync pass: `Native` is a no-op unless metafiles
+    // (always PNG-converted) or sanitized SVGs are present.
     #[cfg(feature = "svg")]
-    if matches!(config.output_format, ImageOutputFormat::Native) && !config.svg.sanitize {
+    let svg_sanitizing = config.svg.sanitize;
+    #[cfg(not(feature = "svg"))]
+    let svg_sanitizing = false;
+    if matches!(config.output_format, ImageOutputFormat::Native)
+        && !svg_sanitizing
+        && !result.images.as_ref().is_some_and(|images| {
+            images
+                .iter()
+                .any(|image| crate::core::image_encode::is_metafile_format(&image.format))
+        })
+    {
         return Ok(Vec::new());
     }
 

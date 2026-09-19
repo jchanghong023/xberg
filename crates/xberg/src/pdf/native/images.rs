@@ -80,7 +80,7 @@ fn raw_pixels_to_png(
 ) -> Result<Bytes> {
     let dynamic = match *format {
         xberg_native_pdf::extractors::PixelFormat::Grayscale => {
-            let buf = image::GrayImage::from_raw(w, h, pixels.to_vec()).ok_or_else(|| {
+            let packed = packed_pixel_rows(w, h, 1, pixels).ok_or_else(|| {
                 PdfError::ExtractionFailed(format!(
                     "grayscale pixel buffer ({} bytes) does not fit {}×{} image",
                     pixels.len(),
@@ -88,10 +88,13 @@ fn raw_pixels_to_png(
                     h
                 ))
             })?;
+            let buf = image::GrayImage::from_raw(w, h, packed.into_owned()).ok_or_else(|| {
+                PdfError::ExtractionFailed(format!("grayscale pixel buffer does not fit {}×{} image", w, h))
+            })?;
             DynamicImage::ImageLuma8(buf)
         }
         xberg_native_pdf::extractors::PixelFormat::RGB => {
-            let buf = image::RgbImage::from_raw(w, h, pixels.to_vec()).ok_or_else(|| {
+            let packed = packed_pixel_rows(w, h, 3, pixels).ok_or_else(|| {
                 PdfError::ExtractionFailed(format!(
                     "RGB pixel buffer ({} bytes) does not fit {}×{} image",
                     pixels.len(),
@@ -99,9 +102,24 @@ fn raw_pixels_to_png(
                     h
                 ))
             })?;
+            let buf = image::RgbImage::from_raw(w, h, packed.into_owned()).ok_or_else(|| {
+                PdfError::ExtractionFailed(format!("RGB pixel buffer does not fit {}×{} image", w, h))
+            })?;
             DynamicImage::ImageRgb8(buf)
         }
         xberg_native_pdf::extractors::PixelFormat::CMYK => {
+            // Same stride hazard as the RGB/Grayscale arms: repack first so the
+            // converted buffer is exactly w × h × 3 and the PNG encoder cannot
+            // panic on an oversized buffer.
+            let packed = packed_pixel_rows(w, h, 4, pixels).ok_or_else(|| {
+                PdfError::ExtractionFailed(format!(
+                    "CMYK pixel buffer ({} bytes) does not fit {}×{} image",
+                    pixels.len(),
+                    w,
+                    h
+                ))
+            })?;
+            let pixels = packed.as_ref();
             let mut rgb = Vec::with_capacity((pixels.len() / 4) * 3);
             for chunk in pixels.chunks_exact(4) {
                 let c = chunk[0] as f32 / 255.0;
@@ -122,6 +140,36 @@ fn raw_pixels_to_png(
         .write_to(&mut Cursor::new(&mut png_bytes), ImageFormat::Png)
         .map_err(|e| PdfError::ExtractionFailed(format!("PNG re-encode of raw PDF image failed: {e}")))?;
     Ok(Bytes::from(png_bytes))
+}
+
+/// Normalized pixel buffer for `raw_pixels_to_png`: the exact `w × h × bpp`
+/// bytes, accepting row-stride-padded input.
+///
+/// `image`'s `from_raw` accepts buffers LARGER than `w × h × bpp`, but the PNG
+/// encoder then panics on its length assertion ("Invalid buffer length") —
+/// observed on PDFs whose embedded rasters carry padding bytes per row
+/// (e.g. `pdfa_004.pdf`: 229×265×3 + 265 bytes, one pad byte per row). A larger
+/// buffer whose length divides evenly into `h` rows of at least the packed row
+/// width is treated as strided rows and repacked; anything else does not fit.
+fn packed_pixel_rows<'a>(w: u32, h: u32, bpp: usize, pixels: &'a [u8]) -> Option<std::borrow::Cow<'a, [u8]>> {
+    let required = w as usize * h as usize * bpp;
+    if pixels.len() == required {
+        return Some(std::borrow::Cow::Borrowed(pixels));
+    }
+    let height = h as usize;
+    if pixels.len() > required && pixels.len() % height == 0 {
+        let stride = pixels.len() / height;
+        let packed_row = w as usize * bpp;
+        if stride >= packed_row {
+            let mut packed = Vec::with_capacity(required);
+            for row in 0..height {
+                let start = row * stride;
+                packed.extend_from_slice(&pixels[start..start + packed_row]);
+            }
+            return Some(std::borrow::Cow::Owned(packed));
+        }
+    }
+    None
 }
 
 /// Build the `ProcessingWarning` for an image that was dropped because its raw

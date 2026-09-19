@@ -1791,6 +1791,12 @@ mod tests {
                 Ok(result.content.to_uppercase())
             }
         }
+        // The guard serializes against every other guard-held renderer test: without it,
+        // a sibling test's `RendererRegistryGuard` teardown clears the global registry
+        // between this test's register and render, the `Custom("shout-259")` arm then
+        // finds nothing registered, and `formatted_content` comes back `None`. Same
+        // pattern as the renderer roundtrip tests in `plugins/renderer.rs`.
+        let _guard = crate::plugins::registry::test_support::RendererRegistryGuard::acquire();
         crate::plugins::register_renderer(std::sync::Arc::new(UppercaseRenderer)).unwrap();
 
         let mut doc = make_doc("markdown");

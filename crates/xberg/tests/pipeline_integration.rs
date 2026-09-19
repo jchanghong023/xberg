@@ -170,7 +170,8 @@ async fn test_pipeline_empty_no_processors() {
     let config = ExtractionConfig::default();
 
     let processed = run_pipeline(doc, &config).await.expect("Async operation failed");
-    assert_eq!(processed.content, "original content");
+    // fork 默认 Markdown 渲染（fork.md）：段落输出带尾随换行
+    assert_eq!(processed.content, "original content\n");
 }
 
 #[tokio::test]
@@ -283,7 +284,8 @@ async fn test_pipeline_postprocessing_disabled() {
     };
 
     let processed = run_pipeline(doc, &config).await.expect("Async operation failed");
-    assert_eq!(processed.content, "start");
+    // fork 默认 Markdown 渲染（fork.md）：段落输出带尾随换行
+    assert_eq!(processed.content, "start\n");
 }
 
 #[tokio::test]
@@ -1171,5 +1173,6 @@ async fn test_pipeline_empty_whitelist_runs_none() {
     };
 
     let processed = run_pipeline(doc, &config).await.expect("Async operation failed");
-    assert_eq!(processed.content, "start");
+    // fork 默认 Markdown 渲染（fork.md）：段落输出带尾随换行
+    assert_eq!(processed.content, "start\n");
 }

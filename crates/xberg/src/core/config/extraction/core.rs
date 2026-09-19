@@ -1078,9 +1078,14 @@ impl ExtractionConfig {
     /// two drifted apart, a container extractor asked `needs_image_data` and was
     /// told no, so it attached an image with an empty buffer, and the OCR path
     /// then ran on those zero bytes and reported `Could not determine image
-    /// format` (GH#1662).
+    /// format` (GH#1662). The pipeline gate requires `run_ocr_on_images` (on by
+    /// default) and no hard opt-out — an `ocr` section is NOT required, because
+    /// `process_images_with_ocr` falls back to the default backend config, so
+    /// the mirror must not require one either.
     pub fn runs_ocr_on_embedded_images(&self) -> bool {
-        self.ocr.is_some() && self.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true)
+        cfg!(all(feature = "ocr", feature = "tokio-runtime"))
+            && self.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true)
+            && !self.effective_disable_ocr()
     }
 
     /// Returns `true` when a standalone image extraction (the whole input document IS
@@ -1731,7 +1736,23 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert!(!config.needs_image_data(), "extract_images = false opts out");
+        assert!(
+            config.needs_image_data(),
+            "embedded-image OCR is on by default, so extract_images = false alone still reads bytes"
+        );
+
+        let config = ExtractionConfig {
+            images: Some(crate::core::config::ImageExtractionConfig {
+                extract_images: false,
+                run_ocr_on_images: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !config.needs_image_data(),
+            "extract_images = false + run_ocr_on_images = false opts out of reading image data"
+        );
 
         let config = ExtractionConfig {
             images: Some(crate::core::config::ImageExtractionConfig {

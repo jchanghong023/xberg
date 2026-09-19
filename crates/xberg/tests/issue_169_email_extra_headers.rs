@@ -37,47 +37,48 @@ Body text.";
     let result =
         extract_bytes_document_blocking(eml_content, "message/rfc822", &config).expect("extraction should succeed");
 
+    // fork 默认 Markdown 渲染：头部字段以 `**Field**:` 粗体标记输出（fork.md）
     assert!(
-        result.content.contains("Subject: Thread reconstruction headers"),
+        result.content.contains("**Subject**: Thread reconstruction headers"),
         "content was: {}",
         result.content
     );
-    assert!(result.content.contains("From: sender@example.com"));
-    assert!(result.content.contains("To: recipient@example.com"));
-    assert!(result.content.contains("CC: cc@example.com"));
+    assert!(result.content.contains("**From**: sender@example.com"));
+    assert!(result.content.contains("**To**: recipient@example.com"));
+    assert!(result.content.contains("**CC**: cc@example.com"));
     assert!(
-        result.content.contains("BCC: bcc@example.com"),
+        result.content.contains("**BCC**: bcc@example.com"),
         "BCC line missing from content: {}",
         result.content
     );
     assert!(
-        result.content.contains("Reply-To: reply@example.com"),
+        result.content.contains("**Reply-To**: reply@example.com"),
         "Reply-To line missing from content: {}",
         result.content
     );
-    assert!(result.content.contains("Date: Mon, 1 Jan 2024 12:00:00 +0000"));
+    assert!(result.content.contains("**Date**: Mon, 1 Jan 2024 12:00:00 +0000"));
     assert!(
-        result.content.contains("Message-ID:") && result.content.contains("msg1@example.com"),
+        result.content.contains("**Message-ID**:") && result.content.contains("msg1@example.com"),
         "Message-ID line missing from content: {}",
         result.content
     );
     assert!(
-        result.content.contains("In-Reply-To:") && result.content.contains("parent@example.com"),
+        result.content.contains("**In-Reply-To**:") && result.content.contains("parent@example.com"),
         "In-Reply-To line missing from content: {}",
         result.content
     );
     assert!(
-        result.content.contains("References:") && result.content.contains("root@example.com"),
+        result.content.contains("**References**:") && result.content.contains("root@example.com"),
         "References line missing from content: {}",
         result.content
     );
     assert!(
-        result.content.contains("List-Id:") && result.content.contains("eng.example.com"),
+        result.content.contains("**List-Id**:") && result.content.contains("eng.example.com"),
         "List-Id line missing from content: {}",
         result.content
     );
     assert!(
-        result.content.contains("List-Unsubscribe:") && result.content.contains("unsub@example.com"),
+        result.content.contains("**List-Unsubscribe**:") && result.content.contains("unsub@example.com"),
         "List-Unsubscribe line missing from content: {}",
         result.content
     );

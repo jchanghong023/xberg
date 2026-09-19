@@ -43,14 +43,30 @@ mod tests {
         let config = ExtractionConfig::default();
         assert!(config.needs_image_processing(), "images are processed by default");
 
+        // Embedded-image OCR is on by default (no `ocr` section needed — the pipeline
+        // falls back to the default backend), so `extract_images = false` alone still
+        // processes images: the general off switch for IMAGE OUTPUT, not for OCR.
         let mut config = ExtractionConfig::default();
         config.images = Some(crate::core::config::ImageExtractionConfig {
             extract_images: false,
             ..Default::default()
         });
+        assert!(
+            config.needs_image_processing(),
+            "default embedded-image OCR keeps processing images after extract_images = false"
+        );
+
+        config.images = Some(crate::core::config::ImageExtractionConfig {
+            extract_images: false,
+            run_ocr_on_images: false,
+            ..Default::default()
+        });
         assert!(!config.needs_image_processing(), "no images, no OCR, no layout");
 
         config.ocr = Some(OcrConfig::default());
-        assert!(config.needs_image_processing());
+        assert!(
+            config.needs_image_processing(),
+            "an explicit OCR section configures document-level OCR processing"
+        );
     }
 }
