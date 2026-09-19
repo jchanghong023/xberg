@@ -705,7 +705,11 @@ fn escape_marker_alt(text: &str) -> String {
 /// pointy-bracket form. A literal `\` is encoded too: the marker is written as a `Raw` node
 /// (verbatim), and `render_markdown`'s backslash-unescape pass would otherwise delete the
 /// backslash of a `\`-before-target sequence in a Windows path (`C:\data\__x` lost its
-/// underscores). `%5C` survives that pass and percent-decodes back to the path.
+/// underscores). `%5C` survives that pass and percent-decodes back to the path. A literal
+/// `%` is encoded for the same round-trip (an existing `%5C` must not become ambiguous).
+/// CommonMark tolerates `[`/`]` inside a destination, but other Markdown flavors and
+/// link-resolution tooling treat them as reference-link syntax, so they are encoded
+/// defensively.
 /// Djot image markers share the `![alt](url)` shape, so its renderer reuses this too.
 pub(super) fn sanitize_marker_url(url: &str) -> String {
     let mut sanitized = String::with_capacity(url.len());
@@ -719,6 +723,9 @@ pub(super) fn sanitize_marker_url(url: &str) -> String {
             '"' => sanitized.push_str("%22"),
             '`' => sanitized.push_str("%60"),
             '\\' => sanitized.push_str("%5C"),
+            '%' => sanitized.push_str("%25"),
+            '[' => sanitized.push_str("%5B"),
+            ']' => sanitized.push_str("%5D"),
             // Control characters have no place in the destination and no encoding that would
             // make them printable here, so they are dropped rather than encoded.
             control if control.is_control() => {}
@@ -1091,9 +1098,16 @@ pub(crate) fn build_comrak_ast<'a>(
                     .flatten()
                     .and_then(|img| img.ocr_result.as_ref());
                 let ocr_text = ocr_result.and_then(|result| {
-                    result
-                        .ocr_internal_document
-                        .as_ref()
+                    // A backend whose table rebuild claimed paragraphs out of the
+                    // internal document (tesseract markdown) leaves the grid
+                    // incomplete — rendering it would drop the tables while plain
+                    // and djot print the full `content`. The grid only runs when
+                    // the document is whole; otherwise the fallback below carries
+                    // the complete text, tables included.
+                    let grid_usable = !result.internal_doc_excludes_tables;
+                    grid_usable
+                        .then_some(result.ocr_internal_document.as_ref())
+                        .flatten()
                         .and_then(crate::rendering::ocr_layout::layout_ocr_text)
                         .or_else(|| {
                             let text = result.content.trim();
@@ -1475,6 +1489,17 @@ mod tests {
             r"C:%5Cdata%5C__pycache__%5Ca.png"
         );
         assert_eq!(sanitize_marker_url("image_0.png"), "image_0.png");
+        // A literal `%` must itself be encoded or the `%5C` it would ride with
+        // decodes ambiguously; `[`/`]` are encoded so other Markdown flavors
+        // and link tooling cannot read them as reference-link syntax.
+        assert_eq!(
+            sanitize_marker_url(r"100%\shot].png"),
+            "100%25%5Cshot%5D.png"
+        );
+        assert_eq!(
+            sanitize_marker_url("img [1].png"),
+            "img%20%5B1%5D.png"
+        );
     }
 
     #[test]
@@ -1832,6 +1857,63 @@ mod tests {
         assert!(
             rendered.windows(2).all(|pair| pair[0] == pair[1]),
             "the block must not change with either flag: {rendered:?}"
+        );
+    }
+
+    /// A backend that rebuilds tables into `content` strips the table-claimed
+    /// paragraphs out of its `ocr_internal_document` and says so via
+    /// `internal_doc_excludes_tables`. The fence must then fall back to
+    /// `content` — the only complete source — instead of rendering a grid that
+    /// silently drops the tables.
+    #[test]
+    fn test_image_fence_falls_back_to_content_when_the_grid_excludes_tables() {
+        use crate::types::internal::ElementKind;
+        use crate::types::ocr_elements::OcrElementLevel;
+        use crate::types::{ExtractedDocument, ExtractedImage};
+
+        let mut b = InternalDocumentBuilder::new("test");
+        b.push_element(crate::types::internal::InternalElement::text(
+            ElementKind::Image { image_index: 0 },
+            "",
+            0,
+        ));
+        let mut doc = b.build();
+        // A grid-renderable internal document whose only line is the prose; the
+        // table markdown lives in `content` alone, and the flag declares that.
+        let mut grid_doc = InternalDocument::new("test");
+        let mut line = crate::types::internal::InternalElement::text(
+            ElementKind::OcrText { level: OcrElementLevel::Line },
+            "prose line",
+            0,
+        );
+        line.bbox = Some(crate::types::BoundingBox {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 40.0,
+            y1: 12.0,
+        });
+        grid_doc.push_element(line);
+        doc.images.push(ExtractedImage {
+            data: bytes::Bytes::from_static(b"\x89PNG"),
+            format: std::borrow::Cow::Borrowed("png"),
+            image_index: 0,
+            page_number: Some(1),
+            ocr_result: Some(Box::new(ExtractedDocument {
+                content: "prose line\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n".to_string(),
+                ocr_internal_document: Some(grid_doc),
+                internal_doc_excludes_tables: true,
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+        let out = render(&doc);
+        assert!(
+            out.contains("| 1 | 2 |"),
+            "the table markdown must reach the output through the content fallback; got: {out:?}"
+        );
+        assert!(
+            out.contains("prose line"),
+            "the non-table prose still renders; got: {out:?}"
         );
     }
 

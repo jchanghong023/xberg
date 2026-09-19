@@ -382,7 +382,11 @@ impl ExcelExtractor {
             }
         }
 
-        for picture in pictures {
+        // Whatever the pops did not consume (pictures no loaded sheet claimed)
+        // is left in the reversed vector in descending order; walking it back
+        // with `rev()` emits it in the same ascending order the placed
+        // pictures used, instead of backwards through the media files.
+        for picture in pictures.into_iter().rev() {
             Self::push_picture(&mut builder, picture, None, &mut next_image_index);
         }
         Self::push_sheet_shapes(&mut builder, &mut shapes, &page_by_sheet_name, 0);

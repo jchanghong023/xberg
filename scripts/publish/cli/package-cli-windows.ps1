@@ -969,9 +969,14 @@ try {
   # A probe that hangs (a model session deadlocked on load, a missing DLL stuck mid-load)
   # must fail the gate instead of blocking the packaging run until a human kills it. The
   # window is generous: the smoke probes load RT-DETR/TATR/PaddleOCR from the staged cache.
+  # All probes share one deadline: per-probe full windows handed out serially would let
+  # k simultaneously hung probes stall the gate for k times the timeout and eat the
+  # workflow's own budget before any diagnostics get written.
   $probeTimeoutMs = 15 * 60 * 1000
+  $probeDeadline = [DateTime]::UtcNow.AddMilliseconds($probeTimeoutMs)
   foreach ($item in $running) {
-    if (-not $item.Process.WaitForExit($probeTimeoutMs)) {
+    $remainingMs = [int]([Math]::Max(0, ($probeDeadline - [DateTime]::UtcNow).TotalMilliseconds))
+    if (-not $item.Process.WaitForExit($remainingMs)) {
       & "$env:SystemRoot\System32\taskkill.exe" /PID $item.Process.Id /T /F | Out-Null
       # Bounded: if the kill itself failed, giving up on the wait beats hanging the gate.
       $item.Process.WaitForExit(10000) | Out-Null

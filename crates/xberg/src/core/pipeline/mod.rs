@@ -1109,7 +1109,28 @@ fn rewrite_content_image_extensions(content: &mut String, format_renames: &[(u32
         let had_cr = line_body.strip_suffix('\r').is_some();
         let body = line_body.strip_suffix('\r').unwrap_or(line_body);
         if fence.fenced(body) {
-            result.push_str(line);
+            // Fenced lines stay literal — except a line that is exactly an image
+            // marker. The Markdown path's `lift_image_markers_out_of_fences` runs
+            // after this pass and promotes exactly such lines out of their fence
+            // into live references, so a rename that skipped them here would leave
+            // the promoted line pointing at a file that no longer exists. The
+            // whole-line shape (the same predicate the lifter applies to a fence's
+            // first line) keeps the carve-out from touching listings that merely
+            // contain a marker mid-text. The carve-out is a deliberate superset of
+            // the lift's reach — any fence language, any position — because the
+            // marker's target file exists under the new name either way.
+            let marker_line = body.trim_start().starts_with("![")
+                && body.contains("](")
+                && body.trim_end().ends_with(')');
+            if marker_line {
+                result.push_str(&rewrite_image_refs_on_unfenced_text(body, format_renames));
+                if had_cr {
+                    result.push('\r');
+                }
+                result.push_str(terminator);
+            } else {
+                result.push_str(line);
+            }
         } else {
             result.push_str(&rewrite_image_refs_on_unfenced_text(body, format_renames));
             // The replacement sees the line's own characters only; a CRLF ending keeps its `\r`.

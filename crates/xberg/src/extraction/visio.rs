@@ -227,6 +227,7 @@ pub(crate) fn extract_visio_package_text(content: &[u8], limits: &SecurityLimits
             .read_to_string(&mut xml)
             .is_err()
         {
+            tracing::debug!("Skipping unreadable or non-UTF-8 Visio package part '{name}'");
             continue;
         }
         if xml.len() > max_stream_size {
@@ -241,6 +242,7 @@ pub(crate) fn extract_visio_package_text(content: &[u8], limits: &SecurityLimits
         }
         remaining -= xml.len();
         let Ok(document) = roxmltree::Document::parse(&xml) else {
+            tracing::debug!("Skipping malformed XML in Visio package part '{name}'");
             continue;
         };
         for node in document.descendants().filter(|node| node.has_tag_name("Text")) {
@@ -350,13 +352,20 @@ impl<'a> VisioParser<'a> {
         let stream = self.read_stream(pointer)?;
 
         if pointer_has_pointers(pointer, self.version) {
-            if let Ok(children) = self.parse_child_pointers(pointer, &stream.contents) {
-                for child in children {
-                    // A damaged child must not hide valid siblings. The root stream
-                    // remains fatal when it cannot be read, while malformed descendants
-                    // are skipped after the surrounding document has been recovered.
-                    let _ = self.scan_stream(child, depth + 1);
+            match self.parse_child_pointers(pointer, &stream.contents) {
+                Ok(children) => {
+                    for child in children {
+                        // A damaged child must not hide valid siblings. The root stream
+                        // remains fatal when it cannot be read, while malformed descendants
+                        // are skipped after the surrounding document has been recovered.
+                        let _ = self.scan_stream(child, depth + 1);
+                    }
                 }
+                // An unparseable ROOT pointer table means the document structure
+                // itself is unreadable — returning an empty success would be a
+                // silent failure. Descendant tables keep the recovery above.
+                Err(error) if depth == 0 => return Err(error),
+                Err(_) => {}
             }
         }
 
@@ -398,15 +407,18 @@ impl<'a> VisioParser<'a> {
         let cap = self.max_stream_size.min(self.remaining_stream_bytes.max(1));
         let decompressed = match decode_visio_lzw(raw, cap) {
             Ok(decompressed) => decompressed,
-            Err(error) => {
-                // The per-stream cap and the budget are the same knob: when the budget lowered
-                // it, this read was refused by the budget, and returning `Err` without the flag
-                // would let a caller's descendant read swallow it and report truncated text.
-                if cap < self.max_stream_size {
-                    self.stream_budget_exhausted = true;
-                }
-                return Err(error);
+            Err(VisioLzwError::TooLarge) => {
+                // The stream's decompressed size violates its cap. When the budget lowered
+                // the cap this read was refused by the budget; when the cap is still the
+                // full `max_stream_size`, the stream alone exceeds what the parse allows.
+                // The flag must be set in both cases — returning `Err` without it would let
+                // a caller's descendant read swallow the error and report truncated text.
+                self.stream_budget_exhausted = true;
+                return Err(XbergError::parsing(
+                    "Decompressed Visio stream exceeds its safety limit",
+                ));
             }
+            Err(VisioLzwError::Malformed(error)) => return Err(error),
         };
         self.charge_stream_bytes(decompressed.len())?;
         if decompressed.len() < 4 {
@@ -444,10 +456,17 @@ impl<'a> VisioParser<'a> {
                 as usize;
             (count_offset, count, 8usize)
         } else {
+            // Count-offset table from libvisio's `VSD5Parser::readPointerInfo`
+            // (VSDDocumentStructure.h constants): each pointer kind carries its
+            // count at a different offset into the container.
             let count_offset = match parent.kind {
-                0x1d | 0x4e => 30,
-                0x1e => 54,
-                0x14 => 130,
+                0x14 => 130,        // VSD_TRAILER_STREAM
+                0x15 => 66,         // VSD_PAGE
+                0x18 => 46,         // VSD_FONT_LIST
+                0x1a => 18,         // VSD_STYLES
+                0x1d | 0x4e => 30,  // VSD_STENCILS / VSD_SHAPE_FOREIGN
+                0x1e => 54,         // VSD_STENCIL_PAGE
+                kind if kind > 0x45 => 30,
                 _ => 10,
             };
             let count = read_u16(contents, count_offset)
@@ -457,8 +476,9 @@ impl<'a> VisioParser<'a> {
         };
 
         if count > MAX_CHILD_POINTERS {
-            // The recursion site's `if let Ok` swallows this error — surface it at the
-            // top level instead of losing the subtree's text to a "clean" conversion.
+            // The recursion site swallows descendant errors, but the flag set here
+            // still fails the conversion at the top level — a pointer table this
+            // damaged must not end in a "clean" conversion that silently lost text.
             self.pointer_limit_exhausted = true;
             return Err(XbergError::parsing(format!(
                 "Visio pointer container declares {count} children, over the safety limit"
@@ -541,20 +561,8 @@ impl<'a> VisioParser<'a> {
                 }
             }
 
-            let trailer_len = if has_chunk_trailer(chunk_type, unknown1, self.version) {
-                8
-            } else {
-                0
-            };
-            let separator_len = if has_chunk_separator(chunk_type, unknown2, unknown3, self.version, trailer_len != 0) {
-                4
-            } else {
-                0
-            };
-            let Some(next) = body_end
-                .checked_add(trailer_len)
-                .and_then(|end| end.checked_add(separator_len))
-            else {
+            let trailer_len = chunk_trailer_len(chunk_type, unknown1, unknown2, unknown3, self.version);
+            let Some(next) = body_end.checked_add(trailer_len) else {
                 break;
             };
             if next > contents.len() || next <= offset {
@@ -583,11 +591,15 @@ fn parse_pointer(data: &[u8], offset: usize, version: u16) -> Option<Pointer> {
             format: read_u16(data, offset + 16)?,
         })
     } else {
+        // libvisio's `VSD5Parser::readPointer` masks Type and Format to their low
+        // bytes — real v5 files carry noise in the high byte, and an unmasked
+        // value both fails the root-pointer kind check and misses every
+        // dispatch range below.
         Some(Pointer {
-            kind: read_u16(data, offset)? as u32,
+            kind: (read_u16(data, offset)? & 0x00ff) as u32,
             offset: read_u32(data, offset + 8)? as usize,
             length: read_u32(data, offset + 12)? as usize,
-            format: read_u16(data, offset + 2)?,
+            format: (read_u16(data, offset + 2)? & 0x00ff) as u16,
         })
     }
 }
@@ -642,28 +654,54 @@ fn parse_chunk_header(data: &[u8], offset: usize, version: u16) -> Option<(u32, 
     }
 }
 
-fn has_chunk_trailer(chunk_type: u32, unknown1: u32, version: u16) -> bool {
-    version >= 6 && matches!(chunk_type, 0x2c | 0x65 | 0x66 | 0x69 | 0x6a | 0x6b | 0x70 | 0x71)
-        || (version >= 6 && unknown1 != 0)
-}
-
-fn has_chunk_separator(chunk_type: u32, unknown2: u16, unknown3: u8, version: u16, has_trailer: bool) -> bool {
-    if version <= 6 {
-        return false;
+/// The trailer computation of libvisio's `getChunkHeader` — the reference
+/// implementation this chunk walk transcribes — per format version. The
+/// advance lands the cursor on the next chunk header; being off by 4 or 8
+/// bytes desynchronizes the walk and silently drops every later text chunk in
+/// the stream, so both variants mirror the reference condition for condition
+/// (VSD6Parser.cpp for v6, VSDParser.cpp for v11+).
+fn chunk_trailer_len(chunk_type: u32, list: u32, level: u16, unknown: u8, version: u16) -> usize {
+    if version < 6 {
+        // VSD5Parser (v5 and below): `getChunkHeader` sets the trailer to zero
+        // unconditionally — the older formats carry no chunk trailer at all.
+        return 0;
     }
-    if matches!(chunk_type, 0x1f | 0xc9) {
-        return false;
+    if version == 6 {
+        // VSD6Parser: an 8-byte trailer for list chunks and a wide type set;
+        // 0x1f (OLE data) and 0xc9 (Name ID) never have one.
+        if matches!(chunk_type, 0x1f | 0xc9) {
+            return 0;
+        }
+        if list != 0 || matches!(chunk_type, 0x64..=0x73 | 0x76 | 0x2c | 0x0d) {
+            return 8;
+        }
+        return 0;
     }
-    if chunk_type == 0x69 {
-        return true;
+    // VSDParser (v11+): an 8-byte stage, a 4-byte stage gated on
+    // list/level/unknown, an array of types that take the extra word only
+    // when the stages did not already fire, and four never-trailer types
+    // that zero the whole thing at the end.
+    let mut trailer = 0usize;
+    if list != 0 || matches!(chunk_type, 0x2c | 0x65 | 0x66 | 0x69 | 0x6a | 0x6b | 0x70 | 0x71) {
+        trailer += 8;
     }
-    if matches!(chunk_type, 0xa9 | 0xaa | 0xb4 | 0xb6) && unknown2 == 2 && unknown3 == 0x54 {
-        return true;
+    if list != 0
+        || (level == 2 && unknown == 0x55)
+        || (level == 2 && unknown == 0x54 && chunk_type == 0xaa)
+        || (level == 3 && unknown != 0x50 && unknown != 0x54)
+    {
+        trailer += 4;
     }
-    if (unknown2 == 2 && unknown3 == 0x55) || (unknown2 == 3 && unknown3 != 0x50) {
-        return true;
+    const TRAILER_CHUNKS: [u32; 14] = [
+        0x64, 0x65, 0x66, 0x69, 0x6a, 0x6b, 0x6f, 0x71, 0x92, 0xa9, 0xb4, 0xb6, 0xb9, 0xc7,
+    ];
+    if trailer != 12 && trailer != 4 && TRAILER_CHUNKS.contains(&chunk_type) {
+        trailer += 4;
     }
-    has_trailer
+    if matches!(chunk_type, 0x1f | 0xc9 | 0x2d | 0xd1) {
+        trailer = 0;
+    }
+    trailer
 }
 
 fn decode_visio_text(data: &[u8], utf16: bool, ansi_encoding: &'static encoding_rs::Encoding) -> String {
@@ -737,7 +775,20 @@ fn summary_information_codepage<R: Read + std::io::Seek>(compound_file: &mut cfb
     None
 }
 
-fn decode_visio_lzw(data: &[u8], max_size: usize) -> Result<Vec<u8>> {
+/// Why a Visio LZW decode failed. The distinction matters to the parse-wide
+/// budget: an over-large output means decompression is still expanding past
+/// its allowance (the bomb must stay flagged even when a parent's recovery
+/// swallows this stream's error), while malformed input merely loses this
+/// stream's text.
+enum VisioLzwError {
+    TooLarge,
+    Malformed(XbergError),
+}
+
+fn decode_visio_lzw(
+    data: &[u8],
+    max_size: usize,
+) -> std::result::Result<Vec<u8>, VisioLzwError> {
     let mut dictionary = [0u8; LZW_DICTIONARY_SIZE];
     let mut output = Vec::with_capacity(data.len().min(max_size));
     let mut output_position = 0usize;
@@ -756,9 +807,7 @@ fn decode_visio_lzw(data: &[u8], max_size: usize) -> Result<Vec<u8>> {
                 };
                 input_position += 1;
                 if output.len() >= max_size {
-                    return Err(XbergError::parsing(
-                        "Decompressed Visio stream exceeds its safety limit",
-                    ));
+                    return Err(VisioLzwError::TooLarge);
                 }
                 dictionary[output_position & (LZW_DICTIONARY_SIZE - 1)] = value;
                 output.push(value);
@@ -776,9 +825,7 @@ fn decode_visio_lzw(data: &[u8], max_size: usize) -> Result<Vec<u8>> {
 
                 let length = (second & 0x0f) as usize + 3;
                 if output.len().checked_add(length).is_none_or(|end| end > max_size) {
-                    return Err(XbergError::parsing(
-                        "Decompressed Visio stream exceeds its safety limit",
-                    ));
+                    return Err(VisioLzwError::TooLarge);
                 }
 
                 let pointer = if first as usize + ((second as usize & 0xf0) << 4) > 4078 {
@@ -801,11 +848,19 @@ fn decode_visio_lzw(data: &[u8], max_size: usize) -> Result<Vec<u8>> {
         }
     }
 
-    if truncated && output.len() < 4 {
-        return Err(XbergError::parsing("Truncated Visio LZW stream"));
+    // Truncated input is refused even when some bytes already decoded: partial
+    // output would flow into the chunk scanner as if it were the whole stream
+    // and come out as silently truncated text. A truncated descendant stream is
+    // dropped by the caller's recovery; a truncated root stream fails the read.
+    if truncated {
+        return Err(VisioLzwError::Malformed(XbergError::parsing(
+            "Truncated Visio LZW stream",
+        )));
     }
     if output.len() < 4 {
-        return Err(XbergError::parsing("Visio LZW stream has no block header"));
+        return Err(VisioLzwError::Malformed(XbergError::parsing(
+            "Visio LZW stream has no block header",
+        )));
     }
     Ok(output)
 }
@@ -823,6 +878,51 @@ fn read_u32(data: &[u8], offset: usize) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The v6 trailer computation mirrors `VSD6Parser::getChunkHeader`: a wide
+    /// type set plus any list gets 8 bytes, 0x1f/0xc9 always zero, everything
+    /// else nothing.
+    #[test]
+    fn v6_chunk_trailer_matches_the_reference() {
+        assert_eq!(chunk_trailer_len(0x64, 0, 0, 0, 6), 8, "0x64 is in the v6 set (the old set8 missed it)");
+        assert_eq!(chunk_trailer_len(0x73, 0, 0, 0, 6), 8);
+        assert_eq!(chunk_trailer_len(0x76, 0, 0, 0, 6), 8);
+        assert_eq!(chunk_trailer_len(0x2c, 0, 0, 0, 6), 8);
+        assert_eq!(chunk_trailer_len(0x0d, 0, 0, 0, 6), 8);
+        assert_eq!(chunk_trailer_len(0x0e, 0, 0, 0, 6), 0, "a text chunk with no list has no trailer");
+        assert_eq!(chunk_trailer_len(0x0e, 7, 0, 0, 6), 8, "a non-zero list always carries one");
+        assert_eq!(chunk_trailer_len(0x1f, 9, 0, 0, 6), 0, "OLE data never has a trailer");
+        assert_eq!(chunk_trailer_len(0xc9, 0, 0, 0, 6), 0);
+        assert_eq!(chunk_trailer_len(0x74, 0, 0, 0, 6), 0, "0x74/0x75 are outside the v6 set");
+    }
+
+    /// The v11+ computation mirrors `VSDParser::getChunkHeader`: the 8-byte
+    /// stage, the gated 4-byte stage, the array types that take 4 only when the
+    /// stages did not already fire, and the four never-trailer types zeroing it
+    /// all. These cases are the shapes the old two-predicate version got wrong.
+    #[test]
+    fn v11_chunk_trailer_matches_the_reference() {
+        // Array type, no stage fired: the array adds the 4 the old code dropped.
+        assert_eq!(chunk_trailer_len(0x64, 0, 1, 0x00, 11), 4);
+        assert_eq!(chunk_trailer_len(0x64, 0, 0, 0x00, 11), 4);
+        assert_eq!(chunk_trailer_len(0x92, 0, 1, 0x00, 11), 4);
+        assert_eq!(chunk_trailer_len(0x6f, 0, 1, 0x00, 11), 4);
+        // Set8 type outside the array: stays at 8 (the old fallback over-advanced).
+        assert_eq!(chunk_trailer_len(0x2c, 0, 1, 0x00, 11), 8);
+        assert_eq!(chunk_trailer_len(0x70, 0, 1, 0x00, 11), 8);
+        // Level 3 with unknown 0x54: the reference excludes it (the old code didn't).
+        assert_eq!(chunk_trailer_len(0x0e, 0, 3, 0x54, 11), 0);
+        assert_eq!(chunk_trailer_len(0x0e, 0, 3, 0x50, 11), 0);
+        // 0x1f/0xc9/0x2d/0xd1 zero out even when earlier stages fired.
+        assert_eq!(chunk_trailer_len(0x1f, 5, 2, 0x55, 11), 0);
+        assert_eq!(chunk_trailer_len(0xd1, 5, 2, 0x55, 11), 0);
+        assert_eq!(chunk_trailer_len(0x2d, 0, 3, 0x10, 11), 0);
+        // Known-good shapes the old code already handled.
+        assert_eq!(chunk_trailer_len(0x69, 0, 1, 0x00, 11), 12);
+        assert_eq!(chunk_trailer_len(0xaa, 0, 2, 0x54, 11), 4);
+        assert_eq!(chunk_trailer_len(0x71, 3, 2, 0x55, 11), 12);
+        assert_eq!(chunk_trailer_len(0x0e, 0, 0, 0x00, 11), 0);
+    }
 
     /// Build a minimal ZIP in memory with `count` page parts.
     fn make_zip_with_entries(count: usize) -> Vec<u8> {

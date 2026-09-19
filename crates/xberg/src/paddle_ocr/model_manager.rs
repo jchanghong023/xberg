@@ -287,6 +287,28 @@ fn effective_v6_tier(tier: &str) -> &str {
         }
     }
 }
+
+/// The PP-OCRv5 fleet only has `server` and `mobile` tiers, but the shared
+/// config default is `tiny` — a PP-OCRv6 name. A bare `pp-ocrv5` configuration
+/// (version pinned, tier left at the default) therefore handed `tiny` straight
+/// into the v5 model tables and hard-failed there; `mobile` is the nearest v5
+/// analogue (the lightest tier), and the v6 `medium`/`small`/`tiny` names all
+/// remap to it with a warning, mirroring [`effective_v6_tier`]. ~keep
+#[cfg(paddle_ocr)]
+fn effective_v5_tier(tier: &str) -> &str {
+    match tier {
+        "server" | "mobile" => tier,
+        other => {
+            tracing::warn!(
+                model_tier = other,
+                fallback = "mobile",
+                "unrecognised PP-OCRv5 model_tier; valid tiers are \"server\" and \"mobile\" \
+                 (\"medium\", \"small\" and \"tiny\" are the PP-OCRv6 names)"
+            );
+            "mobile"
+        }
+    }
+}
 #[cfg_attr(alef, alef(skip))]
 /// Resolved recognition model with engine pool key for sharing.
 #[derive(Debug, Clone)]
@@ -601,6 +623,12 @@ impl ModelManager {
                 det.sha256_checksum,
             ));
         } else {
+            // Mirror the runtime (`ensure_shared_models` via
+            // `ensure_shared_models_versioned`): the tier is normalized before it
+            // reaches the v5 tables, so doctor/probe and runtime agree on what a
+            // configuration resolves to — a bare `pp-ocrv5` configuration must
+            // not FAIL here while the runtime resolves it with a warning.
+            let tier = effective_v5_tier(tier);
             let det = V2_DET_MODELS
                 .iter()
                 .find(|d| d.tier == tier)
@@ -634,6 +662,7 @@ impl ModelManager {
                 rec.dict_sha256,
             ));
         } else {
+            let tier = effective_v5_tier(tier);
             let model_key = match (family, tier) {
                 ("english", "server") | ("chinese", "server") => Some("unified_server"),
                 ("english", "mobile") | ("chinese", "mobile") => Some("unified_mobile"),
@@ -929,7 +958,7 @@ impl ModelManager {
             let cls_model = self.ensure_v2_cls_model()?;
             Ok(SharedModelPaths { det_model, cls_model })
         } else {
-            self.ensure_shared_models(tier)
+            self.ensure_shared_models(effective_v5_tier(tier))
         }
     }
 
@@ -947,7 +976,7 @@ impl ModelManager {
         if version == "pp-ocrv6" && V6_UNIFIED_FAMILIES.contains(&family) {
             self.ensure_v6_rec_model(tier)
         } else {
-            self.resolve_rec_model(family, tier)
+            self.resolve_rec_model(family, effective_v5_tier(tier))
         }
     }
 }
@@ -962,6 +991,19 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let manager = ModelManager::new(temp_dir.path().to_path_buf());
         assert_eq!(manager.cache_dir(), &temp_dir.path().to_path_buf());
+    }
+
+    /// The v5 tier resolver passes the v5 names through and remaps the v6
+    /// names (including the shared `tiny` default) to `mobile`, so a bare
+    /// `pp-ocrv5` configuration resolves instead of hard-failing on an
+    /// unknown tier.
+    #[test]
+    fn test_effective_v5_tier_passes_v5_names_and_remaps_v6_names() {
+        assert_eq!(effective_v5_tier("server"), "server");
+        assert_eq!(effective_v5_tier("mobile"), "mobile");
+        assert_eq!(effective_v5_tier("tiny"), "mobile");
+        assert_eq!(effective_v5_tier("small"), "mobile");
+        assert_eq!(effective_v5_tier("medium"), "mobile");
     }
 
     #[test]
@@ -1287,14 +1329,25 @@ mod check_cached_tests {
         assert!(artifacts.iter().any(|(label, _)| label.contains("eslav")));
     }
 
+    /// `check_models_cached` mirrors the runtime's tier normalization: an
+    /// unknown v5 tier resolves to `mobile` with a warning instead of erroring
+    /// (so doctor does not FAIL a configuration the runtime accepts), while an
+    /// unsupported script family still fails the way the runtime's per-script
+    /// resolution does.
     #[test]
-    fn invalid_tier_and_family_error_like_the_runtime() {
+    fn unknown_v5_tier_falls_back_like_the_runtime_and_bad_family_still_errors() {
         let temp = TempDir::new().unwrap();
         let manager = ModelManager::new(temp.path().to_path_buf());
+        let artifacts = manager
+            .check_models_cached("pp-ocrv5", "english", "huge", false)
+            .unwrap();
         assert!(
-            manager
-                .check_models_cached("pp-ocrv5", "english", "huge", false)
-                .is_err()
+            artifacts.iter().any(|(label, _)| label.contains("mobile")),
+            "unknown tier mirrors the runtime's mobile fallback: {artifacts:?}"
+        );
+        assert!(
+            artifacts.iter().any(|&(_, cached)| !cached),
+            "an empty cache reports the artifacts as uncached: {artifacts:?}"
         );
         assert!(
             manager

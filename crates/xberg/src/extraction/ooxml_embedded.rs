@@ -140,11 +140,63 @@ fn renumber_embedded_image_refs(
     let mut out = String::with_capacity(text.len());
     let mut referenced: Vec<u32> = Vec::new();
     let bytes = text.as_bytes();
+    // Fenced code is literal text: an `image_N` example inside a fence keeps
+    // its numbering and stages nothing, the same contract the pipeline's own
+    // rewriters (`rewrite_content_image_extensions`) apply via `FenceTracker`.
+    let mut fences = crate::extraction::markdown_utils::FenceTracker::default();
+    let mut fenced: Vec<(usize, usize)> = Vec::new();
+    let mut line_offset = 0usize;
+    for line in text.split_inclusive('\n') {
+        // `FenceTracker` expects a bare line: a closer is only "marker run,
+        // nothing else", so the `\n`/`\r\n` terminator must be stripped here
+        // the way the pipeline's and renderer's callers strip it — a closer
+        // carrying its `\n` would never be recognized and the first fence
+        // would swallow the rest of the text. The ranges below still cover
+        // the raw line including its terminator.
+        let bare = line
+            .strip_suffix('\n')
+            .map(|l| l.strip_suffix('\r').unwrap_or(l))
+            .unwrap_or(line);
+        if fences.fenced(bare) {
+            fenced.push((line_offset, line_offset + line.len()));
+        }
+        line_offset += line.len();
+    }
+    let mut fenced_at = 0usize;
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'!' && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+        // The ranges are line-aligned and `i` only ever grows, so a monotonic
+        // cursor answers "is this byte inside a fenced line?" without rescanning.
+        while fenced_at < fenced.len() && fenced[fenced_at].1 <= i {
+            fenced_at += 1;
+        }
+        let in_fenced_range = fenced_at < fenced.len() && fenced[fenced_at].0 <= i;
+        if bytes[i] == b'!' && i + 1 < bytes.len() && bytes[i + 1] == b'[' && !in_fenced_range {
+            // A writer-escaped literal (`\![a](b)` renders as literal text) is
+            // not an opener: an odd run of backslashes before the `!` unescapes
+            // to a literal `!` under CommonMark, so the two bytes pass through
+            // and the scan resumes after them.
+            let mut backslashes = 0usize;
+            while backslashes < i && bytes[i - 1 - backslashes] == b'\\' {
+                backslashes += 1;
+            }
+            if backslashes % 2 == 1 {
+                out.push_str(&text[i..i + 2]);
+                i += 2;
+                continue;
+            }
             match find_markdown_image_parts(&text[i..]) {
                 ImageScan::Parts(alt, target, after) => {
+                    // A candidate whose span runs into a fenced line is not a
+                    // real reference — its `)` belongs to fence content — and
+                    // consuming it whole would swallow the fence's opener:
+                    // degrade to literal bytes the way Malformed does.
+                    let end = i + after;
+                    if fenced_at < fenced.len() && fenced[fenced_at].0 < end {
+                        out.push_str(&text[i..i + 2]);
+                        i += 2;
+                        continue;
+                    }
                     if target.starts_with("data:") {
                         // Self-contained payload: nothing to renumber, and dropping
                         // it would discard the only copy of the picture.
@@ -1098,6 +1150,56 @@ mod tests {
             "the escaped reference is renumbered, got {rewritten}"
         );
         assert_eq!(referenced, vec![0], "the escaped reference counts as a staging candidate");
+    }
+
+    /// A fenced `image_N` reference is example text, not a file reference: it
+    /// keeps the child's numbering verbatim and stages nothing, while the
+    /// unfenced reference after the fence still renumbers and stages.
+    #[test]
+    fn renumber_embedded_image_refs_leaves_fenced_examples_alone() {
+        let image = |index: u32| crate::types::ExtractedImage {
+            image_index: index,
+            ..Default::default()
+        };
+        let images = vec![image(0), image(1)];
+        let input = "```text\n![示例](image_0.png)\n```\n![流程图](image_1.png)\n";
+        let (rewritten, referenced) = renumber_embedded_image_refs(input, 4, &images);
+        assert!(
+            rewritten.contains("```text\n![示例](image_0.png)\n```"),
+            "the fenced example stays verbatim, got {rewritten}"
+        );
+        assert!(
+            rewritten.contains("![流程图](image_5.png)"),
+            "the unfenced reference renumbers, got {rewritten}"
+        );
+        assert_eq!(
+            referenced,
+            vec![1],
+            "only the unfenced reference is a staging candidate"
+        );
+    }
+
+    /// A candidate whose first `)` lands inside a later fence is not a real
+    /// reference: consuming it whole would swallow the fence's opener line,
+    /// so the scan degrades to literal bytes and the fence survives whole —
+    /// and a real reference after that fence still renumbers and stages.
+    #[test]
+    fn renumber_embedded_image_refs_does_not_swallow_a_fence_with_an_unclosed_opener() {
+        let images = vec![crate::types::ExtractedImage {
+            image_index: 0,
+            ..Default::default()
+        }];
+        let input = "![a](x\n```text\ny)\n```\n![flow](image_0.png)\n";
+        let (rewritten, referenced) = renumber_embedded_image_refs(input, 4, &images);
+        assert!(
+            rewritten.contains("```text\ny)\n```"),
+            "the fence survives whole, got {rewritten}"
+        );
+        assert!(
+            rewritten.contains("![flow](image_4.png)"),
+            "the later real reference still renumbers, got {rewritten}"
+        );
+        assert_eq!(referenced, vec![0]);
     }
 
     /// A malformed opener whose `)` never comes must not swallow the next

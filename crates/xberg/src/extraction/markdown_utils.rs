@@ -7,6 +7,12 @@
 /// fence the info string must not contain a backtick). Shared by the content rewriters that
 /// must leave fenced code untouched — an `image_N` reference inside a fence is literal
 /// text, not a file reference.
+///
+/// Known blind spot: a fence the CommonMark writer emitted inside a container carries the
+/// container's prefix (`"> "` for block quotes, deeper indentation for nested list items),
+/// and a prefixed opener is not recognized here. Fenced bodies in that shape take part in
+/// the prose passes; accepted trade-off — recognizing arbitrary prefixes would need a
+/// matching closer rule and risks reclassifying indented prose as code.
 pub fn code_fence_open(line: &str) -> Option<(char, usize)> {
     let indent = line.len() - line.trim_start_matches(' ').len();
     if indent > 3 {
@@ -83,6 +89,11 @@ impl FenceTracker {
 /// never ends). Fences whose first line is any other text are left untouched. An opener longer
 /// than three backticks — what a renderer writes when the fenced body itself holds backticks —
 /// is matched from its first backtick and re-opened with that same run.
+///
+/// Accepted trade-off: the first line alone decides, so a fence whose genuine content starts
+/// with a full marker shape (an OCR'd Markdown tutorial, say) loses that line from the fence.
+/// The builder's baked-in marker and such a first line are indistinguishable at this stage,
+/// and the corpus contains no fence of that shape.
 pub fn lift_image_markers_out_of_fences(content: &mut String) {
     if !content.contains("```text") {
         return;
@@ -192,6 +203,14 @@ pub fn lift_image_markers_out_of_fences(content: &mut String) {
                 // The marker was the fence's only content: drop the fence with
                 // its closer instead of re-opening an empty one.
                 rest = &rest[end..];
+                rest_starts_at_line_start = true;
+            }
+            // The marker was the fence's only content and the input's own
+            // fence never closed (EOF came first): there is nothing left to
+            // fence, and re-opening would only append a dangling empty
+            // ```text block after the lifted marker.
+            None if rest.trim().is_empty() => {
+                rest = &rest[rest.len()..];
                 rest_starts_at_line_start = true;
             }
             _ => {
@@ -373,6 +392,24 @@ mod tests {
         let mut content = String::from("```text\n![](image_0.png)\n\n```\nafter\n");
         lift_image_markers_out_of_fences(&mut content);
         assert_eq!(content, "![](image_0.png)\n\nafter\n");
+    }
+
+    /// An unclosed fence whose marker is its only content ends the document:
+    /// the input's own fence never closed, so re-opening one after the lift
+    /// appended a dangling empty ```text block at EOF.
+    #[test]
+    fn unclosed_marker_only_fence_at_eof_does_not_reopen() {
+        let mut content = String::from("```text\n![](image_0.png)\n");
+        lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(
+            content, "![](image_0.png)\n\n",
+            "no dangling empty fence after the lifted marker"
+        );
+        // With body text after the marker the fence is still re-opened: that
+        // content must survive verbatim behind its own opener.
+        let mut content = String::from("```text\n![](image_0.png)\nlet x = 1;\n");
+        lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(content, "![](image_0.png)\n\n```text\nlet x = 1;\n");
     }
 
     /// The tracker recognizes backtick and tilde fences with info strings, keeps lines

@@ -17,8 +17,12 @@ use super::comrak_bridge::{ImageBlockStyle, build_comrak_ast};
 /// sub-documents, source listings — so none of the prose rewrites below may
 /// touch their interior. Fence lines (opener and closer included) are copied
 /// through unchanged. Only fences indented by up to three spaces are
-/// recognized (CommonMark's own rule); the deeply list-indented shape is not
-/// something this renderer produces for them.
+/// recognized (CommonMark's own rule). Known blind spot: a `Code` element
+/// inside a nested list or block quote comes out of the comrak writer with
+/// the container's prefix (`4+` spaces, `"> "`), so its fence is not
+/// recognized here and its body takes part in the prose passes — an accepted
+/// gap, since prefix-aware tracking would risk reclassifying indented prose
+/// as code and suppressing the rewrites for everything after it.
 fn apply_outside_fences(output: &str, transform: impl Fn(&str) -> String) -> String {
     let mut tracker = FenceTracker::default();
     let mut out = String::with_capacity(output.len());

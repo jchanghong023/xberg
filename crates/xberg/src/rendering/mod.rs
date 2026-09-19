@@ -108,8 +108,12 @@ pub(crate) fn ocr_duplicate_indices(texts: &[&str], ocr_contents: &[&str]) -> Ve
 /// The recognized text each image will actually print, in image order.
 ///
 /// Only an image whose own text reaches the output can make an inlined copy redundant, and only
-/// a body image element that renders its OCR text does that. `ExtractedImage::image_index` is
-/// the key the element stream refers to; it is not the image's position in the vector.
+/// a body image element that renders its OCR text does that. `doc.images` is keyed by position:
+/// `push_image` hands the position to the element it creates and `append_document` remaps
+/// appended elements to their new positions, and the renderers resolve `ElementKind::Image` by
+/// that same position — so this lookup is keyed by position too, not by
+/// `ExtractedImage::image_index` (the export file name's number, which merging a sub-document
+/// leaves stale on its appended images).
 ///
 /// `respect_ocr_flags` mirrors the renderer's own handling of `ocr_text_only` / `append_ocr_text`:
 /// the Node-style renderers (HTML) print no recognized text when neither flag is set and the
@@ -126,14 +130,16 @@ pub(crate) fn image_ocr_contents(
     }
     doc.images
         .iter()
-        .filter(|image| {
+        .enumerate()
+        .filter(|(position, _image)| {
+            let position = *position as u32;
             doc.elements.iter().any(|elem| {
-                elem.kind == crate::types::internal::ElementKind::Image { image_index: image.image_index }
+                elem.kind == crate::types::internal::ElementKind::Image { image_index: position }
                     && elem.layer == crate::types::document_structure::ContentLayer::Body
                     && elem.should_render_image_ocr()
             })
         })
-        .filter_map(|image| image.ocr_result.as_deref())
+        .filter_map(|(_position, image)| image.ocr_result.as_deref())
         .map(|result| result.content.as_str())
         .filter(|content| !content.is_empty())
         .collect()

@@ -243,7 +243,7 @@ impl ContentBuilder {
             let src = if target.is_empty() {
                 String::new()
             } else {
-                target.to_string()
+                Self::escape_target_text(target)
             };
             if !self.content.is_empty() && !self.content.ends_with('\n') {
                 self.content.push('\n');
@@ -264,6 +264,25 @@ impl ContentBuilder {
         let mut escaped = String::with_capacity(alt.len());
         for character in alt.chars() {
             if matches!(character, '[' | ']' | '\\') {
+                escaped.push('\\');
+            }
+            escaped.push(character);
+        }
+        escaped
+    }
+
+    /// Backslash-escape the target characters that would end the destination
+    /// scan early: the placeholder reader stops at the first unescaped `)`, so
+    /// a rel target carrying one (`media/image (1).png`, as third-party
+    /// producers write) would cut the destination short, never match its
+    /// image's `source_path`, and leave the picture orphaned. A bare `\` is
+    /// escaped for the same round trip; the reader undoes exactly these
+    /// escapes before matching. A space stays as-is — it cannot break the
+    /// reader, and promotion replaces the marker wholesale anyway.
+    fn escape_target_text(target: &str) -> String {
+        let mut escaped = String::with_capacity(target.len());
+        for character in target.chars() {
+            if matches!(character, '(' | ')' | '\\') {
                 escaped.push('\\');
             }
             escaped.push(character);

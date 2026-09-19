@@ -140,11 +140,16 @@ pub(crate) fn render_plain(doc: &InternalDocument) -> String {
                         out.push_str(&ocr_result.content);
                         out.push_str("\n\n");
                     }
-                } else if !elem.text.trim().is_empty() {
+                } else if let Some(text) = crate::extraction::markdown_utils::sanitize_image_alt_text(
+                    Some(elem.text.trim().to_string()),
+                ) {
                     // An image the extractor could not resolve (a missing archive
-                    // member) still carries its alt text or caption.
+                    // member) still carries its alt text or caption — sanitized
+                    // like the comrak and djot fallbacks, so a filesystem path an
+                    // Office author baked in drops instead of leaking host paths
+                    // through the plain output.
                     out.push_str("[Image: ");
-                    out.push_str(elem.text.trim());
+                    out.push_str(&text);
                     out.push_str("]\n\n");
                 }
             }

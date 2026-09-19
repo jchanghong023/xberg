@@ -85,7 +85,16 @@ pub(crate) fn layout_boxes(mut items: Vec<(f64, f64, f64, String)>) -> Option<St
         .drain(..)
         .flat_map(|(left, top, height, text)| {
             // The lines are owned so the returned iterator does not borrow `text`.
-            let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+            // Normalize CR before splitting, the same contract the flat fallback
+            // applies: a `\r` that survived here would land mid-row in the grid —
+            // beyond `trim_end`'s reach once a taller column shares the output
+            // line — and re-parse as a row terminator on the markdown side.
+            let lines: Vec<String> = text
+                .replace("\r\n", "\n")
+                .replace('\r', "\n")
+                .split('\n')
+                .map(str::to_string)
+                .collect();
             let line_count = lines.len().max(1) as f64;
             let line_height = height / line_count;
             lines

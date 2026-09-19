@@ -158,6 +158,11 @@ fn prefix_image_refs(content: &str, dir: &Path) -> String {
             // A literal `#` survives CommonMark destination parsing, but a rendered URL
             // cuts the destination at it (fragment start), so the image stops loading.
             '#' => encoded.push_str("%23"),
+            // `?` is the same story one query-string earlier: a rendered URL treats it
+            // as the query's start and the file lookup fails. Legal in a Unix file
+            // name, so the cross-platform hand-off this function documents can
+            // actually carry one.
+            '?' => encoded.push_str("%3F"),
             // Control characters cannot appear in a Windows file name, but a path handed to the
             // CLI on another platform must not break the marker line either — the library drops
             // them for the same reason.
@@ -264,6 +269,14 @@ pub fn extract_command(
             );
         }
         WireFormat::Toon => {
+            // Same Markdown repair as the Text path above: the envelope's content is
+            // the same markdown text, so a placeholder the PPTX content builder baked
+            // into a ```text fence is lifted out before the references are prefixed.
+            if matches!(config.output_format, xberg::core::config::OutputFormat::Markdown)
+                && result.content.contains("```text")
+            {
+                xberg::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut result.content);
+            }
             if let Some(images) = &result.images {
                 let dir = output_dir.as_deref().unwrap_or(Path::new("."));
                 write_extracted_images(images, dir)?;
@@ -342,7 +355,10 @@ pub fn batch_command(
                     xberg::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut lifted);
                     content = std::borrow::Cow::Owned(lifted);
                 }
-                if let Some(images) = &result.images {
+                // The empty-vector guard mirrors the Toon path below: `Some(vec![])`
+                // (image extraction enabled, but this document has no picture bytes)
+                // must not leave an empty `doc_N` directory behind.
+                if let Some(images) = result.images.as_deref().filter(|images| !images.is_empty()) {
                     let base = output_dir.as_deref().unwrap_or(Path::new("."));
                     let dir = batch_image_dir(base, i);
                     std::fs::create_dir_all(&dir).context("Failed to create the batch image directory")?;
@@ -367,6 +383,14 @@ pub fn batch_command(
             let (mut output, per_file_ms) = run_json_batch_sync(inputs, &config)?;
             let total_ms = total_t0.elapsed().as_secs_f64() * 1000.0;
             for (i, result) in output.results.iter_mut().enumerate() {
+                // Same Markdown repair as the batch Text path above: TOON carries the
+                // same markdown content, so a baked-in ```text placeholder is lifted
+                // before the references are prefixed.
+                if matches!(config.output_format, xberg::core::config::OutputFormat::Markdown)
+                    && result.content.contains("```text")
+                {
+                    xberg::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut result.content);
+                }
                 if result.images.as_ref().is_some_and(|images| !images.is_empty()) {
                     let base = output_dir.as_deref().unwrap_or(Path::new("."));
                     let dir = batch_image_dir(base, i);

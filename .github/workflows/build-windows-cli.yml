@@ -125,9 +125,8 @@ jobs:
           **下载后解压即可用**：`xberg.exe` + ONNX Runtime DLL。把解压目录加入 `PATH`，或直接运行 `xberg.exe`。
 
           ```powershell
-          xberg.exe extract document.docx --content-format markdown --format text \
-            --extract-images true --output-dir .\imgs \
-            --config-json '{"images":{"output_format":{"type":"png"}}}'
+          New-Item -ItemType Directory -Force .\imgs | Out-Null
+          xberg.exe extract document.docx --content-format markdown --format text --extract-images true --output-dir .\imgs --config-json '{"images":{"output_format":{"type":"png"}}}'
           ```
 
           ## 相对上游的改动（本 fork）
@@ -140,9 +139,6 @@ jobs:
           | **Markdown 图片独立成段** | 图片标记作为独立段落写出，便于预览器渲染；OCR 文字在后续 `text` 围栏中保留版式 |
           | **精简 OCR / 转写** | 打包版默认 OCR 为 PaddleOCR pp-ocrv6 tiny（模型随包离线可用）；Tesseract 仍编入作后备；音视频离线转写附带 Whisper tiny + layout 模型 |
           | **批处理图片分目录** | batch 文本/Toon 输出把各文档图片写入 `doc_<N>/`，避免同名 `image_N` 互相覆盖 |
-
-          对应提交：
-          - `feat(images): rasterize EMF/WMF to PNG and sanitize path-like alt text`
           EOF
           )
           # The heredoc above is quoted, so __XBERG_VERSION__ was not expanded in it;

@@ -8,8 +8,10 @@
 //! types are picked up automatically with no change required in this file.
 //!
 //! The `*_over` variants load a file *on top of* an existing base configuration by merging
-//! the file's raw values as JSON (see [`merge_config_json`]), so a partial file overrides
-//! only the keys it sets instead of resetting everything to the library defaults.
+//! the file's raw values as JSON (see [`merge_config_json`]). The merge is per **top-level
+//! key**: a nested section the file sets (say `[images]`) replaces the base's whole section,
+//! and sub-keys it omits fall back to serde defaults — but top-level keys the file omits
+//! keep the base's values instead of resetting to the library defaults.
 
 use crate::core::config::merge::merge_config_json;
 use crate::{Result, XbergError};
@@ -82,9 +84,12 @@ impl ExtractionConfig {
     ///
     /// Unlike [`Self::from_file`], the file is not deserialized straight into
     /// `ExtractionConfig`: it is parsed into its format's raw value, converted to JSON, and
-    /// merged into `base` with [`merge_config_json`]. Only the keys the file actually sets
-    /// override `base`, so a file that omits `output_format` (or any other field) keeps the
-    /// base's value instead of falling back to the library default. Unknown fields are still
+    /// merged into `base` with [`merge_config_json`]. Only the top-level keys the file
+    /// actually sets override `base`, so a file that omits `output_format` (or any other
+    /// top-level key) keeps the base's value instead of falling back to the library default.
+    /// The merge is per top-level key: a nested section the file sets (say `[images]`)
+    /// replaces the base's whole section, so sub-keys it omits fall back to serde defaults
+    /// rather than keeping the base's non-default values. Unknown fields are still
     /// rejected, because the merge deserializes back into the `#[serde(deny_unknown_fields)]`
     /// `ExtractionConfig`.
     ///

@@ -339,6 +339,11 @@ impl OcrBackend for TesseractBackend {
             ..Default::default()
         };
 
+        // The table-claim filter above (`filter_elements_covered_by_tables`)
+        // strips the paragraphs tables own out of the internal document whenever
+        // tables were detected, so the renderer's layout grid must not be built
+        // from it — `content` is the only complete source.
+        let internal_doc_excludes_tables = !ocr_result.tables.is_empty();
         Ok(ExtractedDocument {
             content: ocr_result.content,
             mime_type: ocr_result.mime_type.into(),
@@ -351,6 +356,7 @@ impl OcrBackend for TesseractBackend {
                 .collect(),
             ocr_elements,
             ocr_internal_document: ocr_result.internal_document,
+            internal_doc_excludes_tables,
             processing_warnings,
             ..Default::default()
         })
@@ -438,6 +444,11 @@ impl OcrBackend for TesseractBackend {
             ..Default::default()
         };
 
+        // The table-claim filter above (`filter_elements_covered_by_tables`)
+        // strips the paragraphs tables own out of the internal document whenever
+        // tables were detected, so the renderer's layout grid must not be built
+        // from it — `content` is the only complete source.
+        let internal_doc_excludes_tables = !ocr_result.tables.is_empty();
         Ok(ExtractedDocument {
             content: ocr_result.content,
             mime_type: ocr_result.mime_type.into(),
@@ -450,6 +461,7 @@ impl OcrBackend for TesseractBackend {
                 .collect(),
             ocr_elements,
             ocr_internal_document: ocr_result.internal_document,
+            internal_doc_excludes_tables,
             processing_warnings,
             ..Default::default()
         })

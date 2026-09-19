@@ -437,6 +437,15 @@ pub struct ExtractedDocument {
     #[cfg_attr(alef, alef(skip))]
     pub(crate) ocr_internal_document: Option<super::internal::InternalDocument>,
 
+    /// Whether `ocr_internal_document` deliberately omits the paragraphs the
+    /// table rebuild claimed (the tesseract markdown path strips them once a
+    /// table owns those lines). A layout grid built from such a document would
+    /// render everything EXCEPT the tables, so the renderer must fall back to
+    /// `content` — the only source that still carries the table markdown.
+    #[serde(skip)]
+    #[cfg_attr(alef, alef(skip))]
+    pub(crate) internal_doc_excludes_tables: bool,
+
     /// The original `InternalDocument` from the extractor, preserved before derivation.
     ///
     /// Stored by the pipeline before `derive_extraction_result` consumes the document, so

@@ -2177,7 +2177,11 @@ mod tests {
     }
 
     /// Short repeated edge lines (page numbers, dates) are content-adjacent and
-    /// stay, and docs with too few pages to judge pass through unchanged.
+    /// stay, and docs with too few pages to judge pass through unchanged. Both
+    /// halves ride the sparse-page floor (`FURNITURE_MIN_PAGE_LINES`): the pages
+    /// here carry fewer non-empty lines than the floor, so the furniture judge
+    /// never sees them — this test only pins that floor, not the short-line
+    /// threshold or the edge-zone window.
     #[test]
     fn short_edge_lines_and_small_documents_are_left_alone() {
         let mut numbered: Vec<String> = (0..8)
@@ -2198,7 +2202,10 @@ mod tests {
             .collect();
         let before = tiny.clone();
         strip_repeated_edge_furniture(&mut tiny, FurniturePermissions::default());
-        assert_eq!(tiny, before, "a three-page document must pass through unchanged");
+        assert_eq!(
+            tiny, before,
+            "a three-page document with sub-floor pages must pass through unchanged"
+        );
     }
 
     /// A chapter running header sits on a dense consecutive run of pages that

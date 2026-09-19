@@ -232,7 +232,11 @@ def extract_source_text(path: Path):
                         for row in shape.table.rows:
                             parts.append(" ".join(c.text for c in row.cells))
             return "\n".join(parts), "python-pptx", extras
-        if ext in ("xlsx", "xls", "ods"):
+        # openpyxl 只支持 xlsx 系；这里只放行 xlsx——图形文本/单元格折叠等深检门
+        # 严格只认 xlsx，半放开 xlsm 会造成「召回层绿了、深检层静默缺失」的假全检
+        # （zip 级的图片对账/内嵌保真另收 ods，不依赖 openpyxl）。其余表格格式落到
+        # 函数末尾的「无对应基准抽取器」路径。
+        if ext == "xlsx":
             from openpyxl import load_workbook
             wb = load_workbook(str(path), read_only=True, data_only=True)
             extras["pages"] = len(wb.sheetnames)
@@ -1333,7 +1337,11 @@ def _embedded_texts(path: Path):
 
 
 def _embedded_media_md5(path: Path):
-    """内嵌子文档 / embeddings 下直接内嵌的图片：返回 [(文件名, md5, 扩展名), …]。"""
+    """内嵌子文档 / embeddings 下直接内嵌的图片：返回 [(zip 内完整路径, md5, 扩展名), …]。
+
+    用完整路径而不是 basename 作标识：不同子文档常各自带同名 media（image1.png），
+    basename 键会让像素回退比对拿到另一张图的字节（跨子文档同名互相覆盖）。
+    """
     import hashlib, io, zipfile
     exts = (".png", ".jpg", ".jpeg", ".emf", ".wmf", ".bmp")
     out = []
@@ -1344,7 +1352,7 @@ def _embedded_media_md5(path: Path):
                 if "/embeddings/" not in low:
                     continue
                 if low.endswith(exts):
-                    out.append((name.rsplit("/", 1)[-1],
+                    out.append((name,
                                 hashlib.md5(z.read(name)).hexdigest(),
                                 low.rsplit(".", 1)[-1]))
                 elif low.endswith((".docx", ".xlsx", ".pptx")):
@@ -1352,7 +1360,7 @@ def _embedded_media_md5(path: Path):
                         with zipfile.ZipFile(io.BytesIO(z.read(name))) as z2:
                             for n2 in z2.namelist():
                                 if "/media/" in n2.lower() and n2.lower().endswith(exts):
-                                    out.append((n2.rsplit("/", 1)[-1],
+                                    out.append((f"{name}!{n2}",
                                                 hashlib.md5(z2.read(n2)).hexdigest(),
                                                 n2.lower().rsplit(".", 1)[-1]))
                     except Exception:
@@ -1425,14 +1433,14 @@ def _embedded_media_lost(path: Path, m):
                 if "/embeddings/" not in low:
                     continue
                 if low.endswith((".png", ".jpg", ".jpeg", ".bmp")):
-                    raw[name.rsplit("/", 1)[-1]] = z.read(name)
+                    raw[name] = z.read(name)
                 elif low.endswith((".docx", ".xlsx", ".pptx")):
                     try:
                         with zipfile.ZipFile(io.BytesIO(z.read(name))) as z2:
                             for n2 in z2.namelist():
                                 if "/media/" in n2.lower() and n2.lower().endswith(
                                         (".png", ".jpg", ".jpeg", ".bmp")):
-                                    raw[n2.rsplit("/", 1)[-1]] = z2.read(n2)
+                                    raw[f"{name}!{n2}"] = z2.read(n2)
                     except Exception:
                         continue
     except Exception:
@@ -1455,7 +1463,8 @@ def _embedded_media_lost(path: Path, m):
         px = _pixel_hash(raw.get(name, b"")) if name in raw else None
         if px and (px in disk_px or px in top_px):
             continue
-        lost.append(name)
+        # 报告里显示成可读的 basename（完整路径仅作内部键，防跨子文档同名覆盖）。
+        lost.append(name.rsplit("/", 1)[-1].rsplit("!", 1)[-1])
     return lost, len(media)
 
 
@@ -1992,7 +2001,8 @@ def _validate_expectations(data: dict) -> list:
     for k in data:
         if k not in KNOWN_TOP_KEYS:
             warns.append(f"顶层未知键「{k}」（判定代码不读取）")
-    for name, ent in (data.get("files") or {}).items():
+    files = data.get("files")
+    for name, ent in files.items() if isinstance(files, dict) else []:
         if not isinstance(ent, dict):
             warns.append(f"{name}: 文件条目不是对象")
             continue
@@ -2023,7 +2033,10 @@ def _validate_expectations(data: dict) -> list:
                         and all(isinstance(x, str) for x in pair)):
                     warns.append(f"{name}: order 元素应为两个字符串的数组，实为 {pair!r}"
                                  "（GOLDEN_ORDER 跳过该对→顺序守卫静默消失）")
-        for pat in ent.get("forbidden_patterns") or []:
+        # list 键写成真值标量（true/1）时上面的类型契约告警已记，这里跳过迭代——
+        # 直接 `or []` 会对 int/bool 迭代抛 TypeError，把整份配置自检炸掉。
+        forbidden = ent.get("forbidden_patterns")
+        for pat in forbidden if isinstance(forbidden, list) else []:
             p = str(pat)
             if not p:
                 warns.append(f"{name}: forbidden_patterns 含空模式")
@@ -2040,11 +2053,15 @@ def _validate_expectations(data: dict) -> list:
                 continue
             if rx.search(""):
                 warns.append(f"{name}: forbidden 模式能匹配空串「{p}」（会在任意输出上误报）")
-        for tok in ent.get("required_tokens") or []:
+        tokens = ent.get("required_tokens")
+        for tok in tokens if isinstance(tokens, list) else []:
             if len(_norm_ws(str(tok))) < 2:
                 warns.append(f"{name}: required token 过短，无法构成断言: {tok!r}")
     run = data.get("run")
-    if isinstance(run, dict):
+    if run is not None and not isinstance(run, dict):
+        warns.append(f"顶层 run 应为对象，实为 {type(run).__name__}"
+                     "（真值标量/数组会让主流程崩溃或覆盖静默失效）")
+    elif isinstance(run, dict):
         for k in run:
             if k.startswith("_note") or k in KNOWN_RUN_KEYS:
                 continue
@@ -2066,10 +2083,31 @@ def load_expectations(path: Path) -> dict:
         raw = path.read_bytes()
         EXPECTATIONS_SHA256 = hashlib.sha256(raw).hexdigest()
         data = json.loads(raw.decode("utf-8"))
-        data = data if isinstance(data, dict) else {}
+        structural_warning = None
+        if not isinstance(data, dict):
+            # 顶层手误（整包套了一层数组等）与 files 写错同待遇：清空并显式告警，
+            # 不许金标准层静默禁用。
+            data = {}
+            structural_warning = "金标准顶层不是 JSON 对象，金标准检查已禁用"
+        else:
+            # run / files 写成真值非对象时各自清空+告警（两个独立 if：同时坏时
+            # 都要暴露，不许 elif 短路漏掉第二个）；run 不清空会让 main 的
+            # `run_cfg.get` 让整轮带 traceback 崩溃，files 不清空会让
+            # `.items()` 的 AttributeError 在 sha256 已置值后伪装成「解析失败」。
+            if data.get("run") is not None and not isinstance(data.get("run"), dict):
+                data["run"] = {}
+                structural_warning = "顶层 run 不是对象，运行覆盖配置已忽略"
+            if data.get("files") is not None and not isinstance(data.get("files"), dict):
+                data["files"] = {}
+                if structural_warning:
+                    structural_warning += "；顶层 files 不是对象，金标准检查已禁用"
+                else:
+                    structural_warning = "顶层 files 不是对象，金标准检查已禁用"
         print(f"[expectations] 已加载 {path}（{len(data.get('files') or {})} 个文件条目，"
               f"sha256 {EXPECTATIONS_SHA256[:12]}）", flush=True)
         EXPECTATIONS_WARNINGS = _validate_expectations(data)
+        if structural_warning:
+            EXPECTATIONS_WARNINGS.append(structural_warning)
         for w in EXPECTATIONS_WARNINGS:
             print(f"[expectations] 配置告警: {w}", flush=True)
         return data
@@ -2317,8 +2355,10 @@ def run_adversarial(cli: Path, adv_dir: Path, out_dir: Path, timeout: int,
             "char_ratio": None, "src_images": None, "src_images_note": None,
             "source_pages": None,
             "metrics": json_metrics(m), "issues": issues,
-            "warnings": (meta.get("warnings") if rc == 0 else []) or [],
-            "notes": (meta.get("notes") if rc == 0 else []) or [],
+            # 对抗路径 rc!=0 的真实原因只在 meta 里（err.txt 可能缺失/陈旧），保留进
+            # JSON，别让「图片目录创建失败」这类环境故障在报告里消失。
+            "warnings": meta.get("warnings") or [],
+            "notes": meta.get("notes") or [],
             "golden": {"applied": bool(exp)},
             "ocr": None, "counts": {}, "extraction_method": None,
             "adversarial": True,
@@ -2471,12 +2511,14 @@ def _encode_markdown_dir(name: str) -> str:
 
     与 CLI（`prefix_image_refs`）同一张表：源文件名带空格或括号时（`my doc (1).docx`
     → `my doc (1)_images`），不加编码写出的 `![](my doc (1)_images/image_0.png)` 在任何
-    渲染器里都不是有效链接；`%` 也要编码，否则渲染器会把 `100%25` 解码成另一个目录名。
-    引擎侧 `sanitize_marker_url` 共用同样的字符集，但它重写的是文档自带的（已百分号编码
-    的）关系目标，所以那里不能编码 `%`。
+    渲染器里都不是有效链接；`%` 也要编码，否则渲染器会把 `100%25` 解码成另一个目录名；
+    `?` 同理（渲染后的 URL 会把它当 query 起点截断目标）。
+    本表与 CLI `prefix_image_refs` 逐字符一致。引擎侧 `sanitize_marker_url` 是第三张表，
+    按各自输入面设计、并不相同：它多编码文档自带 target 的 `\\`/`[`/`]`、没有 `#`/`?`——
+    对齐任何一张表时不要跨表外推。
     """
     table = {" ": "%20", "(": "%28", ")": "%29", "<": "%3C", ">": "%3E",
-             '"': "%22", "`": "%60", "%": "%25", "#": "%23"}
+             '"': "%22", "`": "%60", "%": "%25", "#": "%23", "?": "%3F"}
     return "".join(table.get(ch, ch) for ch in name
                    if unicodedata.category(ch) != "Cc")
 
@@ -2530,13 +2572,34 @@ def _stem_tags(main_files: list, adv_files: list | None = None) -> dict:
     main_counts = Counter(p.stem for p in main_files)
     adv_counts = Counter(p.stem for p in adv)
     tags = {}
+    used: set[str] = set()
     for p in main_files:
-        tags[p] = p.stem if main_counts[p.stem] == 1 \
+        base = p.stem if main_counts[p.stem] == 1 \
             else f"{p.stem}_{p.suffix.lower().lstrip('.')}"
+        # 主队列内部也有撞名形态：X.pdf+X.docx 的退化 tag（X_pdf）会撞上唯一
+        # stem X_pdf.pptx 的裸 tag——convert_one 的 rmtree 会互删审计产物。
+        tag = base
+        n = 2
+        while tag in used:
+            tag = f"{base}{n}"
+            n += 1
+        used.add(tag)
+        tags[p] = tag
+    # 对抗 tag 与主队列 tag 也可能撞名（主队列 X_adv.pdf ↔ 对抗 X.pdf 都得 X_adv），
+    # 同样互删产物；撞名时退化到带扩展名的形式，再撞就加序号。
     for p in adv:
         base = p.stem if adv_counts[p.stem] == 1 \
             else f"{p.stem}_{p.suffix.lower().lstrip('.')}"
-        tags[p] = f"{base}_adv"
+        tag = f"{base}_adv"
+        if tag in used:
+            ext = p.suffix.lower().lstrip('.')
+            tag = f"{base}_{ext}_adv" if ext else f"{base}_adv"
+            n = 2
+            while tag in used:
+                tag = f"{base}_{ext}_adv{n}" if ext else f"{base}_adv{n}"
+                n += 1
+        used.add(tag)
+        tags[p] = tag
     return tags
 
 
@@ -2553,13 +2616,33 @@ def convert_one(cli: Path, src_file: Path, out_dir: Path, timeout: int, env: dic
     # 上一次运行留下的图片必须清空：残留文件会掩盖真实丢图（IMG_LOST/IMG_MISSING 都以
     # 该目录内容为判据），中断运行留下的半截文件还会误报 IMG_CORRUPT。
     shutil.rmtree(img_dir, ignore_errors=True)
-    img_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        img_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as dir_error:  # noqa: BLE001 - 目录都建不出来时按该文件失败处理
+        notes = [f"图片目录创建失败: {dir_error}"]
+        # 尽力把真实原因落进 err.txt：对抗队列 rc!=0 时只从该文件读诊断，缺了会被
+        # 误报成「无任何诊断输出」（静默失败）。
+        try:
+            (out_dir / f"{stem}.err.txt").write_bytes(f"{notes[0]}\n".encode("utf-8"))
+        except OSError:
+            pass
+        return ("", {"warnings": notes, "counts": {}, "languages": [], "notes": notes},
+                0.0, 1, cli)
     label = f"[{stem}]"
     notes = []
 
     cmd = build_cmd(cli, src_file, img_dir, transcription)
     rc, out, err, elapsed = run_with_ticker(label, cmd, env, timeout)
-    (out_dir / f"{stem}.err.txt").write_bytes(err or b"")
+    try:
+        (out_dir / f"{stem}.err.txt").write_bytes(err or b"")
+    except OSError as err_log_error:  # noqa: BLE001 - 审计日志写不进不能炸整轮，记 note 继续
+        notes.append(f"err.txt 落盘失败: {err_log_error}")
+        # 上一轮运行可能留有同名旧诊断：留下它会让 OCR 通道判定与对抗分类读到陈旧
+        # stderr——尽力删掉，宁可「无诊断」也不要「旧诊断」。
+        try:
+            (out_dir / f"{stem}.err.txt").unlink()
+        except OSError:
+            pass
 
     if rc != 0:
         err_text = (err or b"").decode("utf-8", errors="replace")
@@ -2584,9 +2667,18 @@ def convert_one(cli: Path, src_file: Path, out_dir: Path, timeout: int, env: dic
                      "languages": [], "notes": notes},
                 elapsed, 1, cli)
     md_text = result.get("content", "") or ""
-    n_imgs = write_images_from_json(result, img_dir)
-    meta["notes"] = notes + ([f"由 Python 从 JSON 内联数据落盘 {n_imgs} 张图片"] if n_imgs else [])
-    save_markdown(out_dir, stem, md_text, img_dir.name)
+    try:
+        n_imgs = write_images_from_json(result, img_dir)
+        meta["notes"] = notes + ([f"由 Python 从 JSON 内联数据落盘 {n_imgs} 张图片"] if n_imgs else [])
+        save_markdown(out_dir, stem, md_text, img_dir.name)
+    except Exception as disk_error:  # noqa: BLE001 - 落盘失败同样不能放大为整轮崩溃
+        # images[].data 形态异常 / 磁盘满 / 权限错误：按该文件失败处理（走 rc!=0 的判定
+        # 路径），报告与基线对比仍然完整——JUDGE_CRASH 的语义就是「单文件问题不得放大
+        # 为整轮崩溃」。
+        notes.append(f"落盘失败: {disk_error}")
+        return ("", {"warnings": [f"落盘失败: {disk_error}"], "counts": {},
+                     "languages": [], "notes": notes},
+                elapsed, 1, cli)
     return md_text, meta, elapsed, rc, cli
 
 
@@ -2818,6 +2910,20 @@ def run_selftest() -> int:
     bad_order_pair = {"files": {"a.pdf": {"order": [["a", "b"], ["c"]]}}}
     check("order 非二元组元素被告警",
           "两个字符串的数组" in "\n".join(_validate_expectations(bad_order_pair)))
+    # list 键写成真值标量（true/1）：类型契约告警照记，自检不得被 TypeError 炸掉
+    # ——炸了会连其余告警一起丢、还伪装成「解析失败」。
+    bad_scalar_lists = {"files": {"a.pdf": {"forbidden_patterns": True, "required_tokens": 1}}}
+    warns_scalar = _validate_expectations(bad_scalar_lists)
+    check("list 键写成真值标量只告警不炸自检",
+          any("forbidden_patterns」应为数组" in w for w in warns_scalar)
+          and any("required_tokens」应为数组" in w for w in warns_scalar))
+    check("金标准顶层不是对象要告警",
+          _validate_expectations(["not", "a", "dict"]) == ["金标准顶层不是 JSON 对象"])
+    check("files 写成数组不再炸自检",
+          isinstance(_validate_expectations({"files": ["bad"]}), list))
+    run_warns = _validate_expectations({"run": ["auto"]})
+    check("run 写成真值非对象被告警",
+          any("顶层 run 应为对象" in w for w in run_warns))
     good_types = {"files": {"a.pdf": {
         "min_tables": 3, "require_chinese_ocr": True, "toc_heading_min_recall": 0.8,
         "order": [["a", "b"]], "forbidden_patterns": ["x+"],
@@ -3030,6 +3136,23 @@ def run_selftest() -> int:
     check("对抗内部重名 stem 先按扩展消歧再加 _adv",
           adv_dup[Path("adv/a.pdf")] == "a_pdf_adv"
           and adv_dup[Path("adv/a.docx")] == "a_docx_adv")
+    # 对抗 tag 与主队列 tag 撞名（主队列 X_adv.pdf ↔ 对抗 X.pdf 都得 X_adv）：
+    # convert_one 会 rmtree 图片目录，撞名会删掉主队列审计产物——必须退化消歧。
+    clash = _stem_tags([Path("d/x_adv.pdf")], [Path("adv/x.pdf")])
+    check("对抗 tag 与主队列撞名时退化带扩展名形式",
+          clash[Path("d/x_adv.pdf")] == "x_adv"
+          and clash[Path("adv/x.pdf")] == "x_pdf_adv"
+          and clash[Path("d/x_adv.pdf")] != clash[Path("adv/x.pdf")])
+    clash2 = _stem_tags([Path("d/x_adv.pdf"), Path("d/x_pdf_adv.pdf")], [Path("adv/x.pdf")])
+    check("退化形式再撞名时加序号",
+          clash2[Path("adv/x.pdf")] == "x_pdf_adv2")
+    # 主队列内部：X.pdf+X.docx 的退化 tag（X_pdf）撞上唯一 stem X_pdf.pptx 的裸 tag。
+    clash3 = _stem_tags([Path("d/x.pdf"), Path("d/x.docx"), Path("d/x_pdf.pptx")], [])
+    check("主队列退化 tag 与唯一裸 stem 撞名时加序号",
+          clash3[Path("d/x.pdf")] == "x_pdf"
+          and clash3[Path("d/x.docx")] == "x_docx"
+          and clash3[Path("d/x_pdf.pptx")] == "x_pdf2"
+          and len(set(clash3.values())) == 3)
 
     # --- DUP_SPAM：嵌入对象区间（Embedded object: caption → 下一结构性元素）不计重复 ---
     spam = "ARCH41_CORE4"

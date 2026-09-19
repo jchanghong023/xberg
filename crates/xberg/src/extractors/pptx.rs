@@ -687,7 +687,10 @@ fn promote_baked_image_references(doc: &mut InternalDocument) {
 /// The alt of a baked placeholder is backslash-escaped by the content builder
 /// (see `ContentBuilder::add_image_with_desc`), so the `](` and `)` scans skip
 /// an escaped character instead of stopping at a literal `\]` inside the alt,
-/// and the alt is returned with those escapes undone.
+/// and the alt is returned with those escapes undone. The target is escaped
+/// the same way (`\(`, `\)`, `\\`) — a rel target carrying a bare `)` once cut
+/// the destination short so it never matched its image — and is returned with
+/// those escapes undone.
 fn markdown_image_references(text: &str) -> Vec<(std::ops::Range<usize>, String, String)> {
     let mut found = Vec::new();
     let mut from = 0usize;
@@ -703,7 +706,7 @@ fn markdown_image_references(text: &str) -> Vec<(std::ops::Range<usize>, String,
         found.push((
             start..target_close + 1,
             unescape_alt_text(&text[start + 2..alt_close]).trim().to_string(),
-            text[alt_close + 2..target_close].trim().to_string(),
+            unescape_target_text(text[alt_close + 2..target_close].trim()),
         ));
         from = target_close + 1;
     }
@@ -744,6 +747,29 @@ fn unescape_alt_text(alt: &str) -> String {
         if character == '\\'
             && let Some(&next) = characters.peek()
             && matches!(next, '[' | ']' | '\\')
+        {
+            characters.next();
+            unescaped.push(next);
+            continue;
+        }
+        unescaped.push(character);
+    }
+    unescaped
+}
+
+/// Undo the target escaping the content builder applied (`\(`, `\)`, `\\`), so
+/// the raw target matches its image's `source_path` again. A backslash before
+/// any other character stays as written, mirroring the builder's escape set.
+fn unescape_target_text(target: &str) -> String {
+    if !target.contains('\\') {
+        return target.to_string();
+    }
+    let mut unescaped = String::with_capacity(target.len());
+    let mut characters = target.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\\'
+            && let Some(&next) = characters.peek()
+            && matches!(next, '(' | ')' | '\\')
         {
             characters.next();
             unescaped.push(next);
@@ -2206,6 +2232,40 @@ mod tests {
             Some("see ](fig \\ x"),
             "the promoted alt must be the original, unescaped text"
         );
+    }
+
+    /// A rel target carrying `(`/`)` is baked with CommonMark escapes so the
+    /// promotion scan finds the true closing paren; the target is restored to
+    /// its raw form before matching, or the picture would stay orphaned as
+    /// literal text (`media/image (1).png`, as third-party producers name it).
+    #[test]
+    fn promotes_a_reference_whose_target_breaks_the_scan() {
+        use crate::types::ExtractedImage;
+        use crate::types::internal::{ElementKind, InternalElement};
+        use std::borrow::Cow;
+
+        let mut doc = InternalDocument::new("pptx");
+        // What `add_image_with_desc` bakes for the target `../media/image (1).png`.
+        doc.push_element(InternalElement::text(
+            ElementKind::Paragraph,
+            r"![figure](../media/image \(1\).png)",
+            0,
+        ));
+        doc.images = vec![ExtractedImage {
+            format: Cow::Borrowed("png"),
+            source_path: Some("../media/image (1).png".to_string()),
+            ..Default::default()
+        }];
+
+        promote_baked_image_references(&mut doc);
+
+        assert_eq!(
+            doc.elements.len(),
+            1,
+            "the escaped target must not break the reference: {:?}",
+            doc.elements
+        );
+        assert_eq!(doc.elements[0].kind, ElementKind::Image { image_index: 0 });
     }
 
     /// A placeholder whose rel could not be resolved bakes an empty target; its

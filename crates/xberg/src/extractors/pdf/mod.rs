@@ -437,22 +437,25 @@ fn strip_furniture_from_structured_document(
 ) {
     use crate::types::internal::{ElementKind, InternalElement};
 
-    // Group paragraph texts by page, preserving first-seen order.
-    let mut page_order: Vec<u32> = Vec::new();
-    let mut pages: ahash::AHashMap<u32, Vec<String>> = ahash::AHashMap::new();
+    // Group paragraph texts by page, in page order. The page NUMBER is kept
+    // alongside each list for the consecutive-page detector below: a page with
+    // no paragraphs (a full-page figure) must still break a "consecutive pages"
+    // run there, the same way the flat path's page list keeps physically
+    // consecutive pages adjacent. (The edge-zone detector above still walks the
+    // paragraph-page list by position — its cross-hole behavior is unchanged.)
+    let mut paragraphs_by_page = ahash::AHashMap::<u32, Vec<String>>::new();
     for element in document.elements.iter() {
         if !matches!(element.kind, ElementKind::Paragraph) {
             continue;
         }
         let page = element.page.unwrap_or(0);
-        if !pages.contains_key(&page) {
-            page_order.push(page);
-        }
-        pages.entry(page).or_default().push(element.text.clone());
+        paragraphs_by_page.entry(page).or_default().push(element.text.clone());
     }
-    let page_line_lists: Vec<Vec<String>> = page_order
+    let mut page_keys: Vec<&u32> = paragraphs_by_page.keys().collect();
+    page_keys.sort_unstable();
+    let page_line_lists: Vec<Vec<String>> = page_keys
         .iter()
-        .filter_map(|page| pages.get(page).cloned())
+        .filter_map(|page| paragraphs_by_page.get(*page).cloned())
         .collect();
     let mut furniture = crate::pdf::native::text::furniture_from_page_lines(&page_line_lists, permissions);
     // The consecutive-page detector has no positional evidence to separate a
@@ -460,37 +463,93 @@ fn strip_furniture_from_structured_document(
     // `mark_cross_page_repeating_text` — it is gated only by
     // `strip_repeating_text`, not by the per-band include flags.
     if permissions.strip_repeating_text {
-        furniture.extend(furniture_from_consecutive_page_paragraphs(
-            &page_line_lists,
-        ));
+        let tagged: Vec<(u32, Vec<String>)> = page_keys
+            .iter()
+            .filter_map(|page| paragraphs_by_page.get(*page).cloned().map(|lines| (**page, lines)))
+            .collect();
+        // The share bar is a fraction of the DOCUMENT's pages, not of the pages
+        // that happen to carry paragraphs — a figure-only page counts too.
+        let total_pages = document
+            .elements
+            .iter()
+            .filter_map(|element| element.page)
+            .max()
+            .unwrap_or(0) as usize;
+        furniture.extend(furniture_from_consecutive_page_paragraphs(&tagged, total_pages));
     }
     if furniture.is_empty() {
         return;
     }
 
-    document.elements.retain(|element: &InternalElement| {
+    // Removing elements by position invalidates `Relationship::source` and
+    // `RelationshipTarget::Index` (caption→figure links recorded by the
+    // structure assembly) unless they shift in lockstep — the same invariant
+    // `inject_region_results` upholds on insertion via
+    // `shift_relationship_indices`. A relationship whose caption source was
+    // itself stripped has nothing left to anchor on and is dropped.
+    let is_stripped = |element: &InternalElement| {
         if !matches!(element.kind, ElementKind::Paragraph) {
-            return true;
+            return false;
         }
         let trimmed = element.text.trim();
-        if trimmed.chars().count() < crate::pdf::native::text::FURNITURE_MIN_LINE_CHARS {
-            return true;
-        }
         // Exact matching, the same way the flat-text pass works: a paragraph
         // that merely contains a furniture string is real content and stays.
-        !furniture.contains(trimmed)
+        trimmed.chars().count() >= crate::pdf::native::text::FURNITURE_MIN_LINE_CHARS
+            && furniture.contains(trimmed)
+    };
+    let keep: Vec<bool> = document.elements.iter().map(|e| !is_stripped(e)).collect();
+    // new_index_before[i] = how many KEPT elements sit before i — exactly the
+    // position element i lands on after the retain (when it survives).
+    let mut new_index_before: Vec<u32> = Vec::with_capacity(keep.len());
+    let mut kept_count = 0u32;
+    for kept_flag in &keep {
+        new_index_before.push(kept_count);
+        if *kept_flag {
+            kept_count += 1;
+        }
+    }
+    let mut index = 0usize;
+    document.elements.retain(|_: &InternalElement| {
+        let keep_it = keep[index];
+        index += 1;
+        keep_it
     });
+    let kept = |index: usize| keep.get(index).copied().unwrap_or(false);
+    document.relationships.retain(|relationship| {
+        let source = relationship.source as usize;
+        match &relationship.target {
+            crate::types::internal::RelationshipTarget::Index(target) => {
+                kept(source) && kept(*target as usize)
+            }
+            crate::types::internal::RelationshipTarget::Key(_) => kept(source),
+        }
+    });
+    for relationship in &mut document.relationships {
+        relationship.source = new_index_before[relationship.source as usize];
+        if let crate::types::internal::RelationshipTarget::Index(target) = &mut relationship.target {
+            *target = new_index_before[*target as usize];
+        }
+    }
 }
 
-/// Exact paragraph strings that appear on a dense consecutive run of pages, or
-/// on a large share of pages at any position.
+/// Exact paragraph strings that appear on a physically consecutive run of
+/// pages, or on a large share of the document's pages at any position.
 ///
 /// Complements [`crate::pdf::native::text::furniture_from_page_lines`], which
 /// only inspects each page's edge zones. A chapter running header is often the
 /// 4th–6th paragraph of the structured page (after the book title, page number
 /// and a section title), so it never enters the edge window even though it
 /// repeats verbatim on every page of the chapter.
-fn furniture_from_consecutive_page_paragraphs(pages: &[Vec<String>]) -> std::collections::HashSet<String> {
+///
+/// `pages` carries each list's physical page number and `total_pages` the
+/// document's page count: pages without paragraphs (a full-page figure) stay
+/// in the arithmetic — a run must be consecutive in the document, and the
+/// share bar is a fraction of the whole document, or a figure-heavy document
+/// would judge furniture against a shrunken denominator.
+fn furniture_from_consecutive_page_paragraphs(
+    pages: &[(u32, Vec<String>)],
+    total_pages: usize,
+) -> std::collections::HashSet<String> {
     use crate::pdf::native::text::FURNITURE_MIN_LINE_CHARS;
 
     let mut furniture = std::collections::HashSet::new();
@@ -505,7 +564,7 @@ fn furniture_from_consecutive_page_paragraphs(pages: &[Vec<String>]) -> std::col
     // Per page: set of trimmed paragraph strings long enough to be furniture.
     let per_page: Vec<std::collections::HashSet<&str>> = pages
         .iter()
-        .map(|lines| {
+        .map(|(_, lines)| {
             lines
                 .iter()
                 .map(|line| line.trim())
@@ -515,20 +574,21 @@ fn furniture_from_consecutive_page_paragraphs(pages: &[Vec<String>]) -> std::col
         .collect();
 
     // For every candidate string: pages that contain it, plus the longest run
-    // of consecutive pages that each contain it as a standalone paragraph.
-    let mut last_page: ahash::AHashMap<&str, usize> = ahash::AHashMap::new();
+    // of physically consecutive pages that each contain it as a standalone
+    // paragraph.
+    let mut last_page: ahash::AHashMap<&str, u32> = ahash::AHashMap::new();
     let mut streak: ahash::AHashMap<&str, usize> = ahash::AHashMap::new();
     let mut best_streak: ahash::AHashMap<&str, usize> = ahash::AHashMap::new();
     let mut page_hits: ahash::AHashMap<&str, usize> = ahash::AHashMap::new();
-    for (page_index, set) in per_page.iter().enumerate() {
+    for ((page_number, _), set) in pages.iter().zip(per_page.iter()) {
         for &line in set {
             *page_hits.entry(line).or_insert(0) += 1;
             let run = match last_page.get(line) {
-                Some(&prev) if prev + 1 == page_index => streak.get(line).copied().unwrap_or(1) + 1,
+                Some(&prev) if prev + 1 == *page_number => streak.get(line).copied().unwrap_or(1) + 1,
                 _ => 1,
             };
             streak.insert(line, run);
-            last_page.insert(line, page_index);
+            last_page.insert(line, *page_number);
             let best = best_streak.entry(line).or_insert(0);
             if run > *best {
                 *best = run;
@@ -538,7 +598,8 @@ fn furniture_from_consecutive_page_paragraphs(pages: &[Vec<String>]) -> std::col
 
     // Same consecutive-run bar as the edge-zone pass; plus a document-wide
     // share bar so a header that is only ever paragraph #4 still gets caught.
-    let min_share = ((pages.len() as f64) * crate::pdf::native::text::furniture_min_page_fraction()).ceil() as usize;
+    let min_share =
+        ((total_pages as f64) * crate::pdf::native::text::furniture_min_page_fraction()).ceil() as usize;
     let min_share = min_share.max(crate::pdf::native::text::furniture_min_pages());
     for (line, hits) in page_hits {
         let run = best_streak.get(line).copied().unwrap_or(0);
@@ -3025,6 +3086,95 @@ mod tests {
         assert!(metadata.created_by.is_none());
         assert!(metadata.pages.is_none());
         assert!(metadata.format.is_none());
+    }
+
+    /// Stripping furniture removes elements by position, so the caption→figure
+    /// relationships recorded by the structure assembly must shift in lockstep:
+    /// surviving relationships land on their elements' new positions, a
+    /// relationship anchored on a stripped paragraph is dropped, and a document
+    /// with nothing to strip keeps its relationships byte-for-byte.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn structured_furniture_strip_remaps_relationships() {
+        use crate::types::document_structure::RelationshipKind;
+        use crate::types::internal::{ElementKind, InternalElement, Relationship, RelationshipTarget};
+
+        let paragraph = |text: &str, page: u32| {
+            let mut element = InternalElement::text(ElementKind::Paragraph, text, 0);
+            element.page = Some(page);
+            element
+        };
+
+        let mut doc = crate::types::internal::InternalDocument::new("pdf");
+        // Pages 1–8, each carrying the running header plus a unique body line:
+        // the header repeats on 8 physically consecutive pages, so the
+        // consecutive-page detector registers it as furniture.
+        for page in 1u32..=8 {
+            doc.push_element(paragraph("Chapter 12 running header line", page));
+            doc.push_element(paragraph(&format!("Unique body content for page {page}"), page));
+        }
+        let caption_index = doc.push_element(paragraph("Table 3-1.Cell_types summary", 8));
+        let table_index = doc.push_element(InternalElement::text(
+            ElementKind::Code,
+            "select scan_out from dft_chains;",
+            0,
+        ));
+        doc.push_relationship(Relationship {
+            source: caption_index,
+            target: RelationshipTarget::Index(table_index),
+            kind: RelationshipKind::Caption,
+        });
+        // Anchored on the page-1 header, which the strip removes: dropped whole.
+        doc.push_relationship(Relationship {
+            source: 0,
+            target: RelationshipTarget::Key("anchor".to_string()),
+            kind: RelationshipKind::InternalLink,
+        });
+        // Body paragraph -> caption: both endpoints survive and must shift.
+        doc.push_relationship(Relationship {
+            source: 15,
+            target: RelationshipTarget::Index(caption_index),
+            kind: RelationshipKind::InternalLink,
+        });
+
+        strip_furniture_from_structured_document(&mut doc, crate::pdf::native::text::FurniturePermissions::default());
+
+        assert_eq!(doc.elements.len(), 10, "8 headers stripped, everything else stays");
+        assert_eq!(doc.relationships.len(), 2, "the header-anchored relationship is dropped");
+        let caption_rel = &doc.relationships[0];
+        assert_eq!(caption_rel.source, 8, "the caption lands after the 8 surviving body lines");
+        assert_eq!(caption_rel.target, RelationshipTarget::Index(9), "the table follows the caption");
+        let body_rel = &doc.relationships[1];
+        assert_eq!(body_rel.source, 7, "page-8 body is the last survivor before the caption");
+        assert_eq!(body_rel.target, RelationshipTarget::Index(8));
+    }
+
+    /// A document whose paragraphs never repeat keeps every element AND every
+    /// relationship exactly as it was — the remap path must be a no-op there,
+    /// not a shift-everything-to-zero.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn structured_furniture_strip_without_furniture_leaves_relationships_alone() {
+        use crate::types::document_structure::RelationshipKind;
+        use crate::types::internal::{ElementKind, InternalElement, Relationship, RelationshipTarget};
+
+        let mut doc = crate::types::internal::InternalDocument::new("pdf");
+        let mut paragraph = InternalElement::text(ElementKind::Paragraph, "A single unique body line", 0);
+        paragraph.page = Some(1);
+        let caption_index = doc.push_element(paragraph);
+        let table_index = doc.push_element(InternalElement::text(ElementKind::Code, "code", 0));
+        doc.push_relationship(Relationship {
+            source: caption_index,
+            target: RelationshipTarget::Index(table_index),
+            kind: RelationshipKind::Caption,
+        });
+
+        strip_furniture_from_structured_document(&mut doc, crate::pdf::native::text::FurniturePermissions::default());
+
+        assert_eq!(doc.elements.len(), 2);
+        assert_eq!(doc.relationships.len(), 1);
+        assert_eq!(doc.relationships[0].source, caption_index);
+        assert_eq!(doc.relationships[0].target, RelationshipTarget::Index(table_index));
     }
 
     #[cfg(feature = "pdf")]

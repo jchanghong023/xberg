@@ -331,10 +331,15 @@ pub(crate) fn render_djot(doc: &InternalDocument) -> String {
 /// Escape the characters that would end an alt text's `![…]` bracket early: a `]` closes
 /// the alt, a `[` opens a nested one, and a `\` starts an escape sequence. Backslash
 /// escaping is the minimal CommonMark contract; the comrak writers get it from comrak's
-/// own text nodes, while this line is assembled by hand.
+/// own text nodes, while this line is assembled by hand. Control characters are dropped
+/// with the same policy as the comrak marker alt — an embedded newline in a caption
+/// would otherwise split the marker across lines.
 fn escape_image_alt(alt: &str) -> String {
     let mut escaped = String::with_capacity(alt.len());
     for character in alt.chars() {
+        if character.is_control() {
+            continue;
+        }
         if matches!(character, '[' | ']' | '\\') {
             escaped.push('\\');
         }

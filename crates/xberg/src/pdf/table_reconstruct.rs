@@ -2126,15 +2126,22 @@ fn strip_caption_anchor(cell: &str) -> Option<&str> {
 fn is_toc_dot_band_cell(cell: &str) -> bool {
     let mut run_dots = 0usize;
     let mut has_prefix = false;
+    let mut seen_page_number = false;
     for token in cell.split_whitespace() {
         let token_is_dots = !token.is_empty() && token.chars().all(|c| c == '.');
         if token_is_dots {
             run_dots += token.chars().count();
             continue;
         }
-        // First non-dot token after a >=4-dot run must be the page number.
+        // First non-dot token after a >=4-dot run must be the page number, and
+        // it must be the LAST token — "Entry . . . . 5 and more text" is a
+        // notes column, not a TOC band.
         if run_dots >= 4 {
-            return !token.is_empty() && token.chars().all(|c| c.is_ascii_digit());
+            if seen_page_number || !token.chars().all(|c| c.is_ascii_digit()) {
+                return false;
+            }
+            seen_page_number = true;
+            continue;
         }
         // Non-dot token before the run gathered enough dots: prefix text.
         has_prefix = true;
@@ -5127,6 +5134,10 @@ mod tests {
         assert!(!is_toc_dot_band_cell("see section 2"));
         // Text after the band that is not a page number.
         assert!(!is_toc_dot_band_cell("Entry . . . . and more text"));
+        // Text after the page number, too: the number must be the LAST token —
+        // a "page number then annotation" cell is a notes column, and letting
+        // it pass let a genuine notes grid hit the 60% dot-band rejection.
+        assert!(!is_toc_dot_band_cell("Entry . . . . 5 and more text"));
     }
 
     #[test]

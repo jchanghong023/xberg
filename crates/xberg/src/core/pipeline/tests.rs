@@ -2623,7 +2623,7 @@ mod document_counts {
     #[test]
     fn rewrite_content_image_extensions_skips_code_fences() {
         let mut content =
-            String::from("见 ![](image_0.emf)\n\n```text\n![](image_0.emf)\n```\n");
+            String::from("见 ![](image_0.emf)\n\n```text\nsee ![](image_0.emf) below\n```\n");
         super::rewrite_content_image_extensions(
             &mut content,
             &[(0, "emf".to_string(), "png".to_string())],
@@ -2633,8 +2633,30 @@ mod document_counts {
             "the unfenced reference must follow the rename; got: {content:?}"
         );
         assert!(
-            content.contains("```text\n![](image_0.emf)\n```"),
+            content.contains("```text\nsee ![](image_0.emf) below\n```"),
             "the fenced literal is text, not a reference; got: {content:?}"
+        );
+    }
+
+    /// A fenced line that is EXACTLY an image marker is the shape the Markdown
+    /// path's lift promotes into a live reference after this pass — the rename
+    /// must reach it, or the promoted line points at the pre-rename file. A
+    /// marker embedded in longer listing text stays literal.
+    #[test]
+    fn rewrite_content_image_extensions_rewrites_a_whole_line_marker_inside_a_fence() {
+        let mut content =
+            String::from("```text\n![](image_0.emf)\n```\nsee ![](image_0.emf)\n");
+        super::rewrite_content_image_extensions(
+            &mut content,
+            &[(0, "emf".to_string(), "png".to_string())],
+        );
+        assert!(
+            content.contains("```text\n![](image_0.png)\n```"),
+            "the whole-line marker inside the fence follows the rename: {content:?}"
+        );
+        assert!(
+            content.ends_with("see ![](image_0.png)\n"),
+            "the unfenced reference follows the rename too: {content:?}"
         );
     }
 

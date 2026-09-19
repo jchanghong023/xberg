@@ -185,7 +185,8 @@ enum Commands {
         /// in the batch; without this flag the base is the current directory), because one
         /// directory holding every document's `image_N.ext` files would drop all but the last
         /// document's pictures.
-        /// The directory must already exist.
+        /// The directory must already exist; batch mode creates the per-document
+        /// `doc_<N>` subdirectories inside it as needed.
         #[arg(long)]
         output_dir: Option<PathBuf>,
 
@@ -246,7 +247,8 @@ enum Commands {
         /// in the batch; without this flag the base is the current directory), because one
         /// directory holding every document's `image_N.ext` files would drop all but the last
         /// document's pictures.
-        /// The directory must already exist.
+        /// The directory must already exist; batch mode creates the per-document
+        /// `doc_<N>` subdirectories inside it as needed.
         #[arg(long)]
         output_dir: Option<PathBuf>,
 
