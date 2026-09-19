@@ -109,7 +109,7 @@ Consequence: adding a feature to `full` without adding it to `windows-target` fa
 
 ## Build Profiles
 
-- `release` — LTO thin, codegen-units=1, strip
+- `release` — LTO off, codegen-units=256, strip (wall-clock package builds; keep opt-level=3)
 - `profiling` — inherits release, retains debug info
 - `xberg-wasm` override: `opt-level="z"` (size-optimized)
 - `sevenz-rust2` override: `opt-level=1` — **not 2**. The manifest comment is explicit: "opt-level=2 still SIGBUS'd in go:e2e". Raising it reintroduces the crash

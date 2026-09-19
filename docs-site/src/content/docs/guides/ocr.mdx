@@ -61,7 +61,7 @@ The Candle backends (GLM-OCR, TrOCR, DeepSeek-OCR, PaddleOCR-VL) ship compiled i
 | ---------------- | -------------------- | ----------------------------------- | --------------------------- | ------------------ | ---------------- | ----------------------- | ----------------------- | ------------------------ |
 | **Speed**        | Fast                 | Model-dependent                     | Fast on CPU                 | Moderate           | Moderate         | Moderate                | Moderate                | Slow (API latency)       |
 | **Accuracy**     | Good                 | Excellent                           | Good                        | Excellent          | Good             | Excellent               | Excellent               | Highest                  |
-| **Languages**    | 100+                 | 80+ (11 script families)            | 6 EasyOCR gen2 groups       | All               | 100+             | 20+ (CJK + Latin)       | 20+ (CJK + Latin)       | All (provider-dependent) |
+| **Languages**    | 100+                 | 80+ (11 script families)            | 8 EasyOCR gen2 groups       | All               | 100+             | 20+ (CJK + Latin)       | 20+ (CJK + Latin)       | All (provider-dependent) |
 | **Installation** | System package       | Built-in (native) or Python package | Built-in or Cargo feature   | Built-in           | Built-in         | Built-in                | Built-in                | API key only             |
 | **Model size**   | ~10 MB               | Mobile ~8 MB, Server ~120 MB        | Downloaded on first use     | ~3 GB              | ~250 MB          | ~4 GB                   | ~2.5 GB                 | None (cloud-hosted)      |
 | **GPU support**  | No                   | Yes                                 | No (CPU-only in Xberg 1.1) | Yes (Metal/CUDA)   | Yes (Metal/CUDA) | Yes (Metal/CUDA)        | Yes (Metal/CUDA)        | N/A (server-side)        |
@@ -72,7 +72,7 @@ The Candle backends (GLM-OCR, TrOCR, DeepSeek-OCR, PaddleOCR-VL) ship compiled i
 
 | Backend | Strengths | Trade-offs | Choose it when |
 | --- | --- | --- | --- |
-| **Tesseract** | Broad language and platform support; low runtime overhead; hierarchical hOCR output | Requires a system package and separately installed language data; less reliable on scene text and difficult scans | You need the default backend, WebAssembly support, or a small deployment footprint |
+| **Tesseract** | Broad language and platform support; low runtime overhead; hierarchical hOCR output | Requires a system package and separately installed language data; less reliable on scene text and difficult scans | You need the Tesseract fallback (builds without `paddle-ocr`), WebAssembly support, or a small deployment footprint |
 | **PaddleOCR** | Strong recognition quality; mobile and server model tiers; GPU support; strong CJK coverage | Larger model downloads; server models can be slow and memory-intensive on CPU | Recognition quality is the priority, especially for CJK documents, and you can budget for the model/runtime cost |
 | **Sceptre** | CRAFT detection and CRNN recognition; eight EasyOCR Gen2 language groups | CPU-only; tract mobile builds and opt-in worker-hosted WASM have larger artifacts | You need EasyOCR Gen2 recognition without a Python runtime |
 
@@ -800,7 +800,7 @@ xberg extract document.pdf --force-ocr true --ocr-backend candle-deepseek-ocr --
 
 ### Candle PaddleOCR-VL
 
-PaddleOCR-VL 1.5 — SigLIP vision encoder + Ernie-4.5 text decoder for lightweight multilingual document understanding. Markdown output.
+PaddleOCR-VL 1.6 — SigLIP vision encoder + Ernie-4.5 text decoder for lightweight multilingual document understanding. Markdown output.
 
 <Tabs syncKey="lang">
 <TabItem label="Native bindings (Rust, Go, TypeScript, Node.js, Java, C#, Ruby, PHP, Elixir)">
@@ -1256,8 +1256,8 @@ Set `pipeline` (`OcrPipelineConfig`) to try several backends in priority order (
 
 When `pipeline` is set, the top-level `backend`, `vlm_fallback`, and `backend_options` are ignored — configure each stage directly instead.
 
-:::note[Automatic paddle-ocr pipeline]
-When the `paddle-ocr` feature is compiled in and `backend` is the default (`tesseract`), xberg auto-constructs a `[tesseract @ 100, paddleocr @ 50]` pipeline. An explicitly chosen non-default backend is honored as-is with no silent fallback.
+:::note[No automatic classical fallback]
+The default `backend` is already the strongest classical engine compiled in (`paddle-ocr` where the `paddle-ocr` feature is on, `tesseract` otherwise), so xberg does not mix classical backends on its own — a `[tesseract, paddleocr]` chain requires an explicit `pipeline`. Only `vlm_fallback` synthesises stages: the configured backend at priority 100, then `vlm` at 50 for `OnLowQuality`.
 :::
 
 <Tabs syncKey="lang">
@@ -1482,11 +1482,13 @@ PP-OCRv6 is the default PaddleOCR model generation (`model_version` defaults to 
 
 | Tier | Notes |
 | --- | --- |
-| `medium` | Default. |
-| `small` | Smaller/faster, lower accuracy. |
-| `tiny` | Smallest/fastest, lowest accuracy. |
+| `medium` | ~62MB detection, full 18,708-char CJK+Latin+JA/KO dictionary. Highest accuracy, substantially slower on CPU. |
+| `small` | Default. ~9.9MB detection, same dictionary as `medium`. |
+| `tiny` | ~1.8MB detection, but a reduced 6,904-char (~zh/en) dictionary — it cannot read the scripts the other tiers cover. |
 
-`model_tier` defaults to `"mobile"`, which auto-resolves to the v6 `"medium"` tier — you don't need to set `model_tier` explicitly to get v6's default behavior. A legacy `"mobile"`/`"server"` tier value under v6 also falls back to `"medium"`.
+`model_tier` defaults to `"mobile"`, which auto-resolves to the v6 `"small"` tier — you don't need to set `model_tier` explicitly to get v6's default behavior. A legacy `"server"` tier value, or any unrecognised value, resolves to `"medium"`.
+
+PaddleOCR pages do not run concurrently — the ONNX session is held behind a mutex, so the thread budget goes to intra-op parallelism and wall time scales with page count times per-page inference. On a long document the tier choice, not the thread count, is what governs how long extraction takes.
 
 Scripts outside v6's unified coverage — Arabic, Cyrillic, Devanagari, Greek, Tamil, Telugu, and Thai — transparently fall back to the PP-OCRv5 per-script recognition models; no configuration change is needed to use those languages under v6.
 

@@ -10,7 +10,7 @@ import (
 
 func main() {
 	ocrConfig := &xberg.OcrConfig{
-		Backend:  "tesseract",
+		Backend:  xberg.Ptr("tesseract"),
 		Language: []string{"eng"},
 	}
 

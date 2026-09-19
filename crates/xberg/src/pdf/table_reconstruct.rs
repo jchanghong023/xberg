@@ -40,9 +40,15 @@ const SPURIOUS_COLUMN_MIN_DATA_ROWS: usize = 20;
 const SPURIOUS_COLUMN_MIN_COLUMNS: usize = 6;
 const SPURIOUS_COLUMN_MIN_RETAINED_DENSITY_PERCENT: usize = 75;
 const FOOTER_MIN_ALPHA_PERCENT: usize = 70;
+/// Minimum percentage of a data column's non-ambiguous cells that must parse as a bare
+/// numeric literal (after dash-glyph normalisation) for the column to receive
+/// `normalize_data_cell`'s dash/exponent rewriting (xberg-io/xberg#1582).
+const NUMERIC_COLUMN_MIN_NUMERIC_PERCENT: usize = 60;
 
 #[cfg(feature = "pdf")]
 use super::hierarchy::SegmentData;
+#[cfg(feature = "pdf")]
+use super::structure::lines::segments_are_touching;
 
 /// Convert a PDF `SegmentData` to an `HocrWord` for table reconstruction, adding
 /// `advance_offset`/`top_offset` to the segment's upright-frame position before
@@ -268,13 +274,74 @@ pub(crate) fn page_has_lifted_rotation_frame(segments: &[SegmentData], page_heig
 #[cfg(feature = "pdf")]
 pub(crate) fn segments_to_words(segments: &[SegmentData], page_height: f32) -> Vec<HocrWord> {
     let lifts = rotation_lifts_for_page(segments, page_height);
-    segments
+    let per_segment_words: Vec<Vec<HocrWord>> = segments
         .iter()
-        .flat_map(|seg| {
+        .map(|seg| {
             let (advance_offset, top_offset) = lift_for_rotation(&lifts, seg.rotation_degrees);
             split_segment_to_words_lifted(seg, page_height, advance_offset, top_offset)
         })
-        .collect()
+        .collect();
+    merge_touching_segment_boundaries(segments, per_segment_words)
+}
+
+/// Merges a touching word split across two adjacent segments (xberg-io/xberg#1566) into a
+/// single `HocrWord` before table-cell assignment, so `assign_words_to_cells`'s
+/// `cell_words.join(" ")` never re-inserts the space that `split_segment_to_words_lifted`
+/// dropped by construction. `HocrWord` is `u32`-rounded and carries no font size or baseline,
+/// so a sub-point gap like the reported case (0.069 pt) is not representable once words exist
+/// — the check must run here, on `SegmentData`, one segment boundary at a time.
+///
+/// Only the last word of one segment's group and the first word of the next segment's group
+/// can ever be a split-word boundary, since a single segment's own words were already produced
+/// by whitespace-splitting its own text.
+#[cfg(feature = "pdf")]
+fn merge_touching_segment_boundaries(
+    segments: &[SegmentData],
+    mut per_segment_words: Vec<Vec<HocrWord>>,
+) -> Vec<HocrWord> {
+    for boundary in 0..per_segment_words.len().saturating_sub(1) {
+        let is_touching = match (
+            per_segment_words[boundary].last(),
+            per_segment_words[boundary + 1].first(),
+        ) {
+            (Some(prev_word), Some(next_word)) => segments_are_touching(
+                &segments[boundary],
+                &prev_word.text,
+                &segments[boundary + 1],
+                &next_word.text,
+            ),
+            _ => false,
+        };
+        if !is_touching {
+            continue;
+        }
+        let prev_word = per_segment_words[boundary].pop().expect("checked Some above");
+        let next_word = per_segment_words[boundary + 1].remove(0);
+        per_segment_words[boundary + 1].insert(0, merge_hocr_words(prev_word, next_word));
+    }
+    per_segment_words.into_iter().flatten().collect()
+}
+
+/// Combines two `HocrWord`s that are one split word into a single word: text concatenated
+/// with no separator, bounding box the union of both, confidence the lower of the two.
+#[cfg(feature = "pdf")]
+fn merge_hocr_words(prev: HocrWord, next: HocrWord) -> HocrWord {
+    let left = prev.left.min(next.left);
+    let top = prev.top.min(next.top);
+    let right = (prev.left + prev.width).max(next.left + next.width);
+    let bottom = (prev.top + prev.height).max(next.top + next.height);
+
+    let mut text = prev.text;
+    text.push_str(&next.text);
+
+    HocrWord {
+        text,
+        left,
+        top,
+        width: right - left,
+        height: bottom - top,
+        confidence: prev.confidence.min(next.confidence),
+    }
 }
 
 /// Column-wise merge of several table rows into a single logical row.
@@ -361,6 +428,42 @@ fn min_columns_for(layout_guided: bool, allow_single_column: bool) -> usize {
     }
 }
 
+/// Whether `text` is a bare ordered/bulleted list marker: a run of digits or a single
+/// lowercase letter followed by `.` or `)` (`"1."`, `"12)"`, `"a."`, `"b)"`), or a lone
+/// bullet glyph (`•`, `-`, `–`, `*`). Hand-rolled rather than pulling in `regex` for three
+/// fixed shapes this small (xberg-io/xberg#1570).
+fn is_list_marker_cell(text: &str) -> bool {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_digit() => {
+            let mut rest = chars.as_str();
+            while let Some(next_char) = rest.chars().next() {
+                if !next_char.is_ascii_digit() {
+                    break;
+                }
+                rest = &rest[next_char.len_utf8()..];
+            }
+            rest == "." || rest == ")"
+        }
+        Some(first) if first.is_ascii_lowercase() => {
+            let rest = chars.as_str();
+            rest == "." || rest == ")"
+        }
+        Some('•' | '-' | '–' | '*') => chars.as_str().is_empty(),
+        _ => false,
+    }
+}
+
+/// Whether every whitespace-separated token in `text` is a list marker. Column 0 of a
+/// reconstructed list region is not always one marker per cell: `merge_rows_columnwise`
+/// collapses a multi-row header into a single cell, so the header of a four-item list can
+/// read `"1. 2."`. Testing token-wise sees that as marker content while still rejecting a
+/// genuine header label like `"Line"` or `"Item #"` (xberg-io/xberg#1570). ~keep
+fn is_list_marker_content(text: &str) -> bool {
+    let mut tokens = text.split_whitespace().peekable();
+    tokens.peek().is_some() && tokens.all(is_list_marker_cell)
+}
+
 fn post_process_table_inner(
     mut table: Vec<Vec<String>>,
     min_columns: usize,
@@ -378,6 +481,48 @@ fn post_process_table_inner(
         );
         return None;
     }
+
+    // Caption rows a region absorbed from just above/below the real grid
+    // ("Table 3-1. Cell_types", "Table 3-5. Pin Attributes (cont.)"). The
+    // borderless detector buckets the caption line into the table region, where
+    // it reconstructs as a grid row — and for continued tables as the merged
+    // header, demoting the real column labels into a data row (Tessent manual:
+    // 5 caption rows absorbed). The anchor pattern is tight: the row must OPEN
+    // with `Table N-M.` / `Figure N-M.` and carry only short caption-title
+    // text, so a data row merely *ending* in a cross-reference ("... or
+    // Table 3-1.") never matches. Dropped at the grid entrance so every later
+    // header/flow check sees the caption-free table. ~keep
+    //
+    // Only when non-caption rows survive the drop: a grid whose EVERY row opens
+    // with the anchor is itself the document's table-of-tables / cross-reference
+    // listing (its first column legitimately carries `Table N-M.` values), not a
+    // real grid with an absorbed caption band — dropping them all used to reject
+    // the whole listing here.
+    if table.len() >= 2 {
+        let caption_rows = table.iter().filter(|row| is_caption_row(row)).count();
+        if caption_rows > 0 && caption_rows < table.len() {
+            let before = table.len();
+            table.retain(|row| !is_caption_row(row));
+            if table.len() < before {
+                tracing::debug!(
+                    target: "xberg::table_reconstruct",
+                    dropped_caption_rows = before - table.len(),
+                    "post_process_table_inner: dropped caption rows from grid"
+                );
+            }
+        }
+    }
+
+    // Truth-table merged cells: a value row like `1 1 0` whose three words
+    // clustered into one grid cell reconstructs as a single multi-character
+    // cell (`110`) on an otherwise empty row. When the grid is a truth table
+    // (almost every cell a single 0/1/X/Z bit) and the merged cell's length
+    // equals the column count, splitting it per character restores the row
+    // with no positional guesswork. Anything else (merged values scattered
+    // across several wrong columns, length != column count) needs cell
+    // coordinates this grid no longer carries and is left untouched.
+    // ~keep
+    split_merged_truth_table_cells(&mut table);
 
     let rejection_rows = table.len();
     let rejection_cols = table.first().map_or(0, Vec::len);
@@ -401,6 +546,41 @@ fn post_process_table_inner(
     }
 
     if non_empty > 0 {
+        // Dot-leader table-of-contents rows: a grid whose rows are dominated by
+        // `Entry . . . . N` bands is a fragment of the document's own TOC / list
+        // of figures, not tabular data. The wide whitespace band between a TOC
+        // entry and its page number reads as a column boundary, so the borderless
+        // detector reconstructs a two-column "table" — and the dotted band then
+        // shows up as an oversized banner header cell (Tessent manual: 16 such
+        // headers, 58 caption rows absorbed). Reject so the entries render as
+        // the text lines they are. ≥4 dots per cell keeps genuine ellipsis
+        // ("...") cells and decimal numbers safe; the 60% row share keeps a
+        // table that merely quotes one dotted row. `is_toc_dot_band_cell`
+        // extends this to band cells that kept their entry title ("Logic
+        // . . . ... 269"), which the pure-band check cannot see.
+        let non_empty_rows = table
+            .iter()
+            .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
+            .count();
+        let dot_leader_rows = table
+            .iter()
+            .filter(|row| {
+                row.iter()
+                    .any(|cell| is_dot_leader_cell(cell) || is_toc_dot_band_cell(cell))
+            })
+            .count();
+        if non_empty_rows >= 3 && dot_leader_rows * 5 > non_empty_rows * 3 {
+            tracing::debug!(
+                target: "xberg::table_reconstruct",
+                reason = "dot_leader_toc_rows",
+                dot_leader_rows,
+                non_empty_rows,
+                rows = rejection_rows,
+                cols = rejection_cols,
+                "post_process_table_inner: rejected table"
+            );
+            return None;
+        }
         if layout_guided {
             if long_cells > 0 {
                 let long_cells_100 = table
@@ -490,7 +670,15 @@ fn post_process_table_inner(
     let mut data_rows = table[data_start..].to_vec();
 
     if header_rows.len() > 2 {
-        header_rows = header_rows[header_rows.len() - 2..].to_vec();
+        // Keep the established two-row header cap, but do not discard an
+        // unusually long prefix inferred by `find_data_start`. Earlier rows
+        // are still table content; demote them to data in their original
+        // order while retaining the two rows closest to the detected data
+        // boundary as the header. ~keep
+        let surplus_header_rows = header_rows.len() - 2;
+        let mut demoted_rows: Vec<Vec<String>> = header_rows.drain(..surplus_header_rows).collect();
+        demoted_rows.append(&mut data_rows);
+        data_rows = demoted_rows;
     }
 
     if header_rows.is_empty() {
@@ -521,6 +709,45 @@ fn post_process_table_inner(
             "post_process_table_inner: rejected table"
         );
         return None;
+    }
+
+    // Prose banner header: a small grid whose header row is really a wrapped
+    // prose sentence — one long lowercase cell (>60 chars, no terminal
+    // punctuation) plus a hanging continuation row (empty first column, text
+    // in the second). Real table headers are short labels; a sentence-shaped
+    // banner comes from the borderless detector bucketing two-column prose
+    // with its continuation lines (Tessent manual: "You | can map multiple
+    // non-scan models to one scan model by listing multiple non-scan" heading
+    // a 5-row grid of the sentence's continuation and a code stanza). The
+    // lowercase opening separates it from long-but-title-case real headers,
+    // and rejecting the grid returns its lines to the prose flow they came
+    // from. ~keep
+    {
+        let banner_header = header_rows.iter().any(|row| {
+            row.iter().any(|cell| {
+                let text = cell.trim();
+                let mut chars = text.chars();
+                matches!(chars.next(), Some(first) if first.is_lowercase())
+                    && text.chars().count() > 60
+                    && !text.ends_with(['.', '?', '!', ':'])
+            })
+        });
+        if banner_header && data_rows.len() <= 4 {
+            let hanging_continuation = data_rows.iter().any(|row| {
+                row.first().is_some_and(|cell| cell.trim().is_empty())
+                    && row.get(1).is_some_and(|cell| !cell.trim().is_empty())
+            });
+            if hanging_continuation {
+                tracing::debug!(
+                    target: "xberg::table_reconstruct",
+                    reason = "prose_banner_header",
+                    header_rows = header_rows.len(),
+                    data_rows = data_rows.len(),
+                    "post_process_table_inner: rejected table"
+                );
+                return None;
+            }
+        }
     }
 
     let header = merge_rows_columnwise(&header_rows, column_count);
@@ -591,7 +818,14 @@ fn post_process_table_inner(
             } else {
                 empty_count * 4 > data_row_count * 3
             };
-            if too_sparse {
+            // A column with its own non-empty header label (e.g. a bank statement's "DEPOSIT",
+            // populated on only a minority of transaction rows) is a legitimate, intentionally
+            // sparse column, not the noise this density gate targets -- mirrors
+            // `prune_spurious_interior_column`'s established rule elsewhere in this file
+            // (`header[column].trim().is_empty()` gates eligibility there too), rather than
+            // introducing a new signal (xberg-io/xberg#1649). ~keep
+            let column_has_own_header = processed[0].get(c).is_some_and(|cell| !cell.trim().is_empty());
+            if too_sparse && !column_has_own_header {
                 tracing::debug!(
                     target: "xberg::table_reconstruct",
                     reason = "column_sparsity",
@@ -639,6 +873,36 @@ fn post_process_table_inner(
         }
     }
 
+    // A candidate whose column 0 is bare list markers ("1.", "a)", "•") end to end — the
+    // header row included — is an ordered/bulleted list, not a table: the marker is
+    // line-numbering supplied by the source layout, not a discrete data value
+    // (xberg-io/xberg#1570). Including row 0 is what separates the two lookalikes. A
+    // genuine numbered parts or invoice table carries a header label above its numbers
+    // ("Line", "#", "Item"), so its column 0 is not markers end to end and this guard
+    // leaves it alone; a fabricated list region has a list item in row 0 like every other
+    // row. Scoped to `!layout_guided`: a layout-guided region already has ML confirmation
+    // it is a real table, and both routes that produced the fabricated-table bug
+    // (Tesseract TSV clustering and PaddleOCR word clustering) call this validator with
+    // `layout_guided=false`. ~keep
+    if !layout_guided {
+        let all_col0: Vec<&str> = processed
+            .iter()
+            .filter_map(|row| row.first().map(|cell| cell.trim()))
+            .filter(|cell| !cell.is_empty())
+            .collect();
+        if !all_col0.is_empty() && all_col0.iter().all(|cell| is_list_marker_content(cell)) {
+            tracing::debug!(
+                target: "xberg::table_reconstruct",
+                reason = "list_marker_first_column",
+                marker_rows = all_col0.len(),
+                rows = processed.len(),
+                cols = processed[0].len(),
+                "post_process_table_inner: rejected table"
+            );
+            return None;
+        }
+    }
+
     let dense_numeric_grid = is_dense_numeric_grid(&processed);
 
     if processed[0].len() >= 5 {
@@ -681,6 +945,13 @@ fn post_process_table_inner(
     }
 
     if processed[0].len() >= 2 {
+        // The marker relaxation below applies only when column 0 has no header label of its
+        // own. A header cell like "Line" or "#" means the punctuated numbers beneath it are
+        // row-number *data* in a real table, not list markers (#1570). ~keep
+        let header_col0_is_marker = processed[0]
+            .first()
+            .map(|cell| cell.trim())
+            .is_some_and(is_list_marker_content);
         let mut flow_rows = 0usize;
         let mut eligible_rows = 0usize;
         for row in processed.iter().skip(1) {
@@ -690,10 +961,26 @@ fn post_process_table_inner(
                 continue;
             }
             eligible_rows += 1;
-            let ends_without_punct =
-                !col0.ends_with('.') && !col0.ends_with('?') && !col0.ends_with('!') && !col0.ends_with(':');
+            let col0_is_list_marker = is_list_marker_content(col0);
+            // A list marker's own trailing `.`/`)` is punctuation supplied by the marker
+            // convention, not a sentence-final period — it must not exempt the row from
+            // the flow signal below the way real prose punctuation does (#1570).
+            let ends_without_punct = col0_is_list_marker
+                || (!col0.ends_with('.') && !col0.ends_with('?') && !col0.ends_with('!') && !col0.ends_with(':'));
             let starts_lowercase = col1.chars().next().is_some_and(|c| c.is_lowercase());
-            if ends_without_punct && starts_lowercase {
+            // A real list item's second field is typically a new capitalized clause, not a
+            // lowercase sentence continuation, so `starts_lowercase` is the wrong signal
+            // once col0 is known to be a marker — any non-empty col1 already means this
+            // marker is not standing alone as a discrete column value. Gated on
+            // `header_col0_is_marker` so a headed row-number column keeps the strict
+            // signal, and on `!layout_guided` because a layout-guided region is
+            // ML-confirmed as a real table (#1570). ~keep
+            let flows = if col0_is_list_marker && header_col0_is_marker && !layout_guided {
+                ends_without_punct
+            } else {
+                ends_without_punct && starts_lowercase
+            };
+            if flows {
                 flow_rows += 1;
             }
         }
@@ -753,7 +1040,18 @@ fn post_process_table_inner(
                         .count();
                     let empty_ratio = empty_in_col as f64 / data_row_count as f64;
 
-                    if char_share < 0.15 && empty_ratio > 0.5 {
+                    // A column with its own non-empty header label (e.g. a bank statement's
+                    // "DEPOSIT", populated on only a minority of transaction rows) is a
+                    // legitimate, intentionally sparse column, not a stray annotation/footnote
+                    // fragment split from prose -- mirrors `prune_spurious_interior_column`'s
+                    // established rule elsewhere in this file (`header[column].trim().is_empty()`
+                    // gates eligibility there too), rather than introducing a new signal
+                    // (xberg-io/xberg#1649). ~keep
+                    let column_has_own_header = processed
+                        .first()
+                        .and_then(|header| header.get(c))
+                        .is_some_and(|cell| !cell.trim().is_empty());
+                    if char_share < 0.15 && empty_ratio > 0.5 && !column_has_own_header {
                         tracing::debug!(
                             target: "xberg::table_reconstruct",
                             reason = "content_asymmetry_sparse_column",
@@ -901,9 +1199,23 @@ fn post_process_table_inner(
         *cell = text;
     }
 
+    // Gated per column, not applied to every data cell end to end: `normalize_data_cell`'s
+    // dash/exponent rewriting is correct for a financial column (an em-dash cell means nil,
+    // `1.5E-05` is scientific notation) and corrupts a prose column (`Functionaliteit—12`, a
+    // part code `HRE - HReco`). Row 0 already never reaches this loop, kept above (xberg-io/
+    // xberg#1582). ~keep
+    let numeric_columns: Vec<bool> = (0..processed[0].len())
+        .map(|col| column_is_numeric_for_normalization(&processed, col))
+        .collect();
+
     for row in processed.iter_mut().skip(1) {
-        for cell in row.iter_mut() {
-            normalize_data_cell(cell);
+        for (col, cell) in row.iter_mut().enumerate() {
+            if numeric_columns.get(col).copied().unwrap_or(false) {
+                normalize_data_cell(cell);
+            } else {
+                let trimmed = cell.trim().to_string();
+                *cell = trimmed;
+            }
         }
     }
 
@@ -918,6 +1230,34 @@ fn post_process_table_inner(
 }
 
 fn find_data_start(table: &[Vec<String>], layout_guided: bool) -> usize {
+    // A first row that is fully populated and holds no digit at all is unambiguously a text
+    // header label row (e.g. "DATE | DESCRIPTION | WITHDRAWAL | DEPOSIT | BALANCE") -- trust it
+    // outright rather than scanning forward for enough numeric cells to declare data started.
+    // Without this, a sparse first DATA row (e.g. a bank statement's opening-balance entry,
+    // which has neither a withdrawal nor a deposit, so only 2 of 5 cells are numeric) can fall
+    // short of `DEFAULT_MIN_DATA_ROW_DIGIT_CELLS` and get folded into a bogus multi-row header
+    // merge with the row after it (xberg-io/xberg#1649).
+    //
+    // Scoped to `!layout_guided`: a layout-guided (ML-confirmed) table already has the more
+    // deliberate `looks_like_multiline_numeric_header`/repeated-row-shape logic below to decide
+    // whether a digit-bearing second row is a units-annotation header continuation or real data,
+    // and this early return must not preempt that.
+    //
+    // Also gated on row 1 looking like data (holding at least one digit): a genuine two-row text
+    // header (e.g. "Region | Sales Amount | Growth Rate" over "Area Code | Dollars | Percent")
+    // also has a fully populated, digit-free first row, and without this guard the shortcut
+    // stops one row too early, folding the second header row into the data (xberg-io/xberg#1649
+    // review follow-up). ~keep
+    if !layout_guided
+        && let Some(first_row) = table.first()
+        && !first_row.is_empty()
+        && first_row.iter().all(|cell| !cell.trim().is_empty())
+        && digit_cell_count(first_row) == 0
+        && table.get(1).is_some_and(|row| digit_cell_count(row) > 0)
+    {
+        return 1;
+    }
+
     let first_numeric_row = table
         .iter()
         .position(|row| digit_cell_count(row) >= DEFAULT_MIN_DATA_ROW_DIGIT_CELLS)
@@ -1691,6 +2031,429 @@ fn is_numeric_value_cell(cell: &str) -> bool {
 /// isolated braces appear only in code block delimiters, never in real table data.
 const CODE_BRACE_CELL_FRACTION: f64 = 0.20;
 
+/// Minimum number of non-empty rows carrying a Verilog port/attribute
+/// declaration signal before [`looks_like_verilog_declaration_grid`] may
+/// demote a reconstructed grid as a code listing.
+const VERILOG_DECLARATION_MIN_ROWS: usize = 3;
+
+/// Fraction of non-empty rows carrying a Verilog port/attribute declaration
+/// signal required to demote a grid as a code listing. At 0.60, an isolated
+/// assignment-looking row inside a genuine table cannot demote it on its own.
+const VERILOG_DECLARATION_ROW_FRACTION: f64 = 0.60;
+
+/// Returns `true` if the reconstructed table grid reads as Verilog port /
+/// attribute declaration rows rather than genuine tabular data.
+///
+/// The Tessent-style hardware manuals present LibComp attribute blocks as
+/// monospace stanzas — `nonscan_model = FD2P;`, `input (CD) (active_high_reset)`,
+/// `output [Bits-1 : 0] Q;` — whose per-row two-token shape reconstructs into a
+/// plausible-looking two-column "table". Unlike C listings these carry no curly
+/// braces, so [`looks_like_code_listing`]'s brace signals never fire. Five row
+/// shapes count as declaration evidence:
+/// 1. an assignment row: any cell contains `=` and the joined row contains `;`
+/// 2. a port-attribute pair: `ident) (group` — a parenthesised identifier
+///    group followed by a space-free parenthesised group, the classic
+///    `(pin) (attribute)` Verilog port notation (a space inside the second
+///    group, as in prose "(see Table 4) (Appendix B)", is not a port group)
+/// 3. a keyword-led declaration: the row opens with `input`/`output`/
+///    `inout`/`parameter` and is `;`-terminated like every Verilog statement
+/// 4. a bare scaffolding cell whose whole text is `(` or `)`
+/// 5. a comment-led row: the joined row opens with `//`
+///
+/// Requiring a supermajority of rows keeps API-reference tables (which may
+/// quote one code-ish cell) and prose tables safe from demotion.
+pub(crate) fn looks_like_verilog_declaration_grid(table_cells: &[Vec<String>]) -> bool {
+    let non_empty_rows = table_cells
+        .iter()
+        .filter(|row| row.iter().any(|cell| !cell.trim().is_empty()))
+        .collect::<Vec<_>>();
+    if non_empty_rows.len() < VERILOG_DECLARATION_MIN_ROWS {
+        return false;
+    }
+    let signal_rows = non_empty_rows
+        .iter()
+        .filter(|row| is_verilog_declaration_row(row))
+        .count();
+    (signal_rows as f64) / (non_empty_rows.len() as f64) >= VERILOG_DECLARATION_ROW_FRACTION
+}
+
+/// Whether one cell is a pure dot-leader band — dots (optionally space
+/// separated, as PDF TOC dot rows usually are) optionally followed by a page
+/// number, with no other characters. `". . . . . 279"` qualifies; `"..."`,
+/// `"3.4.1"` and `"see section 2"` do not.
+///
+/// A leader run must also exist: at least one whitespace-separated token that
+/// is nothing but dots. Version and build numbers (`"1.2.3.4.5"`,
+/// `"2024.1.2.3.4"`) clear the character filter on digits alone, but every one
+/// of their tokens carries digits too, so they do not qualify — a whole table
+/// was once rejected because its version column looked like a TOC.
+fn is_dot_leader_cell(cell: &str) -> bool {
+    let trimmed = cell.trim();
+    let dot_count = trimmed.chars().filter(|c| *c == '.').count();
+    if dot_count < 4 {
+        return false;
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c == '.' || c.is_whitespace() || c.is_ascii_digit())
+    {
+        return false;
+    }
+    trimmed.split_whitespace().any(|token| token.chars().all(|c| c == '.'))
+}
+
+/// Maximum total caption-title characters (anchor excluded) a
+/// [`is_caption_row`] row may carry. Caption titles are short ("Cell_types",
+/// "Pin Attributes (cont.)"); a data row carrying a cross-reference stays well
+/// above this once its other cells are counted.
+const CAPTION_ROW_MAX_TITLE_CHARS: usize = 64;
+
+/// Whether one reconstructed row reads as a table caption line: its first
+/// non-empty cell opens with a `Table N-M.` / `Figure N-M.` anchor (digits,
+/// dash, digits, terminating dot) and the row's remaining text is a short
+/// caption title. See the drop site in [`post_process_table_inner`] for why.
+fn is_caption_row(row: &[String]) -> bool {
+    let cells: Vec<&str> = row
+        .iter()
+        .map(|cell| cell.trim())
+        .filter(|cell| !cell.is_empty())
+        .collect();
+    let Some(anchor) = cells.first() else {
+        return false;
+    };
+    let Some(title_in_anchor) = strip_caption_anchor(anchor) else {
+        return false;
+    };
+    let title_chars =
+        title_in_anchor.chars().count() + cells[1..].iter().map(|cell| cell.chars().count()).sum::<usize>();
+    title_chars <= CAPTION_ROW_MAX_TITLE_CHARS
+}
+
+/// Whether `cell` opens with a `Table N-M.` / `Figure N-M.` caption anchor;
+/// returns the anchor cell's trailing text (the start of the caption title),
+/// if any. The anchor must END the anchor cell's number with `.` — "Table 3-1
+/// lists" (a prose sentence quoting the reference) does not match.
+fn strip_caption_anchor(cell: &str) -> Option<&str> {
+    let mut rest = cell.trim_start();
+    let kind_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    if kind_end == 0 || (&rest[..kind_end] != "Table" && &rest[..kind_end] != "Figure") {
+        return None;
+    }
+    rest = rest[kind_end..].trim_start();
+    let number_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let number = &rest[..number_end];
+    let mut chars = number.chars().peekable();
+    fn take_digits(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> bool {
+        let mut any = false;
+        while chars.peek().is_some_and(|c| c.is_ascii_digit()) {
+            chars.next();
+            any = true;
+        }
+        any
+    }
+    if !take_digits(&mut chars) {
+        return None;
+    }
+    if chars.next() != Some('-') {
+        return None;
+    }
+    if !take_digits(&mut chars) {
+        return None;
+    }
+    if chars.next() != Some('.') || chars.peek().is_some() {
+        return None;
+    }
+    // Whatever remains of the anchor cell after "Table N-M." is the start of
+    // the caption title ("Cell_types" in "Table 3-1. Cell_types").
+    Some(rest[number_end..].trim_start())
+}
+
+/// Whether one cell reads as a table-of-contents dot band that carries entry
+/// text: `"Logic . . . . 269"` — arbitrary prefix tokens, then a run of
+/// space-separated dot tokens totalling >= 4 dots, then at most one trailing
+/// page-number token. [`is_dot_leader_cell`] only matches cells that are
+/// *pure* dot/page-number bands; long TOC entry titles reconstruct with the
+/// title text and its dot band in separate grid columns, so the band cell
+/// keeps its prefix (Tessent manual: "Mux Scan DFF With Complex Asynchronous
+/// | Logic . . . ... 269"). A bare `"...."` ellipsis cell matches neither
+/// check: without a prefix or a page number it carries no TOC evidence.
+fn is_toc_dot_band_cell(cell: &str) -> bool {
+    let mut run_dots = 0usize;
+    let mut has_prefix = false;
+    let mut seen_page_number = false;
+    for token in cell.split_whitespace() {
+        let token_is_dots = !token.is_empty() && token.chars().all(|c| c == '.');
+        if token_is_dots {
+            run_dots += token.chars().count();
+            continue;
+        }
+        // First non-dot token after a >=4-dot run must be the page number, and
+        // it must be the LAST token — "Entry . . . . 5 and more text" is a
+        // notes column, not a TOC band.
+        if run_dots >= 4 {
+            if seen_page_number || !token.chars().all(|c| c.is_ascii_digit()) {
+                return false;
+            }
+            seen_page_number = true;
+            continue;
+        }
+        // Non-dot token before the run gathered enough dots: prefix text.
+        has_prefix = true;
+        run_dots = 0;
+    }
+    run_dots >= 4 && has_prefix
+}
+
+/// Whether one cell's characters are all truth-table bit symbols (`0` `1` `X`
+/// `Z` `x` `z` `l` `h` `L` `H`), optionally with the `/` don't-care separator
+/// and a `*` footnote marker ("`0/1/X/Z`", "`Z*`"). Digits beyond 0/1 are
+/// included because truth-table prints annotate states with numeric footnote
+/// markers ("`X2`" = X with footnote 2); this gate only decides whether the
+/// grid reads as bit-shaped, so being generous here costs nothing — the actual
+/// split decision below requires pure bit characters.
+fn is_bitstring_cell(cell: &str) -> bool {
+    !cell.is_empty()
+        && cell
+            .chars()
+            .all(|c| c.is_ascii_digit() || matches!(c, 'X' | 'Z' | 'x' | 'z' | 'l' | 'h' | 'L' | 'H' | '/' | '*'))
+}
+
+/// Whether `value` is pure bit symbols (no `/`, `*`, or footnote digits) — the
+/// strict character set a merged truth-table value row must satisfy before its
+/// characters may be re-split into columns.
+fn is_pure_bit_value(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|c| matches!(c, '0' | '1' | 'X' | 'Z' | 'x' | 'z' | 'l' | 'h' | 'L' | 'H'))
+}
+
+/// Whether `row` is a merged truth-table value row: exactly one non-empty
+/// cell, whose value is pure-bit and whose length equals the grid's column
+/// count — the shape of a `1 1 0` input row whose three words clustered into
+/// one cell. Length == column count is what makes the per-character split
+/// positionally exact: the reconstructed values fill the row left to right
+/// with no coordinate guesswork. Returns the split cells.
+fn merged_truth_table_row(row: &[String]) -> Option<Vec<String>> {
+    let mut non_empty = row.iter().map(|cell| cell.trim()).filter(|cell| !cell.is_empty());
+    let value = non_empty.next()?;
+    if non_empty.next().is_some() || value.chars().count() != row.len() {
+        return None;
+    }
+    if !is_pure_bit_value(value) {
+        return None;
+    }
+    Some(value.chars().map(|c| c.to_string()).collect())
+}
+
+/// Anchor-validated variant for rows the exact split cannot handle: several
+/// single-bit cells survived in their own columns while the rest of the row
+/// (its empty cells plus one adjacent bit run) clustered together —
+/// `| | 00 | 0 |` on a 3-column grid (the `IN` bit merged into the `CNT`
+/// cell) or `| 0 | 0 | XX0 | | 0 | 0 | |` on a 7-column one. The surviving
+/// single-bit cells are anchors: concatenate every pure-bit cell in reading
+/// order and accept only when the total length equals the column count and
+/// every anchor's character equals the character its column position
+/// predicts. A mismatch means the merged run does not cover the empty
+/// columns contiguously in reading order and the split point would be a
+/// guess — the row is left untouched. Returns the per-column characters.
+fn anchored_truth_table_row(row: &[String]) -> Option<Vec<String>> {
+    let mut chars = String::new();
+    let mut multi_cell_count = 0usize;
+    for cell in row {
+        let trimmed = cell.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if !is_pure_bit_value(trimmed) {
+            return None;
+        }
+        if trimmed.chars().count() > 1 {
+            multi_cell_count += 1;
+        }
+        chars.push_str(trimmed);
+    }
+    if multi_cell_count != 1 || chars.chars().count() != row.len() {
+        return None;
+    }
+    let split: Vec<String> = chars.chars().map(|c| c.to_string()).collect();
+    let mut index = 0usize;
+    for cell in row {
+        let trimmed = cell.trim();
+        if trimmed.is_empty() {
+            index += 1;
+            continue;
+        }
+        if trimmed.chars().count() == 1 && split[index] != trimmed {
+            return None;
+        }
+        index += 1;
+    }
+    Some(split)
+}
+
+/// Split merged truth-table value rows (`| | 110 | |` on a 3-column grid)
+/// into one single-bit cell per column (`| 1 | 1 | 0 |`). Gated four ways so
+/// no other table shape can reach the split: 3-8 columns; at least one merged
+/// row; at least one ordinary row whose non-empty cells are majority single
+/// bit characters (proof the grid really is a truth table, not a numeric
+/// table where "101" is a decimal value); and >=60% of all non-empty cells
+/// outside the first (header-candidate) row bit-shaped — measured on the raw
+/// Tessent grids this targets (e.g. the 6-column D flip-flop table whose
+/// "X2"-style footnote cells drag the all-row figure to 58%), the header
+/// labels are the only non-bit cells a truth table carries. Returns how many
+/// rows were split. Rows whose merged values scattered across several wrong
+/// columns, or whose length != column count, carry no positional evidence
+/// and are left untouched (they need cell coordinates this grid no longer
+/// has). [`anchored_truth_table_row`] additionally rescues rows where
+/// single-bit anchor cells pin down an otherwise ambiguous cluster.
+pub(crate) fn split_merged_truth_table_cells(table: &mut [Vec<String>]) -> usize {
+    let Some(columns) = table.first().map(Vec::len) else {
+        return 0;
+    };
+    if !(3..=8).contains(&columns) {
+        return 0;
+    }
+    let mut merged_rows = 0usize;
+    let mut anchored_rows = 0usize;
+    let mut non_empty_cells = 0usize;
+    let mut bitstring_cells = 0usize;
+    let mut has_single_bit_evidence_row = false;
+    let mut passed_header_candidate = false;
+    for row in table.iter() {
+        if merged_truth_table_row(row).is_some() {
+            merged_rows += 1;
+        } else if anchored_truth_table_row(row).is_some() {
+            anchored_rows += 1;
+        }
+        let row_is_empty = row.iter().all(|cell| cell.trim().is_empty());
+        let counts_toward_fraction = passed_header_candidate || row_is_empty;
+        if !row_is_empty {
+            passed_header_candidate = true;
+        }
+        let mut non_empty_in_row = 0usize;
+        let mut single_bit_in_row = 0usize;
+        for cell in row {
+            let trimmed = cell.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if counts_toward_fraction {
+                non_empty_cells += 1;
+                if is_bitstring_cell(trimmed) {
+                    bitstring_cells += 1;
+                }
+            }
+            non_empty_in_row += 1;
+            if trimmed.chars().count() == 1
+                && trimmed
+                    .chars()
+                    .next()
+                    .is_some_and(|c| matches!(c, '0' | '1' | 'X' | 'Z' | 'x' | 'z' | 'l' | 'h' | 'L' | 'H'))
+            {
+                single_bit_in_row += 1;
+            }
+        }
+        if non_empty_in_row > 0 && single_bit_in_row * 2 >= non_empty_in_row {
+            has_single_bit_evidence_row = true;
+        }
+    }
+    if merged_rows + anchored_rows == 0
+        || !has_single_bit_evidence_row
+        || non_empty_cells == 0
+        || bitstring_cells * 100 < non_empty_cells * TRUTH_TABLE_MIN_BITSTRING_CELL_PERCENT
+    {
+        return 0;
+    }
+    let mut split_count = 0usize;
+    for row in table.iter_mut() {
+        if let Some(split) = merged_truth_table_row(row) {
+            *row = split;
+            split_count += 1;
+        } else if let Some(split) = anchored_truth_table_row(row) {
+            *row = split;
+            split_count += 1;
+        }
+    }
+    split_count
+}
+
+/// Minimum percentage of a truth-table candidate's non-empty cells that must
+/// be bit-shaped before [`split_merged_truth_table_cells`] may rewrite rows.
+const TRUTH_TABLE_MIN_BITSTRING_CELL_PERCENT: usize = 60;
+
+/// Whether one reconstructed row reads as a Verilog port/attribute declaration
+/// line. See [`looks_like_verilog_declaration_grid`] for the five shapes.
+fn is_verilog_declaration_row(row: &[String]) -> bool {
+    let cells: Vec<&str> = row
+        .iter()
+        .map(|cell| cell.trim())
+        .filter(|cell| !cell.is_empty())
+        .collect();
+    if cells.is_empty() {
+        return false;
+    }
+    let joined = cells.join(" ");
+
+    // 1. Assignment row: `nonscan_model = FD2P;`
+    if cells.iter().any(|cell| cell.contains('=')) && joined.contains(';') {
+        return true;
+    }
+
+    // 2. Port-attribute pair: `input (CD) (active_high_reset)`. Hand-rolled to
+    //    avoid pulling `regex` in: find `)` followed by optional spaces and `(`,
+    //    with an identifier character before the closing paren. The group after
+    //    the second `(` must be a space-free bracketed run — that is what
+    //    separates the port notation from prose cross-references like
+    //    "(see Table 4) (Appendix B)", whose second group contains a space.
+    //    An empty second group (`input (clk) ( )`, the no-attributes port form)
+    //    also qualifies: empty parentheses pairs do not occur in prose.
+    {
+        let bytes = joined.as_bytes();
+        for i in 1..bytes.len() {
+            if bytes[i] == b')' && bytes[i - 1].is_ascii_alphanumeric() && joined[i + 1..].trim_start().starts_with('(')
+            {
+                let group = joined[i + 1..].trim_start().trim_start_matches('(');
+                if let Some(end) = group.find(')') {
+                    let inner = &group[..end];
+                    if inner.trim().is_empty() || (end <= 32 && !inner.chars().any(char::is_whitespace)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. Keyword-led declaration: `output [Bits-1 : 0] Q;`, `input CK, CSN;`.
+    //    Verilog declaration statements are `;`-terminated, so the keyword
+    //    signal requires the terminator: that keeps a genuine port table's
+    //    data rows ("input | Clock (rising) | ...", no semicolon in any
+    //    column) from counting as declaration evidence regardless of which
+    //    column Direction sits in.
+    if let Some(first) = joined.split_whitespace().next()
+        && matches!(first, "input" | "output" | "inout" | "parameter")
+        && joined.contains(';')
+    {
+        return true;
+    }
+
+    // 4. Bare scaffolding cell: a lone `(` or `)` opening/closing a stanza.
+    if cells.iter().any(|cell| *cell == "(" || *cell == ")") {
+        return true;
+    }
+
+    // 5. Comment-led code row: the joined row opens with `//` (C/Verilog line
+    //    comment). Code stanzas wrapped into two-column grids carry their
+    //    comment lines as rows ("// | The data being output from the core to
+    //    the PAD (outside world) thru"); real table data effectively never
+    //    opens a row with a comment marker.
+    if joined.starts_with("//") {
+        return true;
+    }
+
+    false
+}
+
 /// Returns `true` if the reconstructed table grid looks like a code listing
 /// rather than genuine tabular data.
 ///
@@ -1698,7 +2461,7 @@ const CODE_BRACE_CELL_FRACTION: f64 = 0.20;
 /// (especially C-family language listings with curly-brace syntax) as table
 /// regions, because monospace character spacing creates apparent column positions.
 ///
-/// Three signals are checked:
+/// Signals checked:
 /// 1. **Hard reject**: any non-empty cell whose entire trimmed text is `{` or
 ///    `}` (an isolated brace cannot appear in real table content).
 /// 2. **Fraction check**: if ≥ [`CODE_BRACE_CELL_FRACTION`] of non-empty cells
@@ -1707,6 +2470,9 @@ const CODE_BRACE_CELL_FRACTION: f64 = 0.20;
 ///    head followed by pointer-bearing, comma-delimited parameter rows. A
 ///    terminal `);` or comma termination on every parameter row is required to
 ///    avoid rejecting API-reference tables with incidental code punctuation.
+/// 4. **Verilog declaration grid**: brace-free hardware-description attribute
+///    stanzas (`= FD2P;`, `input (CD) (active_high_reset)`) — see
+///    [`looks_like_verilog_declaration_grid`].
 ///
 /// Python, Ruby, and other brace-free languages are not caught by this check;
 /// those rarely produce false-positive tables at the heuristic tier.
@@ -1732,6 +2498,7 @@ pub(crate) fn looks_like_code_listing(table_cells: &[Vec<String>]) -> bool {
         .count();
     (brace_count as f64) / (non_empty.len() as f64) >= CODE_BRACE_CELL_FRACTION
         || looks_like_declaration_grid(table_cells)
+        || looks_like_verilog_declaration_grid(table_cells)
 }
 
 fn looks_like_declaration_grid(table_cells: &[Vec<String>]) -> bool {
@@ -1895,12 +2662,31 @@ fn drop_column_position(column_positions: Option<&mut Vec<u32>>, col: usize) {
 }
 
 fn normalize_data_cell(cell: &mut String) {
-    let mut text = cell.trim().to_string();
-    if text.is_empty() {
+    let trimmed = cell.trim();
+    if trimmed.is_empty() {
         cell.clear();
         return;
     }
 
+    let mut text = normalize_dash_glyphs_and_spacing(trimmed);
+    text = text.replace("E-", "e-").replace("E+", "e+");
+
+    if text == "-" {
+        text.clear();
+    }
+
+    *cell = text;
+}
+
+/// Rewrites em-dash, en-dash and minus-sign glyphs to an ASCII hyphen and collapses the
+/// whitespace `normalize_data_cell` expects around a leading or embedded hyphen (`"- 3"` ->
+/// `"-3"`), without the exponent lowercasing or lone-dash clearing that follow it. Shared
+/// with [`column_is_numeric_for_normalization`], which needs the same dash-normalised
+/// preview to decide whether a cell is numeric *before* `normalize_data_cell` runs on it —
+/// testing the raw, unnormalised text would miss `"- 3"`, which only reads as a number once
+/// this rewrite has run (xberg-io/xberg#1582). ~keep
+fn normalize_dash_glyphs_and_spacing(text: &str) -> String {
+    let mut text = text.to_string();
     for ch in ['\u{2014}', '\u{2013}', '\u{2212}'] {
         text = text.replace(ch, "-");
     }
@@ -1911,13 +2697,73 @@ fn normalize_data_cell(cell: &mut String) {
 
     text = text.replace("- ", "-");
     text = text.replace(" -", "-");
-    text = text.replace("E-", "e-").replace("E+", "e+");
+    text
+}
 
-    if text == "-" {
-        text.clear();
+/// Whether column `col`'s data rows (everything but the header) are predominantly bare
+/// numeric literals once dash glyphs are normalised — the gate that keeps
+/// `normalize_data_cell` off a prose column. A cell that is nothing but a dash is
+/// nil-or-N/A and cannot decide the question on its own, so it is excluded from the vote
+/// and left to the column's other cells (xberg-io/xberg#1582).
+fn column_is_numeric_for_normalization(table: &[Vec<String>], col: usize) -> bool {
+    let mut evidence = 0usize;
+    let mut numeric = 0usize;
+    for row in table.iter().skip(1) {
+        let Some(cell) = row.get(col) else { continue };
+        let trimmed = cell.trim();
+        if trimmed.is_empty() || is_lone_dash_cell(trimmed) {
+            continue;
+        }
+        evidence += 1;
+        if looks_like_numeric_literal(&normalize_dash_glyphs_and_spacing(trimmed)) {
+            numeric += 1;
+        }
     }
+    evidence > 0 && numeric.saturating_mul(100) >= evidence.saturating_mul(NUMERIC_COLUMN_MIN_NUMERIC_PERCENT)
+}
 
-    *cell = text;
+/// Whether `text` is nothing but one dash glyph (em, en, minus sign or ASCII hyphen) —
+/// ambiguous nil-or-N/A content that carries no evidence either way for
+/// [`column_is_numeric_for_normalization`].
+fn is_lone_dash_cell(text: &str) -> bool {
+    matches!(text, "-" | "\u{2014}" | "\u{2013}" | "\u{2212}")
+}
+
+/// Whether `text` — already run through [`normalize_dash_glyphs_and_spacing`] — is a bare
+/// numeric literal: an optional leading `-`, one or more digits with at most one `.`, and
+/// an optional exponent (`e`/`E`, optional sign, one or more digits). Anything containing a
+/// letter outside that exponent marker, or no digits at all, is not a number (xberg-io/
+/// xberg#1582).
+fn looks_like_numeric_literal(text: &str) -> bool {
+    let text = text.strip_prefix('-').unwrap_or(text);
+    let (mantissa, exponent) = match text.find(['e', 'E']) {
+        Some(index) => (&text[..index], Some(&text[index + 1..])),
+        None => (text, None),
+    };
+    if !is_numeric_mantissa(mantissa) {
+        return false;
+    }
+    exponent.is_none_or(|exp| {
+        let digits = exp.strip_prefix(['-', '+']).unwrap_or(exp);
+        !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit())
+    })
+}
+
+/// Whether `text` is one or more ASCII digits with at most one `.` separator.
+fn is_numeric_mantissa(text: &str) -> bool {
+    if text.is_empty() {
+        return false;
+    }
+    let mut seen_dot = false;
+    let mut seen_digit = false;
+    for character in text.chars() {
+        match character {
+            '0'..='9' => seen_digit = true,
+            '.' if !seen_dot => seen_dot = true,
+            _ => return false,
+        }
+    }
+    seen_digit
 }
 
 #[cfg(test)]
@@ -2006,6 +2852,70 @@ mod tests {
         assert_eq!(words.len(), 2);
         assert_eq!(words[0].text, "Hello");
         assert_eq!(words[1].text, "World");
+    }
+
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn issue_1566_touching_table_segments_merge_into_one_word() {
+        let seg_a = make_seg("2 per ketel, pri", 287.864, 331.641, 46.631, 8.999996);
+        let mut seg_b = make_seg("js per meter", 334.564, 331.641, 41.161, 8.999996);
+        seg_b.is_bold = true;
+
+        let words = segments_to_words(&[seg_a, seg_b], 800.0);
+        let texts: Vec<&str> = words.iter().map(|word| word.text.as_str()).collect();
+        assert_eq!(texts, vec!["2", "per", "ketel,", "prijs", "per", "meter"]);
+    }
+
+    /// FINDING 1 (adversarial review): determines the exact gutter, in points at a 9pt
+    /// font, at which `segments_are_touching` starts fusing two *different table columns*
+    /// (a "100" cell followed by a "5" cell) rather than a genuine split word. The
+    /// analytic threshold is `font_size * TOUCHING_SPAN_GAP_EM_RATIO` = `9.0 * 0.025` =
+    /// 0.225pt (confirmed in f32 arithmetic separately). This test pins that boundary
+    /// empirically through the real `segments_to_words` path, not just the predicate.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn digit_column_fusion_boundary_for_9pt_font() {
+        let font_size = 9.0_f32;
+        let build = |gap: f32| {
+            let seg_a = make_seg("100", 100.0, 500.0, 15.0, font_size);
+            let seg_b = make_seg("5", 100.0 + 15.0 + gap, 500.0, 5.0, font_size);
+            segments_to_words(&[seg_a, seg_b], 800.0)
+        };
+
+        // Just under the 0.225pt threshold: the guard still treats this as one
+        // split word and fuses "100" + "5" into "1005".
+        let texts: Vec<String> = build(0.20).into_iter().map(|w| w.text).collect();
+        assert_eq!(
+            texts,
+            vec!["1005".to_string()],
+            "expected fusion just below the 0.225pt threshold"
+        );
+
+        // At/just over the 0.225pt threshold: the two columns stay separate words.
+        let texts: Vec<String> = build(0.25).into_iter().map(|w| w.text).collect();
+        assert_eq!(
+            texts,
+            vec!["100".to_string(), "5".to_string()],
+            "expected no fusion at/above the 0.225pt threshold"
+        );
+    }
+
+    /// FINDING 1 (adversarial review), continued: is a sub-quarter-point gutter
+    /// physically achievable in a real ruled table? A hairline rule stroke is
+    /// commonly ~0.5pt and cell text needs a non-zero clearance from that rule on
+    /// each side to avoid visually touching it (a documents-in-the-wild minimum is
+    /// on the order of 0.5-1pt per side). This test uses a deliberately tight but
+    /// still physically real gutter (1.5pt: a 0.5pt rule plus 0.5pt padding on each
+    /// side) between two adjacent numeric-column segments and asserts they do NOT
+    /// fuse — guarding the currently-unmodified behavior rather than a hypothetical.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn ruled_table_realistic_gutter_does_not_fuse_adjacent_numeric_columns() {
+        let seg_a = make_seg("100", 287.864, 331.641, 15.0, 9.0);
+        let seg_b = make_seg("5", 287.864 + 15.0 + 1.5, 331.641, 5.0, 9.0);
+        let words = segments_to_words(&[seg_a, seg_b], 800.0);
+        let texts: Vec<&str> = words.iter().map(|word| word.text.as_str()).collect();
+        assert_eq!(texts, vec!["100", "5"]);
     }
 
     #[test]
@@ -2257,6 +3167,48 @@ mod tests {
 
         assert_eq!(find_data_start(&table, true), 2);
         assert_eq!(find_data_start(&table, false), 0);
+    }
+
+    #[test]
+    fn issue_1558_surplus_inferred_header_rows_are_demoted_not_dropped() {
+        let table: Vec<Vec<String>> = (1..=18)
+            .map(|row| {
+                vec![
+                    format!("{row} 8000{row:02}"),
+                    "Fastening screw".into(),
+                    format!("{row},10"),
+                    if row == 7 {
+                        "package of 30".into()
+                    } else {
+                        "available".into()
+                    },
+                ]
+            })
+            .collect();
+
+        assert_eq!(find_data_start(&table, true), 6);
+        let processed = post_process_table(table, true, false).expect("dense parts table should remain valid");
+
+        // Six inferred header rows become one merged header plus four demoted
+        // data rows. No source row may disappear.
+        assert_eq!(processed.len(), 17);
+        let flattened = processed.iter().flatten().cloned().collect::<Vec<_>>().join(" ");
+        for row in 1..=18 {
+            let article = format!("8000{row:02}");
+            assert_eq!(
+                flattened.matches(&article).count(),
+                1,
+                "{article} must survive exactly once"
+            );
+        }
+        assert!(
+            processed[0]
+                .iter()
+                .any(|cell| cell.contains("800005") && cell.contains("800006"))
+        );
+        assert!(processed[1].iter().any(|cell| cell.contains("800001")));
+        assert!(processed[4].iter().any(|cell| cell.contains("800004")));
+        assert!(processed[5].iter().any(|cell| cell.contains("800007")));
     }
 
     #[test]
@@ -3451,6 +4403,91 @@ mod tests {
         assert!(!looks_like_code_listing(&grid));
     }
 
+    /// Tessent 手册的 LibComp 属性块：无花括号的 Verilog 声明逐行被无框表格
+    /// 检测切成两列伪表（fulltest 码 CODE_AS_TABLE，tessent 语料实测 27 块）。
+    /// 三种实测行形态——赋值 `= FD2P;`、端口属性对 `(CD) (active_high_reset)`、
+    /// 关键字行 `output [Bits-1 : 0] Q;`——都应判为代码清单并交还正文。
+    #[test]
+    fn verilog_declaration_grids_are_rejected_as_code() {
+        let attribute_block = vec![
+            vec!["model".into(), "FD3SP(D, CP, TI,".into(), "TE, CD, Q, QN) (".into()],
+            vec!["nonscan_model".into(), "= FD2P;".into(), "".into()],
+            vec!["cell_type".into(), "= scan_cell;".into(), "".into()],
+            vec!["input".into(), "(CD) (active_high_reset)".into(), "".into()],
+            vec!["input".into(), "(D) (data_in)".into(), "".into()],
+            vec!["(".into(), "".into(), "".into()],
+            vec![")".into(), "".into(), "".into()],
+        ];
+        assert!(
+            looks_like_code_listing(&attribute_block),
+            "Verilog attribute declaration rows must read as a code listing"
+        );
+
+        let port_list = vec![
+            vec!["input (clk) ( )".into(), "".into()],
+            vec!["input (din_2) ( )".into(), "".into()],
+            vec!["input (din_1) ( )".into(), "".into()],
+            vec!["input (din_0) ( )".into(), "".into()],
+        ];
+        assert!(
+            looks_like_code_listing(&port_list),
+            "port(attribute) rows must read as a code listing"
+        );
+
+        let bit_range_ports = vec![
+            vec!["output".into(), "[Bits-1 : 0] Q;".into()],
+            vec!["input".into(), "[Addr-1 : 0] A;".into()],
+            vec!["input".into(), "CK, CSN;".into()],
+        ];
+        assert!(
+            looks_like_code_listing(&bit_range_ports),
+            "keyword-led bit-range port rows must read as a code listing"
+        );
+    }
+
+    /// 真正引用 Verilog 关键词的描述表必须放行：行数不足六成带声明信号、
+    /// 且描述散文行不携带赋值/双括号/裸括号证据。
+    #[test]
+    fn verilog_port_description_table_is_not_rejected_as_code() {
+        let grid = vec![
+            vec!["Port".into(), "Direction".into(), "Description".into()],
+            vec!["clk".into(), "input".into(), "Clock, edge-sensitive".into()],
+            vec!["csn".into(), "input".into(), "Active-low chip select".into()],
+            vec!["q".into(), "output".into(), "Read data bus".into()],
+        ];
+        assert!(
+            !looks_like_code_listing(&grid),
+            "a port-description table quoting keywords is real tabular data"
+        );
+    }
+
+    /// 目录/插图清单的点线行（`Entry . . . . 279`）被无框检测当成两列表：
+    /// tessent 语料实测 25 块、58 行题注混入（CAPTION_IN_TABLE）、
+    /// 16 个超长点线表头（TABLE_HEADER_LONG）。≥60% 行为纯点线条+页码
+    /// 即拒收，交还正文；孤立的 "..." 省略号格与普通表格不受影响。
+    #[test]
+    fn dot_leader_toc_grid_is_rejected() {
+        let toc_grid = vec![
+            vec!["D Latch Example .".into(), ". . . . . . . 272".into()],
+            vec!["I/O Pad Limitations and Examples".into(), ". . . . . . 274".into()],
+            vec!["Strength Propagation".into(), ". . . . . . . 274".into()],
+        ];
+        assert!(
+            post_process_table(toc_grid.clone(), true, false).is_none(),
+            "a dot-leader TOC fragment must not be promoted to a table"
+        );
+
+        let genuine = vec![
+            vec!["Step".into(), "Command".into(), "Notes".into()],
+            vec!["1".into(), "run".into(), "see section 2...".into()],
+            vec!["2".into(), "verify".into(), "idempotent".into()],
+        ];
+        assert!(
+            post_process_table(genuine, true, false).is_some(),
+            "a genuine table quoting one ellipsis cell survives"
+        );
+    }
+
     /// Regression test for xberg-io/xberg#1301 (mode b): a colon-introduced,
     /// semicolon-delimited 2-item list whose clauses were word-per-cell
     /// reconstructed into a 10-column, 2-data-row grid. The existing
@@ -3675,5 +4712,866 @@ mod tests {
         assert_eq!(straddled_boundary_ratio(&region, &[0]), 0.0);
         assert_eq!(straddled_boundary_ratio(&region, &[]), 0.0);
         assert_eq!(straddled_boundary_ratio(&[], &[0, 100]), 0.0);
+    }
+
+    #[test]
+    fn test_is_list_marker_cell_matches_the_three_shapes() {
+        assert!(is_list_marker_cell("1."));
+        assert!(is_list_marker_cell("12)"));
+        assert!(is_list_marker_cell("a."));
+        assert!(is_list_marker_cell("b)"));
+        assert!(is_list_marker_cell("•"));
+        assert!(is_list_marker_cell("-"));
+        assert!(is_list_marker_cell("–"));
+        assert!(is_list_marker_cell("*"));
+    }
+
+    #[test]
+    fn test_is_list_marker_cell_rejects_non_marker_shapes() {
+        assert!(
+            !is_list_marker_cell("1"),
+            "a bare digit run with no trailing punctuation is not a marker"
+        );
+        assert!(
+            !is_list_marker_cell("ab."),
+            "multi-letter prefix is not a single-letter ordinal"
+        );
+        assert!(
+            !is_list_marker_cell("A."),
+            "spec covers lowercase ordinals only, not uppercase"
+        );
+        assert!(!is_list_marker_cell("Feature"));
+        assert!(!is_list_marker_cell(""));
+        assert!(!is_list_marker_cell("10"));
+        assert!(
+            !is_list_marker_cell("$4.25"),
+            "currency is not a marker even though it contains digits and a dot"
+        );
+    }
+
+    /// Word-geometry fixture for a one-page scanned PDF: a title, a heading, and a
+    /// four-item numbered list, laid out the way the reported #1570 page actually OCRs —
+    /// each list line's words fall into three x-clusters (marker / early phrase / late
+    /// phrase) separated by gaps well above `CELL_MERGE_GAP_HEIGHT_RATIO * median height`,
+    /// so `merge_words_into_cell_tokens` collapses each line into ~3 dense tokens and
+    /// `detect_columns` mints exactly 3 columns from them — reproducing the "spurious
+    /// 3-column table" the issue describes. Built directly with `HocrWord`/geometry and
+    /// run through the real `cluster_words_into_table_regions` / `reconstruct_table` /
+    /// `post_process_table` pipeline, matching the Tesseract route's own call shape
+    /// (`ocr::processor::execution`, `table_column_threshold: 50`,
+    /// `table_row_threshold_ratio: 0.5`, `post_process_table(table, false, false)`). ~keep
+    #[cfg(feature = "ocr")]
+    fn numbered_list_page_words() -> Vec<HocrWord> {
+        fn hocr_word(text: &str, left: u32, top: u32, width: u32, height: u32) -> HocrWord {
+            HocrWord {
+                text: text.to_string(),
+                left,
+                top,
+                width,
+                height,
+                confidence: 95.0,
+            }
+        }
+
+        vec![
+            // Title line (isolated by a large vertical gap from everything below it).
+            hocr_word("Engine", 100, 88, 60, 24),
+            hocr_word("Oil", 165, 88, 30, 24),
+            hocr_word("Change", 200, 88, 65, 24),
+            hocr_word("Procedure", 270, 88, 85, 24),
+            // Heading line (isolated the same way).
+            hocr_word("Required", 100, 288, 75, 24),
+            hocr_word("Steps", 180, 288, 45, 24),
+            // "1. Drain old oil from engine"
+            hocr_word("1.", 100, 488, 20, 24),
+            hocr_word("Drain", 180, 488, 50, 24),
+            hocr_word("old", 234, 488, 30, 24),
+            hocr_word("oil", 400, 488, 25, 24),
+            hocr_word("from", 429, 488, 35, 24),
+            hocr_word("engine", 468, 488, 55, 24),
+            // "2. Replace oil filter"
+            hocr_word("2.", 100, 528, 20, 24),
+            hocr_word("Replace", 180, 528, 65, 24),
+            hocr_word("oil", 400, 528, 25, 24),
+            hocr_word("filter", 429, 528, 45, 24),
+            // "3. Add 5.5 quarts of synthetic 5W-30 oil"
+            hocr_word("3.", 100, 568, 20, 24),
+            hocr_word("Add", 180, 568, 35, 24),
+            hocr_word("5.5", 219, 568, 30, 24),
+            hocr_word("quarts", 400, 568, 55, 24),
+            hocr_word("of", 459, 568, 20, 24),
+            hocr_word("synthetic", 483, 568, 80, 24),
+            hocr_word("5W-30", 567, 568, 50, 24),
+            hocr_word("oil", 621, 568, 25, 24),
+            // "4. Check oil level with dipstick"
+            hocr_word("4.", 100, 608, 20, 24),
+            hocr_word("Check", 180, 608, 50, 24),
+            hocr_word("oil", 234, 608, 25, 24),
+            hocr_word("level", 400, 608, 40, 24),
+            hocr_word("with", 444, 608, 35, 24),
+            hocr_word("dipstick", 483, 608, 65, 24),
+        ]
+    }
+
+    /// #1570: reconstructing the numbered-list region through the real pipeline must no
+    /// longer produce an accepted table. Asserts the FIXED behavior (`None`) — this is the
+    /// TDD-red assertion: it fails against the pre-fix validator (which returns
+    /// `Some(3-column grid)`, fabricating a table out of prose and, worse, deleting that
+    /// prose from the surrounding page per #1571's centre-in-bbox rule) and passes once
+    /// the list-marker guards land.
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn test_numbered_list_region_is_not_reconstructed_as_a_table() {
+        let words = numbered_list_page_words();
+        let regions = crate::table_core::cluster_words_into_table_regions(&words);
+
+        let list_region = regions
+            .into_iter()
+            .find(|region| region.len() >= crate::table_core::MIN_TABLE_CANDIDATE_WORDS)
+            .expect("the numbered list must cluster into its own table-candidate region");
+        assert_eq!(
+            list_region.len(),
+            24,
+            "the list region must isolate all 24 list words from the title/heading"
+        );
+
+        let table = reconstruct_table(&list_region, 50, 0.5);
+        assert!(
+            !table.is_empty(),
+            "precondition: the list must reconstruct into a non-empty grid"
+        );
+        assert_eq!(
+            table[0].len(),
+            3,
+            "precondition: the list reconstructs into 3 columns, matching the bug report"
+        );
+
+        let result = post_process_table(table, false, false);
+        assert!(
+            result.is_none(),
+            "a numbered list rendered as a 3-column grid must be rejected, not accepted as a fabricated table"
+        );
+    }
+
+    /// Precision regression: a genuine layout-guided table (ML-confirmed region) whose
+    /// first column happens to be numeric-and-punctuated ("1.", "2.", ...) must still be
+    /// accepted. The new list-marker guard is scoped to `!layout_guided`, so this path
+    /// never reaches it at all.
+    #[test]
+    fn test_layout_guided_numeric_first_column_table_is_still_accepted() {
+        let table = vec![
+            vec![
+                "Line".to_string(),
+                "Part Description".to_string(),
+                "Unit Price".to_string(),
+            ],
+            vec![
+                "1.".to_string(),
+                "Stainless Steel Bolt M8x40".to_string(),
+                "$4.25".to_string(),
+            ],
+            vec![
+                "2.".to_string(),
+                "Anodized Aluminum Bracket".to_string(),
+                "$12.90".to_string(),
+            ],
+            vec![
+                "3.".to_string(),
+                "Rubber Grommet Assembly".to_string(),
+                "$1.15".to_string(),
+            ],
+            vec![
+                "4.".to_string(),
+                "Tempered Glass Panel".to_string(),
+                "$38.00".to_string(),
+            ],
+        ];
+        let result = post_process_table(table, true, false);
+        assert!(
+            result.is_some(),
+            "a layout-guided table with a punctuated numeric first column must not be eaten by the #1570 fix"
+        );
+    }
+
+    /// Precision regression, non-layout-guided: the SAME genuine numeric-first-column
+    /// table, reconstructed WITHOUT ML layout confirmation, must still be accepted. Its
+    /// "Line" header is the signal that separates it from a numbered list — a list has a
+    /// marker in every column-0 cell including the first, this table does not (#1570).
+    #[test]
+    fn test_headed_numeric_first_column_table_survives_the_list_marker_guard() {
+        let table = vec![
+            vec![
+                "Line".to_string(),
+                "Part Description".to_string(),
+                "Unit Price".to_string(),
+            ],
+            vec![
+                "1.".to_string(),
+                "Stainless Steel Bolt M8x40".to_string(),
+                "$4.25".to_string(),
+            ],
+            vec![
+                "2.".to_string(),
+                "Anodized Aluminum Bracket".to_string(),
+                "$12.90".to_string(),
+            ],
+            vec![
+                "3.".to_string(),
+                "Rubber Grommet Assembly".to_string(),
+                "$1.15".to_string(),
+            ],
+            vec![
+                "4.".to_string(),
+                "Tempered Glass Panel".to_string(),
+                "$38.00".to_string(),
+            ],
+        ];
+        let result = post_process_table(table, false, false);
+        assert!(
+            result.is_some(),
+            "a headed numeric-first-column table must survive the #1570 list-marker guard without ML confirmation"
+        );
+    }
+
+    /// A list whose markers did not all survive OCR ("Note" where "3." should be) no
+    /// longer satisfies the end-to-end guard, so rejection has to come from the relaxed
+    /// `column_text_flow` signal instead. Proves that relaxation is live, not dead code
+    /// shadowed by the guard above it (#1570).
+    #[test]
+    fn test_partially_ocred_list_markers_are_still_rejected_by_text_flow() {
+        let table = vec![
+            vec!["1.".to_string(), "Drain old".to_string(), "oil from engine".to_string()],
+            vec![
+                "2.".to_string(),
+                "Replace oil".to_string(),
+                "filter and gasket".to_string(),
+            ],
+            vec![
+                "Note".to_string(),
+                "Add 5.5".to_string(),
+                "quarts of synthetic".to_string(),
+            ],
+            vec![
+                "4.".to_string(),
+                "Check oil".to_string(),
+                "level with dipstick".to_string(),
+            ],
+            vec![
+                "5.".to_string(),
+                "Reset the".to_string(),
+                "service indicator".to_string(),
+            ],
+        ];
+        let result = post_process_table(table, false, false);
+        assert!(
+            result.is_none(),
+            "a list with one mis-OCRed marker must still be rejected as prose flow"
+        );
+    }
+
+    /// A prose column's em-dash must survive table normalisation: `normalize_data_cell`'s
+    /// dash rewriting is correct for a financial column but not for a title welded to an
+    /// em-dash leader (xberg-io/xberg#1582).
+    #[test]
+    fn test_prose_column_em_dash_survives_table_normalization() {
+        let table = vec![
+            vec![
+                "Line".to_string(),
+                "Part Description".to_string(),
+                "Unit Price".to_string(),
+            ],
+            vec![
+                "1.".to_string(),
+                "Functionaliteit\u{2014}12".to_string(),
+                "$4.25".to_string(),
+            ],
+            vec![
+                "2.".to_string(),
+                "Anodized Aluminum Bracket".to_string(),
+                "$12.90".to_string(),
+            ],
+            vec![
+                "3.".to_string(),
+                "Rubber Grommet Assembly".to_string(),
+                "$1.15".to_string(),
+            ],
+            vec![
+                "4.".to_string(),
+                "Tempered Glass Panel".to_string(),
+                "$38.00".to_string(),
+            ],
+        ];
+        let processed = post_process_table(table, true, false).expect("headed prose+price table must be accepted");
+        assert_eq!(
+            processed[1][1], "Functionaliteit\u{2014}12",
+            "a prose cell's em-dash must not be rewritten to an ASCII hyphen"
+        );
+    }
+
+    /// A part code split by a spaced hyphen (`"HRE - HReco"`) must not be corrupted by the
+    /// numeric normaliser's `E-` -> `e-` rewrite, which is only correct inside a scientific
+    /// notation exponent (xberg-io/xberg#1582).
+    #[test]
+    fn test_prose_column_part_code_survives_table_normalization() {
+        let table = vec![
+            vec![
+                "Line".to_string(),
+                "Part Description".to_string(),
+                "Unit Price".to_string(),
+            ],
+            vec![
+                "1.".to_string(),
+                "Montagebeugel HRE - HReco".to_string(),
+                "$4.25".to_string(),
+            ],
+            vec![
+                "2.".to_string(),
+                "Anodized Aluminum Bracket".to_string(),
+                "$12.90".to_string(),
+            ],
+            vec![
+                "3.".to_string(),
+                "Rubber Grommet Assembly".to_string(),
+                "$1.15".to_string(),
+            ],
+            vec![
+                "4.".to_string(),
+                "Tempered Glass Panel".to_string(),
+                "$38.00".to_string(),
+            ],
+        ];
+        let processed = post_process_table(table, true, false).expect("headed prose+price table must be accepted");
+        assert_eq!(
+            processed[1][1], "Montagebeugel HRE - HReco",
+            "a part code must not be lowercased or have its hyphen spacing collapsed"
+        );
+    }
+
+    /// A prose cell whose entire content is a single em-dash means something in a document
+    /// (an unfilled field, "not applicable") and must not be silently emptied the way a nil
+    /// marker in a numeric column is (xberg-io/xberg#1582).
+    #[test]
+    fn test_prose_column_lone_em_dash_cell_is_not_emptied() {
+        let table = vec![
+            vec![
+                "Line".to_string(),
+                "Part Description".to_string(),
+                "Unit Price".to_string(),
+            ],
+            vec!["1.".to_string(), "\u{2014}".to_string(), "$4.25".to_string()],
+            vec![
+                "2.".to_string(),
+                "Anodized Aluminum Bracket".to_string(),
+                "$12.90".to_string(),
+            ],
+            vec![
+                "3.".to_string(),
+                "Rubber Grommet Assembly".to_string(),
+                "$1.15".to_string(),
+            ],
+            vec![
+                "4.".to_string(),
+                "Tempered Glass Panel".to_string(),
+                "$38.00".to_string(),
+            ],
+        ];
+        let processed = post_process_table(table, true, false).expect("headed prose+price table must be accepted");
+        assert_eq!(
+            processed[1][1], "\u{2014}",
+            "a lone em-dash in a prose column must not be cleared to an empty cell"
+        );
+    }
+
+    /// Regression: a genuine numeric/financial table must keep getting the full
+    /// normalisation — an em-dash nil cell emptied, `"- 3"` joined to `"-3"`, and a
+    /// scientific-notation exponent lowercased — exactly as before #1582.
+    #[test]
+    fn test_numeric_column_normalization_is_unchanged_by_prose_gate() {
+        let table = vec![
+            vec!["Item".to_string(), "2024".to_string(), "2023".to_string()],
+            vec!["Omzet".to_string(), "1234".to_string(), "1100".to_string()],
+            vec![
+                "Bijzondere baten".to_string(),
+                "\u{2014}".to_string(),
+                "- 3".to_string(),
+            ],
+            vec!["Meetfout".to_string(), "1.5E-05".to_string(), "2.0E-06".to_string()],
+            vec!["Afschrijving".to_string(), "-12".to_string(), "-9".to_string()],
+        ];
+        let processed = post_process_table(table, true, false).expect("financial table must be accepted");
+        assert_eq!(
+            processed[2],
+            vec!["Bijzondere baten".to_string(), String::new(), "-3".to_string()]
+        );
+        assert_eq!(
+            processed[3],
+            vec!["Meetfout".to_string(), "1.5e-05".to_string(), "2.0e-06".to_string()]
+        );
+        assert_eq!(
+            processed[4],
+            vec!["Afschrijving".to_string(), "-12".to_string(), "-9".to_string()]
+        );
+    }
+
+    fn row(cells: &[&str]) -> Vec<String> {
+        cells.iter().map(|c| c.to_string()).collect()
+    }
+
+    #[test]
+    fn caption_rows_with_anchor_first_cell_are_detected() {
+        assert!(is_caption_row(&row(&["", "Table 3-1.", "Cell_types"])));
+        assert!(is_caption_row(&row(&["Table 3-1.", "Cell_types (cont.)"])));
+        assert!(is_caption_row(&row(&["Table 3-5.", "Pin Attributes", "(cont.)"])));
+        assert!(is_caption_row(&row(&["Figure 2-3.", "Scan cell"])));
+    }
+
+    #[test]
+    fn prose_and_data_rows_are_not_caption_rows() {
+        // Prose continuation row that merely ENDS in a cross-reference.
+        assert!(!is_caption_row(&row(&[
+            "detail following",
+            "this table or",
+            "Table 3-1.",
+        ])));
+        // Prose sentence quoting the reference without the terminating dot.
+        assert!(!is_caption_row(&row(&[
+            "Table 3-1 lists all the",
+            "cell_types, which",
+            "are described in detail following this table.",
+        ])));
+        // Real column-header / data rows.
+        assert!(!is_caption_row(&row(&["cell_type", "", "Description"])));
+        assert!(!is_caption_row(&row(&[
+            "clock_gating_and",
+            "",
+            "See \"clock_gating_and\".",
+        ])));
+    }
+
+    #[test]
+    fn caption_row_too_long_to_be_a_title_is_kept() {
+        let long_title = "a".repeat(CAPTION_ROW_MAX_TITLE_CHARS + 1);
+        assert!(!is_caption_row(&row(&["Table 3-1.", &long_title])));
+    }
+
+    #[test]
+    fn caption_rows_are_dropped_and_header_promoted() {
+        // Tessent continued-table shape: the "(cont.)" caption reconstructs as
+        // the grid's first row, demoting the real column labels into data.
+        let table = vec![
+            row(&["Table 3-1.", "Cell_types (cont.)"]),
+            row(&["cell_type", "Description"]),
+            row(&["and", "Logical AND"]),
+            row(&["or", "Logical OR"]),
+        ];
+        let processed = post_process_table(table, true, false).expect("real table must survive");
+        assert_eq!(processed[0], row(&["cell_type", "Description"]));
+        assert!(processed.iter().all(|r| !r.iter().any(|c| c.contains("Table 3-1"))));
+    }
+
+    /// A grid whose every row opens with a `Table N-M.` anchor is a table-of-tables /
+    /// cross-reference listing, not a real grid with an absorbed caption band: it must
+    /// survive caption processing intact instead of being dropped empty and rejected.
+    #[test]
+    fn all_caption_grid_survives_as_a_listing() {
+        let table = vec![
+            row(&["Table 2-1.", "Supported formats"]),
+            row(&["Table 3-4.", "Pin attributes"]),
+            row(&["Figure 5-2.", "Scan chain overview"]),
+        ];
+        let processed = post_process_table(table, true, false).expect("listing must survive");
+        assert_eq!(processed.len(), 3, "no row of the listing may be dropped");
+    }
+
+    /// Version and build numbers are not TOC dot leaders: they clear the character
+    /// filter on digits alone, but carry no whitespace-separated all-dot token. A
+    /// version column used to push a whole table past the 60% dot-band rejection.
+    #[test]
+    fn version_number_cells_are_not_dot_leaders() {
+        assert!(!is_dot_leader_cell("1.2.3.4.5"));
+        assert!(!is_dot_leader_cell("2024.1.2.3.4"));
+        assert!(!is_dot_leader_cell("1.2.3.4.5 6.7.8.9.0"));
+        // Real leader bands keep qualifying.
+        assert!(is_dot_leader_cell(". . . . . 279"));
+        assert!(is_dot_leader_cell("...."));
+        assert!(is_dot_leader_cell(". . . . 12"));
+    }
+
+    #[test]
+    fn toc_dot_band_cells_with_entry_text_are_detected() {
+        assert!(is_toc_dot_band_cell("Logic . . . . ... 269"));
+        assert!(is_toc_dot_band_cell("Example - Mux Scan DFF . . . ."));
+        assert!(is_toc_dot_band_cell("Off By Scan Enable. . . . . 270"));
+    }
+
+    #[test]
+    fn plain_cells_are_not_toc_dot_band_cells() {
+        // A bare ellipsis cell has neither prefix text nor a page number.
+        assert!(!is_toc_dot_band_cell("...."));
+        // Fewer than four dots in the run.
+        assert!(!is_toc_dot_band_cell("1.2 . . . 3"));
+        assert!(!is_toc_dot_band_cell("Weak 0"));
+        assert!(!is_toc_dot_band_cell("see section 2"));
+        // Text after the band that is not a page number.
+        assert!(!is_toc_dot_band_cell("Entry . . . . and more text"));
+        // Text after the page number, too: the number must be the LAST token —
+        // a "page number then annotation" cell is a notes column, and letting
+        // it pass let a genuine notes grid hit the 60% dot-band rejection.
+        assert!(!is_toc_dot_band_cell("Entry . . . . 5 and more text"));
+    }
+
+    #[test]
+    fn toc_remnant_grid_with_titled_dot_bands_is_rejected() {
+        // Tessent L10701: a TOC fragment whose entry titles kept their dot
+        // bands in the second column — pure-band detection cannot see it.
+        let table = vec![
+            row(&["Mux Scan DFF With Complex Asynchronous", "Logic . . . . ... 269"]),
+            row(&["Example - Mux Scan DFF . . . .", ". . . ... 269"]),
+            row(&[
+                "Example - Mux Scan Cell With Asynchronous Gated",
+                "Off By Scan Enable. . . . . 270",
+            ]),
+        ];
+        assert!(post_process_table(table, true, false).is_none());
+    }
+
+    #[test]
+    fn prose_banner_header_grid_is_rejected() {
+        // Tessent L4082: a wrapped prose sentence + code stanza bucketed into
+        // a 2-column grid — banner header cell, then hanging continuations.
+        let table = vec![
+            row(&[
+                "You",
+                "can map multiple non-scan models to one scan model by listing multiple non-scan",
+            ]),
+            row(&["models", "and their pin lists, separated by commas as follows:"]),
+            row(&["nonscan_model", "= model1(in1, in2, in3, out1, out2),"]),
+            row(&["", "model2(i1, i2, i3, o1, o2),"]),
+            row(&["", "model3(in1, in2, in3, out1);"]),
+        ];
+        assert!(post_process_table(table, true, false).is_none());
+    }
+
+    #[test]
+    fn titled_long_header_table_is_not_a_banner() {
+        // Title-case long header + no hanging rows: a genuine (if verbose)
+        // header must survive.
+        let table = vec![
+            row(&[
+                "Signal",
+                "Minimum pulse width requirements for the input pins of this cell",
+            ]),
+            row(&["CK", "1.0"]),
+            row(&["SE", "2.0"]),
+        ];
+        assert!(post_process_table(table, true, false).is_some());
+    }
+
+    #[test]
+    fn merged_truth_table_cells_are_split_per_character() {
+        // Tessent NAND truth table (Table 3-8): `1 1 0` clustered into "110".
+        let table = vec![
+            row(&["IN0", "IN1", "OUT"]),
+            row(&["0", "0/1/X/Z", "1"]),
+            row(&["0/1/X/Z", "0", "1"]),
+            row(&["", "110", ""]),
+            row(&["", "1X/ZX", ""]),
+            row(&["X/Z", "1", "X"]),
+        ];
+        let split_count = split_merged_truth_table_cells(&mut table.clone());
+        assert_eq!(split_count, 1, "only the pure-bit 3==cols row splits");
+        let processed = post_process_table(table, true, false).expect("truth table must survive");
+        assert_eq!(processed[3], row(&["1", "1", "0"]));
+        // "1X/ZX" carries a don't-care group: no positional evidence, kept.
+        assert_eq!(processed[4], row(&["", "1X/ZX", ""]));
+    }
+
+    #[test]
+    fn four_column_mux_merged_rows_split_into_all_columns() {
+        // Tessent MUX truth table (Table 3-19): `1 1 X 1` -> one cell per column.
+        let mut grid = vec![
+            row(&["IN0", "IN1", "CNT", "OUT"]),
+            row(&["0", "0/1/X/Z", "0", "0"]),
+            row(&["", "", "11X1", ""]),
+            row(&["", "", "00X0", ""]),
+            row(&["", "", "01XX", ""]),
+            row(&["", "", "10XX", ""]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut grid), 4);
+        assert_eq!(grid[2], row(&["1", "1", "X", "1"]));
+    }
+
+    #[test]
+    fn merged_rows_needing_coordinates_are_left_untouched() {
+        // Tessent D flip-flop table: "101" + "0/1/X010" clustered on one row
+        // across several wrong columns — splitting would be guesswork.
+        let mut grid = vec![
+            row(&["D1", "CLK1", "SET", "RESET", "Q", "QN"]),
+            row(&["", "101", "", "", "0/1/X010", ""]),
+            row(&["0", "0/1/X", "0", "0/1/X", "0", "1"]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut grid), 0);
+        assert_eq!(grid[1], row(&["", "101", "", "", "0/1/X010", ""]));
+
+        // 6-column grid, merged value shorter than the column count.
+        let mut short = vec![
+            row(&["Di", "CLKi", "SET", "RESET", "Q", "QN"]),
+            row(&["", "", "", "010001", "", ""]),
+            row(&["X1", "0", "0", "", "XX", ""]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut short), 1);
+        // Only the 6-char "010001" row splits. "X1"/"XX" in the last row are
+        // genuine multi-bit values (X->1 transition, both outputs don't-care):
+        // two multi-bit cells in one row give the anchor check no single
+        // cluster to validate, so the row must survive untouched.
+        // ...but a 3-value merged row on a 6-column grid does not split.
+        let mut mismatched = vec![
+            row(&["Di", "CLKi", "SET", "RESET", "Q", "QN"]),
+            row(&["", "", "101", "", "", ""]),
+            row(&["X1", "0", "0", "", "XX", ""]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut mismatched), 0);
+    }
+
+    #[test]
+    fn numeric_table_with_lone_bitstring_value_is_not_split() {
+        // A decimal "101" alone in an otherwise multi-digit numeric table:
+        // no row carries single-bit cells, so the truth-table evidence gate
+        // keeps every cell intact.
+        let mut grid = vec![
+            row(&["Region", "Q1", "Q2"]),
+            row(&["", "101", ""]),
+            row(&["North", "12", "34"]),
+            row(&["South", "56", "78"]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut grid), 0);
+        assert_eq!(grid[1], row(&["", "101", ""]));
+    }
+
+    #[test]
+    fn anchored_rows_split_when_single_bit_cells_validate_the_cluster() {
+        // Tessent TSL truth table: the `IN` bit merged into the adjacent `CNT`
+        // cell ("0"+"0" -> "00"). The surviving OUT cell is the anchor that
+        // proves the split point.
+        let mut grid = vec![
+            row(&["IN", "CNT", "OUT"]),
+            row(&["", "00", "0"]),
+            row(&["", "10", "1"]),
+            row(&["", "11", "0"]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut grid), 3);
+        assert_eq!(grid[1], row(&["0", "0", "0"]));
+        assert_eq!(grid[2], row(&["1", "0", "1"]));
+
+        // A 7-column row whose don't-care run "XX0" absorbed its empty
+        // neighbour: every surrounding single-bit cell agrees with the
+        // reading-order split, so the rewrite is positionally forced.
+        let mut wide = vec![
+            row(&["A", "B", "C", "D", "E", "F", "G"]),
+            row(&["0", "0", "XX0", "", "0", "0", ""]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut wide), 1);
+        assert_eq!(wide[1], row(&["0", "0", "X", "X", "0", "0", "0"]));
+    }
+
+    #[test]
+    fn anchored_rows_with_contradictory_anchors_are_rejected() {
+        // "000" cannot cover columns 0-2 while column 2 itself carries "1":
+        // the anchor contradicts the reading-order prediction, so the split
+        // point would be a guess.
+        let mut contradictory = vec![row(&["A", "B", "C", "D"]), row(&["", "000", "1", ""])];
+        assert_eq!(split_merged_truth_table_cells(&mut contradictory), 0);
+        assert_eq!(contradictory[1], row(&["", "000", "1", ""]));
+
+        // Two multi-bit cells in one row: no single cluster, no validation.
+        let mut two_clusters = vec![
+            row(&["A", "B", "C", "D", "E", "F"]),
+            row(&["", "X1", "0", "0", "XX", ""]),
+        ];
+        assert_eq!(split_merged_truth_table_cells(&mut two_clusters), 0);
+
+        // Non-bit content (letters with a space) blocks the row entirely.
+        let mut mixed = vec![row(&["A", "B", "C", "D"]), row(&["", "00X", "", "L 1"])];
+        assert_eq!(split_merged_truth_table_cells(&mut mixed), 0);
+    }
+
+    #[test]
+    fn verilog_port_pair_requires_space_free_second_group() {
+        let signal = |cells: &[&str]| is_verilog_declaration_row(&row(cells));
+        // The classic port-attribute notation still counts.
+        assert!(signal(&["input (CD)", "(active_high_reset)"]));
+        // Prose cross-references with a spaced second group do not. (A spaced
+        // FIRST group with a space-free second group — "(see notes) (below)"
+        // — still signals; single-word prose groups are indistinguishable
+        // from `(pin) (attr)` on cell text alone, and the 60% row
+        // supermajority is what keeps them from demoting a real table.)
+        assert!(!signal(&["(see Table 4)", "(Appendix B)"]));
+    }
+
+    #[test]
+    fn verilog_keyword_form_requires_semicolon() {
+        let signal = |cells: &[&str]| is_verilog_declaration_row(&row(cells));
+        assert!(signal(&["output [Bits-1 : 0] Q;"]));
+        assert!(signal(&["input", "CK, CSN;"]));
+        // Direction-first port-table rows carry no semicolon: not evidence,
+        // whichever column Direction sits in.
+        assert!(!signal(&["input", "Clock (rising)"]));
+        assert!(!signal(&["Clock (rising)", "input"]));
+        assert!(!signal(&["output", "Q", "register output"]));
+    }
+
+    #[test]
+    fn verilog_comment_rows_and_combined_grids() {
+        let signal = |cells: &[&str]| is_verilog_declaration_row(&row(cells));
+        assert!(signal(&[
+            "//",
+            "The data being output from the core to the PAD (outside world) thru"
+        ]));
+        assert!(signal(&["//", "this I/O pad."]));
+
+        // Tessent L10962: comment rows + `input data_out;` -> 3/3 signals.
+        let grid = vec![
+            row(&[
+                "//",
+                "The data being output from the core to the PAD (outside world) thru",
+            ]),
+            row(&["//", "this I/O pad."]),
+            row(&["input", "data_out;"]),
+        ];
+        assert!(looks_like_verilog_declaration_grid(&grid));
+
+        // A genuine port table must NOT demote: one `;` row among prose rows
+        // stays far below the 60% supermajority.
+        let port_table = vec![
+            row(&["Port", "Clock", "Description"]),
+            row(&["input", "Clock (rising)", "Sampled on rising edge"]),
+            row(&["output", "Q", "Data output"]),
+            row(&["input", "data_out;", "legacy"]),
+        ];
+        assert!(!looks_like_verilog_declaration_grid(&port_table));
+    }
+
+    /// Build the reported fixture's transaction table content directly (xberg-io/xberg#1649):
+    /// a header row followed by nine rows where WITHDRAWAL/DEPOSIT are mutually exclusive, so
+    /// each is empty on a majority of rows and DEPOSIT in particular carries little text overall.
+    fn bank_statement_transaction_table() -> Vec<Vec<String>> {
+        [
+            ["DATE", "DESCRIPTION", "WITHDRAWAL", "DEPOSIT", "BALANCE"],
+            ["2026-01-02", "Opening Balance", "", "", "$10,500.00"],
+            [
+                "2026-01-05",
+                "ACH Deposit - EMPLOYER INC",
+                "",
+                "$2,500.00",
+                "$13,000.00",
+            ],
+            ["2026-01-08", "Check #1042", "$1,250.00", "", "$11,750.00"],
+            [
+                "2026-01-12",
+                "Debit Card Purchase - GROCERY",
+                "$87.32",
+                "",
+                "$11,662.68",
+            ],
+            ["2026-01-15", "Wire Transfer (Outgoing)", "$3,000.00", "", "$8,662.68"],
+            ["2026-01-18", "ATM Withdrawal", "$500.00", "", "$8,162.68"],
+            ["2026-01-22", "ACH Deposit - CONSULTING", "", "$5,000.00", "$13,162.68"],
+            ["2026-01-25", "Monthly Service Fee", "$15.00", "", "$13,147.68"],
+            [
+                "2026-01-28",
+                "Debit Card Purchase - UTILITIES",
+                "$300.00",
+                "",
+                "$12,847.68",
+            ],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(str::to_string).collect())
+        .collect()
+    }
+
+    /// xberg-io/xberg#1649: a real transaction table's sparse but independently-headed DEPOSIT
+    /// column, and its sparse first data row (an opening-balance entry with neither a withdrawal
+    /// nor a deposit), must both survive `post_process_table` intact.
+    #[test]
+    fn issue_1649_sparse_named_deposit_column_and_sparse_first_row_survive_post_process() {
+        let table = bank_statement_transaction_table();
+
+        let processed = post_process_table(table, false, false)
+            .expect("a real financial table with a sparse, independently-headed column must be accepted");
+
+        assert_eq!(
+            processed.len(),
+            10,
+            "the header plus all nine transaction rows must survive"
+        );
+        assert_eq!(
+            processed[0],
+            vec!["DATE", "DESCRIPTION", "WITHDRAWAL", "DEPOSIT", "BALANCE"]
+        );
+        assert_eq!(
+            processed[1],
+            vec!["2026-01-02", "Opening Balance", "", "", "$10,500.00"],
+            "the sparse first data row must not be folded into a bogus multi-row header merge"
+        );
+        assert_eq!(
+            processed[2],
+            vec![
+                "2026-01-05",
+                "ACH Deposit - EMPLOYER INC",
+                "",
+                "$2,500.00",
+                "$13,000.00"
+            ]
+        );
+    }
+
+    /// Negative control for xberg-io/xberg#1649's `column_sparsity`/`content_asymmetry_sparse_column`
+    /// fix: a column that is just as sparse but carries no header label of its own is exactly the
+    /// noise those gates exist to catch, and must still be rejected.
+    #[test]
+    fn issue_1649_unnamed_sparse_column_is_still_rejected() {
+        let mut table = bank_statement_transaction_table();
+        table[0][3] = String::new();
+
+        assert!(
+            post_process_table(table, false, false).is_none(),
+            "an unnamed, mostly-empty column must still be treated as noise, not preserved"
+        );
+    }
+
+    /// Negative control for xberg-io/xberg#1649's `find_data_start` fix: when the first row is
+    /// NOT fully populated, the original numeric-density scan must still run unmodified.
+    #[test]
+    fn issue_1649_find_data_start_leaves_a_genuinely_incomplete_first_row_alone() {
+        let mut table = bank_statement_transaction_table();
+        table[0][4].clear();
+
+        assert_eq!(
+            find_data_start(&table, false),
+            2,
+            "a first row with an empty cell must not trigger the fully-populated-header shortcut"
+        );
+    }
+
+    /// Regression for the fully-populated-header shortcut over-firing on a genuine two-row text
+    /// header (`!layout_guided`, e.g. Tesseract/PaddleOCR): row 0 is fully populated and
+    /// digit-free, but row 1 is a non-numeric header continuation (units/labels), not data. The
+    /// shortcut must not stop at row 1 in that case -- it must fall through to the digit-density
+    /// scan and land on the first genuinely numeric row.
+    #[test]
+    fn issue_1649_two_row_text_header_is_not_truncated_by_the_header_shortcut() {
+        let table: Vec<Vec<String>> = vec![
+            vec!["Region".into(), "Sales Amount".into(), "Growth Rate".into()],
+            vec!["Area Code".into(), "Dollars".into(), "Percent".into()],
+            vec!["R1".into(), "120".into(), "5".into()],
+            vec!["R2".into(), "98".into(), "3".into()],
+        ];
+
+        assert_eq!(
+            find_data_start(&table, false),
+            2,
+            "a non-numeric second header row must not be mistaken for data"
+        );
     }
 }

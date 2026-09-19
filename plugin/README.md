@@ -1,6 +1,6 @@
 # xberg
 
-Extract text, tables, metadata, and images from 106 document formats — PDF, Office, images with OCR, HTML, email, archives, academic — using the local `xberg` CLI in your agent.
+Extract text, tables, metadata, and images from 110 document formats — PDF, Office, images with OCR, HTML, email, archives, academic — using the local `xberg` CLI in your agent.
 
 <!-- ~keep TODO: add screenshot -->
 
@@ -40,7 +40,7 @@ cargo install xberg-cli --features mcp
 
 The Python (`xberg`) and Node (`@xberg-io/xberg`) packages are language SDKs/bindings, not the CLI. The prebuilt CLI binaries (brew, GitHub release) include the MCP server; a source build enables it with `--features mcp` (`mcp` is not in the CLI's default feature set).
 
-OCR ships with Tesseract by default. Install language packs for non-English documents:
+PaddleOCR is the default OCR backend; Tesseract is the fallback wherever PaddleOCR is not compiled in. Install Tesseract language packs for non-English documents:
 
 ```bash
 brew install tesseract-lang        # macOS
@@ -51,7 +51,7 @@ sudo apt install tesseract-ocr-*   # Debian/Ubuntu
 
 | Skill | Trigger |
 |-------|---------|
-| **xberg** | Extract text, tables, metadata, and images from 106 document formats (PDF, Office, images, HTML, email, archives, academic) using Xberg. Use when writing code that calls Xberg APIs in Python, Node.js/TypeScript, Rust, or CLI. Covers installation, extraction (sync/async), configuration (OCR, chunking, output format), batch processing, error handling, and plugins. |
+| **xberg** | Extract text, tables, metadata, and images from 110 document formats (PDF, Office, images, HTML, email, archives, academic) using Xberg. Use when writing code that calls Xberg APIs in Python, Node.js/TypeScript, Rust, or CLI. Covers installation, extraction (sync/async), configuration (OCR, chunking, output format), batch processing, error handling, and plugins. |
 | **extracting-with-ocr** | Use when extracting text from scanned PDFs, photographed pages, or images that have no embedded text layer. Covers OCR backends, language packs, force-OCR, and performance tuning. |
 | **extracting-tables** | Use when extracting tabular data from PDFs, spreadsheets, or images. Covers layout-aware table detection, table model selection, output formats (markdown / JSON cells), and known limits. |
 | **chunking** | Use when splitting extracted text into chunks for LLM context windows or RAG ingestion. Covers chunk size, overlap, markdown/yaml/semantic chunkers, tokenizer-based sizing, and the standalone `chunk` command. |

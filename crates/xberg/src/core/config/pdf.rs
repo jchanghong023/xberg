@@ -62,8 +62,12 @@ impl fmt::Display for PdfBackend {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PdfConfig {
-    /// Extract images from PDF
-    #[serde(default)]
+    /// Extract images from PDF.
+    ///
+    /// Defaults to `true` (matching [`PdfConfig::default`]); an explicit `false` vetoes
+    /// image extraction at the PDF level even when the general `images` section (or its
+    /// absent-section default) would allow it.
+    #[serde(default = "default_true")]
     pub extract_images: bool,
 
     /// Extract tables from PDF.
@@ -96,7 +100,7 @@ pub struct PdfConfig {
     /// Ignored when `ContentFilterConfig.include_headers` is `true`.
     /// Effective nonzero margins require per-page OCR so geometry can be filtered;
     /// document-capable OCR backends use their image-processing path in that case.
-    /// Default: 0.06 (6%)
+    /// Default: 0.0 (disabled; set explicitly to filter header content)
     #[serde(default)]
     pub top_margin_fraction: Option<f32>,
 
@@ -104,7 +108,7 @@ pub struct PdfConfig {
     /// Ignored when `ContentFilterConfig.include_footers` is `true`.
     /// Effective nonzero margins require per-page OCR so geometry can be filtered;
     /// document-capable OCR backends use their image-processing path in that case.
-    /// Default: 0.05 (5%)
+    /// Default: 0.0 (disabled; set explicitly to filter footer content)
     #[serde(default)]
     pub bottom_margin_fraction: Option<f32>,
 
@@ -193,7 +197,7 @@ pub struct HierarchyConfig {
 impl Default for PdfConfig {
     fn default() -> Self {
         Self {
-            extract_images: false,
+            extract_images: true,
             extract_tables: true,
             passwords: None,
             extract_metadata: true,

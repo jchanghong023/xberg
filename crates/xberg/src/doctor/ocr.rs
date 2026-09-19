@@ -560,9 +560,11 @@ mod tests {
         };
 
         let configs = effective_backend_configs(&ocr);
+        // The primary stage is whatever backend the config resolves to; the compiled-in
+        // default may be PaddleOCR rather than Tesseract, so match "not the VLM stage".
         let primary = configs
             .iter()
-            .find(|effective| effective.config.backend == "tesseract")
+            .find(|effective| effective.config.backend != "vlm")
             .unwrap();
         let vlm = configs
             .iter()

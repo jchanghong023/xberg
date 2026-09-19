@@ -1,13 +1,13 @@
 <!--
 AI-RULEZ :: GENERATED FILE — DO NOT EDIT
-Content-Hash: blake3:4c81d61fcac25d8d37e359bb6f26049fa524174cbec696462bda47f9cc66a707
-Source-Hash: blake3:a92a53795b15c1bfb0f4ee65d2ec8e7475ff291f9271b5bbf404957b82eb790a
+Content-Hash: blake3:28060fd14909427c0f77d94c820751454c43bbbfab3ca549427e170b0c662449
+Source-Hash: blake3:8436911387ca6e92e089da7c4165303e587d88cbff8b705ce66d7cd4eaaa5497
 Schema-Version: v1
 -->
 
 # Supported Formats Reference
 
-Xberg supports 106 formats across 140 unique file extensions and accepts 53 compatibility MIME aliases. The tables below summarize the current extension families; `xberg formats` and the [generated format reference](https://docs.xberg.io/reference/formats/) are authoritative for individual MIME mappings and feature-gated availability.
+Xberg supports 110 formats across 146 unique file extensions and accepts 58 compatibility MIME aliases. The tables below summarize the current extension families; `xberg formats` and the [generated format reference](https://docs.xberg.io/reference/formats/) are authoritative for individual MIME mappings and feature-gated availability.
 
 ## Office Documents
 
@@ -74,6 +74,12 @@ Xberg supports 106 formats across 140 unique file extensions and accepts 53 comp
 | Format                | Extensions      | MIME Type                                       | Capabilities                            |
 | --------------------- | --------------- | ----------------------------------------------- | --------------------------------------- |
 | Hangul Word Processor | `.hwp`, `.hwpx` | `application/x-hwp`, `application/haansofthwpx` | Korean document format, text extraction |
+
+### Drawings
+
+| Format | Extensions               | MIME Type                                                   | Capabilities                                           |
+| ------ | ------------------------ | ----------------------------------------------------------- | ------------------------------------------------------ |
+| Visio  | `.vsd`, `.vsdx`, `.vsdm` | `application/vnd.visio`, `application/vnd.ms-visio.drawing` | Shape text from legacy binary and OPC drawing packages |
 
 ## Images (OCR-Enabled)
 
@@ -153,6 +159,7 @@ Xberg supports 106 formats across 140 unique file extensions and accepts 53 comp
 | MP4 audio track | `.mp4`, `.mpg4`, `.mp4v`, `.m4v` | Audio-track transcription |
 | MPEG audio track | `.mpeg`, `.mpg`, `.mpe`, `.m1v`, `.m2v` | Audio-track transcription |
 | WebM audio track | `.webm` | Audio-track transcription |
+| Windows Media audio track | `.wmv`, `.asf` | Audio-track transcription |
 
 ## Email & Archives
 

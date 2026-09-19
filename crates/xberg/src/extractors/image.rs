@@ -146,43 +146,49 @@ fn image_ocr_quality_score(text: &str) -> f64 {
 }
 
 #[cfg(any(test, all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm"))))]
-fn select_image_ocr_result(
-    layout_doc: InternalDocument,
-    whole_image_result: Result<InternalDocument>,
-) -> InternalDocument {
-    let whole_image_doc = match whole_image_result {
-        Ok(doc) => doc,
+fn select_image_ocr_result(region_doc: InternalDocument, whole: Result<WholeImageOcr>) -> WholeImageOcr {
+    let whole = match whole {
+        Ok(whole) => whole,
         Err(error) => {
             tracing::warn!(%error, "Whole-image OCR quality comparison failed; retaining layout-region OCR");
-            return layout_doc;
+            return WholeImageOcr {
+                document: region_doc,
+                from_whole_image: false,
+            };
         }
     };
-    let layout_text = internal_document_text(&layout_doc);
-    let whole_image_text = internal_document_text(&whole_image_doc);
+    let layout_text = internal_document_text(&region_doc);
+    let whole_text = internal_document_text(&whole.document);
     let layout_score = image_ocr_quality_score(&layout_text);
-    let whole_image_score = image_ocr_quality_score(&whole_image_text);
-    let token_retention = alphanumeric_token_retention(&layout_text, &whole_image_text);
+    let whole_score = image_ocr_quality_score(&whole_text);
+    let token_retention = alphanumeric_token_retention(&layout_text, &whole_text);
 
-    if layout_score < whole_image_score || token_retention < MIN_LAYOUT_OCR_ALPHANUMERIC_TOKEN_RETENTION {
+    if layout_score < whole_score || token_retention < MIN_LAYOUT_OCR_ALPHANUMERIC_TOKEN_RETENTION {
         tracing::debug!(
             layout_score,
-            whole_image_score,
+            whole_score,
             token_retention,
             "Whole-image OCR retained because layout-region OCR reduced text quality"
         );
-        whole_image_doc
+        // The whole-image reading *is* the body again.
+        whole
     } else {
-        layout_doc
+        // Region text won and is already organized into the body; the
+        // whole-image reading would only duplicate it.
+        WholeImageOcr {
+            document: region_doc,
+            from_whole_image: false,
+        }
     }
 }
 
 #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
 fn cached_whole_image_after_layout_error(
-    whole_image_result: &Result<InternalDocument>,
+    whole_image_result: &Result<WholeImageOcr>,
     error: crate::XbergError,
-) -> Result<InternalDocument> {
-    let whole_image_doc = match whole_image_result {
-        Ok(doc) => doc,
+) -> Result<WholeImageOcr> {
+    let whole = match whole_image_result {
+        Ok(whole) => whole,
         Err(whole_image_error) => {
             return Err(crate::XbergError::Other(format!(
                 "Image OCR failed in both paths; whole-image OCR: {whole_image_error}; layout-region OCR: {error}"
@@ -193,14 +199,17 @@ fn cached_whole_image_after_layout_error(
         %error,
         "Layout-region OCR failed after whole-image OCR succeeded; retaining whole-image output"
     );
-    let mut retained = whole_image_doc.clone();
+    let mut retained = whole.document.clone();
     retained.processing_warnings.push(crate::types::ProcessingWarning {
         source: std::borrow::Cow::Borrowed("layout-ocr"),
         message: std::borrow::Cow::Borrowed(
             "Layout-region OCR failed after whole-image OCR succeeded; retained whole-image output",
         ),
     });
-    Ok(retained)
+    Ok(WholeImageOcr {
+        document: retained,
+        from_whole_image: whole.from_whole_image,
+    })
 }
 
 #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
@@ -591,6 +600,7 @@ fn finish_cached_layout_document(
         speaker_notes: None,
         section_name: None,
         sheet_name: None,
+        ocr_confidence: None,
         image_preprocessing: whole_image_doc.metadata.image_preprocessing.clone(),
     }]);
     ImageExtractor::mark_ocr_extraction(&mut assembled);
@@ -1101,26 +1111,42 @@ async fn extract_layout_regions(
     Ok(build_region_ocr_document(builder, formulas, processing_warnings))
 }
 
+/// The output of the standalone-image whole-image OCR route: the assembled
+/// document plus which route produced it.
+///
+/// `from_whole_image` marks that the body *is* the whole-image reading. It used
+/// to carry the raw backend result so `extract_content` could attach it to the
+/// extracted image, but that hand-back was deliberately reversed (see the
+/// comment at the `doc.images.push` call sites): the pipeline's shared image-OCR
+/// pass re-recognizes the original bytes on purpose, and the union of both
+/// channels' noise is the accepted output shape. With no reader left for the
+/// payload, only the provenance flag remains — selection tests assert on it.
+#[derive(Debug)]
+struct WholeImageOcr {
+    document: InternalDocument,
+    from_whole_image: bool,
+}
+
 #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
 async fn extract_selected_image_ocr_path<Layout, LayoutFuture, Whole, WholeFuture>(
     use_layout: bool,
     layout: Layout,
     whole: Whole,
-) -> Result<InternalDocument>
+) -> Result<WholeImageOcr>
 where
     Layout: FnOnce() -> LayoutFuture,
-    LayoutFuture: std::future::Future<Output = Result<InternalDocument>>,
+    LayoutFuture: std::future::Future<Output = Result<WholeImageOcr>>,
     Whole: FnOnce() -> WholeFuture,
-    WholeFuture: std::future::Future<Output = Result<InternalDocument>>,
+    WholeFuture: std::future::Future<Output = Result<WholeImageOcr>>,
 {
     if use_layout { layout().await } else { whole().await }
 }
 
 #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
 enum LayoutOcrPreparation {
-    Complete(InternalDocument),
+    Complete(WholeImageOcr),
     Detected {
-        whole_image_result: Result<InternalDocument>,
+        whole_image_result: Result<WholeImageOcr>,
         rgb: std::sync::Arc<image::RgbImage>,
         detections: Vec<crate::layout::LayoutDetection>,
     },
@@ -1201,18 +1227,26 @@ fn configured_region_ocr(
     Ok((backend, region_config))
 }
 
+/// Applies `psm` whenever the caller has not explicitly set one, whether or not a
+/// `TesseractConfig` is present. Keyed on the `psm` field itself, not on struct
+/// presence (#1573) — an explicitly materialised `TesseractConfig` that leaves `psm`
+/// unset still gets the automatic default, and any other field the caller did set is
+/// preserved rather than overwritten.
 #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
 fn apply_default_tesseract_psm(config: &mut crate::core::config::OcrConfig, psm: i32) {
-    if config.backend != "tesseract" || config.tesseract_config.is_some() {
+    if config.backend != "tesseract" {
         return;
     }
 
-    let tesseract_config = crate::types::TesseractConfig {
-        language: config.language.clone(),
-        psm,
-        ..Default::default()
-    };
-    config.tesseract_config = Some(tesseract_config);
+    let tesseract_config = config
+        .tesseract_config
+        .get_or_insert_with(|| crate::types::TesseractConfig {
+            language: config.language.clone(),
+            ..Default::default()
+        });
+    if tesseract_config.psm.is_none() {
+        tesseract_config.psm = Some(psm);
+    }
 }
 
 #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
@@ -1225,10 +1259,12 @@ fn apply_default_whole_image_tesseract_psm(config: &mut crate::core::config::Ocr
     apply_default_tesseract_psm(config, psm);
 }
 
+/// Checks the same reconciled language `config_to_tesseract` resolves (#1572), so a
+/// `jpn_vert` set only on `tesseract_config.language` still selects the vertical PSM.
 #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
 fn has_vertical_tesseract_language(config: &crate::core::config::OcrConfig) -> bool {
     config
-        .language
+        .effective_tesseract_language()
         .iter()
         .flat_map(|language| language.split('+'))
         .any(|language| language.trim().to_ascii_lowercase().ends_with("_vert"))
@@ -1270,7 +1306,9 @@ fn should_retry_sparse_image_ocr(
     any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline")
 ))]
 fn is_implicit_horizontal_tesseract(config: &crate::core::config::OcrConfig) -> bool {
-    config.backend == "tesseract" && config.tesseract_config.is_none() && !has_vertical_tesseract_language(config)
+    config.backend == "tesseract"
+        && config.tesseract_config.as_ref().and_then(|c| c.psm).is_none()
+        && !has_vertical_tesseract_language(config)
 }
 
 #[cfg(all(
@@ -1303,7 +1341,7 @@ fn sparse_image_ocr_fallback_config(
 ) -> crate::core::config::OcrConfig {
     let mut fallback_config = whole_image_config.clone();
     let tesseract_config = fallback_config.tesseract_config.get_or_insert_default();
-    tesseract_config.psm = SPARSE_IMAGE_OCR_FALLBACK_PSM;
+    tesseract_config.psm = Some(SPARSE_IMAGE_OCR_FALLBACK_PSM);
     let preprocessing = crate::types::ImagePreprocessingConfig {
         deskew: false,
         contrast_enhance: true,
@@ -1347,6 +1385,7 @@ fn normalize_image_bytes_for_ocr(
     content: &[u8],
     images_config: &crate::core::config::ImageExtractionConfig,
     security_limits: &crate::extractors::security::SecurityLimits,
+    ocr_config: &crate::core::config::OcrConfig,
 ) -> Result<NormalizedOcrImage> {
     let rgb = match crate::extraction::image::decode_image_to_rgb8_with_security_limits(content, security_limits) {
         Ok(decoded) => decoded,
@@ -1355,8 +1394,13 @@ fn normalize_image_bytes_for_ocr(
     };
     let (width, height) = rgb.dimensions();
     let dpi_config = crate::types::ImageDpiConfig::from(images_config);
+    // GH#1630: an explicit `OcrConfig.backend_options["source_dpi"]` hint wins, then embedded
+    // PNG `pHYs` density, then `None` (the historical 72 DPI assumption). Shared with
+    // `ocr::processor::execution::perform_ocr` (GH#1621: no second density scanner).
+    let explicit_source_dpi = crate::extraction::image::explicit_source_dpi_from_ocr_config(ocr_config);
+    let known_source_dpi = crate::extraction::image::resolve_known_source_dpi(explicit_source_dpi, content);
     let (planned_width, planned_height) =
-        crate::image::preprocessing::normalized_image_dimensions(width, height, &dpi_config, None);
+        crate::image::preprocessing::normalized_image_dimensions(width, height, &dpi_config, known_source_dpi);
     let encoded_source_bytes = u64::try_from(content.len())
         .map_err(|_| crate::extraction::image_decode::image_dimension_error(width, height, u64::MAX, u64::MAX))?;
     let current_bytes = u64::try_from(rgb.as_raw().len())
@@ -1378,7 +1422,7 @@ fn normalize_image_bytes_for_ocr(
         width as usize,
         height as usize,
         &dpi_config,
-        None,
+        known_source_dpi,
     ) {
         Ok(result) => result,
         Err((error, _)) => {
@@ -1521,7 +1565,15 @@ fn ocr_backend_emits_structured_markdown(config: &ExtractionConfig) -> bool {
 
 #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
 fn should_use_layout_ocr(config: &ExtractionConfig) -> bool {
-    config.layout.is_some() && config.ocr.is_some() && !ocr_backend_emits_structured_markdown(config)
+    // An absent `ocr` section must not gate layout OCR off: both whole-image OCR
+    // (`extract_with_ocr`) and the shared image OCR helper fall back to
+    // `OcrConfig::default()` when `config.ocr` is `None`, so OCR runs anyway —
+    // demanding an explicit section here only made a standalone `layout`
+    // configuration silently take the whole-image path (a caller passing
+    // `{"layout": {}}` got no layout detection and no diagnostic). The hard
+    // opt-outs (`disable_ocr` / `ocr.enabled = false`) and structured-markdown
+    // backends remain the gates.
+    config.layout.is_some() && !config.effective_disable_ocr() && !ocr_backend_emits_structured_markdown(config)
 }
 
 #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
@@ -1571,7 +1623,7 @@ impl ImageExtractor {
         content: &[u8],
         mime_type: &str,
         config: &ExtractionConfig,
-    ) -> Result<InternalDocument> {
+    ) -> Result<WholeImageOcr> {
         use crate::plugins::registry::get_ocr_backend_registry;
 
         let default_ocr_config;
@@ -1595,7 +1647,16 @@ impl ImageExtractor {
             let wants_pipeline = ocr_config.vlm_fallback != crate::core::config::VlmFallbackPolicy::Disabled
                 || ocr_config.pipeline.is_some();
             if wants_pipeline && let Some(pipeline) = ocr_config.effective_pipeline() {
-                return self.extract_with_ocr_pipeline(content, config, &pipeline).await;
+                // Pipeline output has no single whole-image backend result to
+                // hand back; the pipeline runner organizes the text itself, and
+                // the pipeline's shared image-OCR pass still fills the fence.
+                return self
+                    .extract_with_ocr_pipeline(content, config, &pipeline)
+                    .await
+                    .map(|document| WholeImageOcr {
+                        document,
+                        from_whole_image: false,
+                    });
             }
         }
 
@@ -1610,6 +1671,14 @@ impl ImageExtractor {
         apply_default_whole_image_tesseract_psm(&mut ocr_config_with_format);
         ocr_config_with_format.output_format = Some(config.output_format.clone());
         ocr_config_with_format.acceleration = config.acceleration.clone();
+        // GH#1651: the sibling injection the embedded-image route already does
+        // (`extraction::image_ocr`). Without it a standalone image's OCR decode never sees
+        // the caller's `ExtractionConfig::security_limits`. Assigned conditionally so an
+        // `OcrConfig::security_limits` the caller set directly is not silently replaced by
+        // `None`; `ExtractionConfig` still wins whenever it carries a value. ~keep
+        if let Some(security_limits) = config.security_limits.clone() {
+            ocr_config_with_format.security_limits = Some(security_limits);
+        }
         #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
         let include_words = should_use_layout_ocr(config);
         #[cfg(not(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm"))))]
@@ -1632,7 +1701,7 @@ impl ImageExtractor {
         let normalized_ocr_bytes = config
             .images
             .as_ref()
-            .map(|images_config| normalize_image_bytes_for_ocr(content, images_config, security_limits))
+            .map(|images_config| normalize_image_bytes_for_ocr(content, images_config, security_limits, ocr_config))
             .transpose()?;
         #[cfg(feature = "ocr-pipeline")]
         let ocr_input: &[u8] = normalized_ocr_bytes
@@ -1670,6 +1739,10 @@ impl ImageExtractor {
             ocr_result
         };
 
+        // Every field of the backend result moves into the body document
+        // below; nothing else consumes it, so no clone (#1571-era lesson —
+        // backfilling `ExtractedImage::ocr_result` from here was deliberately
+        // removed, see the call sites in `extract_content`).
         let ocr_content = ocr_result.content;
         let ocr_metadata = ocr_result.metadata;
         let ocr_elements = ocr_result.ocr_elements;
@@ -1683,6 +1756,21 @@ impl ImageExtractor {
         let ocr_tables = ocr_result.tables;
         #[cfg(feature = "ocr")]
         let ocr_internal_document = ocr_result.ocr_internal_document;
+
+        // ~keep The whole image is one OCR run, so its confidence describes page 1 and only
+        // page 1. The multi-frame TIFF branch below splits that single run's text by byte
+        // offset into several pages with no per-frame OCR of their own, so those pages keep
+        // `ocr_confidence: None` rather than repeating a figure that was never measured for
+        // them (#1568). Gated on `pdf` because the shared builder lives in that module.
+        #[cfg(all(feature = "ocr", feature = "pdf"))]
+        let whole_image_ocr_confidence = crate::extractors::pdf::ocr::page_ocr_confidence(
+            backend.confidence_semantics(),
+            crate::extractors::pdf::ocr::mean_text_conf_of(&ocr_metadata.additional),
+            crate::extractors::pdf::ocr::word_count_of(&ocr_metadata.additional).unwrap_or(0),
+            backend.name(),
+        );
+        #[cfg(all(feature = "ocr", not(feature = "pdf")))]
+        let whole_image_ocr_confidence: Option<crate::types::page::PageOcrConfidence> = None;
 
         #[cfg(feature = "ocr")]
         {
@@ -1704,9 +1792,20 @@ impl ImageExtractor {
             // pass: multi-frame TIFF page tracking slices `content` by byte
             // offset and has no per-frame correspondence to hOCR elements, so it
             // keeps the flat paragraph-split fallback.
+            //
+            // `internal_doc.elements` can be legitimately empty even when OCR found
+            // text: `perform_ocr` (execution.rs) drops any hOCR paragraph entirely
+            // claimed by a detected table before this code ever sees it (#1571), and
+            // a page that is nothing but a table empties the list that way. Falling
+            // back to `ocr_extraction_result.content` in that case would resurrect
+            // the same table text as prose alongside the `OcrTable` pushed below --
+            // exactly the duplication being fixed. Once any table was detected, trust
+            // the (possibly empty) filtered element list instead of that fallback. ~keep
             let use_hocr_headings = ocr_extraction_result.page_contents.is_none();
+            let hocr_has_content_or_tables =
+                |internal_doc: &InternalDocument| !internal_doc.elements.is_empty() || !ocr_tables.is_empty();
             let mut doc = match &ocr_internal_document {
-                Some(internal_doc) if use_hocr_headings && !internal_doc.elements.is_empty() => {
+                Some(internal_doc) if use_hocr_headings && hocr_has_content_or_tables(internal_doc) => {
                     build_image_internal_document_from_hocr_elements(&internal_doc.elements)
                 }
                 _ => build_image_internal_document(Some(&ocr_extraction_result.content), None),
@@ -1751,11 +1850,15 @@ impl ImageExtractor {
                         speaker_notes: None,
                         section_name: None,
                         sheet_name: None,
+                        ocr_confidence: whole_image_ocr_confidence,
                     }]);
                 }
             }
 
-            Ok(doc)
+            Ok(WholeImageOcr {
+                document: doc,
+                from_whole_image: true,
+            })
         }
 
         #[cfg(not(feature = "ocr"))]
@@ -1781,9 +1884,13 @@ impl ImageExtractor {
                     speaker_notes: None,
                     section_name: None,
                     sheet_name: None,
+                    ocr_confidence: None,
                 }]);
             }
-            Ok(doc)
+            Ok(WholeImageOcr {
+                document: doc,
+                from_whole_image: true,
+            })
         }
     }
 
@@ -1815,17 +1922,27 @@ impl ImageExtractor {
         let image = image::DynamicImage::ImageRgb8(image);
         let images = [image];
 
-        let (text, _tables, ocr_elements, pipeline_doc, llm_usage, _page_texts, _rasters, formulas, _) =
-            Box::pin(crate::extractors::pdf::ocr::run_ocr_pipeline(
-                None,
-                Some(&images),
-                #[cfg(feature = "layout-detection")]
-                None,
-                config,
-                pipeline,
-                None,
-            ))
-            .await?;
+        let (
+            text,
+            _tables,
+            ocr_elements,
+            pipeline_doc,
+            llm_usage,
+            _page_texts,
+            _rasters,
+            formulas,
+            _,
+            mut pipeline_ocr_confidence,
+        ) = Box::pin(crate::extractors::pdf::ocr::run_ocr_pipeline(
+            None,
+            Some(&images),
+            #[cfg(feature = "layout-detection")]
+            None,
+            config,
+            pipeline,
+            None,
+        ))
+        .await?;
 
         // Build a clean image document from the pipeline text (keeping the "image"
         // doc type and shape the rest of the image path produces), then carry over
@@ -1861,6 +1978,9 @@ impl ImageExtractor {
                 speaker_notes: None,
                 section_name: None,
                 sheet_name: None,
+                // ~keep The lone image was handed to the runner as page 0, so the winning
+                // stage keys its summary at page 1 -- the same page this builds (#1568).
+                ocr_confidence: pipeline_ocr_confidence.remove(&1),
             }]);
         }
 
@@ -1878,20 +1998,28 @@ impl ImageExtractor {
         content: &[u8],
         mime_type: &str,
         config: &ExtractionConfig,
-    ) -> Result<InternalDocument> {
+    ) -> Result<WholeImageOcr> {
         let layout_config = config.layout.as_ref().ok_or_else(|| crate::XbergError::Parsing {
             message: "Layout config required for layout-enhanced OCR".to_string(),
             source: None,
         })?;
 
-        let ocr_config = config.ocr.as_ref().ok_or_else(|| crate::XbergError::Parsing {
-            message: "OCR config required for layout-enhanced OCR".to_string(),
-            source: None,
-        })?;
+        // Whole-image OCR inside `prepare_layout_ocr` runs with the default
+        // backend when no `ocr` section is configured (`extract_with_ocr`
+        // fallback); region OCR here mirrors that fallback instead of failing
+        // the extraction with "OCR config required".
+        let default_ocr_config;
+        let ocr_config = match config.ocr.as_ref() {
+            Some(c) => c,
+            None => {
+                default_ocr_config = crate::core::config::OcrConfig::default();
+                &default_ocr_config
+            }
+        };
 
         let preparation = prepare_layout_ocr(self, content, mime_type, config, layout_config.clone()).await?;
         let (whole_image_result, rgb, detections) = match preparation {
-            LayoutOcrPreparation::Complete(doc) => return Ok(doc),
+            LayoutOcrPreparation::Complete(whole) => return Ok(whole),
             LayoutOcrPreparation::Detected {
                 whole_image_result,
                 rgb,
@@ -1900,16 +2028,16 @@ impl ImageExtractor {
         };
         #[cfg(feature = "pdf")]
         let recognized_tables = match &whole_image_result {
-            Ok(whole_image_doc) => recognize_cached_image_tables(whole_image_doc, &rgb, &detections, config).await,
+            Ok(whole) => recognize_cached_image_tables(&whole.document, &rgb, &detections, config).await,
             Err(_) => Vec::new(),
         };
         #[cfg(not(feature = "pdf"))]
         let recognized_tables = Vec::new();
 
-        if let Ok(whole_image_doc) = &whole_image_result
+        if let Ok(whole) = &whole_image_result
             && source_image_is_proven_single_frame(content, mime_type)
             && let Some(structured) = try_assemble_cached_layout_document(
-                whole_image_doc,
+                &whole.document,
                 &detections,
                 &recognized_tables,
                 rgb.width(),
@@ -1926,11 +2054,17 @@ impl ImageExtractor {
                 tables = structured.tables.len(),
                 "Assembled cached image OCR with layout structure"
             );
-            return Ok(structured);
+            // The layout assembly already organized the picture's text into the
+            // body (tables, headings, reading order); handing the raw whole-
+            // image result to the fence would print it all a second time.
+            return Ok(WholeImageOcr {
+                document: structured,
+                from_whole_image: false,
+            });
         }
-        if let Ok(whole_image_doc) = &whole_image_result
+        if let Ok(whole) = &whole_image_result
             && let Some(structured) = try_retain_canonical_whole_image_ocr(
-                whole_image_doc,
+                &whole.document,
                 &detections,
                 rgb.width(),
                 rgb.height(),
@@ -1938,10 +2072,15 @@ impl ImageExtractor {
             )
         {
             tracing::debug!(
-                elements = whole_image_doc.prebuilt_ocr_elements.as_ref().map_or(0, Vec::len),
+                elements = whole.document.prebuilt_ocr_elements.as_ref().map_or(0, Vec::len),
                 "Retained canonical whole-image OCR without per-region OCR"
             );
-            return Ok(structured);
+            // The body *is* the whole-image reading here, so the fence keeps
+            // the same source (see `WholeImageOcr`).
+            return Ok(WholeImageOcr {
+                document: structured,
+                from_whole_image: whole.from_whole_image,
+            });
         }
 
         let (backend, region_ocr_config) = match configured_region_ocr(config, ocr_config) {
@@ -2304,7 +2443,7 @@ impl InternalDocumentExtractor for ImageExtractor {
         };
 
         if config.effective_disable_ocr() {
-            let attach_image = if config.needs_image_data() {
+            let attach_image = if config.wants_own_bytes_in_result() {
                 Some(extracted_image)
             } else {
                 None
@@ -2329,7 +2468,7 @@ impl InternalDocumentExtractor for ImageExtractor {
             #[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
             {
                 let use_layout = should_use_layout_ocr(config);
-                let mut doc = extract_selected_image_ocr_path(
+                let WholeImageOcr { document: mut doc, .. } = extract_selected_image_ocr_path(
                     use_layout,
                     || self.extract_with_layout_ocr(content, mime_type, config),
                     || self.extract_with_ocr(content, mime_type, config),
@@ -2341,7 +2480,12 @@ impl InternalDocumentExtractor for ImageExtractor {
                 Self::mark_ocr_extraction(&mut doc);
                 doc.metadata.format = Some(crate::types::FormatMetadata::Image(image_metadata));
                 doc.mime_type = mime_type.to_string();
-                if config.needs_image_data() {
+                if config.wants_own_bytes_in_result() {
+                    // 不在此回填首次整图 OCR：管线共享 OCR 通道会以原始字节再识别
+                    // 一次，两条通道的噪声并集才是既有输出形态（DPI 归一化字节与
+                    // 原始字节识别结果不同，单通道会丢掉只出现在另一通道的金标准
+                    // token——测试识别.png 实证 `pp-ocrv6`/`TesseractConfig::default`
+                    // 丢失导致 GOLDEN_TOKEN_MISSING FAIL）。
                     doc.images.push(extracted_image);
                 }
                 if let Some(warning) = exif_warning.clone() {
@@ -2355,14 +2499,15 @@ impl InternalDocumentExtractor for ImageExtractor {
                 not(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))
             ))]
             {
-                let mut doc = self.extract_with_ocr(content, mime_type, config).await?;
+                let WholeImageOcr { document: mut doc, .. } = self.extract_with_ocr(content, mime_type, config).await?;
                 if let Some(ocr_config) = config.ocr.as_ref() {
                     apply_public_image_ocr_element_policy(&mut doc, ocr_config);
                 }
                 Self::mark_ocr_extraction(&mut doc);
                 doc.metadata.format = Some(crate::types::FormatMetadata::Image(image_metadata));
                 doc.mime_type = mime_type.to_string();
-                if config.needs_image_data() {
+                if config.wants_own_bytes_in_result() {
+                    // 同上：不回填首次 OCR 结果，保留管线第二识别通道（见上一处注释）。
                     doc.images.push(extracted_image);
                 }
                 if let Some(warning) = exif_warning.clone() {
@@ -2480,6 +2625,7 @@ mod tests {
             &png,
             &images_config,
             &crate::extractors::security::SecurityLimits::default(),
+            &crate::core::config::OcrConfig::default(),
         )
         .expect("normal image should remain within the default decode budget");
 
@@ -2509,10 +2655,184 @@ mod tests {
         assert!(metadata.dimension_clamped);
     }
 
+    // GH#1630: standalone image OCR discarded PNG `pHYs` density and always assumed 72 DPI, so
+    // a genuine 300 DPI scan was resampled even when the requested `target_dpi` was already 300.
+    // This is the actual site the reporter's repro exercised: `extract_with_ocr` normalizes the
+    // bytes here, at the extractor boundary, before any backend (including `perform_ocr`, fixed
+    // separately) ever sees them.
+    mod png_source_dpi_at_extractor_boundary {
+        use super::*;
+
+        /// Standard PNG CRC-32 (polynomial 0xEDB88320), needed to splice a well-formed `pHYs`
+        /// chunk into a real encoded PNG. Test-fixture construction only — the parser being
+        /// exercised, `extraction::image::png_pixel_density_dpi`, is defined once and shared;
+        /// see GH#1621.
+        fn png_crc32(data: &[u8]) -> u32 {
+            let mut crc: u32 = 0xFFFF_FFFF;
+            for &byte in data {
+                crc ^= u32::from(byte);
+                for _ in 0..8 {
+                    let mask = (crc & 1).wrapping_neg();
+                    crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+                }
+            }
+            !crc
+        }
+
+        fn png_chunk(chunk_type: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut body = Vec::with_capacity(4 + data.len());
+            body.extend_from_slice(chunk_type);
+            body.extend_from_slice(data);
+            let mut out = Vec::with_capacity(8 + body.len());
+            out.extend_from_slice(&(u32::try_from(data.len()).unwrap()).to_be_bytes());
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&png_crc32(&body).to_be_bytes());
+            out
+        }
+
+        /// Splice a `pHYs` chunk expressing `ppu` pixels-per-metre (both axes, unit = meter)
+        /// into a real encoded PNG, immediately after IHDR (signature 8 bytes + IHDR chunk 25
+        /// bytes) and always before IDAT.
+        fn png_with_phys_density(width: u32, height: u32, ppu: u32) -> Vec<u8> {
+            const SIGNATURE_AND_IHDR_LEN: usize = 8 + 25;
+            let img = image::RgbImage::from_pixel(width, height, image::Rgb([255, 255, 255]));
+            let png = encode_rgb_as_png(img.as_raw(), width, height).expect("encode fixture PNG");
+
+            let mut phys_data = Vec::with_capacity(9);
+            phys_data.extend_from_slice(&ppu.to_be_bytes());
+            phys_data.extend_from_slice(&ppu.to_be_bytes());
+            phys_data.push(1); // unit = meter
+            let phys_chunk = png_chunk(b"pHYs", &phys_data);
+
+            let mut out = Vec::with_capacity(png.len() + phys_chunk.len());
+            out.extend_from_slice(&png[..SIGNATURE_AND_IHDR_LEN]);
+            out.extend_from_slice(&phys_chunk);
+            out.extend_from_slice(&png[SIGNATURE_AND_IHDR_LEN..]);
+            out
+        }
+
+        /// 11811 px/m is the reporter's fixture value: 11811 * 0.0254 = 299.9994 DPI, not an
+        /// exact 300 — every assertion below tolerates that rather than requiring an exact
+        /// integer match.
+        const REPORTER_FIXTURE_PPU: u32 = 11_811;
+        const EXPECTED_DPI_FROM_REPORTER_FIXTURE: f64 = 299.999_4;
+        const DPI_TOLERANCE: f64 = 0.001;
+
+        fn images_config_targeting(target_dpi: i32) -> crate::core::config::ImageExtractionConfig {
+            crate::core::config::ImageExtractionConfig {
+                target_dpi,
+                auto_adjust_dpi: false,
+                ..Default::default()
+            }
+        }
+
+        /// Unit-level check on `normalize_image_bytes_for_ocr` directly: a `target_dpi=300`
+        /// request against a genuine ~300 DPI PNG must not resize, and must report the true
+        /// embedded density rather than the fabricated 72 assumption.
+        #[cfg(feature = "ocr-pipeline")]
+        #[test]
+        fn does_not_resize_when_target_dpi_matches_known_png_density() {
+            let png = png_with_phys_density(16, 16, REPORTER_FIXTURE_PPU);
+            let images_config = images_config_targeting(300);
+
+            let normalized = normalize_image_bytes_for_ocr(
+                &png,
+                &images_config,
+                &crate::extractors::security::SecurityLimits::default(),
+                &crate::core::config::OcrConfig::default(),
+            )
+            .expect("normalization must succeed");
+
+            let metadata = normalized.metadata.expect("preprocessing metadata is recorded");
+            assert!(
+                metadata.skipped_resize,
+                "a 300 target against a ~300 detected source must not resize"
+            );
+            assert!(
+                (metadata.original_dpi.horizontal - EXPECTED_DPI_FROM_REPORTER_FIXTURE).abs() < DPI_TOLERANCE,
+                "expected ~{EXPECTED_DPI_FROM_REPORTER_FIXTURE} DPI, got {}",
+                metadata.original_dpi.horizontal
+            );
+        }
+
+        /// Control: a PNG with no density metadata must still default to 72 DPI and still
+        /// resize against a 300 target — the pre-fix, and still-correct-for-this-case, behaviour.
+        #[cfg(feature = "ocr-pipeline")]
+        #[test]
+        fn still_resizes_and_assumes_72_dpi_when_png_has_no_density_metadata() {
+            let img = image::RgbImage::from_pixel(16, 16, image::Rgb([255, 255, 255]));
+            let png = encode_rgb_as_png(img.as_raw(), 16, 16).expect("encode fixture PNG");
+            let images_config = images_config_targeting(300);
+
+            let normalized = normalize_image_bytes_for_ocr(
+                &png,
+                &images_config,
+                &crate::extractors::security::SecurityLimits::default(),
+                &crate::core::config::OcrConfig::default(),
+            )
+            .expect("normalization must succeed");
+
+            let metadata = normalized.metadata.expect("preprocessing metadata is recorded");
+            assert!(
+                !metadata.skipped_resize,
+                "a 300 target against an assumed-72 source must resize"
+            );
+            assert_eq!(
+                metadata.original_dpi,
+                crate::types::ImageDpi::from((72.0, 72.0)),
+                "no embedded metadata must leave the historical 72 assumption unchanged"
+            );
+        }
+
+        /// The decisive, end-to-end regression test: the reporter's own repro (minus corpus
+        /// bytes — a synthetic PNG built with valid CRCs and an explicit `pHYs`), run through
+        /// the real public `xberg::extract` API with `target_dpi=300`, `auto_adjust_dpi=false`,
+        /// `use_cache=false`, `force_ocr=true`. Before the fix this reports
+        /// `original_dpi: 72.0`, `scale_factor: ~4.17`, and a resized raster; after the fix it
+        /// must report `original_dpi ≈ 300` and no resize.
+        #[cfg(feature = "ocr")]
+        #[tokio::test]
+        async fn end_to_end_extract_honours_embedded_png_density_at_the_reporters_target_dpi() {
+            let png = png_with_phys_density(16, 16, REPORTER_FIXTURE_PPU);
+
+            let config = ExtractionConfig {
+                images: Some(images_config_targeting(300)),
+                ocr: Some(crate::core::config::OcrConfig::default()),
+                force_ocr: true,
+                use_cache: false,
+                disable_ocr: false,
+                ..Default::default()
+            };
+
+            let input = crate::core::config::ExtractInput::from_bytes(png, "image/png", Some("gh1630.png".to_string()));
+            let result = crate::extract(input, &config).await.expect("extraction must succeed");
+            let doc = result.results.first().expect("one document must be returned");
+            let metadata = doc
+                .metadata
+                .image_preprocessing
+                .clone()
+                .expect("image_preprocessing metadata must be recorded for OCR'd images");
+
+            assert!(
+                (metadata.original_dpi.horizontal - EXPECTED_DPI_FROM_REPORTER_FIXTURE).abs() < DPI_TOLERANCE,
+                "GH#1630: expected original_dpi ~{EXPECTED_DPI_FROM_REPORTER_FIXTURE}, got {}",
+                metadata.original_dpi.horizontal
+            );
+            assert!(
+                metadata.skipped_resize,
+                "GH#1630: target_dpi=300 against a genuine ~300 DPI source must not resize \
+                 (scale_factor was previously target/72 = ~4.17)"
+            );
+        }
+    }
+
     #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
     #[test]
     fn should_apply_vertical_block_psm_to_default_vertical_tesseract_config() {
+        // The default backend is PaddleOCR wherever it is compiled in; this test pins
+        // Tesseract PSM materialization, so it names Tesseract explicitly.
         let mut ocr_config = crate::core::config::OcrConfig {
+            backend: "tesseract".to_string(),
             language: vec!["jpn_vert".to_string()],
             ..Default::default()
         };
@@ -2522,7 +2842,7 @@ mod tests {
         let tesseract_config = ocr_config
             .tesseract_config
             .expect("whole-image OCR must materialize Tesseract configuration");
-        assert_eq!(tesseract_config.psm, VERTICAL_BLOCK_TESSERACT_PSM);
+        assert_eq!(tesseract_config.psm, Some(VERTICAL_BLOCK_TESSERACT_PSM));
         assert_eq!(tesseract_config.language, vec!["jpn_vert"]);
     }
 
@@ -2530,6 +2850,7 @@ mod tests {
     #[test]
     fn should_apply_default_whole_image_psm_to_horizontal_tesseract_config() {
         let mut ocr_config = crate::core::config::OcrConfig {
+            backend: "tesseract".to_string(),
             language: vec!["eng".to_string()],
             ..Default::default()
         };
@@ -2539,7 +2860,7 @@ mod tests {
         let tesseract_config = ocr_config
             .tesseract_config
             .expect("whole-image OCR must materialize Tesseract configuration");
-        assert_eq!(tesseract_config.psm, WHOLE_IMAGE_TESSERACT_PSM);
+        assert_eq!(tesseract_config.psm, Some(WHOLE_IMAGE_TESSERACT_PSM));
         assert_eq!(tesseract_config.language, vec!["eng"]);
     }
 
@@ -2550,7 +2871,7 @@ mod tests {
             language: vec!["jpn_vert".to_string()],
             tesseract_config: Some(crate::types::TesseractConfig {
                 language: vec!["jpn_vert".to_string()],
-                psm: 4,
+                psm: Some(4),
                 ..Default::default()
             }),
             ..Default::default()
@@ -2559,8 +2880,70 @@ mod tests {
         apply_default_whole_image_tesseract_psm(&mut ocr_config);
 
         let tesseract_config = ocr_config.tesseract_config.expect("explicit config must remain");
-        assert_eq!(tesseract_config.psm, 4);
+        assert_eq!(tesseract_config.psm, Some(4));
         assert_eq!(tesseract_config.language, vec!["jpn_vert"]);
+    }
+
+    // Regression test for #1573: `TesseractConfig()` with every field left at its
+    // default must produce the SAME effective PSM as no `TesseractConfig` at all, not
+    // fall back to the internal engine default (PSM 3 native / 6 wasm). Previously
+    // `apply_default_tesseract_psm` keyed off `tesseract_config.is_some()`, so a caller
+    // who materialized the struct (even with every field default) silently lost the
+    // whole-image PSM.
+    #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
+    #[test]
+    fn should_apply_same_default_psm_whether_or_not_tesseract_config_struct_is_present() {
+        let mut without_struct = crate::core::config::OcrConfig {
+            backend: "tesseract".to_string(),
+            language: vec!["eng".to_string()],
+            ..Default::default()
+        };
+        let mut with_default_struct = crate::core::config::OcrConfig {
+            backend: "tesseract".to_string(),
+            language: vec!["eng".to_string()],
+            tesseract_config: Some(crate::types::TesseractConfig::default()),
+            ..Default::default()
+        };
+
+        apply_default_whole_image_tesseract_psm(&mut without_struct);
+        apply_default_whole_image_tesseract_psm(&mut with_default_struct);
+
+        let psm_without_struct = without_struct
+            .tesseract_config
+            .expect("whole-image OCR must materialize Tesseract configuration")
+            .psm;
+        let psm_with_default_struct = with_default_struct
+            .tesseract_config
+            .expect("struct was already present")
+            .psm;
+
+        assert_eq!(psm_without_struct, Some(WHOLE_IMAGE_TESSERACT_PSM));
+        assert_eq!(
+            psm_without_struct, psm_with_default_struct,
+            "TesseractConfig::default() must resolve to the same effective PSM as no TesseractConfig at all"
+        );
+    }
+
+    // An explicitly set `psm`, alongside another explicitly set field, must still be
+    // honoured and not overwritten by the automatic default (#1573).
+    #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "ocr-pipeline"))]
+    #[test]
+    fn should_not_overwrite_explicit_psm_when_another_field_is_also_set() {
+        let mut ocr_config = crate::core::config::OcrConfig {
+            language: vec!["eng".to_string()],
+            tesseract_config: Some(crate::types::TesseractConfig {
+                psm: Some(7),
+                enable_table_detection: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        apply_default_whole_image_tesseract_psm(&mut ocr_config);
+
+        let tesseract_config = ocr_config.tesseract_config.expect("explicit config must remain");
+        assert_eq!(tesseract_config.psm, Some(7));
+        assert!(!tesseract_config.enable_table_detection);
     }
 
     #[cfg(feature = "ocr")]
@@ -2669,7 +3052,12 @@ mod tests {
 
         #[test]
         fn should_retry_implicit_horizontal_tesseract_when_words_are_sparse() {
-            let config = crate::core::config::OcrConfig::default();
+            // The sparse retry is a Tesseract-only fallback; the compiled-in default
+            // backend may be PaddleOCR, so the subject backend is named explicitly.
+            let config = crate::core::config::OcrConfig {
+                backend: "tesseract".to_string(),
+                ..Default::default()
+            };
             let confidences = vec![0.10; SPARSE_IMAGE_OCR_WORD_LIMIT];
             let result = result_with_word_confidences(&confidences);
 
@@ -2694,10 +3082,13 @@ mod tests {
         }
 
         #[test]
-        fn should_exclude_explicit_and_vertical_tesseract_from_sparse_retry() {
+        fn should_exclude_explicit_psm_and_vertical_tesseract_from_sparse_retry() {
             let result = result_with_word_confidences(&[0.10]);
-            let explicit_config = crate::core::config::OcrConfig {
-                tesseract_config: Some(crate::types::TesseractConfig::default()),
+            let explicit_psm_config = crate::core::config::OcrConfig {
+                tesseract_config: Some(crate::types::TesseractConfig {
+                    psm: Some(4),
+                    ..Default::default()
+                }),
                 ..Default::default()
             };
             let vertical_config = crate::core::config::OcrConfig {
@@ -2709,9 +3100,30 @@ mod tests {
                 ..Default::default()
             };
 
-            assert!(!should_retry_sparse_image_ocr(&explicit_config, &result));
+            assert!(!should_retry_sparse_image_ocr(&explicit_psm_config, &result));
             assert!(!should_retry_sparse_image_ocr(&vertical_config, &result));
             assert!(!should_retry_sparse_image_ocr(&other_backend_config, &result));
+        }
+
+        // Regression test for #1573: a `TesseractConfig` may be present for a reason
+        // unrelated to `psm` (e.g. table detection toggled off). The sparse-text retry
+        // must still trigger as long as `psm` itself is unset — struct presence alone
+        // no longer disables it. Previously `is_implicit_horizontal_tesseract` keyed off
+        // `tesseract_config.is_none()`, so this case never retried.
+        #[test]
+        fn should_retry_sparse_image_ocr_when_tesseract_config_present_but_psm_unset() {
+            let config = crate::core::config::OcrConfig {
+                backend: "tesseract".to_string(),
+                tesseract_config: Some(crate::types::TesseractConfig {
+                    enable_table_detection: false,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            let confidences = vec![0.10; SPARSE_IMAGE_OCR_WORD_LIMIT];
+            let result = result_with_word_confidences(&confidences);
+
+            assert!(should_retry_sparse_image_ocr(&config, &result));
         }
 
         #[test]
@@ -2744,7 +3156,7 @@ mod tests {
                 .tesseract_config
                 .expect("fallback must materialize Tesseract configuration");
 
-            assert_eq!(tesseract_config.psm, SPARSE_IMAGE_OCR_FALLBACK_PSM);
+            assert_eq!(tesseract_config.psm, Some(SPARSE_IMAGE_OCR_FALLBACK_PSM));
             assert_eq!(
                 tesseract_config
                     .preprocessing
@@ -2776,7 +3188,10 @@ mod tests {
         /// though `crate::ocr::types::TesseractConfig::default()` already has `true`.
         #[test]
         fn should_apply_public_ngram_default_to_whole_image_tesseract_config() {
-            let mut whole_image_config = crate::core::config::OcrConfig::default();
+            let mut whole_image_config = crate::core::config::OcrConfig {
+                backend: "tesseract".to_string(),
+                ..Default::default()
+            };
             apply_default_whole_image_tesseract_psm(&mut whole_image_config);
 
             let tesseract_config = whole_image_config
@@ -2794,6 +3209,15 @@ mod tests {
 
     fn image_ocr_document(text: &str) -> InternalDocument {
         build_image_internal_document(Some(text), None)
+    }
+
+    /// A whole-image route output whose body carries `text` and whose fence
+    /// payload is empty unless the test supplies one.
+    fn whole_image_ocr_document(text: &str) -> WholeImageOcr {
+        WholeImageOcr {
+            document: image_ocr_document(text),
+            from_whole_image: false,
+        }
     }
 
     #[test]
@@ -2939,6 +3363,7 @@ mod tests {
             speaker_notes: None,
             section_name: None,
             sheet_name: None,
+            ocr_confidence: None,
         }]);
         doc.metadata.additional.insert(
             std::borrow::Cow::Borrowed(crate::ocr_metadata_keys::OCR_PROCESSED_IMAGE_WIDTH_METADATA_KEY),
@@ -3126,7 +3551,12 @@ mod tests {
     #[test]
     fn should_disable_redundant_tesseract_analysis_for_region_ocr() {
         let extraction_config = ExtractionConfig::default();
-        let ocr_config = crate::core::config::OcrConfig::default();
+        // Region OCR materializes Tesseract configuration only for the Tesseract
+        // backend; the compiled-in default may be PaddleOCR, so name it explicitly.
+        let ocr_config = crate::core::config::OcrConfig {
+            backend: "tesseract".to_string(),
+            ..Default::default()
+        };
 
         let (_, region_config) = configured_region_ocr(&extraction_config, &ocr_config).unwrap();
         let tesseract_config = region_config
@@ -3138,7 +3568,7 @@ mod tests {
             Some(crate::core::config::OutputFormat::Plain)
         );
         assert_eq!(tesseract_config.output_format, "text");
-        assert_eq!(tesseract_config.psm, 6);
+        assert_eq!(tesseract_config.psm, Some(6));
         assert!(!tesseract_config.enable_table_detection);
         assert!(ocr_config.tesseract_config.is_none());
     }
@@ -3149,7 +3579,7 @@ mod tests {
         let extraction_config = ExtractionConfig::default();
         let ocr_config = crate::core::config::OcrConfig {
             tesseract_config: Some(crate::types::TesseractConfig {
-                psm: 4,
+                psm: Some(4),
                 ..Default::default()
             }),
             ..Default::default()
@@ -3159,7 +3589,7 @@ mod tests {
 
         assert_eq!(
             region_config.tesseract_config.expect("explicit config must remain").psm,
-            4
+            Some(4)
         );
     }
 
@@ -3719,8 +4149,8 @@ mod tests {
     #[cfg(all(feature = "layout-detection", feature = "ocr"))]
     #[test]
     fn should_retain_cached_whole_image_when_region_ocr_fails() {
-        let mut whole = image_ocr_document("cached whole-image text");
-        whole.metadata.additional.insert(
+        let mut whole = whole_image_ocr_document("cached whole-image text");
+        whole.document.metadata.additional.insert(
             std::borrow::Cow::Borrowed("ocr_candidate"),
             serde_json::json!("whole-image"),
         );
@@ -3731,14 +4161,14 @@ mod tests {
         )
         .expect("cached whole-image OCR must remain usable");
 
-        assert_eq!(internal_document_text(&retained), "cached whole-image text");
+        assert_eq!(internal_document_text(&retained.document), "cached whole-image text");
         assert_eq!(
-            retained.metadata.additional.get("ocr_candidate"),
+            retained.document.metadata.additional.get("ocr_candidate"),
             Some(&serde_json::json!("whole-image"))
         );
-        assert_eq!(retained.processing_warnings.len(), 1);
+        assert_eq!(retained.document.processing_warnings.len(), 1);
         assert_eq!(
-            retained.processing_warnings[0].message,
+            retained.document.processing_warnings[0].message,
             "Layout-region OCR failed after whole-image OCR succeeded; retained whole-image output"
         );
     }
@@ -3772,7 +4202,7 @@ mod tests {
             },
             || {
                 whole_calls.set(whole_calls.get() + 1);
-                std::future::ready(Ok(image_ocr_document("unexpected retry")))
+                std::future::ready(Ok(whole_image_ocr_document("unexpected retry")))
             },
         )
         .await;
@@ -3784,7 +4214,11 @@ mod tests {
 
     #[cfg(all(feature = "layout-detection", feature = "ocr"))]
     #[tokio::test]
-    async fn should_use_default_whole_image_ocr_when_layout_has_no_ocr_config() {
+    async fn should_run_layout_ocr_without_explicit_ocr_config() {
+        // `{"layout": {}}` with no `ocr` section must still take the layout
+        // path: the OCR that feeds it falls back to `OcrConfig::default()`,
+        // so demanding an explicit section here only made the layout
+        // configuration silently degrade to whole-image OCR.
         let config = ExtractionConfig {
             layout: Some(crate::core::config::LayoutDetectionConfig::default()),
             ocr: None,
@@ -3797,46 +4231,83 @@ mod tests {
             should_use_layout_ocr(&config),
             || {
                 layout_calls.set(layout_calls.get() + 1);
-                std::future::ready(Err(crate::XbergError::Other("unexpected layout path".to_string())))
+                std::future::ready(Ok(whole_image_ocr_document("layout path with default OCR")))
             },
             || {
                 whole_calls.set(whole_calls.get() + 1);
-                std::future::ready(Ok(image_ocr_document("default whole-image OCR")))
+                std::future::ready(Ok(whole_image_ocr_document("unexpected whole path")))
             },
         )
         .await
-        .expect("missing explicit OCR config must retain the default whole-image path");
+        .expect("a layout configuration without an ocr section must still take the layout path");
 
-        assert_eq!(internal_document_text(&result), "default whole-image OCR");
-        assert_eq!(layout_calls.get(), 0);
-        assert_eq!(whole_calls.get(), 1);
+        assert_eq!(internal_document_text(&result.document), "layout path with default OCR");
+        assert_eq!(layout_calls.get(), 1);
+        assert_eq!(whole_calls.get(), 0);
+    }
+
+    #[cfg(all(feature = "layout-detection", feature = "ocr"))]
+    #[test]
+    fn should_not_use_layout_ocr_when_ocr_is_hard_disabled() {
+        let config = ExtractionConfig {
+            layout: Some(crate::core::config::LayoutDetectionConfig::default()),
+            disable_ocr: true,
+            ..Default::default()
+        };
+        assert!(
+            !should_use_layout_ocr(&config),
+            "disable_ocr is a hard switch and must keep the layout path off"
+        );
+
+        let config = ExtractionConfig {
+            layout: Some(crate::core::config::LayoutDetectionConfig::default()),
+            ocr: Some(crate::core::config::OcrConfig {
+                enabled: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !should_use_layout_ocr(&config),
+            "ocr.enabled = false is a hard switch and must keep the layout path off"
+        );
     }
 
     #[test]
     fn should_use_whole_image_ocr_when_invoice_regions_drop_fields() {
         let layout = image_ocr_document("Invoice 1042 Acme Total 1250 USD");
-        let mut whole = image_ocr_document("Invoice 1042 Acme Corporation Date July 31 Total 1250 USD");
-        whole.metadata.additional.insert(
+        let mut whole = WholeImageOcr {
+            document: image_ocr_document("Invoice 1042 Acme Corporation Date July 31 Total 1250 USD"),
+            from_whole_image: true,
+        };
+        whole.document.metadata.additional.insert(
             std::borrow::Cow::Borrowed("ocr_candidate"),
             serde_json::Value::String("whole-image".to_string()),
         );
-        whole.processing_warnings.push(crate::types::ProcessingWarning {
-            source: std::borrow::Cow::Borrowed("ocr"),
-            message: std::borrow::Cow::Borrowed("whole-image warning"),
-        });
+        whole
+            .document
+            .processing_warnings
+            .push(crate::types::ProcessingWarning {
+                source: std::borrow::Cow::Borrowed("ocr"),
+                message: std::borrow::Cow::Borrowed("whole-image warning"),
+            });
 
         let selected = select_image_ocr_result(layout, Ok(whole));
 
         assert_eq!(
-            internal_document_text(&selected),
+            internal_document_text(&selected.document),
             "Invoice 1042 Acme Corporation Date July 31 Total 1250 USD"
         );
         assert_eq!(
-            selected.metadata.additional.get("ocr_candidate"),
+            selected.document.metadata.additional.get("ocr_candidate"),
             Some(&serde_json::Value::String("whole-image".to_string()))
         );
-        assert_eq!(selected.processing_warnings.len(), 1);
-        assert_eq!(selected.processing_warnings[0].message, "whole-image warning");
+        assert_eq!(selected.document.processing_warnings.len(), 1);
+        assert_eq!(selected.document.processing_warnings[0].message, "whole-image warning");
+        assert!(
+            selected.from_whole_image,
+            "the winning whole-image reading is marked as the whole-image route"
+        );
     }
 
     #[test]
@@ -3846,13 +4317,17 @@ mod tests {
             std::borrow::Cow::Borrowed("ocr_candidate"),
             serde_json::Value::String("layout".to_string()),
         );
-        let whole = image_ocr_document("The quick brown fox jumps over the lazy dog");
+        let whole = whole_image_ocr_document("The quick brown fox jumps over the lazy dog");
 
         let selected = select_image_ocr_result(layout, Ok(whole));
 
         assert_eq!(
-            selected.metadata.additional.get("ocr_candidate"),
+            selected.document.metadata.additional.get("ocr_candidate"),
             Some(&serde_json::Value::String("layout".to_string()))
+        );
+        assert!(
+            !selected.from_whole_image,
+            "a region-organized body must not be marked as the whole-image route"
         );
     }
 
@@ -3867,10 +4342,15 @@ mod tests {
             alphanumeric_token_retention(&internal_document_text(&layout), &internal_document_text(&whole)),
             1.0
         );
-        let selected = select_image_ocr_result(layout, Ok(whole));
+        let selected = select_image_ocr_result(
+            layout,
+            Ok(whole_image_ocr_document(
+                "Quarterly revenue increased while operating expenses remained stable.",
+            )),
+        );
 
         assert_eq!(
-            internal_document_text(&selected),
+            internal_document_text(&selected.document),
             "Quarterly revenue increased while operating expenses remained stable."
         );
     }
@@ -3907,11 +4387,11 @@ mod tests {
         );
 
         assert_eq!(
-            selected.metadata.additional.get("ocr_candidate"),
+            selected.document.metadata.additional.get("ocr_candidate"),
             Some(&serde_json::Value::String("layout".to_string()))
         );
-        assert_eq!(selected.processing_warnings.len(), 1);
-        assert_eq!(selected.processing_warnings[0].message, "layout warning");
+        assert_eq!(selected.document.processing_warnings.len(), 1);
+        assert_eq!(selected.document.processing_warnings[0].message, "layout warning");
     }
 
     /// Regression test for #705: a backend that gates ocr_elements on include_elements
@@ -4312,10 +4792,95 @@ mod tests {
         assert!(!doc.images[0].data.is_empty(), "image data must be non-empty");
     }
 
+    /// REV-C6 regression for the #1662 review: OCR alone must NOT put a standalone
+    /// image's own bytes in the result. `needs_image_data` gained an OCR disjunct so
+    /// containers would read embedded images for OCR (#1662); `wants_own_bytes_in_result`
+    /// is the narrower predicate `extractors/image.rs` uses instead, so a standalone
+    /// image's public `images` output stays exactly as it was before #1662 unless the
+    /// caller also asked for image extraction, captioning, or QR codes. `doc.images` must
+    /// stay empty here, in contrast to
+    /// `test_extract_with_ocr_populates_images_for_captioning` immediately above, whose
+    /// only difference is a `captioning` config.
+    #[tokio::test]
+    async fn test_extract_with_ocr_only_does_not_populate_images() {
+        use crate::core::config::OcrConfig;
+        use crate::plugins::{OcrBackend, OcrBackendType, Plugin, register_ocr_backend, unregister_ocr_backend};
+        use crate::types::ExtractedDocument;
+
+        let mut png_buf = std::io::Cursor::new(Vec::new());
+        image::ImageBuffer::<image::Rgb<u8>, _>::from_pixel(1, 1, image::Rgb([255u8, 255, 255]))
+            .write_to(&mut png_buf, image::ImageFormat::Png)
+            .expect("failed to encode test PNG");
+        let png_1x1 = png_buf.into_inner();
+
+        struct EmptyOcrBackend1662;
+
+        #[async_trait::async_trait]
+        impl OcrBackend for EmptyOcrBackend1662 {
+            fn backend_type(&self) -> OcrBackendType {
+                OcrBackendType::Custom
+            }
+            fn supports_language(&self, _: &str) -> bool {
+                true
+            }
+            async fn process_image(&self, _: &[u8], _config: &OcrConfig) -> crate::Result<ExtractedDocument> {
+                Ok(ExtractedDocument {
+                    content: String::new(),
+                    ..Default::default()
+                })
+            }
+        }
+
+        impl Plugin for EmptyOcrBackend1662 {
+            fn name(&self) -> &str {
+                "empty-ocr-1662"
+            }
+            fn version(&self) -> String {
+                "0.0.0".to_string()
+            }
+            fn initialize(&self) -> crate::Result<()> {
+                Ok(())
+            }
+            fn shutdown(&self) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        register_ocr_backend(std::sync::Arc::new(EmptyOcrBackend1662)).unwrap();
+        struct BackendGuard(&'static str);
+        impl Drop for BackendGuard {
+            fn drop(&mut self) {
+                let _ = unregister_ocr_backend(self.0);
+            }
+        }
+        let _guard = BackendGuard("empty-ocr-1662");
+
+        let config = ExtractionConfig {
+            ocr: Some(OcrConfig {
+                backend: "empty-ocr-1662".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let extractor = ImageExtractor::new();
+        let doc = extractor.extract_content(&png_1x1, "image/png", &config).await.unwrap();
+
+        assert!(
+            doc.images.is_empty(),
+            "OCR alone must not echo a standalone image's bytes into the public result: {:?}",
+            doc.images
+        );
+    }
+
     /// Full-pipeline regression for #732: InternalDocument.images must survive the
     /// derive.rs conversion so ExtractedDocument.images is Some after run_pipeline.
+    // Holds a `ProcessorSnapshotLease` for the whole `run_pipeline` call. Without `#[serial]`
+    // this raced the `#[serial]`-guarded lifecycle tests in `core::pipeline::tests`, whose
+    // mutations are refused while any snapshot lease is live. ~keep
     #[cfg(feature = "ocr")]
     #[tokio::test]
+    #[serial_test::serial]
     async fn test_pipeline_images_some_after_ocr_with_captioning() {
         use crate::core::config::{CaptioningConfig, LlmConfig, OcrConfig};
         use crate::core::pipeline::run_pipeline;

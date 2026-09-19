@@ -35,8 +35,14 @@ fn text_fixture() -> PathBuf {
     repo_root().join("test_documents").join("text").join("fake_text.txt")
 }
 
-fn docx_fixture() -> PathBuf {
-    repo_root().join("test_documents").join("docx").join("word_tables.docx")
+/// The feature-gated probe for the catalogue-vs-capability test. Originally
+/// `docx/word_tables.docx`, but the pinned `test_documents` corpus (ffc1599,
+/// same pin as upstream) ships no `docx/` directory at all, so the test could
+/// only fail on the missing fixture. CSV is feature-gated the same way and its
+/// fixture exists, which keeps the assertion's meaning intact: the catalogue
+/// must advertise a format exactly when the built binary can extract it.
+fn gated_format_fixture() -> PathBuf {
+    repo_root().join("test_documents").join("csv").join("data_table.csv")
 }
 
 fn require(path: &Path) {
@@ -165,24 +171,24 @@ fn extract_json_includes_the_timing_envelope() {
 /// feature combination.
 #[test]
 fn formats_command_agrees_with_actual_extraction_capability() {
-    let fixture = docx_fixture();
+    let fixture = gated_format_fixture();
     require(&fixture);
 
     let listed = run(&["formats", "--format", "json"]);
     assert!(listed.success, "`xberg formats` failed: {}", listed.stderr);
     let formats: serde_json::Value =
         serde_json::from_str(&listed.stdout).unwrap_or_else(|error| panic!("formats JSON was not valid: {error}"));
-    let advertises_docx = formats
+    let advertises_gated_format = formats
         .as_array()
         .expect("formats output must be a JSON array")
         .iter()
-        .any(|entry| entry.get("extension").and_then(serde_json::Value::as_str) == Some("docx"));
+        .any(|entry| entry.get("extension").and_then(serde_json::Value::as_str) == Some("csv"));
 
     let extracted = run(&["extract", &fixture.to_string_lossy()]);
 
     assert_eq!(
-        advertises_docx, extracted.success,
-        "`xberg formats` advertises docx = {advertises_docx}, but extracting a docx succeeded = {}. \
+        advertises_gated_format, extracted.success,
+        "`xberg formats` advertises csv = {advertises_gated_format}, but extracting a csv succeeded = {}. \
          The catalogue must describe the built binary. stderr: {}",
         extracted.success, extracted.stderr
     );

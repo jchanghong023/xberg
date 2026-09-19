@@ -144,7 +144,7 @@ pub fn decode_audio_to_pcm(bytes: &[u8], max_bytes: Option<u64>) -> Result<PcmAu
 
 /// Average `channels` interleaved planes down to mono.
 #[cfg(feature = "transcription")]
-fn down_mix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
+pub(crate) fn down_mix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
     if channels == 0 {
         return Vec::new();
     }
@@ -167,7 +167,7 @@ fn down_mix_to_mono(interleaved: &[f32], channels: usize) -> Vec<f32> {
 /// issues emerge for very low-bitrate sources (e.g. 8 kHz telephone audio), the
 /// caller can swap in a higher-quality resampler at the W2 inference layer.
 #[cfg(feature = "transcription")]
-fn resample_linear_to_16k(samples: &[f32], src_hz: u32) -> Vec<f32> {
+pub(crate) fn resample_linear_to_16k(samples: &[f32], src_hz: u32) -> Vec<f32> {
     const TARGET_HZ: u32 = 16_000;
 
     if samples.is_empty() || src_hz == 0 {

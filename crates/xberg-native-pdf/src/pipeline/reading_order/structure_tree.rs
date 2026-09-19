@@ -123,7 +123,7 @@ impl ReadingOrderStrategy for StructureTreeStrategy {
         // Per ISO 32000-1:2008 Section 14.7.1, suspects=true means the structure
         // tree may contain errors or unreliable content. ~keep
         if context.suspects {
-            tracing::warn!("structure tree marked as suspect, falling back to geometric ordering");
+            tracing::debug!("structure tree marked as suspect, falling back to geometric ordering");
             return self.fallback_order(spans, context);
         }
 
@@ -140,7 +140,7 @@ impl ReadingOrderStrategy for StructureTreeStrategy {
         // authoring tool assigned MCIDs in content-stream order without
         // respecting column visual order). Fall back to geometric. ~keep
         if mcid_order_zigzags_columns(&spans, mcid_order) {
-            tracing::warn!("MCID order zigzags across columns, falling back to geometric ordering");
+            tracing::debug!("MCID order zigzags across columns, falling back to geometric ordering");
             return self.fallback_order(spans, context);
         }
 

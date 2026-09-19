@@ -16,8 +16,8 @@ use crate::types::document_structure::{AnnotationKind, ContentLayer, TextAnnotat
 use crate::types::internal::{ElementKind, InternalDocument, InternalElement, list_item_source_label_from_attributes};
 
 use super::common::{
-    FootnoteCollector, NestingKind, RenderState, handle_container_end, is_body_element, is_container_end,
-    parse_metadata_entries,
+    CELL_LINE_BREAK, FootnoteCollector, NestingKind, RenderState, handle_container_end, is_body_element,
+    is_container_end, parse_metadata_entries,
 };
 
 /// Minimum valid ATX heading depth (CommonMark `#`).
@@ -418,9 +418,14 @@ fn append_annotated_span<'a>(
             parent.append(sup);
         }
         AnnotationKind::Highlight => {
-            let hl = mk(arena, NodeValue::Highlight);
-            build_inlines(arena, hl, trimmed, inner_for_node);
-            parent.append(hl);
+            // CommonMark has no highlight syntax: comrak's `==…==` is an extension its
+            // own writer emits, and renderers that do not implement it show the
+            // delimiters as literal text. `<mark>` is inline HTML, which CommonMark
+            // allows and every renderer passes through, so the highlight survives
+            // without the extension-only syntax.
+            parent.append(mk(arena, NodeValue::HtmlInline("<mark>".to_string())));
+            build_inlines(arena, parent, trimmed, inner_for_node);
+            parent.append(mk(arena, NodeValue::HtmlInline("</mark>".to_string())));
         }
         AnnotationKind::Link { url, title } => {
             let link = mk(
@@ -457,6 +462,8 @@ fn build_table<'a>(arena: &'a comrak::Arena<'a>, cells: &[Vec<String>], has_head
     if num_cols == 0 {
         return None;
     }
+    // A banner row is not a header: see [`first_row_labels_columns`].
+    let has_header = has_header && first_row_labels_columns(cells, num_cols);
     let synthetic_header_rows = usize::from(!has_header);
 
     let table_node = mk(
@@ -484,9 +491,7 @@ fn build_table<'a>(arena: &'a comrak::Arena<'a>, cells: &[Vec<String>], has_head
         for col in 0..num_cols {
             let cell_node = mk(arena, NodeValue::TableCell);
             let content = row.get(col).map(|s| s.as_str()).unwrap_or("");
-            if !content.is_empty() {
-                cell_node.append(mk_text(arena, content));
-            }
+            append_cell_content(arena, cell_node, content);
             row_node.append(cell_node);
         }
 
@@ -494,6 +499,49 @@ fn build_table<'a>(arena: &'a comrak::Arena<'a>, cells: &[Vec<String>], has_head
     }
 
     Some(table_node)
+}
+
+/// Whether a table's first row can serve as its Markdown header row.
+///
+/// A header labels columns, so it fills at least two of them. A banner — the
+/// "总体策略说明：…" note a spreadsheet puts above its data, or the single cell of a
+/// one-column sheet — fills one, and the extractor hands it over as row 0 with the
+/// other cells empty. Promoting it to the header row put a 300-character note into
+/// the header of the rendered table; leaving it as data keeps the banner in the
+/// table where it belongs.
+fn first_row_labels_columns(cells: &[Vec<String>], num_cols: usize) -> bool {
+    num_cols >= 2
+        && cells
+            .first()
+            .is_some_and(|row| row.iter().filter(|cell| !cell.trim().is_empty()).count() >= 2)
+}
+
+/// Append a cell's content, keeping the source's own line breaks as `<br>`.
+///
+/// Mirrors [`super::common::push_escaped_cell`] (xberg-io/xberg#163): a raw
+/// newline cannot appear inside a GFM row, but dropping the break instead
+/// folded a spreadsheet cell's four lines into one run-on line. An `HtmlInline`
+/// node is required because a `Text` node's `<`/`>` would be escaped into
+/// `\<br\>` by the CommonMark writer.
+fn append_cell_content<'a>(arena: &'a comrak::Arena<'a>, cell: &'a AstNode<'a>, content: &str) {
+    let mut lines: Vec<&str> = content
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+        .collect();
+    while lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    while lines.last().is_some_and(|line| line.trim().is_empty()) {
+        lines.pop();
+    }
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            cell.append(mk(arena, NodeValue::HtmlInline(CELL_LINE_BREAK.to_string())));
+        }
+        if !line.is_empty() {
+            cell.append(mk_text(arena, line));
+        }
+    }
 }
 
 /// Bullet glyphs that OCR/plain-text extraction commonly reads as unordered
@@ -581,12 +629,122 @@ enum ContainerKind {
     Group,
 }
 
+/// How an `ElementKind::Image` becomes comrak nodes.
+///
+/// Markdown renders each image as a `text` fenced block carrying its path and OCR grid. That
+/// block is Markdown syntax, and comrak writes a `Raw` node verbatim into every output format,
+/// so the other comrak-backed writers must keep a real image node instead of inheriting it —
+/// HTML previously emitted `<img>` and cannot render a fence at all.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImageBlockStyle {
+    /// Markdown: one `text` fence per image (marker line plus OCR text).
+    Fence,
+    /// HTML and any other comrak writer: a paragraph holding the image node.
+    Node,
+}
+
+/// Backtick marker long enough that no line of `body` can close the fence it opens.
+///
+/// A `text` fence opened with three backticks ends at the first line whose content is three or
+/// more of them, and a recognized-text body carries source listings verbatim, so a page of
+/// OCR'd code can hold exactly such a line. The fence is then closed early and the closing line
+/// that follows becomes the start of a new, never-closed fence, swallowing every block comrak
+/// writes after it. One backtick more than the body's longest run cannot be closed by anything
+/// in that body; a body without backticks keeps the plain three.
+fn fence_marker_for(body: &str) -> String {
+    let mut longest = 0usize;
+    let mut run = 0usize;
+    for character in body.chars() {
+        if character == '`' {
+            run += 1;
+            longest = longest.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    "`".repeat(longest.max(2) + 1)
+}
+
+/// Escape a description for the `Raw` image marker line.
+///
+/// The marker is written verbatim — comrak never gets to escape it the way it would a real
+/// image node — so a description carrying `]`, `[` or a backslash would end the alt text early
+/// and inject markup, and a newline (or any other control character) would split the marker
+/// across lines so it stops being an image. Control characters are dropped and the three
+/// Markdown-significant characters become numeric character references.
+///
+/// Entities, not backslash escapes, are what survives the production path: `render_markdown`
+/// runs comrak's output through `unescape_backslash_sequences` with the targets `_ [ ] ( ) * =`
+/// (`rendering::markdown`), so a `\[` or `\]` written here would lose its backslash before a
+/// reader ever saw it and the injection would be back. `&#91;`/`&#92;`/`&#93;` carry no
+/// backslash to strip and still decode to the original character in any Markdown renderer;
+/// `replace_html_entities` in the same module rewrites only `&#10;`/`&#2;`, so it leaves them
+/// untouched.
+fn escape_marker_alt(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_control() {
+            continue;
+        }
+        match character {
+            '\\' => escaped.push_str("&#92;"),
+            '[' => escaped.push_str("&#91;"),
+            ']' => escaped.push_str("&#93;"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+/// Percent-encode the characters that would end or unbalance a marker's link destination.
+///
+/// The destination is built from the extractor's own naming, not from document text, so this
+/// only guards the line's syntax: a space ends a CommonMark link destination early, an
+/// unbalanced `)` closes it early (an extractor relationship target like `media/image1).png`
+/// did exactly that, leaving the tail of the name as loose text), and `<`/`>` can open the
+/// pointy-bracket form. A literal `\` is encoded too: the marker is written as a `Raw` node
+/// (verbatim), and `render_markdown`'s backslash-unescape pass would otherwise delete the
+/// backslash of a `\`-before-target sequence in a Windows path (`C:\data\__x` lost its
+/// underscores). `%5C` survives that pass and percent-decodes back to the path. A literal
+/// `%` is encoded for the same round-trip (an existing `%5C` must not become ambiguous).
+/// CommonMark tolerates `[`/`]` inside a destination, but other Markdown flavors and
+/// link-resolution tooling treat them as reference-link syntax, so they are encoded
+/// defensively.
+/// Djot image markers share the `![alt](url)` shape, so its renderer reuses this too.
+pub(super) fn sanitize_marker_url(url: &str) -> String {
+    let mut sanitized = String::with_capacity(url.len());
+    for character in url.chars() {
+        match character {
+            ' ' => sanitized.push_str("%20"),
+            '(' => sanitized.push_str("%28"),
+            ')' => sanitized.push_str("%29"),
+            '<' => sanitized.push_str("%3C"),
+            '>' => sanitized.push_str("%3E"),
+            '"' => sanitized.push_str("%22"),
+            '`' => sanitized.push_str("%60"),
+            '\\' => sanitized.push_str("%5C"),
+            '%' => sanitized.push_str("%25"),
+            '[' => sanitized.push_str("%5B"),
+            ']' => sanitized.push_str("%5D"),
+            // Control characters have no place in the destination and no encoding that would
+            // make them printable here, so they are dropped rather than encoded.
+            control if control.is_control() => {}
+            other => sanitized.push(other),
+        }
+    }
+    sanitized
+}
+
 /// Build a comrak AST from an `InternalDocument`.
 ///
 /// The returned node is a `Document` root whose children mirror the document
 /// body content.  Footnotes are appended after body elements.  Non-body
 /// elements (headers, footers) are excluded.
-pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Arena<'a>) -> &'a AstNode<'a> {
+pub(crate) fn build_comrak_ast<'a>(
+    doc: &InternalDocument,
+    arena: &'a comrak::Arena<'a>,
+    image_block_style: ImageBlockStyle,
+) -> &'a AstNode<'a> {
     let root = mk(arena, NodeValue::Document);
     let footnotes = FootnoteCollector::new(doc);
     let mut state = RenderState::default();
@@ -607,7 +765,33 @@ pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Ar
         stack.last().map(|e| e.node).unwrap_or(*root)
     }
 
-    for consolidated_elem in &consolidated {
+    // The inlined copy of an image's recognized text is dropped from the paragraph stream: the
+    // image itself renders that text, so walking both showed the recognized content twice.
+    // Titles and headings are never candidates: a heading that reproduces a logo's
+    // text is document structure standing before the image, not the copy that
+    // follows it (which the pipeline inserts as a plain paragraph).
+    let view_texts: Vec<&str> = consolidated
+        .iter()
+        .map(|entry| match entry.resolve(&doc.elements) {
+            ElementView::Ref(elem) => {
+                if is_body_element(elem) && matches!(elem.kind, ElementKind::Paragraph) {
+                    elem.text.as_str()
+                } else {
+                    ""
+                }
+            }
+            ElementView::Merged { text, .. } => text,
+        })
+        .collect();
+    let repeated_ocr = super::ocr_duplicate_indices(
+        &view_texts,
+        &super::image_ocr_contents(doc, image_block_style == ImageBlockStyle::Node),
+    );
+
+    for (entry_index, consolidated_elem) in consolidated.iter().enumerate() {
+        if repeated_ocr[entry_index] {
+            continue;
+        }
         let orig_idx = consolidated_elem.original_index();
         let view = consolidated_elem.resolve(&doc.elements);
 
@@ -831,7 +1015,14 @@ pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Ar
 
             ElementKind::Image { image_index } => {
                 let image = doc.images.get(image_index as usize);
-                let desc = image.and_then(|img| img.description.as_deref()).unwrap_or("");
+                // Sanitized once, here, because both the image node and the Raw marker read
+                // this field: Word/PowerPoint bake local image paths into `@descr`, and an alt
+                // attribute that leaks `C:\Users\...` defeats the policy the marker already
+                // applies. `sanitize_image_alt_text` trims, and drops path-like values outright.
+                let desc = crate::extraction::markdown_utils::sanitize_image_alt_text(
+                    image.and_then(|img| img.description.clone()),
+                )
+                .unwrap_or_default();
                 let url = match image {
                     None => {
                         if desc.is_empty() {
@@ -842,7 +1033,7 @@ pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Ar
                     Some(img) => {
                         if !img.data.is_empty() {
                             format!("image_{}.{}", image_index, img.format)
-                        } else if let Some(ref path) = img.source_path {
+                        } else if let Some(path) = &img.source_path {
                             path.clone()
                         } else {
                             format!("image_{}.bin", image_index)
@@ -850,38 +1041,126 @@ pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Ar
                     }
                 };
 
-                let has_ocr = render_image_ocr
-                    && image
-                        .and_then(|img| img.ocr_result.as_ref())
-                        .is_some_and(|result| !result.content.is_empty());
+                // A `Raw` node is written verbatim: inside a list item or block quote the
+                // fence's lines come out flush-left, which ends the container and breaks
+                // the list/quote structure around the image. Those contexts keep a real
+                // image node — comrak formats it correctly there — exactly like the
+                // non-Markdown writers below.
+                let in_block_container = container_stack
+                    .iter()
+                    .any(|entry| matches!(entry.kind, ContainerKind::List | ContainerKind::BlockQuote));
+                if image_block_style == ImageBlockStyle::Node || in_block_container {
+                    // HTML and the other comrak writers keep the image as an image: a `Raw`
+                    // fence is Markdown and would be written verbatim into their output.
+                    let has_ocr = render_image_ocr
+                        && image
+                            .and_then(|img| img.ocr_result.as_ref())
+                            .is_some_and(|result| !result.content.is_empty());
 
-                if doc.ocr_text_only && has_ocr {
-                    let ocr_result = image.and_then(|img| img.ocr_result.as_ref()).unwrap();
-                    let ocr_para = mk(arena, NodeValue::Paragraph);
-                    ocr_para.append(mk_text(arena, &ocr_result.content));
-                    parent.append(ocr_para);
-                } else {
-                    let para = mk(arena, NodeValue::Paragraph);
-                    let img_node = mk(
-                        arena,
-                        NodeValue::Image(Box::new(NodeLink {
-                            url,
-                            title: String::new(),
-                        })),
-                    );
-                    img_node.append(mk_text(arena, desc));
-                    para.append(img_node);
-                    parent.append(para);
-
-                    if render_image_ocr
-                        && doc.append_ocr_text
-                        && let Some(ocr_result) = image.and_then(|img| img.ocr_result.as_ref())
-                        && !ocr_result.content.is_empty()
-                    {
+                    if image_block_style == ImageBlockStyle::Node && doc.ocr_text_only && has_ocr {
+                        let ocr_result = image.and_then(|img| img.ocr_result.as_ref()).unwrap();
                         let ocr_para = mk(arena, NodeValue::Paragraph);
                         ocr_para.append(mk_text(arena, &ocr_result.content));
                         parent.append(ocr_para);
+                    } else {
+                        let para = mk(arena, NodeValue::Paragraph);
+                        let img_node = mk(
+                            arena,
+                            NodeValue::Image(Box::new(NodeLink {
+                                url,
+                                title: String::new(),
+                            })),
+                        );
+                        img_node.append(mk_text(arena, &desc));
+                        para.append(img_node);
+                        parent.append(para);
+
+                        // The markdown renderer's fence path prints recognized text
+                        // regardless of the doc-level flags (its dedup passes
+                        // `respect_ocr_flags = false`); a container-nested image must
+                        // not flip to flag gating or a reproduced paragraph would be
+                        // deleted while nothing prints in its place. Only the
+                        // Node-style writers (HTML) keep the flag gate here.
+                        let append_ocr = render_image_ocr
+                            && (image_block_style == ImageBlockStyle::Fence || doc.append_ocr_text)
+                            && image
+                                .and_then(|img| img.ocr_result.as_ref())
+                                .is_some_and(|result| !result.content.is_empty());
+                        if append_ocr {
+                            let ocr_result = image.and_then(|img| img.ocr_result.as_ref()).unwrap();
+                            let ocr_para = mk(arena, NodeValue::Paragraph);
+                            ocr_para.append(mk_text(arena, &ocr_result.content));
+                            parent.append(ocr_para);
+                        }
                     }
+                    continue;
+                }
+
+                let ocr_result = render_image_ocr
+                    .then_some(image)
+                    .flatten()
+                    .and_then(|img| img.ocr_result.as_ref());
+                let ocr_text = ocr_result.and_then(|result| {
+                    // A backend whose table rebuild claimed paragraphs out of the
+                    // internal document (tesseract markdown) leaves the grid
+                    // incomplete — rendering it would drop the tables while plain
+                    // and djot print the full `content`. The grid only runs when
+                    // the document is whole; otherwise the fallback below carries
+                    // the complete text, tables included.
+                    let grid_usable = !result.internal_doc_excludes_tables;
+                    grid_usable
+                        .then_some(result.ocr_internal_document.as_ref())
+                        .flatten()
+                        .and_then(crate::rendering::ocr_layout::layout_ocr_text)
+                        .or_else(|| {
+                            let text = result.content.trim();
+                            // Fence bodies are verbatim: a literal `\r` would
+                            // ride along into the output, so CRLF-only content
+                            // is normalized here, matching the layout path's
+                            // per-line handling.
+                            (!text.is_empty()).then(|| text.replace("\r\n", "\n").replace('\r', "\n"))
+                        })
+                });
+                // Every image leaves its marker line — the markdown image carrying the path the
+                // extractor wrote — as a paragraph of its own, followed by a `text` fenced block
+                // holding the recognized text when OCR ran. Flat OCR text loses where each line
+                // sat (a caption in the picture's top-right corner came back as an arbitrary
+                // line of the stream) while a fence keeps the reconstructed alignment visible in
+                // any renderer; the marker itself must stay outside it, because a markdown
+                // image inside a code fence is never fetched or drawn. Neither half is optional:
+                // `images.ocr_text_only` / `images.append_ocr_text` still govern the other
+                // renderers and the pipeline's substitution into pre-rendered text, but they no
+                // longer strip this output down to nothing. ~keep
+                let marker = if desc.is_empty() {
+                    format!("![]({})", sanitize_marker_url(&url))
+                } else {
+                    format!("![{}]({})", escape_marker_alt(&desc), sanitize_marker_url(&url))
+                };
+                let body = ocr_text;
+
+                // The marker leaves the fence: a markdown image inside a ```text block is
+                // code, so nothing ever fetches the file it names, and a reader of the
+                // rendered markdown sees a path instead of the picture. The marker becomes its
+                // own paragraph and the fence keeps only the recognized text, which is the
+                // half whose alignment a fence actually preserves. ~keep
+                let mut marker_block = String::from(marker.as_str());
+                marker_block.push_str("\n\n");
+                parent.append(mk(arena, NodeValue::Raw(marker_block)));
+
+                if let Some(body) = body.as_deref() {
+                    // The fence outgrows its body: a body line holding three or more backticks
+                    // (OCR reads code listings) would close a three-backtick fence early, and
+                    // the closing line written after it would open a fence that never ends,
+                    // swallowing every block that follows on re-parse.
+                    let fence = fence_marker_for(body);
+                    let mut block = String::with_capacity(body.len() + fence.len() * 2 + 8);
+                    block.push_str(&fence);
+                    block.push_str("text\n");
+                    block.push_str(body);
+                    block.push('\n');
+                    block.push_str(&fence);
+                    block.push('\n');
+                    parent.append(mk(arena, NodeValue::Raw(block)));
                 }
             }
 
@@ -1004,7 +1283,17 @@ pub(crate) fn build_comrak_ast<'a>(doc: &InternalDocument, arena: &'a comrak::Ar
             }
 
             ElementKind::RawBlock => {
-                let raw = mk(arena, NodeValue::Raw(elem_text.to_string()));
+                // comrak emits `NodeValue::Raw` verbatim with no block
+                // separation: without a trailing newline the raw block's last
+                // line (typically a closing ``` fence) glues onto the following
+                // paragraph, and the merged line is no longer a bare closer —
+                // every fence-aware prose pass after the first raw block would
+                // treat the rest of the document as fence content (verbatim).
+                let mut raw_text = elem_text.to_string();
+                if !raw_text.ends_with('\n') {
+                    raw_text.push('\n');
+                }
+                let raw = mk(arena, NodeValue::Raw(raw_text));
                 parent.append(raw);
             }
 
@@ -1181,15 +1470,42 @@ mod tests {
     use super::*;
     use crate::types::document_structure::{AnnotationKind, ContentLayer, TextAnnotation};
     use crate::types::internal_builder::InternalDocumentBuilder;
-    use comrak::{Options, format_commonmark};
+    use comrak::{Options, format_commonmark, format_html};
 
     /// Helper: build AST from doc and render to CommonMark string.
     fn render(doc: &InternalDocument) -> String {
         let arena = comrak::Arena::new();
-        let root = build_comrak_ast(doc, &arena);
+        let root = build_comrak_ast(doc, &arena, ImageBlockStyle::Fence);
         let mut output = String::new();
         format_commonmark(root, &Options::default(), &mut output).unwrap();
         output
+    }
+
+    /// Helper: build AST from doc the way the HTML writer does and render it to HTML.
+    fn render_html(doc: &InternalDocument) -> String {
+        let arena = comrak::Arena::new();
+        let root = build_comrak_ast(doc, &arena, ImageBlockStyle::Node);
+        let mut output = String::new();
+        format_html(root, &Options::default(), &mut output).unwrap();
+        output
+    }
+
+    /// A marker URL carries a raw filesystem path, so a `\` before a
+    /// backslash-unescape target (`\_`) must be percent-encoded: the marker is
+    /// a `Raw` node written verbatim into the prose, where `render_markdown`'s
+    /// unescape pass deletes target backslashes and would corrupt the path.
+    #[test]
+    fn sanitize_marker_url_encodes_backslashes() {
+        assert_eq!(
+            sanitize_marker_url(r"C:\data\__pycache__\a.png"),
+            r"C:%5Cdata%5C__pycache__%5Ca.png"
+        );
+        assert_eq!(sanitize_marker_url("image_0.png"), "image_0.png");
+        // A literal `%` must itself be encoded or the `%5C` it would ride with
+        // decodes ambiguously; `[`/`]` are encoded so other Markdown flavors
+        // and link tooling cannot read them as reference-link syntax.
+        assert_eq!(sanitize_marker_url(r"100%\shot].png"), "100%25%5Cshot%5D.png");
+        assert_eq!(sanitize_marker_url("img [1].png"), "img%20%5B1%5D.png");
     }
 
     #[test]
@@ -1478,6 +1794,317 @@ mod tests {
             out
         );
         assert!(out.contains("Only text."), "paragraph must still render; got: {}", out);
+    }
+
+    /// An image element plus the `ExtractedImage` it resolves to, carrying `ocr_text` as its
+    /// recognized text.
+    fn doc_with_ocr_image(ocr_text: Option<&str>) -> InternalDocument {
+        use crate::types::internal::ElementKind;
+        use crate::types::{ExtractedDocument, ExtractedImage};
+
+        let mut b = InternalDocumentBuilder::new("test");
+        b.push_element(crate::types::internal::InternalElement::text(
+            ElementKind::Image { image_index: 0 },
+            "",
+            0,
+        ));
+        let mut doc = b.build();
+        doc.images.push(ExtractedImage {
+            data: bytes::Bytes::from_static(b"\x89PNG"),
+            format: std::borrow::Cow::Borrowed("png"),
+            image_index: 0,
+            page_number: Some(1),
+            width: Some(100),
+            height: Some(100),
+            ocr_result: ocr_text.map(|text| {
+                Box::new(ExtractedDocument {
+                    content: text.to_string(),
+                    ..Default::default()
+                })
+            }),
+            ..Default::default()
+        });
+        doc
+    }
+
+    /// The block is the only place a markdown reader finds the image file and what it
+    /// contained, so it carries both halves whatever `images.ocr_text_only` and
+    /// `images.append_ocr_text` say. Those flags used to strip it — both set against the block
+    /// left an empty fence, discarding the very text the OCR pass had just produced. ~keep
+    #[test]
+    fn test_image_fence_ignores_the_text_only_flags() {
+        let mut rendered = Vec::new();
+        for ocr_text_only in [false, true] {
+            for append_ocr_text in [false, true] {
+                let mut doc = doc_with_ocr_image(Some("Recognized text"));
+                doc.ocr_text_only = ocr_text_only;
+                doc.append_ocr_text = append_ocr_text;
+                let out = render(&doc);
+                let context = format!("ocr_text_only={ocr_text_only}, append_ocr_text={append_ocr_text}");
+                assert!(
+                    out.contains("```text"),
+                    "{context}: the image must render in a fenced block; got: {out:?}"
+                );
+                assert!(
+                    out.contains("![](image_0.png)"),
+                    "{context}: the path must stay in the marker line; got: {out:?}"
+                );
+                assert!(
+                    out.contains("Recognized text"),
+                    "{context}: the recognized text must stay in the block; got: {out:?}"
+                );
+                assert!(
+                    !out.contains("```text\n![](image_0.png)"),
+                    "{context}: the marker is markdown, not code, and must not open the fence; got: {out:?}"
+                );
+                rendered.push(out);
+            }
+        }
+        assert!(
+            rendered.windows(2).all(|pair| pair[0] == pair[1]),
+            "the block must not change with either flag: {rendered:?}"
+        );
+    }
+
+    /// A backend that rebuilds tables into `content` strips the table-claimed
+    /// paragraphs out of its `ocr_internal_document` and says so via
+    /// `internal_doc_excludes_tables`. The fence must then fall back to
+    /// `content` — the only complete source — instead of rendering a grid that
+    /// silently drops the tables.
+    #[test]
+    fn test_image_fence_falls_back_to_content_when_the_grid_excludes_tables() {
+        use crate::types::internal::ElementKind;
+        use crate::types::ocr_elements::OcrElementLevel;
+        use crate::types::{ExtractedDocument, ExtractedImage};
+
+        let mut b = InternalDocumentBuilder::new("test");
+        b.push_element(crate::types::internal::InternalElement::text(
+            ElementKind::Image { image_index: 0 },
+            "",
+            0,
+        ));
+        let mut doc = b.build();
+        // A grid-renderable internal document whose only line is the prose; the
+        // table markdown lives in `content` alone, and the flag declares that.
+        let mut grid_doc = InternalDocument::new("test");
+        let mut line = crate::types::internal::InternalElement::text(
+            ElementKind::OcrText {
+                level: OcrElementLevel::Line,
+            },
+            "prose line",
+            0,
+        );
+        line.bbox = Some(crate::types::BoundingBox {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 40.0,
+            y1: 12.0,
+        });
+        grid_doc.push_element(line);
+        doc.images.push(ExtractedImage {
+            data: bytes::Bytes::from_static(b"\x89PNG"),
+            format: std::borrow::Cow::Borrowed("png"),
+            image_index: 0,
+            page_number: Some(1),
+            ocr_result: Some(Box::new(ExtractedDocument {
+                content: "prose line\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n".to_string(),
+                ocr_internal_document: Some(grid_doc),
+                internal_doc_excludes_tables: true,
+                ..Default::default()
+            })),
+            ..Default::default()
+        });
+        let out = render(&doc);
+        assert!(
+            out.contains("| 1 | 2 |"),
+            "the table markdown must reach the output through the content fallback; got: {out:?}"
+        );
+        assert!(
+            out.contains("prose line"),
+            "the non-table prose still renders; got: {out:?}"
+        );
+    }
+
+    /// An image the OCR pass found no text in still carries its path: that line is what tells
+    /// a reader a picture sits there at all. There is no recognized text to lay out, so no
+    /// fence accompanies it.
+    #[test]
+    fn test_image_without_ocr_text_still_carries_the_path() {
+        let doc = doc_with_ocr_image(None);
+        let out = render(&doc);
+        assert!(out.contains("![](image_0.png)"), "got: {out:?}");
+        assert!(
+            !out.contains("```text"),
+            "no recognized text means no fence to keep aligned: {out:?}"
+        );
+    }
+
+    /// A recognized-text body carries source listings verbatim — OCR reads backticks. A line of
+    /// three of them closes a three-backtick fence early, and the closing line written after it
+    /// opens a fence that never ends, turning every block that follows into code. The fence must
+    /// outgrow the body, with the marker still outside it.
+    #[test]
+    fn test_image_fence_outgrows_backticks_in_the_ocr_text() {
+        let doc = doc_with_ocr_image(Some("below\n```\nabove"));
+        let out = render(&doc);
+
+        assert!(
+            out.contains("````text"),
+            "the fence must be longer than the body's longest backtick run; got: {out:?}"
+        );
+        assert!(
+            out.contains("below\n```\nabove"),
+            "the body must be written verbatim inside the fence; got: {out:?}"
+        );
+        let marker = out.find("![](image_0.png)").expect("marker line");
+        let fence = out.find("````text").expect("fence opener");
+        assert!(
+            marker < fence,
+            "the marker is markdown, not code, and must stay outside the fence; got: {out:?}"
+        );
+    }
+
+    /// The marker line is a `Raw` node, so comrak writes it verbatim instead of escaping it as
+    /// it would for a real image node: a description holding `]` would end the alt text early
+    /// and inject markup, and a newline would split the marker so it stops being an image.
+    /// Both are neutralized — the character as a numeric entity, the control character dropped —
+    /// and an ordinary description renders unchanged.
+    #[test]
+    fn test_image_marker_escapes_the_description() {
+        let mut doc = doc_with_ocr_image(None);
+        doc.images[0].description = Some("Ref] (see\nnote)".to_string());
+        let out = render(&doc);
+        assert!(
+            out.contains("![Ref&#93; (seenote)](image_0.png)"),
+            "brackets must be entity-encoded and the newline dropped; got: {out:?}"
+        );
+
+        let mut doc = doc_with_ocr_image(None);
+        doc.images[0].description = Some("Architecture diagram".to_string());
+        let out = render(&doc);
+        assert!(
+            out.contains("![Architecture diagram](image_0.png)"),
+            "an ordinary description must render unchanged; got: {out:?}"
+        );
+    }
+
+    /// The test above renders through comrak alone, but the production path is
+    /// `render_markdown`, which strips a backslash before `_ [ ] ( ) * =` from comrak's output.
+    /// A backslash escape written for the marker would be undone there, so the description has
+    /// to be entity-encoded to survive that pass.
+    #[test]
+    fn test_image_marker_encoding_survives_the_markdown_escape_pass() {
+        let mut doc = doc_with_ocr_image(None);
+        doc.escape_markdown = true;
+        doc.images[0].description = Some("Ref] (see\nnote)".to_string());
+
+        let out = crate::rendering::markdown::render_markdown(&doc);
+
+        assert!(
+            out.contains("![Ref&#93; (seenote)](image_0.png)"),
+            "the entity must reach the rendered markdown intact; got: {out:?}"
+        );
+        assert!(
+            !out.contains("\\]"),
+            "a backslash escape would be stripped by the unescape pass; got: {out:?}"
+        );
+    }
+
+    /// The HTML writer reads the same description field as the markdown marker, so a path baked
+    /// in by Office must not surface as an `alt` attribute there either — while a real
+    /// description still does.
+    #[test]
+    fn test_image_html_alt_uses_the_sanitized_description() {
+        let mut doc = doc_with_ocr_image(None);
+        doc.images[0].description = Some(r"C:\Users\author\x.png".to_string());
+        let html = render_html(&doc);
+        assert!(
+            !html.contains("Users"),
+            "the host path must not reach the alt attribute: {html:?}"
+        );
+        assert!(html.contains(r#"alt="""#), "the alt attribute stays, emptied: {html:?}");
+
+        let mut doc = doc_with_ocr_image(None);
+        doc.images[0].description = Some("Architecture diagram".to_string());
+        let html = render_html(&doc);
+        assert!(
+            html.contains(r#"alt="Architecture diagram""#),
+            "a real description must survive: {html:?}"
+        );
+    }
+
+    /// An image inside a list item must stay a real image node: a `Raw` fence is written
+    /// verbatim without the item's indentation, which would end the list and break the
+    /// structure around the picture.
+    #[test]
+    fn test_image_inside_a_list_stays_an_image_node() {
+        let mut b = InternalDocumentBuilder::new("test");
+        b.push_list(false);
+        b.push_paragraph("before the picture", vec![], None, None);
+        b.push_element(crate::types::internal::InternalElement::text(
+            ElementKind::Image { image_index: 0 },
+            "",
+            0,
+        ));
+        b.push_paragraph("after the picture", vec![], None, None);
+        b.end_list();
+        let mut doc = b.build();
+        doc.images.push(doc_image());
+
+        let out = render(&doc);
+        assert!(
+            !out.contains("```text"),
+            "a fence must not appear inside a list: {out:?}"
+        );
+        assert!(
+            out.contains("![](image_0.png)"),
+            "the image must stay a live reference: {out:?}"
+        );
+        assert!(
+            out.contains("before the picture") && out.contains("after the picture"),
+            "the surrounding item text must survive: {out:?}"
+        );
+        assert!(out.matches('-').count() >= 1, "the list marker must survive: {out:?}");
+    }
+
+    /// Same guarantee inside a block quote: verbatim fence lines would carry no `> `
+    /// prefix and silently leave the quote.
+    #[test]
+    fn test_image_inside_a_block_quote_stays_an_image_node() {
+        let mut b = InternalDocumentBuilder::new("test");
+        b.push_quote_start();
+        b.push_paragraph("quoted text", vec![], None, None);
+        b.push_element(crate::types::internal::InternalElement::text(
+            ElementKind::Image { image_index: 0 },
+            "",
+            0,
+        ));
+        b.push_quote_end();
+        let mut doc = b.build();
+        doc.images.push(doc_image());
+
+        let out = render(&doc);
+        assert!(
+            !out.contains("```text"),
+            "a fence must not appear inside a quote: {out:?}"
+        );
+        assert!(out.contains("![](image_0.png)"), "got: {out:?}");
+        for line in out.lines().filter(|line| !line.trim().is_empty()) {
+            assert!(
+                line.starts_with("> "),
+                "every line must stay inside the quote: {line:?}"
+            );
+        }
+    }
+
+    /// The image payload shared by the container tests above.
+    fn doc_image() -> crate::types::ExtractedImage {
+        crate::types::ExtractedImage {
+            data: bytes::Bytes::from_static(b"\x89PNG"),
+            format: std::borrow::Cow::Borrowed("png"),
+            image_index: 0,
+            ..Default::default()
+        }
     }
 
     #[test]

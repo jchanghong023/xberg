@@ -115,6 +115,123 @@ impl AsRef<str> for InternalElementId {
     }
 }
 
+/// One OCR page's authoritative processed-raster coordinate frame (GH#1645).
+///
+/// Public `OcrElement` geometry stays in the OCR backend's own raster pixel space even
+/// after the rest of a page's document is normalized into PDF page points, and
+/// `Metadata::additional`'s document-wide `ocr_processed_image_width/height` pair cannot
+/// describe differently sized, preprocessed, or rotated pages. This record is the per-page
+/// authority a multi-page consumer joins to an `OcrElement` through the element's own
+/// `page_number`.
+///
+/// Crate-private and carried on [`InternalDocument::ocr_coordinate_frame`] with
+/// `#[serde(skip)]` so it never crosses the plugin-bridge JSON wire format or gets an alef
+/// binding DTO; it is folded into `Metadata::additional` under
+/// `ocr_metadata_keys::OCR_PAGE_COORDINATE_FRAMES_METADATA_KEY` once a page's document is
+/// final (`extractors::pdf::mod`).
+// Gated to match the only code that writes or reads it, in `extractors::pdf::ocr`.
+// Ungated, the `ocr`-without-`pdf` feature leg compiles the field with no writer and no
+// reader, which `-D warnings` rejects as dead_code — and CI builds that leg. ~keep
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+// `pub` + alef(skip), not `pub(crate)`: `InternalDocument` is a `pub` struct whose every
+// other field is `pub`, and struct-update syntax requires ALL fields to be visible at the
+// construction site. One `pub(crate)` field therefore breaks the 12 integration tests that
+// build one with `..Default::default()`, since those are separate crates. alef(skip)
+// keeps it out of the generated bindings, and `#[serde(skip)]` on the field keeps it off
+// the plugin-bridge wire. ~keep
+#[cfg_attr(alef, alef(skip))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct OcrPageCoordinateFrame {
+    /// 1-based page this frame describes.
+    pub page_number: u32,
+    /// Processed raster width in pixels.
+    pub width: u32,
+    /// Processed raster height in pixels.
+    pub height: u32,
+    /// Always `"pixel"`.
+    pub unit: &'static str,
+    /// Always `"top_left"`.
+    pub origin: &'static str,
+}
+
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+impl OcrPageCoordinateFrame {
+    /// `width`/`height` must already be known non-zero -- callers gate on that before
+    /// constructing one, so this never represents a degenerate/fabricated frame.
+    pub fn new(page_number: u32, width: u32, height: u32) -> Self {
+        Self {
+            page_number,
+            width,
+            height,
+            unit: "pixel",
+            origin: "top_left",
+        }
+    }
+}
+
+/// One PDF page's raw MediaBox coordinate frame (GH#1653 + GH#1654).
+///
+/// GH#1653: `origin_x`/`origin_y` are the MediaBox `llx`/`lly`, which can be non-zero and
+/// negative -- a consumer that assumes `(0, 0)` mis-places every geometry field the page
+/// reports. GH#1654: `clockwise_rotation` is the page `/Rotate`. Both gaps are one record,
+/// not two, because a consumer needs the origin and the rotation together to place a page's
+/// geometry in display space.
+///
+/// `width`/`height` are the MediaBox *extent* (`urx - llx`, `ury - lly`) and are deliberately
+/// NOT swapped for a 90/270 rotation: this describes raw PDF user space, the space
+/// `HierarchicalBlock.bbox` and other segment geometry actually live in
+/// (`pdf::structure::types`), not the displayed/rotated frame. This is the opposite of
+/// `OcrPageCoordinateFrame` above, which reports the already-rotated processed raster. ~keep
+#[cfg(feature = "pdf")]
+#[cfg_attr(alef, alef(skip))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub(crate) struct PdfPageCoordinateFrame {
+    /// 1-based page this frame describes.
+    pub page_number: u32,
+    /// MediaBox `llx`.
+    pub origin_x: f32,
+    /// MediaBox `lly`.
+    pub origin_y: f32,
+    /// MediaBox extent: `urx - llx`. Not swapped for 90/270 rotation.
+    pub width: f32,
+    /// MediaBox extent: `ury - lly`. Not swapped for 90/270 rotation.
+    pub height: f32,
+    /// Always `"point"`.
+    pub unit: &'static str,
+    /// Always `"bottom_left"`.
+    pub origin: &'static str,
+    /// The page `/Rotate`, normalized to one of `{0, 90, 180, 270}`.
+    pub clockwise_rotation: i32,
+}
+
+#[cfg(feature = "pdf")]
+impl PdfPageCoordinateFrame {
+    /// Returns `None` for a MediaBox that does not yield a usable extent.
+    ///
+    /// A MediaBox is not guaranteed well-ordered -- the margin filter at this record's own
+    /// call site defensively takes `min`/`max` over the same y pair -- so an inverted or
+    /// degenerate box produces a zero or negative extent. Publishing that as an authoritative
+    /// frame is worse than publishing nothing, so the page is omitted instead, matching the
+    /// fail-closed convention `OcrPageCoordinateFrame` uses for invalid raster dimensions. ~keep
+    pub fn new(page_number: u32, llx: f32, lly: f32, urx: f32, ury: f32, clockwise_rotation: i32) -> Option<Self> {
+        let width = urx - llx;
+        let height = ury - lly;
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        Some(Self {
+            page_number,
+            origin_x: llx,
+            origin_y: lly,
+            width,
+            height,
+            unit: "point",
+            origin: "bottom_left",
+            clockwise_rotation,
+        })
+    }
+}
+
 #[cfg_attr(alef, alef(skip))]
 /// The internal flat document representation.
 ///
@@ -282,6 +399,16 @@ pub struct InternalDocument {
     /// pipeline from `ExtractionConfig::table_anchors`. Defaults to `false`.
     #[serde(skip)]
     pub table_anchors: bool,
+
+    /// This OCR page's authoritative processed-raster coordinate frame, captured before
+    /// the page-local metadata it comes from is discarded (GH#1645). `#[serde(skip)]` for
+    /// the same reason as the fields above -- it never crosses the plugin-bridge JSON wire
+    /// format -- and is folded into `Metadata::additional` once the page document is final
+    /// rather than becoming a new public binding type. `None` for every non-OCR document,
+    /// and for an OCR'd page whose render raster was degenerate (0x0).
+    #[serde(skip)]
+    #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+    pub ocr_coordinate_frame: Option<OcrPageCoordinateFrame>,
 }
 
 impl From<crate::types::extraction::ExtractedDocument> for InternalDocument {
@@ -368,6 +495,8 @@ impl InternalDocument {
             form_fields: Vec::new(),
             formulas: Vec::new(),
             recorded_formulas: Vec::new(),
+            #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+            ocr_coordinate_frame: None,
         }
     }
 

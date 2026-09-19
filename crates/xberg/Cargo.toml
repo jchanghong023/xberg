@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-description = "High-performance document intelligence library for Rust. Extract text, metadata, and structured data from PDFs, Office documents, images, and 106 formats and 371 programming languages via tree-sitter code intelligence with async/sync APIs."
+description = "High-performance document intelligence library for Rust. Extract text, metadata, and structured data from PDFs, Office documents, images, and 110 formats and 371 programming languages via tree-sitter code intelligence with async/sync APIs."
 license.workspace = true
 repository = "https://github.com/xberg-io/xberg"
 homepage = "https://xberg.io"
@@ -85,6 +85,7 @@ excel = ["dep:calamine", "dep:roxmltree", "dep:zip", "dep:quick-xml", "tokio-run
 excel-wasm = ["dep:calamine", "dep:roxmltree", "dep:zip"]
 office = [
     "dep:cfb",
+    "dep:flate2",
     "dep:roxmltree",
     "dep:zip",
     "dep:quick-xml",
@@ -450,6 +451,10 @@ transcription = [
     "dep:symphonia",
     "dep:lofty",
     "dep:tokenizers",
+    # Windows Media (ASF/WMV) containers are decoded through Media Foundation.
+    # Declared only in the Windows target block below, so this is a no-op on
+    # other targets, exactly like `dep:fs2` above.
+    "dep:windows",
     "ort-bundled",
     "tokio-runtime",
 ]
@@ -492,6 +497,7 @@ embedding-presets = []
 embeddings = [
     "onnx-runtime",
     "dep:ndarray",
+    "dep:lru",
     "chunking",
     "tokio-runtime",
     "embedding-presets",
@@ -502,6 +508,7 @@ embeddings = [
 static-embeddings = [
     "embedding-presets",
     "tokio-runtime",
+    "dep:lru",
     "dep:model2vec-rs",
     # Supplies model2vec-rs's tokenizers 0.21 instance a regex backend without esaxx_fast (GH#1389).
     "dep:tokenizers-model2vec",
@@ -517,19 +524,19 @@ static-embeddings = [
 reranker-presets = []
 # reranker: full cross-encoder inference via ONNX Runtime (ORT-dependent,
 # WASM-incompatible). NOTE: reranker-presets is a subset of reranker; always implied.
-reranker = ["reranker-presets", "onnx-runtime", "dep:ndarray", "tokio-runtime"]
+reranker = ["reranker-presets", "onnx-runtime", "dep:ndarray", "dep:lru", "tokio-runtime"]
 # v5.0.0: SPLADE sparse embeddings for hybrid dense+sparse retrieval.
 # sparse-embedding-presets: static preset metadata (WASM/Android-safe, no ORT).
 sparse-embedding-presets = []
 # sparse-embeddings: SPLADE inference via ONNX Runtime (ORT-dependent,
 # WASM-incompatible). Builds on the shared crate::onnx helper (onnx-runtime).
-sparse-embeddings = ["sparse-embedding-presets", "onnx-runtime", "dep:ndarray", "tokio-runtime"]
+sparse-embeddings = ["sparse-embedding-presets", "onnx-runtime", "dep:ndarray", "dep:lru", "tokio-runtime"]
 # v5.0.0: ColBERT late-interaction (multi-vector) embeddings for MaxSim retrieval.
 # late-interaction-presets: static preset metadata + pure-CPU MaxSim (WASM/Android-safe, no ORT).
 late-interaction-presets = []
 # late-interaction: ColBERT multi-vector inference via ONNX Runtime (ORT-dependent,
 # WASM-incompatible). Builds on the shared crate::onnx helper (onnx-runtime).
-late-interaction = ["late-interaction-presets", "onnx-runtime", "dep:ndarray", "tokio-runtime"]
+late-interaction = ["late-interaction-presets", "onnx-runtime", "dep:ndarray", "dep:lru", "tokio-runtime"]
 stopwords = []
 quality = ["dep:unicode-normalization", "dep:chardetng", "stopwords"]
 
@@ -665,8 +672,13 @@ prometheus = ["api", "otel", "dep:opentelemetry-prometheus", "dep:prometheus"]
 # Excluded:
 # - liter-llm: tokenizers → hf-hub → ureq 2.12.1 → rustls 0.23 + socks 0.3 (both wasm-incompatible).
 #   Added to android-target explicitly; WASM does not use LLM for now.
-# - hwpx: unhwp → zip → xz2 → lzma-sys (native C, missing wasm stdlib). Native-only;
-#   re-enabled in android-target.
+# hwpx is NOT excluded here: unhwp's own Cargo.toml target-gates its `zip` dependency —
+# non-wasm32 gets `zip = "2.2"` with default features (pulls xz2 → lzma-sys, native C), but
+# `cfg(target_arch = "wasm32")` gets `zip = "2.2", default-features = false, features =
+# ["deflate"]`, which never touches xz2/lzma-sys. unhwp's other deps (cfb, flate2, regex,
+# pulldown-cmark, quick-xml, serde, thiserror, unicode-normalization, uncore, unrefine) are
+# pure Rust and already compiled into this wasm-target build via `hwp`/base deps; `rayon` is
+# also `cfg(not(wasm32))`-gated out by unhwp itself. See `wasm-target` for the enabling flag.
 no-ort-target = [
     "pdf",
     "html",
@@ -737,6 +749,11 @@ wasm-target = [
     "layout-tract",
     "auto-rotate-tract",
     "ner-candle-wasm",
+    # unhwp gates its own `zip` dep to a deflate-only, lzma-free build under
+    # `cfg(target_arch = "wasm32")` (see the `no-ort-target` comment above); every other
+    # transitive dep is pure Rust and already compiled in via `hwp`/base deps. Small ZIP+XML
+    # format, no bundled data/grammar — expected to be a modest size add, unlike tree-sitter.
+    "hwpx",
 ]
 # android-target: no-ort-target plus native-Linux variants that work on Android ABI
 # (excel with tokio, native tree-sitter, Tesseract OCR, and API/MCP transport).
@@ -1248,13 +1265,13 @@ calamine = { version = "0.36.1", features = ["dates"], optional = true }
 cfb = { workspace = true, optional = true }
 chardetng = { version = "1.0.0", optional = true }
 chrono = { workspace = true, optional = true }
-codepage = "0.1.2"
+codepage = "0.1.3"
 comrak = { workspace = true }
 crawlberg = { workspace = true, optional = true }
 dbase = { workspace = true, optional = true }
-dirs = "6"
+dirs = "7"
 either = { version = "1", optional = true }
-encoding_rs = { version = "0.8.35" }
+encoding_rs = { version = "0.8.41" }
 fast_image_resize = { version = "6.1.0", optional = true }
 flate2 = { version = "1.1", optional = true }
 hayro-jbig2 = { version = "0.3", default-features = false, features = ["std"], optional = true }
@@ -1275,11 +1292,11 @@ image = { workspace = true, default-features = false, features = [
     "rayon",
 ], optional = true }
 include_dir = { version = "0.7", optional = true }
-indexmap = "2.14.1"
+indexmap = "2.14.2"
 infer = "0.22.0"
 itertools = { workspace = true, optional = true }
 jotdown = "0.10"
-jsonschema = { version = "0.52", optional = true, default-features = false }
+jsonschema = { version = "0.56", optional = true, default-features = false }
 libc = { workspace = true }
 # lofty: pure-Rust audio tag reader (ID3v1/v2, MP4 atoms, Vorbis comments, FLAC, etc.)
 # MIT license. Used for metadata extraction independent of the inference backend.
@@ -1288,8 +1305,9 @@ lofty = { version = "0.25", optional = true }
 # pulls reqwest/rustls → aws-lc-rs → aws-lc-sys; the MSVC build is handled by the fix shipped in
 # xberg-io/liter-llm). hf-hub 1.0 now rides the same reqwest/aws-lc-rs stack.
 log = { workspace = true }
-lopdf = { version = "0.44.0", optional = true, default-features = false }
-mail-parser = { version = "0.11.8", features = ["full_encoding"], optional = true }
+lopdf = { version = "0.45.0", optional = true, default-features = false }
+lru = { version = "0.18", optional = true }
+mail-parser = { version = "0.11.9", features = ["full_encoding"], optional = true }
 # AsciiMath parser, used to reach LaTeX through the shared MathML converter.
 mathemascii = { version = "0.4.0", optional = true }
 mel_spec = { version = "0.4", optional = true }
@@ -1303,7 +1321,7 @@ ndarray = { version = "0.17", optional = true }
 nom-exif = { workspace = true, optional = true }
 num_cpus = { workspace = true }
 once_cell = { workspace = true }
-opentelemetry = { version = "0.32", features = ["trace"], optional = true }
+opentelemetry = { version = "0.32", features = ["trace"], optional = true } # capped by tracing-opentelemetry: 0.33 (latest) still depends on opentelemetry 0.32, so raising these three splits the lock into two `opentelemetry` versions and the layer/tracer types stop matching. `cargo upgrade --incompatible` raises them and leaves this comment behind; re-pin until tracing-opentelemetry moves to 0.33. Verified 2026-09-18. ~keep
 # Bridges the OTel `SdkMeterProvider` to a `prometheus::Registry` for the opt-in `/metrics`
 # endpoint (#1391). 0.32.0 matches the `opentelemetry`/`opentelemetry_sdk` 0.32 pin exactly.
 opentelemetry-prometheus = { version = "0.32", optional = true }
@@ -1339,7 +1357,7 @@ rake = { version = "0.3.6", optional = true }
 rayon = { workspace = true }
 regex = "1.13.1"
 resvg = { workspace = true, optional = true }
-rmcp = { version = "3.1.4", features = [
+rmcp = { version = "3.4.0", features = [
     "server",
     "macros",
     "base64",
@@ -1416,7 +1434,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["s
 tract-onnx = { workspace = true, optional = true }
 # Typst's own parser, used to convert Typst math to LaTeX.
 typst-syntax = { version = "0.15.1", optional = true }
-unhwp = { version = "0.9.1", default-features = false, features = ["hwpx"], optional = true }
+unhwp = { version = "0.11.0", default-features = false, features = ["hwpx"], optional = true }
 unicode-normalization = { version = "0.1.25", optional = true }
 url = { workspace = true }
 urlencoding = "2"
@@ -1434,8 +1452,8 @@ xberg-gliner = { workspace = true, optional = true }
 # (xberg-io/xberg#1541). `xberg-libheif` gates every version-dependent call, including a
 # `#[cfg(not(feature = "v1_20"))]` fallback to `heif_image_get_plane_readonly`, so this only
 # gives up newer libheif APIs, not functionality. ~keep
-xberg-libheif = { path = "../xberg-libheif", version = "1.1.0", optional = true, default-features = false, features = ["v1_19"] }
-xberg-libwpd = { path = "../xberg-libwpd", version = "1.1.0", optional = true }
+xberg-libheif = { path = "../xberg-libheif", version = "1.2.5", optional = true, default-features = false, features = ["v1_19"] }
+xberg-libwpd = { path = "../xberg-libwpd", version = "1.2.5", optional = true }
 xberg-native-pdf = { workspace = true, optional = true }
 # No `version` on this path-dep: xberg-tesseract carries `links =
 # "xberg_tesseract"`, and a versioned path-dep makes the maturin sdist
@@ -1495,10 +1513,10 @@ tokenizers = { version = "0.23", default-features = false, features = ["fancy-re
 # why `candle-vlm-ocr` is safe in `full`/`windows-target`. GPU acceleration (cudarc / metal) is
 # strictly opt-in via candle-cuda/metal/mkl/accelerate and must be enabled with platform awareness.
 # CI uses `--features full` which keeps GPU accel off.
-xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.1.0", optional = true }
+xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.2.5", optional = true }
 # PaddleOCR via ONNX Runtime or tract (vendored from paddle-ocr-rs). The backend is selected
 # by the enabling feature (`paddle-ocr-ort` / `paddle-ocr-tract`), never by a default.
-xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.1.0", optional = true, default-features = false }
+xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.2.5", optional = true, default-features = false }
 
 # Desktop / server hosts (Linux + macOS, NOT Android): xberg's direct `ureq` client uses
 # ring-backed rustls plus `platform-verifier`, which trusts the OS certificate store
@@ -1537,10 +1555,21 @@ ureq = { version = "3.4", default-features = false, features = [
     "json",
 ], optional = true }
 # Candle-based VLM OCR backends - pure-Rust transformer inference, not on WASM yet.
-xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.1.0", optional = true }
+xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.2.5", optional = true }
 # PaddleOCR via ONNX Runtime or tract (vendored from paddle-ocr-rs). The backend is selected
 # by the enabling feature (`paddle-ocr-ort` / `paddle-ocr-tract`), never by a default.
-xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.1.0", optional = true, default-features = false }
+xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.2.5", optional = true, default-features = false }
+# Windows GDI/GDI+ rasterization of EMF/WMF metafiles so OCR can run on Office vector
+# images (Visio OLE previews, legacy VML shapes). Windows-only: the crate is `#![cfg(windows)]`.
+xberg-windows-metafile = { path = "../xberg-windows-metafile", version = "1.2.5" }
+# Media Foundation decodes the audio track of Windows Media (ASF/WMV) inputs, which
+# symphonia cannot demux. The high-level `windows` crate is already in the tree at this
+# version, so this adds an edge, not a second copy. See src/transcription/wmf.rs.
+windows = { version = "0.62", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Media_MediaFoundation",
+    "Win32_System_Com",
+] }
 
 # tokio OS features (every native target, including Android and Windows): `process`, `fs`, and
 # `rt-multi-thread` all fail to compile on wasm32 — tokio's own wasm32 gate only allows
@@ -1669,18 +1698,22 @@ dotenvy = "0.15"
 filetime = "0.2"
 image = { workspace = true, default-features = false, features = ["png"] }
 # Test retrieval features prove runtime compilation stays offline under Cargo feature unification. ~keep
-jsonschema = { version = "0.52", default-features = false, features = ["resolve-file", "resolve-http", "tls-ring"] }
+jsonschema = { version = "0.56", default-features = false, features = ["resolve-file", "resolve-http", "tls-ring"] }
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 # Test-only: builds an in-memory model2vec fixture (safetensors bytes) for the
 # static_engine unit tests, without a network fetch.
 safetensors = "0.8"
 serial_test = "3.5.0"
+# Test-only: pins a bundled fixture's bytes by SHA256 so a regression test provably
+# exercises the exact reported sample rather than a substitute. ~keep
+sha2 = { workspace = true }
 syn = { version = "3", features = ["full", "visit"] }
 tar = "^0.4"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "time"] }
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = "1"
 wiremock = "0.6"
 zip = { version = ">=7.0.0, <8.7.0", default-features = false, features = ["deflate-flate2"] }
 
@@ -1695,6 +1728,10 @@ required-features = ["structured"]
 [[test]]
 name = "structured_live"
 required-features = ["structured", "pdf"]
+
+[[test]]
+name = "llm_response_byte_cap"
+required-features = ["structured"]
 
 [[test]]
 name = "sqlite_geopackage_extraction"

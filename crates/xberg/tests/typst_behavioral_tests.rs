@@ -910,7 +910,10 @@ async fn test_typst_empty_heading_edge_case() {
                 "Should extract regular content even if some headings are empty."
             );
         }
-        Err(_) => {}
+        Err(_) => {
+            // An empty `= ` heading is malformed Typst; rejecting the document is an acceptable
+            // outcome here. Only the successful path carries an assertion. ~keep
+        }
     }
 }
 

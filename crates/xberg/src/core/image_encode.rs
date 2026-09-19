@@ -115,6 +115,7 @@ pub(crate) fn re_encode(
     image: &mut ExtractedImage,
     target: ImageOutputFormat,
     limits: &SecurityLimits,
+    image_config: &crate::core::config::extraction::ImageExtractionConfig,
     #[cfg(feature = "svg")] svg_options: &SvgOptions,
 ) -> Result<bool, EncodeWarning> {
     if target == ImageOutputFormat::Native {
@@ -153,6 +154,13 @@ pub(crate) fn re_encode(
         });
     }
 
+    // Windows metafiles (EMF/WMF) have no standard decoder in the image crate, but the
+    // GDI rasterizer can turn them into pixels. Prefer that over leaving `.emf` refs in
+    // Markdown previews that cannot render them.
+    if is_windows_metafile(image) {
+        return re_encode_metafile(image, target, image_config, limits);
+    }
+
     if is_untranslatable(&image.format) {
         return Err(EncodeWarning::Undecodable {
             source_format: image.format.to_string(),
@@ -168,6 +176,68 @@ pub(crate) fn re_encode(
     image.format = Cow::Borrowed(new_format);
 
     Ok(true)
+}
+
+/// Re-encode every image in `images` to `target` — the blocking core of the pipeline's
+/// image-format pass.
+///
+/// Shared by the sync pipeline (which runs it inline on its caller's thread) and the async
+/// pipeline (which runs it inside `tokio::task::spawn_blocking`, see
+/// `core::pipeline::apply_output_format_pass_offload`): decoding, the GDI rasterization a
+/// Windows metafile goes through, and encoding are CPU/Win32-bound work that must stay off
+/// async runtime workers.
+///
+/// Returns the re-encoded images, the `(image_index, old format, new format)` renames for
+/// callers that bake `image_N.ext` references into pre-rendered content (only entries whose
+/// format actually changed, so a sibling whose re-encode failed keeps its old extension on
+/// disk and in the references), and one `ProcessingWarning` per failed image, in image order.
+///
+/// The rename key is [`ExtractedImage::image_index`] — the number the renderers bake into
+/// `image_N.ext` and the CLI names the written file by — *not* the vector position: staging
+/// can drop unreferenced images, leaving the positions dense while the field has gaps, and a
+/// position-keyed rename then missed its reference or collided with another image's number.
+/// `re_encode` never touches the field, so recording it after the call is exact.
+/// The staging triple [`re_encode_images`] returns: the re-encoded images, the
+/// `image_N` extension renames the content's references must follow, and the
+/// warnings collected along the way.
+pub(crate) type ReencodedImages = (
+    Vec<ExtractedImage>,
+    Vec<(u32, String, String)>,
+    Vec<crate::types::ProcessingWarning>,
+);
+
+pub(crate) fn re_encode_images(
+    mut images: Vec<ExtractedImage>,
+    target: ImageOutputFormat,
+    limits: &SecurityLimits,
+    image_config: &crate::core::config::extraction::ImageExtractionConfig,
+) -> ReencodedImages {
+    let mut format_renames: Vec<(u32, String, String)> = Vec::new();
+    let mut warnings = Vec::new();
+    for image in images.iter_mut() {
+        let previous_format = image.format.to_string();
+        match re_encode(
+            image,
+            target,
+            limits,
+            image_config,
+            #[cfg(feature = "svg")]
+            &image_config.svg,
+        ) {
+            Ok(true) => {
+                let next_format = image.format.to_string();
+                if !previous_format.eq_ignore_ascii_case(&next_format) {
+                    format_renames.push((image.image_index, previous_format, next_format));
+                }
+            }
+            Ok(false) => {}
+            Err(warning) => warnings.push(crate::types::ProcessingWarning {
+                source: Cow::Borrowed("image_encoder"),
+                message: Cow::Owned(warning.to_string()),
+            }),
+        }
+    }
+    (images, format_renames, warnings)
 }
 
 const ENCODE_FIXED_OVERHEAD_BYTES: u64 = 256 * 1024;
@@ -229,6 +299,10 @@ fn target_matches_format(target: ImageOutputFormat, format: &str) -> bool {
 ///
 /// When the `svg` feature is active, SVG is handled separately (via `sanitize_svg` /
 /// `rasterize_svg`) and is therefore **not** listed here.
+///
+/// EMF/WMF are still listed here so non-Windows builds (and failed GDI paths)
+/// report Undecodable; Windows builds intercept them earlier via
+/// [`re_encode_metafile`].
 fn is_untranslatable(format: &str) -> bool {
     let lc = format.to_ascii_lowercase();
     let s = lc.as_str();
@@ -239,6 +313,49 @@ fn is_untranslatable(format: &str) -> bool {
     #[cfg(feature = "svg")]
     {
         matches!(s, "emf" | "wmf" | "jpeg2000" | "jp2" | "j2k")
+    }
+}
+
+/// Whether the image is a Windows metafile (EMF/WMF) by declared format string.
+///
+/// Office extractors set `format` from magic bytes; relying on that string keeps
+/// this path free of the `office`-gated format detector.
+fn is_windows_metafile(image: &ExtractedImage) -> bool {
+    image.format.eq_ignore_ascii_case("emf") || image.format.eq_ignore_ascii_case("wmf")
+}
+
+/// Rasterize EMF/WMF to pixels via the Windows GDI path, then encode to `target`.
+///
+/// Requires the same features as the shared metafile rasterizer (`ocr` +
+/// `tokio-runtime`), which is where the GDI bridge lives. Builds without those
+/// features leave metafiles untouched (Undecodable), matching pre-rasterize behaviour.
+fn re_encode_metafile(
+    image: &mut ExtractedImage,
+    target: ImageOutputFormat,
+    image_config: &crate::core::config::extraction::ImageExtractionConfig,
+    limits: &SecurityLimits,
+) -> Result<bool, EncodeWarning> {
+    #[cfg(all(windows, feature = "ocr", feature = "tokio-runtime"))]
+    {
+        let source_format = image.format.to_string();
+        let dynamic = crate::extraction::image_ocr::rasterize_metafile_to_dynamic_image(image, image_config, limits)
+            .map_err(|error| EncodeWarning::DecodeFailed {
+                source_format,
+                message: error.to_string(),
+            })?;
+        validate_reencode_peak(&dynamic, target, image.data.len(), limits)?;
+        let (new_bytes, new_format) = encode_to_target(&dynamic, target)?;
+        image.data = Bytes::from(new_bytes);
+        image.format = Cow::Borrowed(new_format);
+        Ok(true)
+    }
+
+    #[cfg(not(all(windows, feature = "ocr", feature = "tokio-runtime")))]
+    {
+        let _ = (image_config, target, limits);
+        Err(EncodeWarning::Undecodable {
+            source_format: image.format.to_string(),
+        })
     }
 }
 
@@ -718,6 +835,7 @@ mod tests {
             image,
             target,
             &SecurityLimits::default(),
+            &crate::core::config::extraction::ImageExtractionConfig::default(),
             #[cfg(feature = "svg")]
             &SvgOptions::default(),
         )
@@ -736,6 +854,7 @@ mod tests {
             &mut image,
             ImageOutputFormat::Jpeg { quality: 85 },
             &limits,
+            &crate::core::config::extraction::ImageExtractionConfig::default(),
             #[cfg(feature = "svg")]
             &SvgOptions::default(),
         );
@@ -920,7 +1039,13 @@ mod tests {
             sanitize: true,
             render_dpi: 96.0,
         };
-        let result = re_encode(&mut image, ImageOutputFormat::Native, &SecurityLimits::default(), &opts);
+        let result = re_encode(
+            &mut image,
+            ImageOutputFormat::Native,
+            &SecurityLimits::default(),
+            &crate::core::config::extraction::ImageExtractionConfig::default(),
+            &opts,
+        );
         assert!(
             matches!(result, Ok(true)),
             "SVG sanitize on Native must return Ok(true); got {result:?}"
@@ -939,7 +1064,13 @@ mod tests {
             sanitize: false,
             render_dpi: 96.0,
         };
-        let result = re_encode(&mut image, ImageOutputFormat::Native, &SecurityLimits::default(), &opts);
+        let result = re_encode(
+            &mut image,
+            ImageOutputFormat::Native,
+            &SecurityLimits::default(),
+            &crate::core::config::extraction::ImageExtractionConfig::default(),
+            &opts,
+        );
         assert!(
             matches!(result, Ok(false)),
             "SVG no-sanitize on Native must return Ok(false); got {result:?}"
@@ -956,6 +1087,7 @@ mod tests {
             &mut image,
             ImageOutputFormat::Svg,
             &SecurityLimits::default(),
+            &crate::core::config::extraction::ImageExtractionConfig::default(),
             &SvgOptions::default(),
         );
         assert!(
@@ -974,6 +1106,7 @@ mod tests {
             &mut image,
             ImageOutputFormat::Svg,
             &SecurityLimits::default(),
+            &crate::core::config::extraction::ImageExtractionConfig::default(),
             &SvgOptions::default(),
         );
         assert!(
@@ -993,6 +1126,7 @@ mod tests {
             &mut image,
             ImageOutputFormat::Jpeg { quality: 85 },
             &SecurityLimits::default(),
+            &crate::core::config::extraction::ImageExtractionConfig::default(),
             &SvgOptions::default(),
         );
         assert!(

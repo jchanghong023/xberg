@@ -871,7 +871,12 @@ pub fn parse_cff_encoding(font_data: &[u8]) -> Option<HashMap<u8, char>> {
             );
             cff
         } else {
-            tracing::warn!("CFF version {} not supported (expected 1)", font_data[0]);
+            crate::extractors::recovery_tally::record(|counts| {
+                counts
+                    .unsupported_cff_versions
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            });
+            tracing::trace!("CFF version {} not supported (expected 1)", font_data[0]);
             return None;
         }
     } else {

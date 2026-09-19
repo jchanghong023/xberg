@@ -10,7 +10,7 @@ pub(crate) mod constants;
 pub(crate) mod geometry;
 pub(crate) mod layout_classify;
 pub(crate) mod layout_debug;
-mod lines;
+pub(crate) mod lines;
 mod list_marker;
 pub(crate) mod page_number;
 mod paragraphs;

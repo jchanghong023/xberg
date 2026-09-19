@@ -24,6 +24,7 @@ pub(crate) type PdfExtractionPhaseResult = (
     Vec<crate::types::PdfFormField>,
     Vec<crate::types::ProcessingWarning>,
     Option<Vec<String>>,
+    Vec<crate::types::internal::PdfPageCoordinateFrame>,
 );
 
 #[cfg(feature = "pdf")]
@@ -86,6 +87,21 @@ fn hierarchy_cluster_count(config: &ExtractionConfig) -> usize {
             || crate::core::config::HierarchyConfig::default().k_clusters,
             |hierarchy| hierarchy.k_clusters,
         )
+}
+
+/// Whether this extraction should pull image bytes out of the PDF.
+///
+/// An explicit `false` at either level vetoes: `images.extract_images = false` is the
+/// general switch every other extractor honors on its own, and
+/// `pdf_options.extract_images = false` is the PDF-specific one. An OR here would let
+/// the CLI's `--pdf-*` flags materialize `pdf_options` (with `Default`'s `true`) and
+/// silently re-enable extraction the caller had turned off with `--extract-images false`.
+fn pdf_images_requested(config: &ExtractionConfig) -> bool {
+    let pdf_level_opt_out = config
+        .pdf_options
+        .as_ref()
+        .is_some_and(|options| !options.extract_images);
+    config.needs_image_data() && !pdf_level_opt_out
 }
 
 /// Report a table-extraction failure that took out a whole detector pass, not just one page.
@@ -376,10 +392,27 @@ pub(crate) fn extract_all_from_native_document(
         .as_ref()
         .is_some_and(|options| options.extract_annotations);
     let force_annotation_page_tracking = annotation_fallback_requested && config.pages.is_none();
+    let hierarchy_enabled = config
+        .pdf_options
+        .as_ref()
+        .is_some_and(|options| options.hierarchy.as_ref().is_some_and(|hierarchy| hierarchy.enabled));
+    // ~keep A `PageHierarchy` can only be hung off a `PageContent` (`pages.rs`'s
+    // `assign_hierarchy_to_pages`), and `page_contents` is produced only when
+    // `pages.extract_pages` is set. `PageConfig::default()` leaves that `false`, so
+    // `pdf_options.hierarchy.enabled` was a silent no-op unless the caller also set an
+    // unrelated flag nothing in the hierarchy config points at: headings were detected, then
+    // dropped for want of a page to attach them to (CI E2E `test_pdf_hierarchy_config`).
+    // Asking for the hierarchy is the opt-in for the per-page tracking it requires.
+    let force_hierarchy_page_tracking =
+        hierarchy_enabled && !config.pages.as_ref().is_some_and(|pages| pages.extract_pages);
     let mut tracked_config;
-    let text_config = if force_annotation_page_tracking {
+    let text_config = if force_annotation_page_tracking || force_hierarchy_page_tracking {
         tracked_config = config.clone();
-        tracked_config.pages = Some(crate::core::config::PageConfig::default());
+        let mut page_config = tracked_config.pages.take().unwrap_or_default();
+        if force_hierarchy_page_tracking {
+            page_config.extract_pages = true;
+        }
+        tracked_config.pages = Some(page_config);
         &tracked_config
     } else {
         config
@@ -432,10 +465,6 @@ pub(crate) fn extract_all_from_native_document(
         .as_ref()
         .map(|options| options.ocr_inline_images)
         .unwrap_or(false);
-    let hierarchy_enabled = config
-        .pdf_options
-        .as_ref()
-        .is_some_and(|options| options.hierarchy.as_ref().is_some_and(|hierarchy| hierarchy.enabled));
     let needs_structured = needs_structured_extraction(
         hierarchy_enabled,
         &config.output_format,
@@ -528,8 +557,7 @@ pub(crate) fn extract_all_from_native_document(
         pdf_metadata.page_structure = None;
     }
 
-    let images_extraction_enabled =
-        config.needs_image_data() || config.pdf_options.as_ref().map(|p| p.extract_images).unwrap_or(false);
+    let images_extraction_enabled = pdf_images_requested(config);
 
     let (images, image_positions) = if images_extraction_enabled || ocr_inline_images {
         let max_images = config.images.as_ref().and_then(|i| i.max_images_per_page);
@@ -554,6 +582,12 @@ pub(crate) fn extract_all_from_native_document(
         return Err(crate::error::XbergError::Cancelled);
     }
 
+    // GH#1653 + GH#1654: one raw-MediaBox coordinate frame per page, computed alongside the
+    // margin-filtering media-box read below while the native document is still in scope. Not
+    // yet filtered to pages that actually end up with hierarchy blocks -- `mod.rs` does that
+    // once `assign_hierarchy_to_pages` has run, since that happens after this function
+    // returns and the `NativeDocument` this loop reads from is dropped. ~keep
+    let mut pdf_page_coordinate_frames: Vec<crate::types::internal::PdfPageCoordinateFrame> = Vec::new();
     let pre_rendered_doc = if needs_structured && !config.force_ocr {
         let k = hierarchy_cluster_count(config);
 
@@ -593,7 +627,7 @@ pub(crate) fn extract_all_from_native_document(
         };
 
         for (page_index, segments) in all_page_segments.iter_mut().enumerate() {
-            let (_, lower_y, _, upper_y) =
+            let (llx, lower_y, urx, upper_y) =
                 doc.doc
                     .get_page_media_box(page_index)
                     .map_err(|error| crate::error::XbergError::Parsing {
@@ -604,6 +638,34 @@ pub(crate) fn extract_all_from_native_document(
                         source: None,
                     })?;
             retain_segments_inside_page_margins(segments, lower_y.min(upper_y), lower_y.max(upper_y), margins);
+
+            // Fail closed by omission (GH#1654): a page whose `/Rotate` is present but
+            // malformed gets no record at all rather than a silently-degraded
+            // `clockwise_rotation: 0`, which would be indistinguishable from an honestly
+            // absent `/Rotate`. ~keep
+            match doc.doc.get_page_rotation_status(page_index) {
+                Ok(xberg_native_pdf::PageRotation::Absent) => {
+                    pdf_page_coordinate_frames.extend(crate::types::internal::PdfPageCoordinateFrame::new(
+                        (page_index + 1) as u32,
+                        llx,
+                        lower_y,
+                        urx,
+                        upper_y,
+                        0,
+                    ));
+                }
+                Ok(xberg_native_pdf::PageRotation::Valid(rotation)) => {
+                    pdf_page_coordinate_frames.extend(crate::types::internal::PdfPageCoordinateFrame::new(
+                        (page_index + 1) as u32,
+                        llx,
+                        lower_y,
+                        urx,
+                        upper_y,
+                        rotation,
+                    ));
+                }
+                Ok(xberg_native_pdf::PageRotation::Malformed) | Err(_) => {}
+            }
         }
 
         let total_segs: usize = all_page_segments.iter().map(|s| s.len()).sum();
@@ -719,6 +781,7 @@ pub(crate) fn extract_all_from_native_document(
         form_fields,
         extraction_warnings,
         page_labels,
+        pdf_page_coordinate_frames,
     ))
 }
 
@@ -858,7 +921,7 @@ fn join_pages_with_boundaries(
 #[cfg(test)]
 mod tests {
     use super::{
-        hierarchy_cluster_count, needs_structured_extraction, page_has_exact_text_block,
+        hierarchy_cluster_count, needs_structured_extraction, page_has_exact_text_block, pdf_images_requested,
         retain_segments_inside_page_margins, table_stage_failure_warning,
     };
     use crate::core::config::OutputFormat;
@@ -883,6 +946,43 @@ mod tests {
             hierarchy_cluster_count(&config),
             crate::core::config::HierarchyConfig::default().k_clusters
         );
+    }
+
+    #[test]
+    fn pdf_image_extraction_defaults_on_without_pdf_options() {
+        let config = crate::core::config::ExtractionConfig::default();
+        assert!(pdf_images_requested(&config));
+    }
+
+    #[test]
+    fn pdf_level_extract_images_false_vetoes_default_on_images_section() {
+        // `--pdf-extract-images false` with no `images` section: the general switch still
+        // says "extract" (absent section = defaults), the PDF-level flag must win.
+        let mut config = crate::core::config::ExtractionConfig::default();
+        let mut pdf_options = crate::core::config::PdfConfig::default();
+        pdf_options.extract_images = false;
+        config.pdf_options = Some(pdf_options);
+        assert!(!pdf_images_requested(&config));
+    }
+
+    #[test]
+    fn general_level_extract_images_false_beats_materialized_pdf_default() {
+        // `--extract-images false` plus any other `--pdf-*` flag: the CLI materializes
+        // `pdf_options` with `Default`'s `extract_images = true`; the general opt-out
+        // must still turn extraction off.
+        let mut config = crate::core::config::ExtractionConfig::default();
+        let mut images = crate::core::config::ImageExtractionConfig::default();
+        images.extract_images = false;
+        config.images = Some(images);
+        config.pdf_options = Some(crate::core::config::PdfConfig::default());
+        assert!(!pdf_images_requested(&config));
+    }
+
+    #[test]
+    fn explicit_pdf_level_true_keeps_default_extraction_on() {
+        let mut config = crate::core::config::ExtractionConfig::default();
+        config.pdf_options = Some(crate::core::config::PdfConfig::default());
+        assert!(pdf_images_requested(&config));
     }
 
     #[test]
@@ -1061,6 +1161,7 @@ mod tests {
                 speaker_notes: None,
                 section_name: None,
                 sheet_name: None,
+                ocr_confidence: None,
                 image_preprocessing: None,
             },
             PageContent {
@@ -1074,6 +1175,7 @@ mod tests {
                 speaker_notes: None,
                 section_name: None,
                 sheet_name: None,
+                ocr_confidence: None,
                 image_preprocessing: None,
             },
         ]);

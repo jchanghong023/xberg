@@ -373,7 +373,12 @@ pub(crate) fn init_thread_pools(budget: usize) {
 ///
 /// Model backends with private pools use this value to obey the same extraction
 /// budget. Before initialization, this resolves to the standard automatic limit.
-#[cfg(sceptre_ocr)]
+///
+/// `init_thread_pools` runs on the single-extraction and batch paths alike
+/// (`core/extractor/file.rs`, `engine/extract_impl.rs`), so a caller's
+/// `ConcurrencyConfig::max_threads` is visible here by the time a lazily built
+/// model session asks for its intra-op thread count.
+#[cfg(any(sceptre_ocr, paddle_ocr))]
 pub(crate) fn active_thread_budget() -> usize {
     match ACTIVE_THREAD_BUDGET.load(Ordering::Relaxed) {
         0 => resolve_thread_budget(None),

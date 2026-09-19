@@ -6,7 +6,14 @@
 //! Format information is centralized in the `FORMATS` registry. All extension-to-MIME
 //! mappings and supported MIME type validation are derived from this single source of truth.
 
-#[cfg(any(feature = "office", feature = "hwpx", feature = "iwork", feature = "archives"))]
+#[cfg(any(
+    feature = "office",
+    feature = "hwpx",
+    feature = "iwork",
+    feature = "archives",
+    feature = "hwp",
+    feature = "email"
+))]
 use crate::extractors::security::SecurityLimits;
 use crate::{Result, XbergError};
 use serde::{Deserialize, Serialize};
@@ -35,6 +42,9 @@ const SQLITE_APPLICATION_ID_LENGTH: usize = 4;
 const GEOPACKAGE_APPLICATION_ID: &[u8; SQLITE_APPLICATION_ID_LENGTH] = b"GPKG";
 const GEOPACKAGE_LEGACY_APPLICATION_ID: &[u8; SQLITE_APPLICATION_ID_LENGTH] = b"GP10";
 const J2C_CODESTREAM_MAGIC: &[u8; 4] = b"\xFF\x4F\xFF\x51";
+/// MS-CFB (compound binary file) signature, shared by legacy .doc/.xls/.ppt.
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+const OLE2_MAGIC: [u8; 8] = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PackageInspection {
@@ -160,6 +170,11 @@ fn xml_vocabulary(trimmed: &str) -> Option<&'static str> {
     if root_has_name_in_namespace(root, "kml", "http://www.opengis.net/kml/2.2") {
         return Some(KML_MIME_TYPE);
     }
+    if root_has_name_in_namespace(root, "document", ODF_OFFICE_NAMESPACE)
+        && root_attribute_value(root, "office:mimetype") == Some(ODG_MIME_TYPE)
+    {
+        return Some(ODG_FLAT_MIME_TYPE);
+    }
     root_has_name_in_namespace(root, "html", "http://www.w3.org/1999/xhtml").then_some("application/xhtml+xml")
 }
 
@@ -263,6 +278,16 @@ pub(crate) const POWER_POINT_MIME_TYPE: &str =
 pub(crate) const DOCX_MIME_TYPE: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 pub(crate) const LEGACY_WORD_MIME_TYPE: &str = "application/msword";
 pub(crate) const LEGACY_POWERPOINT_MIME_TYPE: &str = "application/vnd.ms-powerpoint";
+pub(crate) const VISIO_MIME_TYPE: &str = "application/vnd.visio";
+/// MIME type of the OPC (ZIP) Visio Drawing package (`.vsdx`/`.vsdm`); the
+/// content type registered in its `[Content_Types].xml` is
+/// `application/vnd.ms-visio.drawing.main+xml`.
+pub(crate) const VISIO_DRAWING_ML_MIME_TYPE: &str = "application/vnd.ms-visio.drawing";
+/// Only reachable from `detect_ole2_package`, which is gated on the feature set that pulls in
+/// the `cfb` crate; without one of those features nothing names this constant and `-D warnings`
+/// rejects it as dead code. Gate must track that function's. ~keep
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+pub(crate) const LEGACY_EXCEL_MIME_TYPE: &str = "application/vnd.ms-excel";
 
 pub(crate) const PST_MIME_TYPE: &str = "application/vnd.ms-outlook-pst";
 pub(crate) const WPD_MIME_TYPE: &str = "application/vnd.wordperfect";
@@ -279,6 +304,18 @@ pub(crate) const EXCEL_MIME_TYPE: &str = "application/vnd.openxmlformats-officed
 pub(crate) const ODT_MIME_TYPE: &str = "application/vnd.oasis.opendocument.text";
 pub(crate) const ODP_MIME_TYPE: &str = "application/vnd.oasis.opendocument.presentation";
 pub(crate) const ODS_MIME_TYPE: &str = "application/vnd.oasis.opendocument.spreadsheet";
+pub(crate) const ODG_MIME_TYPE: &str = "application/vnd.oasis.opendocument.graphics";
+/// Flat single-file XML variant of [`ODG_MIME_TYPE`] (`.fodg`): the whole
+/// package's `content.xml` inlined as one document, with no ZIP layer. The
+/// packaged MIME type is carried inside it as the root element's
+/// `office:mimetype` attribute rather than as a separate file, so content
+/// detection reads that attribute (see `xml_vocabulary`) instead of sniffing
+/// a ZIP signature. ~keep
+pub(crate) const ODG_FLAT_MIME_TYPE: &str = "application/vnd.oasis.opendocument.graphics-flat-xml";
+/// ODF namespace bound to the `office:` prefix, used to confirm the root
+/// element of a flat ODF document is actually `office:document` before
+/// trusting its `office:mimetype` attribute. ~keep
+const ODF_OFFICE_NAMESPACE: &str = "urn:oasis:names:tc:opendocument:xmlns:office:1.0";
 #[cfg(any(feature = "office", feature = "hwpx", feature = "iwork", feature = "archives"))]
 const ZIP_MIME_TYPE: &str = "application/zip";
 
@@ -429,6 +466,16 @@ static FORMATS: &[FormatEntry] = &[
         aliases: &[],
     },
     FormatEntry {
+        extensions: &["vsd"],
+        mime_type: VISIO_MIME_TYPE,
+        aliases: &[],
+    },
+    FormatEntry {
+        extensions: &["vsdx", "vsdm"],
+        mime_type: VISIO_DRAWING_ML_MIME_TYPE,
+        aliases: &[],
+    },
+    FormatEntry {
         extensions: &["odt"],
         mime_type: ODT_MIME_TYPE,
         aliases: &[],
@@ -506,6 +553,11 @@ static FORMATS: &[FormatEntry] = &[
     FormatEntry {
         extensions: &["ods"],
         mime_type: ODS_MIME_TYPE,
+        aliases: &[],
+    },
+    FormatEntry {
+        extensions: &["fodg"],
+        mime_type: ODG_FLAT_MIME_TYPE,
         aliases: &[],
     },
     FormatEntry {
@@ -842,6 +894,14 @@ static FORMATS: &[FormatEntry] = &[
         extensions: &["mpeg", "mpg", "mpe", "m1v", "m2v"],
         mime_type: "video/mpeg",
         aliases: &[],
+    },
+    // Windows Media. symphonia cannot demux ASF, so the transcription extractor
+    // decodes the audio track through Media Foundation instead
+    // (crates/xberg/src/transcription/container.rs).
+    FormatEntry {
+        extensions: &["wmv", "asf"],
+        mime_type: "video/x-ms-wmv",
+        aliases: &["video/x-ms-asf", "application/vnd.ms-asf"],
     },
     FormatEntry {
         extensions: &[],
@@ -1257,7 +1317,19 @@ fn detect_mime_type_from_file_content(
     let mut from_magic = match detect_mime_type_from_bytes_with_inspection(header, package_inspection) {
         Ok(detected) => detected,
         Err(_) if json_candidate => JSON_MIME_TYPE.to_string(),
-        Err(_) => return None,
+        Err(_) => {
+            // An MS-CFB compound document (.doc/.xls/.ppt) cannot be typed from a
+            // fixed-size prefix: identifying it means following the FAT sector
+            // chain to the root directory entry, and a truncated buffer references
+            // sectors that are not present in `header` (#1590). Escape to a
+            // structure-aware read over the file the same way the ZIP branch below
+            // escapes to `detect_zip_package` for an inconclusive archive header. ~keep
+            #[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+            if package_inspection == PackageInspection::FullArchive && header.starts_with(&OLE2_MAGIC[..]) {
+                return detect_ole2_package(&mut *file, &SecurityLimits::default());
+            }
+            return None;
+        }
     };
     if matches!(from_magic.as_str(), PLAIN_TEXT_MIME_TYPE | OCTET_STREAM_MIME_TYPE) && json_candidate {
         from_magic = JSON_MIME_TYPE.to_string();
@@ -1477,9 +1549,59 @@ fn detect_mime_type_from_bytes_with_inspection(
         return Ok(PLAIN_TEXT_MIME_TYPE.to_string());
     }
 
+    // The bytes are not valid UTF-8, but a legacy single-byte encoding (Windows-1252,
+    // ISO-8859-1) can still be text our extractors read -- e.g. the CSV extractor's own
+    // `encoding_rs`/`chardetng` decoding (xberg-io/xberg#1625). Detecting that encoding
+    // here would duplicate that decoder, so this only asks whether the raw bytes are
+    // plausibly text at all, via the byte-value distribution a real single-byte-encoded
+    // document has. ~keep
+    if looks_like_legacy_encoded_text(content) {
+        return Ok(PLAIN_TEXT_MIME_TYPE.to_string());
+    }
+
     Err(XbergError::UnsupportedFormat(
         "Could not determine MIME type from bytes".to_string(),
     ))
+}
+
+/// Minimum fraction of `content` bytes that must fall in [`is_legacy_text_byte`]'s range for
+/// non-UTF-8 `content` to be accepted as legacy-encoded plain text (#1625).
+///
+/// Genuine prose in a single-byte Western encoding is close to 100% printable ASCII plus a
+/// small fraction of accented high bytes; unrelated binary formats mix in enough control and
+/// otherwise-unmapped bytes to fall well short of this even though single-byte encodings like
+/// Windows-1252 map every byte value and so "decode" without error either way.
+const LEGACY_TEXT_PRINTABLE_BYTE_RATIO: f64 = 0.95;
+
+/// The five byte values in `0x80..=0x9F` that Windows-1252 leaves undefined. Every other byte in
+/// that range maps to a printable character -- including the curly quotes, en/em dashes and
+/// ellipsis that Word and Excel emit, which are the most common marker that a file is CP1252 and
+/// not ISO-8859-1. Treating the whole range as non-text rejected a 38-byte CP1252 sentence
+/// containing one pair of curly quotes, because two bytes out of 38 already exceed
+/// [`LEGACY_TEXT_PRINTABLE_BYTE_RATIO`]. ~keep
+const WINDOWS_1252_UNDEFINED_BYTES: [u8; 5] = [0x81, 0x8D, 0x8F, 0x90, 0x9D];
+
+/// Whether `byte` is one that a legacy single-byte text encoding (Windows-1252, ISO-8859-1) maps
+/// to a printable character, or is common whitespace.
+fn is_legacy_text_byte(byte: u8) -> bool {
+    match byte {
+        0x09 | 0x0A | 0x0D | 0x20..=0x7E | 0xA0..=0xFF => true,
+        0x80..=0x9F => !WINDOWS_1252_UNDEFINED_BYTES.contains(&byte),
+        _ => false,
+    }
+}
+
+/// Heuristic check for legacy-encoded (non-UTF-8) plain text, used only after the UTF-8 fast
+/// path above has already failed. A NUL byte rules out text outright; otherwise the content is
+/// accepted when at least [`LEGACY_TEXT_PRINTABLE_BYTE_RATIO`] of its bytes are printable
+/// (see [`is_legacy_text_byte`]).
+fn looks_like_legacy_encoded_text(content: &[u8]) -> bool {
+    if content.is_empty() || content.contains(&0) {
+        return false;
+    }
+
+    let printable_count = content.iter().filter(|&&byte| is_legacy_text_byte(byte)).count();
+    (printable_count as f64 / content.len() as f64) >= LEGACY_TEXT_PRINTABLE_BYTE_RATIO
 }
 
 fn is_geojson(value: &serde_json::Value) -> bool {
@@ -1589,6 +1711,15 @@ fn detect_office_format_from_archive<R: Read + Seek>(archive: &mut zip::ZipArchi
     if has(archive, "ppt/presentation.xml") {
         return Some(POWER_POINT_MIME_TYPE);
     }
+    if has(archive, "visio/document.xml") {
+        return Some(VISIO_DRAWING_ML_MIME_TYPE);
+    }
+    // Some producers unwrap a Visio drawing into a flat package (a "VDX"-style
+    // layout) with the parts at the archive root, e.g. an OLE `Package` stream
+    // holding `document.xml` + `pages/page1.xml` with no `[Content_Types].xml`.
+    if has(archive, "document.xml") && archive.file_names().any(|name| name.starts_with("pages/")) {
+        return Some(VISIO_DRAWING_ML_MIME_TYPE);
+    }
     // A Numbers package also carries `Index/Document.iwa`, so the discriminating
     // parts are tested first. Otherwise a spreadsheet is read as a Pages
     // document and yields no sheets at all.
@@ -1606,6 +1737,43 @@ fn detect_office_format_from_archive<R: Read + Seek>(archive: &mut zip::ZipArchi
         return Some(IWORK_PAGES_MIME_TYPE);
     }
     None
+}
+
+/// Identify a legacy MS-CFB compound document (.doc/.xls/.ppt) from its root
+/// storage CLSID.
+///
+/// Mirrors the CLSID table `infer`'s `ole2()` matcher uses, but reads through
+/// a `Read + Seek` source instead of a fixed byte slice. A compound file
+/// cannot be typed from a truncated prefix: locating the root directory entry
+/// means following the FAT sector chain, and a chain built from a partial
+/// read references sectors the buffer does not contain (#1590).
+/// `cfb::CompoundFile::open` seeks and reads only the header, FAT, and
+/// directory sectors it needs, so this does not load the file into memory —
+/// the same shape `detect_zip_package` uses for a ZIP-based package.
+/// `limits.max_archive_size` still bounds the file this is attempted
+/// against, mirroring the bound `zip_central_directory_within_limits` applies
+/// before it opens a ZIP central directory.
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+fn detect_ole2_package<R: Read + Seek>(mut reader: R, limits: &SecurityLimits) -> Option<String> {
+    let length = reader.seek(SeekFrom::End(0)).ok()?;
+    if length > limits.max_archive_size as u64 {
+        return None;
+    }
+    reader.seek(SeekFrom::Start(0)).ok()?;
+    let compound_file = cfb::CompoundFile::open(reader).ok()?;
+    let mime_type = match compound_file.root_entry().clsid().to_string().as_str() {
+        "00020810-0000-0000-c000-000000000046" | "00020820-0000-0000-c000-000000000046" => LEGACY_EXCEL_MIME_TYPE,
+        "00020906-0000-0000-c000-000000000046" => LEGACY_WORD_MIME_TYPE,
+        "64818d10-4f9b-11cf-86ea-00aa00b929e8" => LEGACY_POWERPOINT_MIME_TYPE,
+        // Legacy .vsd does not carry a distinctive root CLSID on every producer's
+        // files, but its native root stream names the format — the same judgement
+        // the OLE embedded-object path (`ooxml_embedded::identify_ole_container_mime`)
+        // applies. Without this arm, content-based detection cannot route a .vsd to
+        // the Visio extractor at all.
+        _ if compound_file.exists("VisioDocument") || compound_file.exists("/VisioDocument") => VISIO_MIME_TYPE,
+        _ => return None,
+    };
+    Some(mime_type.to_string())
 }
 
 #[cfg(any(feature = "office", feature = "hwpx", feature = "iwork", feature = "archives"))]
@@ -1662,6 +1830,19 @@ fn ooxml_package_mime(part_name: &str, content_type: &str) -> Option<&'static st
         "/word/document.xml" => wordprocessing_package_mime(content_type),
         "/ppt/presentation.xml" => presentation_package_mime(content_type),
         "/xl/workbook.xml" | "/xl/workbook.bin" => spreadsheet_package_mime(content_type),
+        "/visio/document.xml" => drawing_package_mime(content_type),
+        _ => None,
+    }
+}
+
+/// Map a Visio Drawing package content type to its MIME type.
+#[cfg(feature = "office")]
+fn drawing_package_mime(content_type: &str) -> Option<&'static str> {
+    match content_type {
+        "application/vnd.ms-visio.drawing.main+xml" => Some(VISIO_DRAWING_ML_MIME_TYPE),
+        // Macro-enabled drawings (`.vsdm`) carry the same shape-text parts; route
+        // them through the same reader rather than leaving the package unidentified.
+        "application/vnd.ms-visio.drawing.macroEnabled.main+xml" => Some(VISIO_DRAWING_ML_MIME_TYPE),
         _ => None,
     }
 }
@@ -2281,6 +2462,9 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         let config = crate::core::config::ExtractionConfig {
             use_cache: false,
+            // The fork's default output format is Markdown (upstream: Plain, see
+            // fork.md); pin Plain so this routing test keeps its upstream assertion.
+            output_format: crate::core::config::formats::OutputFormat::Plain,
             ..Default::default()
         };
 
@@ -2303,6 +2487,8 @@ mod tests {
             geojson: Some(crate::core::config::GeoJsonExtractionConfig {
                 include_full_coordinates: true,
             }),
+            // This test pins routing and the plain coordinate rendering, not Markdown escaping.
+            output_format: crate::core::config::OutputFormat::Plain,
             ..Default::default()
         };
 
@@ -2794,6 +2980,70 @@ mod tests {
         assert_eq!(detected, JSON_MIME_TYPE);
     }
 
+    /// Build an in-memory MS-CFB compound document with the given root storage
+    /// CLSID, padded with a stream large enough to push the file past
+    /// `MIME_SNIFF_LENGTH`. Mirrors `build_test_ppt_ole` in `extraction/ppt/mod.rs`.
+    #[cfg(feature = "office")]
+    fn build_test_ole2_document(clsid: &str, padding_len: usize) -> Vec<u8> {
+        let cursor = Cursor::new(Vec::new());
+        let mut compound_file = cfb::CompoundFile::create(cursor).expect("create in-memory OLE container");
+        compound_file
+            .set_storage_clsid("/", uuid::Uuid::parse_str(clsid).expect("valid CLSID literal"))
+            .expect("set root storage CLSID");
+        compound_file
+            .create_stream("/Padding")
+            .expect("create padding stream")
+            .write_all(&vec![0_u8; padding_len])
+            .expect("write padding stream");
+        compound_file.into_inner().into_inner()
+    }
+
+    #[cfg(feature = "office")]
+    #[test]
+    fn content_only_bytes_and_file_agree_on_a_legacy_ole2_document_past_the_sniff_window() {
+        // Before the fix: `detect_or_validate_bytes` (whole buffer) detected
+        // these correctly via `infer`'s `ole2()` matcher, while
+        // `detect_or_validate_file` (bounded MIME_SNIFF_LENGTH prefix) failed
+        // outright with "Could not detect MIME type from file content" — a
+        // compound file cannot be typed from a truncated prefix because the FAT
+        // sector chain that locates the root directory entry references
+        // sectors the prefix does not contain (#1590). Same bytes, different
+        // answer; a real Word/Excel/PowerPoint document is essentially always
+        // larger than the 4096-byte sniff window. ~keep
+        use crate::core::config::MimeDetectionPolicy;
+
+        let cases = [
+            ("00020906-0000-0000-c000-000000000046", LEGACY_WORD_MIME_TYPE),
+            ("00020810-0000-0000-c000-000000000046", LEGACY_EXCEL_MIME_TYPE),
+            ("64818d10-4f9b-11cf-86ea-00aa00b929e8", LEGACY_POWERPOINT_MIME_TYPE),
+        ];
+
+        for (clsid, expected_mime) in cases {
+            let content = build_test_ole2_document(clsid, MIME_SNIFF_LENGTH * 2);
+            assert!(
+                content.len() > MIME_SNIFF_LENGTH,
+                "fixture for {clsid} must exceed the sniff window to exercise #1590"
+            );
+
+            let from_bytes = detect_or_validate_bytes(&content, None, None, MimeDetectionPolicy::ContentOnly)
+                .unwrap_or_else(|error| panic!("bytes API failed to detect {clsid}: {error}"));
+            assert_eq!(from_bytes, expected_mime, "bytes API mismatch for {clsid}");
+
+            let dir = tempdir().unwrap();
+            let path = dir.path().join("legacy.bin");
+            std::fs::write(&path, &content).unwrap();
+            let mut file = File::open(&path).unwrap();
+            let from_file = detect_or_validate_file(&path, &mut file, None, MimeDetectionPolicy::ContentOnly)
+                .unwrap_or_else(|error| panic!("path API failed to detect {clsid}: {error}"));
+            assert_eq!(from_file, expected_mime, "path API mismatch for {clsid}");
+
+            assert_eq!(
+                from_bytes, from_file,
+                "bytes and path APIs must agree on identical content for {clsid}"
+            );
+        }
+    }
+
     #[test]
     fn octet_stream_file_hint_falls_back_to_each_detection_policy() {
         use crate::core::config::MimeDetectionPolicy;
@@ -3272,5 +3522,66 @@ mod tests {
             "declared alias MIME types are advertised as supported but unroutable:\n  {}",
             unclaimed.join("\n  ")
         );
+    }
+
+    // #1625: a caller with no MIME type who sends legacy-encoded (non-UTF-8) text, such as a
+    // Windows-1252 CSV export, must not be refused when xberg's extractors can read it.
+    #[test]
+    fn should_detect_windows1252_text_as_plain_text() {
+        // "name;city\r\nJosé;München\r\n" encoded as Windows-1252 (0xE9 = 'é', 0xFC = 'ü').
+        let windows_1252 = b"name;city\r\nJos\xe9;M\xfcnchen\r\n";
+
+        assert_eq!(detect_mime_type_from_bytes(windows_1252).unwrap(), PLAIN_TEXT_MIME_TYPE);
+    }
+
+    #[test]
+    fn should_still_detect_utf8_text_as_plain_text() {
+        let utf8 = "name;city\r\nJosé;München\r\n".as_bytes();
+
+        assert_eq!(detect_mime_type_from_bytes(utf8).unwrap(), PLAIN_TEXT_MIME_TYPE);
+    }
+
+    #[test]
+    fn should_reject_non_utf8_binary_content_not_recognized_as_a_known_format() {
+        // Bytes chosen to defeat both signals a too-eager fallback might rely on: an
+        // encoding that maps every byte (so decoding alone "succeeds" without error)
+        // and a low but nonzero share of ASCII, so the input still is not text.
+        let binary: Vec<u8> = (0u8..=255).cycle().take(600).collect();
+        assert!(std::str::from_utf8(&binary).is_err(), "fixture must not be valid UTF-8");
+
+        let result = detect_mime_type_from_bytes(&binary);
+        assert!(
+            matches!(result, Err(XbergError::UnsupportedFormat(_))),
+            "expected UnsupportedFormat, got {result:?}"
+        );
+    }
+
+    // The fixture above carries NUL bytes, so it is rejected by the NUL guard before the byte
+    // ratio is ever computed -- it cannot show that the ratio itself discriminates. This one
+    // omits NUL so that the ratio is the only thing left to reject it. ~keep
+    #[test]
+    fn should_reject_nul_free_binary_content_on_the_printable_byte_ratio_alone() {
+        let binary: Vec<u8> = (1u8..=255).cycle().take(600).collect();
+        assert!(
+            !binary.contains(&0),
+            "fixture must exercise the ratio, not the NUL guard"
+        );
+        assert!(!looks_like_legacy_encoded_text(&binary));
+
+        let result = detect_mime_type_from_bytes(&binary);
+        assert!(
+            matches!(result, Err(XbergError::UnsupportedFormat(_))),
+            "expected UnsupportedFormat, got {result:?}"
+        );
+    }
+
+    // #1625: curly quotes are the commonest sign that a file is Windows-1252 rather than
+    // ISO-8859-1, and they live in `0x80..=0x9F`. A short sentence holding one pair of them
+    // must still read as text. ~keep
+    #[test]
+    fn should_detect_windows1252_curly_quotes_as_plain_text() {
+        let windows_1252 = b"He said \x93hello\x94 to Jos\xe9 and left.\r\n";
+
+        assert_eq!(detect_mime_type_from_bytes(windows_1252).unwrap(), PLAIN_TEXT_MIME_TYPE);
     }
 }

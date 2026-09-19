@@ -5,7 +5,7 @@
 
 use std::borrow::Cow;
 
-use super::lines::{needs_space_between, segments_need_space};
+use super::lines::{crosses_visual_line_break, needs_space_between, segments_need_space};
 use super::text_repair::finalize_hyphens;
 use super::types::{LayoutHintClass, LayoutRegionPath, LayoutRegionTag, PdfParagraph};
 use crate::types::document_structure::{AnnotationKind, ContentLayer, TextAnnotation};
@@ -22,6 +22,7 @@ pub(crate) fn assemble_internal_document(
     tables: &[crate::types::Table],
     images: Option<&[crate::types::ExtractedImage]>,
     image_positions: &[(u32, u32)],
+    hyphen_witnesses: &super::pipeline::HyphenWitnesses,
 ) -> InternalDocument {
     tracing::debug!(
         page_count = pages.len(),
@@ -68,9 +69,9 @@ pub(crate) fn assemble_internal_document(
         }
 
         let (paragraph_elem_map, page_end_transition_index) = if let Some(page_tables) = page_tables {
-            assemble_page_elements_with_tables(&mut builder, paragraphs, &page_tables, page_num)
+            assemble_page_elements_with_tables(&mut builder, paragraphs, &page_tables, page_num, hyphen_witnesses)
         } else {
-            assemble_page_elements(&mut builder, paragraphs, page_num)
+            assemble_page_elements(&mut builder, paragraphs, page_num, hyphen_witnesses)
         };
 
         if page_has_content {
@@ -135,6 +136,7 @@ fn assemble_page_elements(
     builder: &mut InternalDocumentBuilder,
     paragraphs: &[PdfParagraph],
     page: Option<u32>,
+    hyphen_witnesses: &super::pipeline::HyphenWitnesses,
 ) -> (Vec<ParagraphElementPosition>, u32) {
     let mut in_list = false;
     let mut open_regions = Vec::new();
@@ -162,7 +164,7 @@ fn assemble_page_elements(
             in_list = false;
         }
 
-        let elem_idx = push_paragraph_element(builder, para, page);
+        let elem_idx = push_paragraph_element(builder, para, page, hyphen_witnesses);
         paragraph_elem_map.push(ParagraphElementPosition {
             paragraph_index: para_idx,
             element_index: elem_idx,
@@ -293,6 +295,132 @@ fn image_element(
         .with_page(page_number)
 }
 
+/// Minimum fraction of a paragraph's own area a table's bounding box must cover before the
+/// paragraph is even considered for table-duplicate suppression. Mirrors the coverage
+/// threshold `pdf::structure::pipeline::filter_segments_by_table_bboxes` uses for the
+/// equivalent native-span check (GH#1616).
+const MIN_TABLE_COVERAGE_AREA_RATIO: f32 = 0.5;
+
+/// Lowercased alphanumeric tokens, for an order-insensitive table-coverage text match.
+///
+/// GH#1622: a substring match on normalized glyph concatenation -- the shape
+/// `pdf::structure::pipeline::filter_segments_by_table_bboxes` uses for the #1616 native-span
+/// fix -- assumes the paragraph's word order matches the table's cell order. That holds for
+/// native text spans (extracted in their own visual order) but not for OCR: TATR's cell grid
+/// is a row/column intersection independent of the flattened paragraph's own line-by-line OCR
+/// order, so a malformed grid routinely reassembles the same words in a different order (e.g.
+/// "Site 01 | Samples 6 | Status Complete" from a grid vs. "Site Samples Status 01 6 Complete"
+/// from the flattened paragraph). Measured on `ocr1599.pdf`: a substring match found zero
+/// matches against this exact pair and suppressed nothing. Token-multiset containment is
+/// insensitive to the reordering while still requiring every one of the paragraph's own words
+/// to be accounted for in the table -- the same multiset-containment shape
+/// `extractors::pdf::ocr::document::ocr_structure_heuristic_token_retention` already uses for
+/// GH#1622's other symptom. Reimplemented locally rather than shared (`avoid-duplication`):
+/// this is the third such shape in the crate (after `image.rs`'s `alphanumeric_token_retention`
+/// and `document.rs`'s), each over different geometry/visibility; consolidating them behind
+/// one shared home is a reasonable follow-up but out of scope for this fix. ~keep
+fn table_coverage_tokens(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Multiset of tokens everything a table actually carries -- cells when populated, otherwise
+/// the rendered markdown -- for the "carries" half of the coverage test below.
+fn table_coverage_token_counts(table: &crate::types::Table) -> std::collections::HashMap<String, usize> {
+    let tokens = if table.cells.iter().any(|row| !row.is_empty()) {
+        table
+            .cells
+            .iter()
+            .flat_map(|row| row.iter())
+            .flat_map(|cell| table_coverage_tokens(cell))
+            .collect::<Vec<_>>()
+    } else {
+        table_coverage_tokens(&table.markdown)
+    };
+    let mut counts = std::collections::HashMap::new();
+    for token in tokens {
+        *counts.entry(token).or_insert(0usize) += 1;
+    }
+    counts
+}
+
+/// Whether every token of `text` (as a multiset) is accounted for within `table_token_counts`
+/// -- order-insensitive containment, so a table whose cell grid reassembled the same words in
+/// a different sequence than the source paragraph still counts as carrying it.
+fn table_carries_every_token(text: &str, table_token_counts: &std::collections::HashMap<String, usize>) -> bool {
+    let mut remaining = table_token_counts.clone();
+    for token in table_coverage_tokens(text) {
+        match remaining.get_mut(&token) {
+            Some(count) if *count > 0 => *count -= 1,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// The text `paragraph` would actually render as, mirroring `push_paragraph_element`'s own
+/// `get_text` closure: `.text` when populated (the bare-text-heuristic-path shape), otherwise
+/// joined from `.lines` (the geometry-backed shape every OCR-layout paragraph actually uses --
+/// `.text` is empty there, so reading `.text` alone always saw an empty string and never
+/// matched any table).
+fn paragraph_effective_text(paragraph: &PdfParagraph, hyphen_witnesses: &super::pipeline::HyphenWitnesses) -> String {
+    if !paragraph.text.is_empty() {
+        paragraph.text.clone()
+    } else {
+        join_line_texts_plain(&paragraph.lines, hyphen_witnesses)
+    }
+}
+
+/// Whether `paragraph` (whose rendered text is `paragraph_text`) should be suppressed from
+/// the paragraph stream because `table` already renders its text as a grid cell.
+///
+/// GH#1622 investigation: `assemble_page_elements_with_tables` interleaved tables into the
+/// paragraph stream by geometric slot but never suppressed the source paragraph, so a
+/// TATR-recognized table's flattened source text still appeared as an ordinary paragraph
+/// immediately next to the correctly-gridded table -- observed directly on a fixture while
+/// investigating GH#1622 (the sidebar/status table on `ocr1599.pdf` renders twice). Geometry
+/// alone is deliberately not sufficient: GH#1616 already established that a reconstructed
+/// grid need not span every printed run inside its own bounding box, so suppressing on
+/// coverage alone deletes columns the grid left out. Requiring the table's own normalized
+/// cell/markdown text to actually contain the paragraph's normalized text (mirroring
+/// `pdf::structure::pipeline::filter_segments_by_table_bboxes`, the #1616 fix for the
+/// equivalent native-span path) keeps a paragraph that merely overlaps a table's bbox but
+/// carries text the grid does not. ~keep
+fn paragraph_is_covered_and_carried_by_table(
+    paragraph: &PdfParagraph,
+    paragraph_text: &str,
+    table: &crate::types::Table,
+    table_token_counts: &std::collections::HashMap<String, usize>,
+) -> bool {
+    let Some((left, bottom, right, top)) = paragraph.block_bbox else {
+        return false;
+    };
+    let Some(bbox) = table.bounding_box else {
+        return false;
+    };
+    let para_area = (right - left) * (top - bottom);
+    if !(para_area.is_finite() && para_area > 0.0) {
+        return false;
+    }
+    let text = paragraph_text.trim();
+    if text.is_empty() {
+        return false;
+    }
+
+    let inter_left = left.max(bbox.x0 as f32);
+    let inter_right = right.min(bbox.x1 as f32);
+    let inter_bottom = bottom.max(bbox.y0 as f32);
+    let inter_top = top.min(bbox.y1 as f32);
+    if inter_left >= inter_right || inter_bottom >= inter_top {
+        return false;
+    }
+    let inter_area = (inter_right - inter_left) * (inter_top - inter_bottom);
+
+    inter_area / para_area >= MIN_TABLE_COVERAGE_AREA_RATIO && table_carries_every_token(text, table_token_counts)
+}
+
 /// Push paragraph elements in their established reading order, with tables interleaved.
 ///
 /// Returns the element and structural-transition positions for every non-caption
@@ -302,6 +430,7 @@ fn assemble_page_elements_with_tables(
     paragraphs: &[PdfParagraph],
     tables: &[&crate::types::Table],
     page: Option<u32>,
+    hyphen_witnesses: &super::pipeline::HyphenWitnesses,
 ) -> (Vec<ParagraphElementPosition>, u32) {
     let mut positioned: Vec<(f32, &crate::types::Table)> = Vec::new();
     let mut unpositioned: Vec<&crate::types::Table> = Vec::new();
@@ -323,10 +452,24 @@ fn assemble_page_elements_with_tables(
 
     positioned.sort_by(|a, b| b.0.total_cmp(&a.0));
 
+    let table_token_counts: Vec<(&crate::types::Table, std::collections::HashMap<String, usize>)> = tables
+        .iter()
+        .filter(|table| !table.markdown.trim().is_empty())
+        .map(|&table| (table, table_coverage_token_counts(table)))
+        .collect();
+
     let ordered_paragraphs: Vec<(usize, &PdfParagraph)> = paragraphs
         .iter()
         .enumerate()
-        .filter(|(_, para)| para.caption_for.is_none())
+        .filter(|(_, para)| {
+            if para.caption_for.is_some() {
+                return false;
+            }
+            let effective_text = paragraph_effective_text(para, hyphen_witnesses);
+            !table_token_counts
+                .iter()
+                .any(|(table, counts)| paragraph_is_covered_and_carried_by_table(para, &effective_text, table, counts))
+        })
         .collect();
     let mut tables_at_slot: Vec<Vec<&crate::types::Table>> =
         (0..=ordered_paragraphs.len()).map(|_| Vec::new()).collect();
@@ -369,7 +512,7 @@ fn assemble_page_elements_with_tables(
             in_list = false;
         }
 
-        let elem_idx = push_paragraph_element(builder, para, page);
+        let elem_idx = push_paragraph_element(builder, para, page, hyphen_witnesses);
         paragraph_elem_map.push(ParagraphElementPosition {
             paragraph_index: para_idx,
             element_index: elem_idx,
@@ -607,7 +750,12 @@ fn push_table_element(builder: &mut InternalDocumentBuilder, table: &crate::type
 
 /// Convert a single PdfParagraph to the appropriate InternalElement and push it.
 /// Returns the element index.
-fn push_paragraph_element(builder: &mut InternalDocumentBuilder, para: &PdfParagraph, page: Option<u32>) -> u32 {
+fn push_paragraph_element(
+    builder: &mut InternalDocumentBuilder,
+    para: &PdfParagraph,
+    page: Option<u32>,
+    hyphen_witnesses: &super::pipeline::HyphenWitnesses,
+) -> u32 {
     let bbox = para.block_bbox.map(|bb| BoundingBox {
         x0: bb.0 as f64,
         y0: bb.1 as f64,
@@ -632,7 +780,7 @@ fn push_paragraph_element(builder: &mut InternalDocumentBuilder, para: &PdfParag
         let text = if !para.text.is_empty() {
             para.text.clone()
         } else {
-            join_line_texts_plain(&para.lines)
+            join_line_texts_plain(&para.lines, hyphen_witnesses)
         };
         finalize_hyphens(&text).into_owned()
     };
@@ -671,7 +819,7 @@ fn push_paragraph_element(builder: &mut InternalDocumentBuilder, para: &PdfParag
         let ordered = list_item_is_ordered(para);
         let text = get_text(para);
         let annotations = if para.text.is_empty() {
-            let (annotated_text, annotations) = extract_text_and_annotations(para);
+            let (annotated_text, annotations) = extract_text_and_annotations(para, hyphen_witnesses);
             if annotated_text == text {
                 annotations
             } else {
@@ -729,7 +877,7 @@ fn push_paragraph_element(builder: &mut InternalDocumentBuilder, para: &PdfParag
         };
         builder.push_paragraph(&para.text, annotations, page, bbox)
     } else {
-        let (text, annotations) = extract_text_and_annotations(para);
+        let (text, annotations) = extract_text_and_annotations(para, hyphen_witnesses);
         builder.push_paragraph(&text, annotations, page, bbox)
     }
 }
@@ -779,7 +927,10 @@ fn emit_caption_elements(
 ///
 /// Walks segments, groups consecutive runs of the same bold/italic state,
 /// and produces `TextAnnotation` spans for formatting changes.
-fn extract_text_and_annotations(para: &PdfParagraph) -> (String, Vec<TextAnnotation>) {
+fn extract_text_and_annotations(
+    para: &PdfParagraph,
+    hyphen_witnesses: &super::pipeline::HyphenWitnesses,
+) -> (String, Vec<TextAnnotation>) {
     let all_segments: Vec<&crate::pdf::hierarchy::SegmentData> = para.lines.iter().flat_map(|l| &l.segments).collect();
 
     if all_segments.is_empty() {
@@ -813,10 +964,16 @@ fn extract_text_and_annotations(para: &PdfParagraph) -> (String, Vec<TextAnnotat
             let prev_last = prev_seg.text.split_whitespace().next_back().unwrap_or("");
             let next_first = next_seg.text.split_whitespace().next().unwrap_or("");
 
-            if should_dehyphenate(prev_last, next_first) {
-                text.pop();
-            } else if segments_need_space(prev_seg, prev_last, next_seg, next_first) {
-                text.push(' ');
+            match classify_line_break_hyphen(prev_last, next_first, prev_seg, next_seg, hyphen_witnesses) {
+                LineBreakHyphen::Weld => {
+                    text.pop();
+                }
+                LineBreakHyphen::KeepHyphen => {}
+                LineBreakHyphen::NotApplicable => {
+                    if segments_need_space(prev_seg, prev_last, next_seg, next_first) {
+                        text.push(' ');
+                    }
+                }
             }
         }
 
@@ -825,14 +982,26 @@ fn extract_text_and_annotations(para: &PdfParagraph) -> (String, Vec<TextAnnotat
         for (wi, &(word, seg_idx)) in run_words.iter().enumerate() {
             if wi > 0 {
                 let (prev, prev_seg_idx) = run_words[wi - 1];
-                if should_dehyphenate(prev, word) {
-                    text.pop();
-                } else if prev_seg_idx == seg_idx {
-                    if needs_space_between(prev, word) {
-                        text.push(' ');
+                match classify_line_break_hyphen(
+                    prev,
+                    word,
+                    all_segments[prev_seg_idx],
+                    all_segments[seg_idx],
+                    hyphen_witnesses,
+                ) {
+                    LineBreakHyphen::Weld => {
+                        text.pop();
                     }
-                } else if segments_need_space(all_segments[prev_seg_idx], prev, all_segments[seg_idx], word) {
-                    text.push(' ');
+                    LineBreakHyphen::KeepHyphen => {}
+                    LineBreakHyphen::NotApplicable => {
+                        if prev_seg_idx == seg_idx {
+                            if needs_space_between(prev, word) {
+                                text.push(' ');
+                            }
+                        } else if segments_need_space(all_segments[prev_seg_idx], prev, all_segments[seg_idx], word) {
+                            text.push(' ');
+                        }
+                    }
                 }
             }
             text.push_str(word);
@@ -862,7 +1031,10 @@ fn extract_text_and_annotations(para: &PdfParagraph) -> (String, Vec<TextAnnotat
 }
 
 /// Join line texts into a single plain string (no markup).
-fn join_line_texts_plain(lines: &[super::types::PdfLine]) -> String {
+fn join_line_texts_plain(
+    lines: &[super::types::PdfLine],
+    hyphen_witnesses: &super::pipeline::HyphenWitnesses,
+) -> String {
     if lines.is_empty() {
         return String::new();
     }
@@ -899,10 +1071,17 @@ fn join_line_texts_plain(lines: &[super::types::PdfLine]) -> String {
                 continue;
             };
 
-            if should_dehyphenate(prev_word, word) {
-                result.pop();
-                result.push_str(word);
-                continue;
+            match classify_line_break_hyphen(prev_word, word, prev_seg, seg, hyphen_witnesses) {
+                LineBreakHyphen::Weld => {
+                    result.pop();
+                    result.push_str(word);
+                    continue;
+                }
+                LineBreakHyphen::KeepHyphen => {
+                    result.push_str(word);
+                    continue;
+                }
+                LineBreakHyphen::NotApplicable => {}
             }
 
             let insert_space = if std::ptr::eq(prev_seg, seg) {
@@ -920,15 +1099,62 @@ fn join_line_texts_plain(lines: &[super::types::PdfLine]) -> String {
 }
 
 /// Check if a line-ending hyphen should be removed and words joined.
-fn should_dehyphenate(prev: &str, next: &str) -> bool {
+///
+/// Requires `prev_seg`/`next_seg` to actually cross a visual line break (xberg-io/xberg#1581):
+/// without that check, a suspended hyphen mid-line ("onderhouds- en") matches the same text
+/// pattern as a genuine wrapped-line hyphen and gets welded regardless of position.
+/// How a hyphen that ends a visual line joins to the fragment after the break.
+///
+/// Two different things happen at a line break and the positional signals cannot tell them
+/// apart: a wrap that split a word (`Mon-` + `tanide`), and a compound whose own hyphen simply
+/// landed there (`long-` + `term`). Collapsing them into one boolean is what welded real
+/// compounds into tokens that do not exist (xberg-io/xberg#1613). `KeepHyphen` is a distinct
+/// outcome from `NotApplicable`: the pair still joins with no space between them, it is only the
+/// hyphen that survives. ~keep
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineBreakHyphen {
+    /// Not a hyphen-at-a-break pair; normal spacing rules apply.
+    NotApplicable,
+    /// A wrap split one word: drop the hyphen and join the halves.
+    Weld,
+    /// The compound's own hyphen: keep it, and join without inserting a space.
+    KeepHyphen,
+}
+
+fn classify_line_break_hyphen(
+    prev: &str,
+    next: &str,
+    prev_seg: &crate::pdf::hierarchy::SegmentData,
+    next_seg: &crate::pdf::hierarchy::SegmentData,
+    hyphen_witnesses: &super::pipeline::HyphenWitnesses,
+) -> LineBreakHyphen {
     if prev.len() < 2 || !prev.ends_with('-') {
-        return false;
+        return LineBreakHyphen::NotApplicable;
     }
     let before_hyphen = prev[..prev.len() - 1].chars().next_back();
     if !before_hyphen.is_some_and(|c| c.is_alphabetic()) {
-        return false;
+        return LineBreakHyphen::NotApplicable;
     }
-    next.chars().next().is_some_and(|c| c.is_lowercase())
+    if !next.chars().next().is_some_and(|c| c.is_lowercase()) {
+        return LineBreakHyphen::NotApplicable;
+    }
+    if !crosses_visual_line_break(prev_seg, next_seg) {
+        return LineBreakHyphen::NotApplicable;
+    }
+    // The four conditions above are positional and typographic; they separate a hyphen at the
+    // break from one mid-line, but cannot separate the two things that both happen at a break:
+    // a wrap that split a word, and a compound whose own hyphen landed there. That is what
+    // `should_preserve_lexical_hyphen` weighs, and this site used to decide without it
+    // (xberg-io/xberg#1613). Arguments are prepared exactly as `dehyphenate_paragraph_lines`
+    // prepares them -- the guard trims non-lexical characters but deliberately keeps `-`, so
+    // the trailing hyphen must come off here. ~keep
+    let trailing_word = prev.trim_end_matches('-').split_whitespace().last().unwrap_or("");
+    let leading_word = next.split_whitespace().next().unwrap_or("");
+    if super::pipeline::should_preserve_lexical_hyphen(trailing_word, leading_word, hyphen_witnesses) {
+        LineBreakHyphen::KeepHyphen
+    } else {
+        LineBreakHyphen::Weld
+    }
 }
 
 /// Collapse runs of 2+ spaces inside a line while preserving leading indentation.
@@ -1174,7 +1400,7 @@ mod tests {
         let mut second = make_paragraph("second", None);
         second.layout_region_path = Some(nested_layout_path());
 
-        let document = assemble_internal_document(vec![vec![first, second]], &[], None, &[]);
+        let document = assemble_internal_document(vec![vec![first, second]], &[], None, &[], &Default::default());
         let starts = document
             .elements
             .iter()
@@ -1206,7 +1432,7 @@ mod tests {
         })
         .collect::<Vec<_>>();
 
-        let document = assemble_internal_document(vec![paragraphs], &[], None, &[]);
+        let document = assemble_internal_document(vec![paragraphs], &[], None, &[], &Default::default());
         let heading_depths = document
             .elements
             .iter()
@@ -1236,7 +1462,7 @@ mod tests {
             child: None,
         });
 
-        let document = assemble_internal_document(vec![vec![first, second]], &[], None, &[]);
+        let document = assemble_internal_document(vec![vec![first, second]], &[], None, &[], &Default::default());
         assert_eq!(
             document
                 .elements
@@ -1290,7 +1516,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let document = assemble_internal_document(vec![paragraphs], &[], None, &[]);
+        let document = assemble_internal_document(vec![paragraphs], &[], None, &[], &Default::default());
         assert_eq!(
             document
                 .elements
@@ -1317,7 +1543,7 @@ mod tests {
         below.layout_region_path = Some(nested_layout_path());
         let table = make_table_at("| a |\n|---|", 600.0);
 
-        let document = assemble_internal_document(vec![vec![above, below]], &[table], None, &[]);
+        let document = assemble_internal_document(vec![vec![above, below]], &[table], None, &[], &Default::default());
         assert_eq!(page_element_labels(&document), ["<table>", "above", "below"]);
         let table_element = document
             .elements
@@ -1345,7 +1571,13 @@ mod tests {
 
     #[test]
     fn no_layout_path_emits_no_group_markers() {
-        let document = assemble_internal_document(vec![vec![make_paragraph("legacy", None)]], &[], None, &[]);
+        let document = assemble_internal_document(
+            vec![vec![make_paragraph("legacy", None)]],
+            &[],
+            None,
+            &[],
+            &Default::default(),
+        );
         assert!(
             document
                 .elements
@@ -1361,7 +1593,7 @@ mod tests {
             make_paragraph("Title", Some(1)),
             make_paragraph("Body text", None),
         ]];
-        let doc = assemble_internal_document(pages, &[], None, &[]);
+        let doc = assemble_internal_document(pages, &[], None, &[], &Default::default());
         assert_eq!(doc.elements.len(), 2);
         assert!(matches!(doc.elements[0].kind, ElementKind::Heading { level: 1 }));
         assert_eq!(doc.elements[0].text, "Title");
@@ -1371,7 +1603,7 @@ mod tests {
 
     #[test]
     fn test_assemble_internal_document_empty() {
-        let doc = assemble_internal_document(vec![], &[], None, &[]);
+        let doc = assemble_internal_document(vec![], &[], None, &[], &Default::default());
         assert!(doc.elements.is_empty());
     }
 
@@ -1381,7 +1613,7 @@ mod tests {
             vec![make_paragraph("Page 1", None)],
             vec![make_paragraph("Page 2", None)],
         ];
-        let doc = assemble_internal_document(pages, &[], None, &[]);
+        let doc = assemble_internal_document(pages, &[], None, &[], &Default::default());
         let paragraphs: Vec<_> = doc
             .elements
             .iter()
@@ -1402,7 +1634,7 @@ mod tests {
             bounding_box: None,
             ..Default::default()
         }];
-        let doc = assemble_internal_document(pages, &tables, None, &[]);
+        let doc = assemble_internal_document(pages, &tables, None, &[], &Default::default());
         assert!(doc.elements.iter().any(|e| e.text == "Before"));
         assert!(doc.tables.iter().any(|t| t.markdown.contains("| A | B |")));
     }
@@ -1420,7 +1652,7 @@ mod tests {
             bounding_box: None,
             ..Default::default()
         }];
-        let doc = assemble_internal_document(pages, &tables, None, &[]);
+        let doc = assemble_internal_document(pages, &tables, None, &[], &Default::default());
         assert!(doc.elements.iter().any(|e| e.text == "Page 1"));
         assert!(doc.elements.iter().any(|e| e.text == "Page 2"));
         assert!(doc.tables.iter().any(|t| t.markdown.contains("| Table |")));
@@ -1434,7 +1666,7 @@ mod tests {
         ]];
         let tables = vec![make_table_in_box("| Between |", 80.0, 520.0, 800.0)];
 
-        let document = assemble_internal_document(pages, &tables, None, &[]);
+        let document = assemble_internal_document(pages, &tables, None, &[], &Default::default());
 
         assert_eq!(page_element_labels(&document), ["Before", "<table>", "After"]);
     }
@@ -1449,7 +1681,7 @@ mod tests {
         ]];
         let tables = vec![make_table_at("| Full width |", 800.0)];
 
-        let document = assemble_internal_document(pages, &tables, None, &[]);
+        let document = assemble_internal_document(pages, &tables, None, &[], &Default::default());
 
         assert_eq!(
             page_element_labels(&document),
@@ -1467,7 +1699,7 @@ mod tests {
         ]];
         let tables = vec![make_table_in_box("| Right column |", 350.0, 550.0, 800.0)];
 
-        let document = assemble_internal_document(pages, &tables, None, &[]);
+        let document = assemble_internal_document(pages, &tables, None, &[], &Default::default());
 
         assert_eq!(
             page_element_labels(&document),
@@ -1485,7 +1717,7 @@ mod tests {
         ]];
         let tables = vec![make_table_in_box("| Right column |", 350.0, 550.0, 800.0)];
 
-        let document = assemble_internal_document(pages, &tables, None, &[]);
+        let document = assemble_internal_document(pages, &tables, None, &[], &Default::default());
 
         assert_eq!(
             page_element_labels(&document),
@@ -1503,7 +1735,7 @@ mod tests {
             bounding_box: None,
             ..Default::default()
         }];
-        let doc = assemble_internal_document(pages, &tables, None, &[]);
+        let doc = assemble_internal_document(pages, &tables, None, &[], &Default::default());
         assert!(doc.elements.iter().any(|e| e.text == "Page 1"));
         assert!(doc.tables.iter().any(|t| t.markdown.contains("| Extra |")));
     }
@@ -1518,14 +1750,14 @@ mod tests {
             bounding_box: None,
             ..Default::default()
         }];
-        let doc = assemble_internal_document(pages, &tables, None, &[]);
+        let doc = assemble_internal_document(pages, &tables, None, &[], &Default::default());
         assert!(doc.tables.is_empty() || doc.tables.iter().all(|t| t.markdown.trim().is_empty()));
     }
 
     #[test]
     fn test_no_page_break_when_leading_page_empty() {
         let pages = vec![vec![], vec![make_paragraph("Content on page 2", None)]];
-        let doc = assemble_internal_document(pages, &[], None, &[]);
+        let doc = assemble_internal_document(pages, &[], None, &[], &Default::default());
         assert!(
             !doc.elements.iter().any(|e| matches!(e.kind, ElementKind::PageBreak)),
             "Blank leading page should not produce a page break"
@@ -1542,7 +1774,7 @@ mod tests {
     #[test]
     fn test_no_page_break_when_trailing_page_empty() {
         let pages = vec![vec![make_paragraph("Content on page 1", None)], vec![]];
-        let doc = assemble_internal_document(pages, &[], None, &[]);
+        let doc = assemble_internal_document(pages, &[], None, &[], &Default::default());
         assert!(
             !doc.elements.iter().any(|e| matches!(e.kind, ElementKind::PageBreak)),
             "Blank trailing page should not produce a page break"
@@ -1555,7 +1787,7 @@ mod tests {
             vec![make_paragraph("Page 1", None)],
             vec![make_paragraph("Page 2", None)],
         ];
-        let doc = assemble_internal_document(pages, &[], None, &[]);
+        let doc = assemble_internal_document(pages, &[], None, &[], &Default::default());
         assert!(
             doc.elements.iter().any(|e| matches!(e.kind, ElementKind::PageBreak)),
             "PageBreak should separate two content pages"
@@ -1565,7 +1797,7 @@ mod tests {
     #[test]
     fn test_no_page_break_single_page() {
         let pages = vec![vec![make_paragraph("Only page", None)]];
-        let doc = assemble_internal_document(pages, &[], None, &[]);
+        let doc = assemble_internal_document(pages, &[], None, &[], &Default::default());
         assert!(
             !doc.elements.iter().any(|e| matches!(e.kind, ElementKind::PageBreak)),
             "Single page should not produce a page break"
@@ -1576,7 +1808,7 @@ mod tests {
     fn test_image_elements_injected_with_positions() {
         let pages = vec![vec![make_paragraph("Page with image", None)]];
         let image_positions = vec![(1u32, 0u32)];
-        let doc = assemble_internal_document(pages, &[], None, &image_positions);
+        let doc = assemble_internal_document(pages, &[], None, &image_positions, &Default::default());
 
         let image_elems: Vec<_> = doc
             .elements
@@ -1624,7 +1856,7 @@ mod tests {
             kind_confidence: None,
             data_base64: None,
         }];
-        let doc = assemble_internal_document(pages, &[], Some(&images), &image_positions);
+        let doc = assemble_internal_document(pages, &[], Some(&images), &image_positions, &Default::default());
         let img_elem = doc
             .elements
             .iter()
@@ -1636,7 +1868,7 @@ mod tests {
     #[test]
     fn test_no_image_elements_with_empty_positions() {
         let pages = vec![vec![make_paragraph("No images here", None)]];
-        let doc = assemble_internal_document(pages, &[], None, &[]);
+        let doc = assemble_internal_document(pages, &[], None, &[], &Default::default());
 
         let image_count = doc
             .elements
@@ -1707,7 +1939,7 @@ mod tests {
         let images = vec![make_image_at(0, 1, Some(image_bbox))];
         let image_positions = vec![(1u32, 0u32)];
 
-        let document = assemble_internal_document(pages, &[], Some(&images), &image_positions);
+        let document = assemble_internal_document(pages, &[], Some(&images), &image_positions, &Default::default());
 
         let labels = page_elements_with_images(&document);
         assert_eq!(
@@ -1749,7 +1981,7 @@ mod tests {
         let images = vec![make_image_at(0, 1, None)];
         let image_positions = vec![(1u32, 0u32)];
 
-        let document = assemble_internal_document(pages, &[], Some(&images), &image_positions);
+        let document = assemble_internal_document(pages, &[], Some(&images), &image_positions, &Default::default());
 
         let labels = page_elements_with_images(&document);
         assert_eq!(
@@ -1775,7 +2007,7 @@ mod tests {
         };
         let images = vec![make_image_at(0, 1, Some(image_bbox))];
 
-        let document = assemble_internal_document(pages, &[], Some(&images), &[(1, 0)]);
+        let document = assemble_internal_document(pages, &[], Some(&images), &[(1, 0)], &Default::default());
 
         assert_eq!(
             page_elements_with_images(&document),
@@ -1800,7 +2032,7 @@ mod tests {
             make_image_at(1, 1, Some(image_bbox)),
         ];
 
-        let document = assemble_internal_document(pages, &[], Some(&images), &[(1, 0), (1, 1)]);
+        let document = assemble_internal_document(pages, &[], Some(&images), &[(1, 0), (1, 1)], &Default::default());
         let image_indices: Vec<u32> = document
             .elements
             .iter()
@@ -1829,7 +2061,7 @@ mod tests {
         };
         let images = vec![make_image_at(0, 1, Some(image_bbox))];
 
-        let document = assemble_internal_document(pages, &[], Some(&images), &[(1, 0)]);
+        let document = assemble_internal_document(pages, &[], Some(&images), &[(1, 0)], &Default::default());
 
         assert_eq!(
             page_elements_with_images(&document),
@@ -1853,7 +2085,7 @@ mod tests {
         };
         let images = vec![make_image_at(0, 1, Some(image_bbox))];
 
-        let document = assemble_internal_document(pages, &[], Some(&images), &[(1, 0)]);
+        let document = assemble_internal_document(pages, &[], Some(&images), &[(1, 0)], &Default::default());
 
         assert_eq!(
             page_elements_with_images(&document),
@@ -1896,7 +2128,7 @@ mod tests {
             make_image_at(1, 1, Some(right_image_bbox)),
         ];
 
-        let document = assemble_internal_document(pages, &[], Some(&images), &[(1, 0), (1, 1)]);
+        let document = assemble_internal_document(pages, &[], Some(&images), &[(1, 0), (1, 1)], &Default::default());
         let index_of_text = |text: &str| {
             document
                 .elements
@@ -1954,7 +2186,7 @@ mod tests {
         let mut caption = make_paragraph("Caption text", None);
         caption.caption_for = Some(0);
         let pages = vec![vec![para1, caption]];
-        let doc = assemble_internal_document(pages, &[], None, &[]);
+        let doc = assemble_internal_document(pages, &[], None, &[], &Default::default());
         assert!(doc.elements.iter().any(|e| e.text == "Main text"));
         assert!(doc.elements.iter().any(|e| e.text == "Caption text"));
     }
@@ -2000,7 +2232,7 @@ mod tests {
             word_count,
         };
 
-        let document = assemble_internal_document(vec![vec![paragraph]], &[], None, &[]);
+        let document = assemble_internal_document(vec![vec![paragraph]], &[], None, &[], &Default::default());
         let item = document
             .elements
             .iter()
@@ -2036,7 +2268,7 @@ mod tests {
         ] {
             let mut paragraph = make_paragraph(source, None);
             paragraph.is_list_item = true;
-            let document = assemble_internal_document(vec![vec![paragraph]], &[], None, &[]);
+            let document = assemble_internal_document(vec![vec![paragraph]], &[], None, &[], &Default::default());
             let item = document
                 .elements
                 .iter()
@@ -2061,7 +2293,7 @@ mod tests {
         paragraph.lines = lines;
         paragraph.is_list_item = true;
 
-        let document = assemble_internal_document(vec![vec![paragraph]], &[], None, &[]);
+        let document = assemble_internal_document(vec![vec![paragraph]], &[], None, &[], &Default::default());
         let item = document
             .elements
             .iter()
@@ -2109,7 +2341,7 @@ mod tests {
             word_count,
         };
 
-        let doc = assemble_internal_document(vec![vec![para]], &[], None, &[]);
+        let doc = assemble_internal_document(vec![vec![para]], &[], None, &[], &Default::default());
         assert_eq!(doc.elements.len(), 1);
 
         let elem = &doc.elements[0];
@@ -2144,7 +2376,7 @@ mod tests {
         let mut para = make_paragraph("B. The Property shall be developed in substantial conformance.", None);
         para.is_list_item = true;
 
-        let doc = assemble_internal_document(vec![vec![para]], &[], None, &[]);
+        let doc = assemble_internal_document(vec![vec![para]], &[], None, &[], &Default::default());
 
         let item = doc
             .elements
@@ -2196,7 +2428,7 @@ mod tests {
             word_count,
         };
 
-        let doc = assemble_internal_document(vec![vec![para]], &[], None, &[]);
+        let doc = assemble_internal_document(vec![vec![para]], &[], None, &[], &Default::default());
         let elem = &doc.elements[0];
 
         let bold_anns: Vec<_> = elem
@@ -2277,7 +2509,7 @@ mod tests {
     fn test_merged_h1_text_appears_in_assembled_document() {
         let merged_para = make_production_h1("KAISUN HOLDINGS LIMITED");
         let pages = vec![vec![merged_para]];
-        let doc = assemble_internal_document(pages, &[], None, &[]);
+        let doc = assemble_internal_document(pages, &[], None, &[], &Default::default());
 
         assert_eq!(doc.elements.len(), 1);
         let heading = &doc.elements[0];
@@ -2306,7 +2538,7 @@ mod tests {
             make_production_h1("HR 28/24"),
             make_production_h1("HR 36/30"),
         ]];
-        let doc = assemble_internal_document(pages, &[], None, &[]);
+        let doc = assemble_internal_document(pages, &[], None, &[], &Default::default());
 
         let headings: Vec<_> = doc
             .elements
@@ -2338,5 +2570,281 @@ mod tests {
             "should allocate when spaces are collapsed"
         );
         assert_eq!(result, "  has extra spaces");
+    }
+
+    fn paragraph_text(document: &InternalDocument) -> &str {
+        document
+            .elements
+            .iter()
+            .find(|e| matches!(e.kind, ElementKind::Paragraph))
+            .map(|e| e.text.as_str())
+            .expect("a paragraph element should be emitted")
+    }
+
+    // xberg-io/xberg#1581: a suspended Dutch hyphen ("CV- en") welded into "CVen" because
+    // `classify_line_break_hyphen` fired at the run boundary purely from the text pattern, without
+    // checking whether the two runs actually sit on different visual lines.
+    #[test]
+    fn suspended_hyphen_across_style_run_boundary_is_not_welded() {
+        let segments = vec![plain_segment("CV- "), bold_segment("en boiler")];
+        let line = PdfLine {
+            segments,
+            baseline_y: 700.0,
+            dominant_font_size: 12.0,
+            is_bold: false,
+            is_monospace: false,
+        };
+        let mut para = make_paragraph("", None);
+        para.lines = vec![line];
+
+        let document = assemble_internal_document(vec![vec![para]], &[], None, &[], &Default::default());
+        assert_eq!(paragraph_text(&document), "CV- en boiler");
+    }
+
+    // xberg-io/xberg#1581: the same weld, but for two segments split mid-line within one
+    // style run (`onderhouds- en`), the site the issue traces to `join_line_texts_plain`'s
+    // preceding-word lookup and the same-run branch of `extract_text_and_annotations`.
+    #[test]
+    fn suspended_hyphen_within_one_style_run_is_not_welded() {
+        let segments = vec![
+            plain_segment("onderhouds- "),
+            plain_segment("en installatiewerkzaamheden"),
+        ];
+        let line = PdfLine {
+            segments,
+            baseline_y: 700.0,
+            dominant_font_size: 12.0,
+            is_bold: false,
+            is_monospace: false,
+        };
+        let mut para = make_paragraph("", None);
+        para.lines = vec![line];
+
+        let document = assemble_internal_document(vec![vec![para]], &[], None, &[], &Default::default());
+        assert_eq!(paragraph_text(&document), "onderhouds- en installatiewerkzaamheden");
+    }
+
+    // xberg-io/xberg#1613: the line-break hyphen decision was purely typographic, with no access
+    // to the lexical evidence `should_preserve_lexical_hyphen` exists to weigh -- so a compound
+    // whose own hyphen lands on a line break was welded into a token that does not exist.
+    // `long-term` and `cost-effective` are entries in `PRESERVED_LEXICAL_COMPOUNDS`, so these
+    // need no witness collection and no corpus: the extractor already lists them as
+    // must-preserve, and both lost the hyphen on this path.
+    #[test]
+    fn a_static_compound_hyphen_at_a_line_break_survives() {
+        for (trailing, leading, expected) in [
+            ("a long-", "term contract", "a long-term contract"),
+            ("a cost-", "effective option", "a cost-effective option"),
+        ] {
+            let first = PdfLine {
+                segments: vec![SegmentData {
+                    baseline_y: 700.0,
+                    ..plain_segment(trailing)
+                }],
+                baseline_y: 700.0,
+                dominant_font_size: 12.0,
+                is_bold: false,
+                is_monospace: false,
+            };
+            let second = PdfLine {
+                segments: vec![SegmentData {
+                    baseline_y: 685.0,
+                    ..plain_segment(leading)
+                }],
+                baseline_y: 685.0,
+                dominant_font_size: 12.0,
+                is_bold: false,
+                is_monospace: false,
+            };
+            let mut para = make_paragraph("", None);
+            para.lines = vec![first, second];
+
+            let document = assemble_internal_document(vec![vec![para]], &[], None, &[], &Default::default());
+            assert_eq!(paragraph_text(&document), expected);
+        }
+    }
+
+    // The other half of the rule: a word the wrap genuinely broke must still be rejoined.
+    // Without this, "preserve the hyphen" degenerates into "never dehyphenate".
+    #[test]
+    fn a_genuine_wrap_hyphen_at_a_line_break_is_still_joined() {
+        let first = PdfLine {
+            segments: vec![SegmentData {
+                baseline_y: 700.0,
+                ..plain_segment("adjuvant Mon-")
+            }],
+            baseline_y: 700.0,
+            dominant_font_size: 12.0,
+            is_bold: false,
+            is_monospace: false,
+        };
+        let second = PdfLine {
+            segments: vec![SegmentData {
+                baseline_y: 685.0,
+                ..plain_segment("tanide was used")
+            }],
+            baseline_y: 685.0,
+            dominant_font_size: 12.0,
+            is_bold: false,
+            is_monospace: false,
+        };
+        let mut para = make_paragraph("", None);
+        para.lines = vec![first, second];
+
+        let document = assemble_internal_document(vec![vec![para]], &[], None, &[], &Default::default());
+        assert_eq!(paragraph_text(&document), "adjuvant Montanide was used");
+    }
+
+    // Same defect via `join_line_texts_plain` (list items get their text from that path,
+    // not `extract_text_and_annotations`).
+    #[test]
+    fn suspended_hyphen_is_not_welded_in_list_item_plain_join() {
+        let segments = vec![plain_segment("montage- "), plain_segment("en installatiehandleiding")];
+        let line = PdfLine {
+            segments,
+            baseline_y: 700.0,
+            dominant_font_size: 12.0,
+            is_bold: false,
+            is_monospace: false,
+        };
+        let mut para = make_paragraph("", None);
+        para.lines = vec![line];
+        para.is_list_item = true;
+
+        let document = assemble_internal_document(vec![vec![para]], &[], None, &[], &Default::default());
+        let item = document
+            .elements
+            .iter()
+            .find(|e| matches!(e.kind, ElementKind::ListItem { .. }))
+            .expect("list item should be emitted");
+        assert_eq!(item.text, "montage- en installatiehandleiding");
+    }
+
+    // The control from the issue's own reproducer: a genuine line-wrap hyphen, where the
+    // trailing and leading runs sit on different visual lines (baselines differ by more than
+    // the inline-style tolerance), must still be rejoined. A fix that stops all dehyphenation
+    // would pass the three tests above for the wrong reason.
+    #[test]
+    fn genuine_line_wrap_hyphen_still_joins_across_visual_line_break() {
+        let line1 = PdfLine {
+            segments: vec![SegmentData {
+                baseline_y: 700.0,
+                ..plain_segment("Zie de installatie-")
+            }],
+            baseline_y: 700.0,
+            dominant_font_size: 12.0,
+            is_bold: false,
+            is_monospace: false,
+        };
+        let line2 = PdfLine {
+            segments: vec![SegmentData {
+                baseline_y: 686.0,
+                ..plain_segment("handleiding voor details")
+            }],
+            baseline_y: 686.0,
+            dominant_font_size: 12.0,
+            is_bold: false,
+            is_monospace: false,
+        };
+        let mut para = make_paragraph("", None);
+        para.lines = vec![line1, line2];
+
+        let document = assemble_internal_document(vec![vec![para]], &[], None, &[], &Default::default());
+        assert_eq!(paragraph_text(&document), "Zie de installatiehandleiding voor details");
+    }
+
+    /// GH#1622 duplication finding, direction 1 (suppressed when carried): a paragraph
+    /// whose text a positioned table's own grid actually contains must not also render as
+    /// a separate paragraph -- observed directly on `ocr1599.pdf`'s sidebar/status table,
+    /// which rendered its flattened source text as prose immediately before rendering the
+    /// same content again as a correctly-gridded table.
+    #[test]
+    fn should_suppress_paragraph_fully_carried_by_a_positioned_table() {
+        let table = make_table_in_box(
+            "| Site | Samples | Status |\n| --- | --- | --- |\n| 01 | 6 | Complete |",
+            40.0,
+            560.0,
+            800.0,
+        );
+        let paragraph = make_paragraph_in_box("Site Samples Status 01 6 Complete", 760.0, 40.0, 560.0);
+
+        let document = assemble_internal_document(vec![vec![paragraph]], &[table], None, &[], &Default::default());
+
+        let labels = page_element_labels(&document);
+        assert_eq!(
+            labels,
+            ["<table>"],
+            "the flattened source paragraph must not survive alongside the table that carries it"
+        );
+    }
+
+    /// GH#1622 duplication finding, direction 2 (negative control against over-deletion,
+    /// mirroring GH#1616 from the other side): a paragraph that overlaps a table's bounding
+    /// box but carries a word absent from the table's own grid text must survive -- the grid
+    /// does not necessarily span every printed run inside its own bbox (GH#1616), so
+    /// suppression on geometry alone would delete a column the grid left out.
+    #[test]
+    fn should_keep_paragraph_overlapping_a_table_bbox_but_not_carried_by_its_grid() {
+        let table = make_table_in_box("| Site | Samples |\n| --- | --- |\n| 01 | 6 |", 40.0, 560.0, 800.0);
+        let paragraph_text = "Site Samples Status Escalation 01 6 Complete-pending-review";
+        let paragraph = make_paragraph_in_box(paragraph_text, 760.0, 40.0, 560.0);
+
+        let document = assemble_internal_document(vec![vec![paragraph]], &[table], None, &[], &Default::default());
+
+        let labels = page_element_labels(&document);
+        assert!(
+            labels.contains(&paragraph_text),
+            "a paragraph carrying text the grid does not represent must not be deleted, got {labels:?}"
+        );
+        assert!(labels.contains(&"<table>"));
+    }
+
+    /// GH#1622: TATR's cell grid can reassemble the same words in a different order than the
+    /// flattened source paragraph (row/column intersection is independent of OCR line order) --
+    /// measured directly on `ocr1599.pdf`, where a substring match found no overlap between
+    /// "Site Samples Status 01 6 Complete" (paragraph) and "Site 01 | Samples 6 | Status
+    /// Complete" (table) and suppressed nothing. Token-multiset containment must still catch
+    /// this reordering.
+    #[test]
+    fn should_suppress_paragraph_whose_words_the_table_reassembled_in_a_different_order() {
+        let table = make_table_in_box(
+            "| Site 01 | Samples 6 | Status Complete |\n| --- | --- | --- |",
+            40.0,
+            560.0,
+            800.0,
+        );
+        let paragraph = make_paragraph_in_box("Site Samples Status 01 6 Complete", 760.0, 40.0, 560.0);
+
+        let document = assemble_internal_document(vec![vec![paragraph]], &[table], None, &[], &Default::default());
+
+        let labels = page_element_labels(&document);
+        assert_eq!(
+            labels,
+            ["<table>"],
+            "a reordered-but-fully-carried paragraph must still be suppressed, got {labels:?}"
+        );
+    }
+
+    /// Text-only match is not sufficient: a paragraph carrying the same words as a table but
+    /// positioned entirely outside its bounding box must survive untouched.
+    #[test]
+    fn should_keep_identical_text_paragraph_outside_the_table_bbox() {
+        let table = make_table_in_box(
+            "| Site | Samples | Status |\n| --- | --- | --- |\n| 01 | 6 | Complete |",
+            40.0,
+            560.0,
+            800.0,
+        );
+        let paragraph_text = "Site Samples Status 01 6 Complete";
+        let paragraph = make_paragraph_in_box(paragraph_text, 200.0, 40.0, 560.0);
+
+        let document = assemble_internal_document(vec![vec![paragraph]], &[table], None, &[], &Default::default());
+
+        let labels = page_element_labels(&document);
+        assert!(
+            labels.contains(&paragraph_text),
+            "geometry must still gate suppression even on an exact text match, got {labels:?}"
+        );
+        assert!(labels.contains(&"<table>"));
     }
 }

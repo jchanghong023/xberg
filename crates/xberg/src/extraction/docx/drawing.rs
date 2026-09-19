@@ -381,6 +381,13 @@ fn collect_txbx_content_text(reader: &mut Reader<&[u8]>, budget: &mut SecurityBu
             },
             Ok(Event::Text(e)) if in_text => {
                 let text = e.xml10_content();
+                budget.check_entity(&text)?;
+                budget.account_text(text.len())?;
+                current.push_str(&text);
+            }
+            Ok(Event::GeneralRef(ref e)) if in_text => {
+                let text = crate::utils::xml_utils::resolve_general_ref(e);
+                budget.account_text(text.len())?;
                 current.push_str(&text);
             }
             Ok(Event::End(ref e)) => {
@@ -462,12 +469,15 @@ fn parse_vml_textbox(reader: &mut Reader<&[u8]>, budget: &mut SecurityBudget) ->
 }
 
 /// Parse a `<w:pict>` VML fallback wrapper, extracting text-box content from a
-/// nested `<v:textbox><w:txbxContent>` if present (#81, #224).
+/// nested `<v:textbox><w:txbxContent>` if present (#81, #224), and the image
+/// relationship from a nested `<v:imagedata r:id="…"/>` when the pict is a
+/// legacy picture rather than a text box.
 ///
-/// Consumes events through the matching `</w:pict>` end tag regardless of whether a
-/// text box was found, so the caller's own event loop never sees `w:pict`'s inner
+/// Consumes events through the matching `</w:pict>` end tag regardless of what was
+/// found, so the caller's own event loop never sees `w:pict`'s inner
 /// `v:shape`/`w:p`/`w:r`/`w:t` events leak out as if they were ordinary body content.
-/// Returns `Ok(None)` when no text box was found (nothing to attach to the document).
+/// Returns `Ok(None)` when neither a text box nor an image reference was found
+/// (nothing to attach to the document).
 ///
 /// Threads `budget` through every event so nesting and iteration count inside
 /// `w:pict` are measured against the caller's caps instead of passing through
@@ -482,20 +492,31 @@ pub(crate) fn parse_vml_pict(
     let mut buf = Vec::new();
     let mut depth = 1u32;
     let mut text_box_content: Option<String> = None;
+    let mut image_ref: Option<String> = None;
 
     loop {
         budget.step()?;
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) => {
                 budget.enter()?;
-                if e.local_name().as_ref() == "textbox" {
-                    // `parse_vml_textbox` consumes its own end tag and balances
-                    // the `enter()` above internally, so no manual
-                    // `budget.leave()` is needed here. ~keep
-                    text_box_content = parse_vml_textbox(reader, budget)?;
-                } else {
-                    depth += 1;
+                match e.local_name().as_ref() {
+                    "textbox" => {
+                        // `parse_vml_textbox` consumes its own end tag and balances
+                        // the `enter()` above internally, so no manual
+                        // `budget.leave()` is needed here. ~keep
+                        text_box_content = parse_vml_textbox(reader, budget)?;
+                    }
+                    "imagedata" => {
+                        if image_ref.is_none() {
+                            image_ref = vml_image_ref(e);
+                        }
+                        depth += 1;
+                    }
+                    _ => depth += 1,
                 }
+            }
+            Ok(Event::Empty(ref e)) if e.local_name().as_ref() == "imagedata" && image_ref.is_none() => {
+                image_ref = vml_image_ref(e);
             }
             Ok(Event::End(_)) => {
                 budget.leave();
@@ -510,15 +531,89 @@ pub(crate) fn parse_vml_pict(
         buf.clear();
     }
 
-    Ok(text_box_content.map(|text| Drawing {
-        text_box_content: Some(text),
+    if text_box_content.is_none() && image_ref.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(Drawing {
+        image_ref,
+        text_box_content,
         ..Default::default()
     }))
+}
+
+/// Relationship id targeted by a VML `<v:imagedata r:id="…"/>` element.
+///
+/// The lookup is prefix-qualified: `r:id` is the relationship, while a bare `id`
+/// is VML's core element id — an arbitrary name that must not shadow the
+/// relationship when it comes first in the attribute order. `o:relid` is VML's
+/// native relationship attribute and some legacy writers emit only it; it is
+/// the fallback.
+pub(crate) fn vml_image_ref(e: &BytesStart) -> Option<String> {
+    namespaced_attr(e, "id").or_else(|| namespaced_attr(e, "relid"))
+}
+
+/// First attribute whose name is `<prefix>:<local>`. A bare name is never a
+/// match: `get_attr`'s local-name matching would let VML's element `id` stand
+/// in for the relationship and lose the real image.
+fn namespaced_attr(e: &BytesStart, local: &str) -> Option<String> {
+    e.attributes().flatten().find_map(|attr| {
+        let key: &str = attr.key.as_ref();
+        // `:` is ASCII, so the byte index from `rfind` is always a char boundary.
+        let separator = key.rfind(':')?;
+        if key[separator + 1..] != *local {
+            return None;
+        }
+        quick_xml::escape::unescape(attr.value.as_ref())
+            .ok()
+            .map(|s| s.into_owned())
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `o:relid` is VML's native relationship attribute and legacy writers may emit
+    /// it instead of `r:id`; both spellings must resolve the image, with `r:id`
+    /// winning when both are present. VML's bare element `id` is neither — it must
+    /// neither be used on its own nor shadow the real relationship when it comes
+    /// first in the attribute order.
+    #[test]
+    fn vml_image_ref_falls_back_to_office_relid() {
+        let mut with_rid = quick_xml::events::BytesStart::new("v:imagedata");
+        with_rid.push_attribute(("r:id", "rId5"));
+        assert_eq!(vml_image_ref(&with_rid).as_deref(), Some("rId5"));
+
+        let mut with_relid = quick_xml::events::BytesStart::new("v:imagedata");
+        with_relid.push_attribute(("o:relid", "rId7"));
+        assert_eq!(vml_image_ref(&with_relid).as_deref(), Some("rId7"));
+
+        let mut both = quick_xml::events::BytesStart::new("v:imagedata");
+        both.push_attribute(("o:relid", "rIdA"));
+        both.push_attribute(("r:id", "rIdB"));
+        assert_eq!(
+            vml_image_ref(&both).as_deref(),
+            Some("rIdB"),
+            "r:id wins when both spellings are present"
+        );
+
+        let mut bare_id_only = quick_xml::events::BytesStart::new("v:imagedata");
+        bare_id_only.push_attribute(("id", "Picture 1"));
+        assert_eq!(
+            vml_image_ref(&bare_id_only),
+            None,
+            "a bare element id is not a relationship"
+        );
+
+        let mut bare_before_rid = quick_xml::events::BytesStart::new("v:imagedata");
+        bare_before_rid.push_attribute(("id", "Picture 1"));
+        bare_before_rid.push_attribute(("r:id", "rId9"));
+        assert_eq!(
+            vml_image_ref(&bare_before_rid).as_deref(),
+            Some("rId9"),
+            "a bare element id must not shadow the relationship"
+        );
+    }
 
     /// Helper to parse drawing XML and return the Drawing object.
     fn parse_drawing_from_xml(xml: &[u8]) -> Drawing {

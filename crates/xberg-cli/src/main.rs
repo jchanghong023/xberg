@@ -176,9 +176,17 @@ enum Commands {
         ///
         /// When `--extract-images true` is used with text or toon format, the markdown content
         /// references image files by name (e.g. `image_0.png`). Pass this flag to control where
-        /// those files land. Defaults to the current working directory when not specified.
+        /// those files land: with an explicit directory the references name it
+        /// (`<dir>/image_0.png`) so the written text finds the pictures wherever it is saved,
+        /// while the default writes name-only references that resolve when the text is saved
+        /// into that same directory.
         /// Ignored for `--format json` because JSON embeds image bytes inline.
-        /// The directory must already exist.
+        /// In batch mode each result's images go to `<dir>/doc_<N>/` (N is the result's position
+        /// in the batch; without this flag the base is the current directory), because one
+        /// directory holding every document's `image_N.ext` files would drop all but the last
+        /// document's pictures.
+        /// The directory must already exist; batch mode creates the per-document
+        /// `doc_<N>` subdirectories inside it as needed.
         #[arg(long)]
         output_dir: Option<PathBuf>,
 
@@ -230,9 +238,17 @@ enum Commands {
         ///
         /// When `--extract-images true` is used with text or toon format, the markdown content
         /// references image files by name (e.g. `image_0.png`). Pass this flag to control where
-        /// those files land. Defaults to the current working directory when not specified.
+        /// those files land: with an explicit directory the references name it
+        /// (`<dir>/image_0.png`) so the written text finds the pictures wherever it is saved,
+        /// while the default writes name-only references that resolve when the text is saved
+        /// into that same directory.
         /// Ignored for `--format json` because JSON embeds image bytes inline.
-        /// The directory must already exist.
+        /// In batch mode each result's images go to `<dir>/doc_<N>/` (N is the result's position
+        /// in the batch; without this flag the base is the current directory), because one
+        /// directory holding every document's `image_N.ext` files would drop all but the last
+        /// document's pictures.
+        /// The directory must already exist; batch mode creates the per-document
+        /// `doc_<N>` subdirectories inside it as needed.
         #[arg(long)]
         output_dir: Option<PathBuf>,
 
@@ -699,11 +715,25 @@ impl From<ContentOutputFormatArg> for ContentOutputFormat {
     }
 }
 
+fn main() -> Result<()> {
+    // `block_on` drives the command future on the calling thread, and a Windows main thread
+    // only gets ~1 MiB of stack — less than the 16 MiB the runtime's worker threads are given
+    // for the crate's recursive parsers, which overflows before any worker is even reached.
+    // Run the CLI on a worker with that same budget so `xberg extract` behaves identically on
+    // Windows and Unix. ~keep
+    std::thread::Builder::new()
+        .name("xberg-main".to_string())
+        .stack_size(commands::extract::RUNTIME_WORKER_STACK_SIZE_BYTES)
+        .spawn(run_cli)?
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
 #[expect(
     clippy::print_stdout,
     reason = "detect/formats/version/api-schema results are the CLI's stdout output contract"
 )]
-fn main() -> Result<()> {
+fn run_cli() -> Result<()> {
     // Captured as early as feasible for the optional per-stage cold-start timing breakdown (see
     // `commands::extract::stage_timing_requested`). Gated on the env var so the timing path is
     // fully zero-cost (no `Instant::now()` call, no state) when stage timing isn't requested. ~keep

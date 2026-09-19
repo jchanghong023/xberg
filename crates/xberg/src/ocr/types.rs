@@ -178,6 +178,22 @@ pub struct TesseractConfig {
     /// (or don't need) the true page number leave it at the default, `1`.
     #[serde(default = "default_page_number")]
     pub page_number: u32,
+
+    /// Security limits for the image decode this OCR call performs.
+    ///
+    /// Carried from `OcrConfig::security_limits`, which the caller's `ExtractionConfig`
+    /// populates before dispatch. Before GH#1651 this type had no such field, so
+    /// `config_to_tesseract` had nothing to copy into and every Tesseract decode ran under
+    /// `SecurityLimits::default()` on every route -- a caller who raised the limit to admit
+    /// a large scan was still refused at 100 MiB.
+    ///
+    /// `#[serde(skip)]` because it is injected at runtime, never read from a config file,
+    /// and deliberately absent from `hash_config` (`ocr::processor::config`): limits gate
+    /// whether a decode is attempted and never change the text Tesseract produces, so
+    /// folding them into the cache key would split cache entries that are identical in
+    /// content. `None` means `SecurityLimits::default()`, never "disable the check". ~keep
+    #[serde(skip)]
+    pub security_limits: Option<crate::extractors::security::SecurityLimits>,
 }
 
 /// Default for [`TesseractConfig::page_number`]: page 1, matching Tesseract's own
@@ -204,14 +220,20 @@ fn default_page_number() -> u32 {
 /// whole bad page.
 const MIN_CONFIDENCE_FLOOR_DEFAULT: f64 = 0.0;
 
+/// Engine-facing PSM used when the public `types::formats::TesseractConfig::psm` is
+/// `None` (no explicit caller choice) and no pipeline-level default (whole-image,
+/// vertical-language, layout-region, sparse-retry) applied one either — see #1573.
+/// Keep in sync with the platform split documented on `types::formats::TesseractConfig::psm`.
+#[cfg(target_arch = "wasm32")]
+const DEFAULT_ENGINE_PSM: u8 = 6;
+#[cfg(not(target_arch = "wasm32"))]
+const DEFAULT_ENGINE_PSM: u8 = 3;
+
 impl Default for TesseractConfig {
     fn default() -> Self {
         Self {
             language: "eng".to_string(),
-            #[cfg(target_arch = "wasm32")]
-            psm: 6,
-            #[cfg(not(target_arch = "wasm32"))]
-            psm: 3,
+            psm: DEFAULT_ENGINE_PSM,
             output_format: "markdown".to_string(),
             oem: 3,
             min_confidence: MIN_CONFIDENCE_FLOOR_DEFAULT,
@@ -235,6 +257,7 @@ impl Default for TesseractConfig {
             tessdata_path: None,
             source_dpi: None,
             page_number: default_page_number(),
+            security_limits: None,
         }
     }
 }
@@ -269,7 +292,7 @@ impl TesseractConfig {
 impl From<&crate::types::TesseractConfig> for TesseractConfig {
     fn from(config: &crate::types::TesseractConfig) -> Self {
         Self {
-            psm: config.psm as u8,
+            psm: config.psm.map(|psm| psm as u8).unwrap_or(DEFAULT_ENGINE_PSM),
             language: config.language.join("+"),
             output_format: config.output_format.clone(),
             oem: config.oem as u8,
@@ -301,6 +324,7 @@ impl From<&crate::types::TesseractConfig> for TesseractConfig {
             // to the default; direct callers of the internal `TesseractConfig`/`perform_ocr`
             // API can still set it explicitly.
             page_number: default_page_number(),
+            security_limits: None,
         }
     }
 }
@@ -562,7 +586,7 @@ mod tests {
     fn test_tesseract_config_from_public_api() {
         let public_config = crate::types::TesseractConfig {
             language: vec!["deu".to_string()],
-            psm: 6,
+            psm: Some(6),
             output_format: "text".to_string(),
             oem: 1,
             min_confidence: 70.0,

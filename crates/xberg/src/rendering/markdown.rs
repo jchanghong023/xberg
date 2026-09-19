@@ -4,11 +4,53 @@ use comrak::{Arena, Options, format_commonmark};
 use std::borrow::Cow;
 use std::sync::LazyLock;
 
+use crate::extraction::markdown_utils::FenceTracker;
 use crate::types::annotations::PdfAnnotation;
 use crate::types::internal::InternalDocument;
 
 use super::common::{annotation_display_text, annotation_type_label};
-use super::comrak_bridge::build_comrak_ast;
+use super::comrak_bridge::{ImageBlockStyle, build_comrak_ast};
+
+/// Apply `transform` only to the spans of `output` that are not fenced code.
+///
+/// Fenced blocks carry their bodies verbatim by contract — OCR text, embedded
+/// sub-documents, source listings — so none of the prose rewrites below may
+/// touch their interior. Fence lines (opener and closer included) are copied
+/// through unchanged. Only fences indented by up to three spaces are
+/// recognized (CommonMark's own rule). Known blind spot: a `Code` element
+/// inside a nested list or block quote comes out of the comrak writer with
+/// the container's prefix (`4+` spaces, `"> "`), so its fence is not
+/// recognized here and its body takes part in the prose passes — an accepted
+/// gap, since prefix-aware tracking would risk reclassifying indented prose
+/// as code and suppressing the rewrites for everything after it.
+fn apply_outside_fences(output: &str, transform: impl Fn(&str) -> String) -> String {
+    let mut tracker = FenceTracker::default();
+    let mut out = String::with_capacity(output.len());
+    let mut span = String::new();
+    for line in output.split_inclusive('\n') {
+        // `FenceTracker` expects a line without its terminator: a closer is
+        // only "marker run, nothing else", so a trailing `\n` (or `\r\n`)
+        // would make the closer unrecognizable and swallow the whole rest of
+        // the document as fence content.
+        let bare = line
+            .strip_suffix('\n')
+            .map(|l| l.strip_suffix('\r').unwrap_or(l))
+            .unwrap_or(line);
+        if tracker.fenced(bare) {
+            if !span.is_empty() {
+                out.push_str(&transform(&span));
+                span.clear();
+            }
+            out.push_str(line);
+        } else {
+            span.push_str(line);
+        }
+    }
+    if !span.is_empty() {
+        out.push_str(&transform(&span));
+    }
+    out
+}
 
 /// Single-pass replacement of multiple two-char escape sequences of the form `\X`
 /// where X is one of `_`, `[`, `]`, `(`, `)`.
@@ -131,7 +173,7 @@ static ARXIV_WATERMARK_REGEX: LazyLock<regex::Regex> = LazyLock::new(|| {
 pub(crate) fn render_markdown(doc: &InternalDocument) -> String {
     tracing::debug!(element_count = doc.elements.len(), "markdown rendering starting");
     let arena = Arena::new();
-    let root = build_comrak_ast(doc, &arena);
+    let root = build_comrak_ast(doc, &arena, ImageBlockStyle::Fence);
 
     if root.first_child().is_none() {
         tracing::debug!("markdown rendering: empty AST, returning empty string");
@@ -144,62 +186,62 @@ pub(crate) fn render_markdown(doc: &InternalDocument) -> String {
     let mut output = String::new();
     format_commonmark(root, &options, &mut output).expect("comrak formatting should not fail");
 
+    // Every pass below rewrites prose. They all run fence-aware: a fenced
+    // body is verbatim content (OCR text, embedded sub-documents), never a
+    // candidate for entity replacement, escape stripping or watermark removal.
     if output.contains("<!--") {
         let marker_re = doc
             .page_marker_format
             .as_deref()
             .map(crate::core::config::page::marker_line_regex);
+        let mut tracker = FenceTracker::default();
         output = output
             .lines()
             .filter(|line| {
-                let trimmed = line.trim();
-                !trimmed.starts_with("<!--")
-                    || !trimmed.ends_with("-->")
-                    || marker_re.as_ref().is_some_and(|re| re.is_match(trimmed))
+                tracker.fenced(line) || {
+                    let trimmed = line.trim();
+                    !trimmed.starts_with("<!--")
+                        || !trimmed.ends_with("-->")
+                        || marker_re.as_ref().is_some_and(|re| re.is_match(trimmed))
+                }
             })
             .collect::<Vec<_>>()
             .join("\n");
     }
 
-    if let Cow::Owned(s) = replace_html_entities(&output) {
-        output = s;
+    if matches!(replace_html_entities(&output), Cow::Owned(_)) {
+        output = apply_outside_fences(&output, |span| match replace_html_entities(span) {
+            Cow::Borrowed(kept) => kept.to_string(),
+            Cow::Owned(replaced) => replaced,
+        });
     }
 
     if doc.escape_markdown {
         const UNESCAPE_TARGETS: &[char] = &['_', '[', ']', '(', ')', '*', '='];
-        let cow = unescape_backslash_sequences(&output, UNESCAPE_TARGETS);
-        if let Cow::Owned(s) = cow {
-            output = s;
+        if matches!(unescape_backslash_sequences(&output, UNESCAPE_TARGETS), Cow::Owned(_)) {
+            output = apply_outside_fences(&output, |span| {
+                unescape_backslash_sequences(span, UNESCAPE_TARGETS).into_owned()
+            });
         }
 
         if output.contains("\\*") || output.contains("\\#") {
-            output = output
-                .lines()
-                .map(|line| {
-                    let trimmed = line.trim_start();
-                    if trimmed.starts_with("\\* ") || trimmed.starts_with("\\#.") || trimmed.starts_with("\\#\\.") {
-                        line.replacen("\\*", "*", 1).replacen("\\#", "#", 1)
-                    } else {
-                        line.to_string()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
+            output = apply_outside_fences(&output, rewrite_leading_marker_escapes);
         }
     } else {
         const UNESCAPE_TARGETS: &[char] = &['_', '[', ']', '(', ')', '*', '=', '-', '#'];
-        let cow = unescape_backslash_sequences(&output, UNESCAPE_TARGETS);
-        if let Cow::Owned(s) = cow {
-            output = s;
+        if matches!(unescape_backslash_sequences(&output, UNESCAPE_TARGETS), Cow::Owned(_)) {
+            output = apply_outside_fences(&output, |span| {
+                unescape_backslash_sequences(span, UNESCAPE_TARGETS).into_owned()
+            });
         }
     }
 
-    if let Cow::Owned(s) = collapse_excess_newlines(&output) {
-        output = s;
+    if matches!(collapse_excess_newlines(&output), Cow::Owned(_)) {
+        output = apply_outside_fences(&output, |span| collapse_excess_newlines(span).into_owned());
     }
 
     if !doc.include_watermarks {
-        output = strip_arxiv_watermark_noise(output);
+        output = apply_outside_fences(&output, |span| strip_arxiv_watermark_noise(span.to_string()));
     }
 
     if let Some(annotations) = doc.annotations.as_deref() {
@@ -220,6 +262,69 @@ pub(crate) fn render_markdown(doc: &InternalDocument) -> String {
     output.push('\n');
     tracing::debug!(output_length = output.len(), "markdown rendering complete");
     output
+}
+
+/// Rewrite comrak's leading `\*` / `\#` escapes on prose lines.
+///
+/// The escaped numbered-marker forms (`\* `, `\#.`, `\#\.`) and the
+/// `##选通`-style multi-hash prose marker (see [`leading_multi_hash_marker`])
+/// read as literal characters in every viewer, so their backslashes are
+/// dropped. Called through [`apply_outside_fences`] — fence bodies keep any
+/// literal `\#` they carry.
+fn rewrite_leading_marker_escapes(input: &str) -> String {
+    // Preserve the span's trailing newline: `lines().join()` alone drops it,
+    // gluing a following fence opener onto the prose line (comrak emits no
+    // blank line before a code block that is the first child of a list item).
+    let trailing_newline = input.ends_with('\n');
+    let mut out = input
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("\\* ") || trimmed.starts_with("\\#.") || trimmed.starts_with("\\#\\.") {
+                line.replacen("\\*", "*", 1).replacen("\\#", "#", 1)
+            } else if let Some(pairs) = leading_multi_hash_marker(trimmed) {
+                let start = line.len() - trimmed.len();
+                let mut out = String::with_capacity(line.len() - pairs);
+                out.push_str(&line[..start]);
+                out.push_str(&"#".repeat(pairs));
+                out.push_str(&line[start + pairs * 2..]);
+                out
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if trailing_newline {
+        out.push('\n');
+    }
+    out
+}
+
+/// Count the leading `\#` escape pairs in a trimmed line and decide whether they
+/// form an unescapable `##tag`-style visual marker.
+///
+/// Returns `Some(pairs)` when the line starts with **two or more** `\#` pairs
+/// followed by a character that can never continue an ATX heading (anything but
+/// blank or `.`). CommonMark requires a blank after the closing `#` sequence, so
+/// `##选通` is literal prose and the escapes only add rendering noise. A single
+/// `\#` (`#06-18`, issue #1292) and the `\#.` numbered-marker form (handled by
+/// the caller's pre-existing branch) intentionally keep their escapes.
+fn leading_multi_hash_marker(trimmed: &str) -> Option<usize> {
+    let bytes = trimmed.as_bytes();
+    let mut pairs = 0usize;
+    let mut i = 0usize;
+    while i + 1 < bytes.len() && bytes[i] == b'\\' && bytes[i + 1] == b'#' {
+        pairs += 1;
+        i += 2;
+    }
+    if pairs < 2 {
+        return None;
+    }
+    match bytes.get(i) {
+        None | Some(b' ') | Some(b'\t') | Some(b'.') => None,
+        Some(_) => Some(pairs),
+    }
 }
 
 /// Render the document-level PDF annotations (issue #63) as a Markdown
@@ -385,6 +490,61 @@ mod tests {
         );
     }
 
+    /// A `##tag`-style visual marker (`##` with no blank after it) can never parse
+    /// as an ATX heading, so comrak's leading-hash escapes are pure noise there:
+    /// they render literally as `\#\#` in viewers. They are unescaped, while the
+    /// single-hash `#06-18` shape keeps its escapes (issue #1292).
+    #[test]
+    fn render_markdown_unescapes_leading_multi_hash_marker_without_blank() {
+        let mut b = InternalDocumentBuilder::new("test");
+        b.push_paragraph("##选通processor sib", vec![], None, None);
+        b.push_paragraph("#06-18 widget replacement", vec![], None, None);
+        b.push_paragraph("## keep me escaped", vec![], None, None);
+        let doc = b.build();
+
+        let rendered = render_markdown(&doc);
+        assert!(
+            rendered.starts_with("##选通processor sib\n"),
+            "expected the `##` marker to be unescaped: {rendered}"
+        );
+        assert!(
+            rendered.contains("\\#06-18"),
+            "a single leading hash keeps the #1292 escape: {rendered}"
+        );
+        assert!(
+            rendered.contains("\\#\\# keep me escaped"),
+            "hashes followed by a blank could otherwise turn into a real heading: {rendered}"
+        );
+    }
+
+    /// `##` alone at end of line or before `.`/tab must not be unescaped: the
+    /// blank-ish followers are the shapes where a bare `##` could read as an
+    /// (empty) ATX heading or collide with the `\#.` numbered-marker branch.
+    #[test]
+    fn leading_multi_hash_marker_rejects_heading_shaped_followers() {
+        assert_eq!(leading_multi_hash_marker("\\#\\#选通"), Some(2));
+        assert_eq!(leading_multi_hash_marker("\\#\\#\\#x"), Some(3));
+        assert_eq!(
+            leading_multi_hash_marker("\\#\\# spaced"),
+            None,
+            "blank after hashes could become a heading"
+        );
+        // `"\\t"` in a Rust literal is backslash+`t`, not a tab — the follower
+        // under test here is a real TAB character.
+        assert_eq!(leading_multi_hash_marker("\\#\\#\ttabbed"), None);
+        assert_eq!(
+            leading_multi_hash_marker("\\#\\#."),
+            None,
+            "dot form belongs to the numbered-marker branch"
+        );
+        assert_eq!(
+            leading_multi_hash_marker("\\#06-18"),
+            None,
+            "single hash stays #1292-escaped"
+        );
+        assert_eq!(leading_multi_hash_marker("plain text"), None);
+    }
+
     /// Issue #1292: a bare "- clause" paragraph must still render with its
     /// leading dash escaped by default, otherwise a CommonMark parser would
     /// reinterpret it as a list item.
@@ -519,6 +679,74 @@ mod tests {
             !rendered.contains("[TABLE:"),
             "no anchor should appear without a table_id: {rendered}"
         );
+    }
+
+    /// Fenced bodies are verbatim by contract: none of the prose
+    /// post-processing passes (entity replacement, backslash unescaping,
+    /// multi-hash marker rewriting, blank-line collapsing, arXiv watermark
+    /// stripping) may reach into a ```text fence, whose content is OCR text or
+    /// an embedded sub-document quoted byte for byte. Prose BEFORE AND AFTER
+    /// the fence must still be rewritten — a closer that never recognized
+    /// would silently disable every pass after the document's first fence.
+    #[test]
+    fn render_markdown_keeps_fenced_bodies_verbatim() {
+        let mut b = InternalDocumentBuilder::new("test");
+        b.push_paragraph(
+            "Research title 7 arXiv:2401.12345v2 [cs.CL] 9 Jan 2024",
+            vec![],
+            None,
+            None,
+        );
+        b.push_raw_block(
+            "text",
+            "```text\nkeep \\_ \\[ escapes, &#10; entities, \\#\\#选通\n\n\nand arXiv:2401.9999.999 markers too\n```",
+            None,
+        );
+        b.push_paragraph(
+            "Later prose watermark 8 arXiv:2401.5555v1 [cs.CL] 9 Jan 2024",
+            vec![],
+            None,
+            None,
+        );
+        let doc = b.build();
+        let rendered = render_markdown(&doc);
+
+        assert!(
+            !rendered.contains("arXiv:2401.12345v2"),
+            "the prose watermark before the fence must still be stripped: {rendered}"
+        );
+        assert!(
+            !rendered.contains("arXiv:2401.5555v1"),
+            "the prose watermark after the fence must still be stripped: {rendered}"
+        );
+        assert!(
+            rendered.contains("keep \\_ \\[ escapes, &#10; entities, \\#\\#选通"),
+            "fence body must keep its escapes and entities verbatim: {rendered}"
+        );
+        assert!(
+            rendered.contains("arXiv:2401.9999.999 markers too"),
+            "fence body must keep its watermark-shaped text: {rendered}"
+        );
+        assert!(
+            rendered.contains("选通\n\n\nand"),
+            "fence body must keep its blank-line spacing: {rendered}"
+        );
+    }
+
+    /// A non-fenced span ending right before a fence opener must keep its
+    /// trailing newline through `rewrite_leading_marker_escapes`: the
+    /// `lines().join()` shape alone drops it, gluing the opener onto the prose
+    /// line (comrak writes no blank line before a code block that is the first
+    /// child of a list item) and breaking the fence.
+    #[test]
+    fn rewrite_leading_marker_escapes_keeps_span_trailing_newline() {
+        let input = "- item text\n```text\nfenced body keeps \\# literal\n```\nafter \\# marker\n";
+        let out = apply_outside_fences(input, rewrite_leading_marker_escapes);
+        assert!(
+            out.contains("- item text\n```text"),
+            "the fence opener must stay on its own line: {out:?}"
+        );
+        assert_eq!(out, input, "no prose line here carries a rewrite shape");
     }
 
     #[test]

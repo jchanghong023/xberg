@@ -48,6 +48,15 @@ struct FileDetectionChecks {
 }
 
 fn open_regular_file(path: &Path) -> Result<File> {
+    // Stat before opening: Windows refuses to open a directory at all (ACCESS_DENIED
+    // surfaces as an Io error before the is_file check could classify it), so every
+    // platform must reject non-regular inputs before the open for the documented
+    // Validation error to be reported consistently.
+    if !path.metadata().map_err(XbergError::from)?.is_file() {
+        return Err(XbergError::validation(
+            "Extraction input must be a regular file".to_string(),
+        ));
+    }
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -772,7 +781,7 @@ mod cache_key_tests {
         let psm_auto = ExtractionConfig {
             ocr: Some(OcrConfig {
                 tesseract_config: Some(TesseractConfig {
-                    psm: 3,
+                    psm: Some(3),
                     ..TesseractConfig::default()
                 }),
                 ..OcrConfig::default()
@@ -782,7 +791,7 @@ mod cache_key_tests {
         let psm_sparse = ExtractionConfig {
             ocr: Some(OcrConfig {
                 tesseract_config: Some(TesseractConfig {
-                    psm: 11,
+                    psm: Some(11),
                     ..TesseractConfig::default()
                 }),
                 ..OcrConfig::default()

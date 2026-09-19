@@ -1,6 +1,6 @@
 //! Utilities for splitting and analyzing PDF paragraphs.
 
-use super::types::PdfParagraph;
+use super::types::{PdfLine, PdfParagraph};
 
 /// Maximum baseline-to-baseline gap, as a multiple of the larger paragraph's
 /// dominant font size, permitted when merging a continuation paragraph.
@@ -12,6 +12,22 @@ use super::types::PdfParagraph;
 /// bottom — and must never be joined into one logical paragraph, which would
 /// associate their text (and mangle the merged block's bounding box). See #1350.
 const MAX_CONTINUATION_LINE_GAP_MULTIPLE: f32 = 3.0;
+
+/// Maximum baseline-to-baseline gap, as a multiple of the larger font size,
+/// permitted when BOTH boundary paragraphs are single-line bold runs.
+///
+/// A genuine bold wrap sits one leading apart (≤ ~1.6× the font size). A pair of
+/// standalone bold display lines — the Tessent manual's section running-head tab
+/// ("RAM Examples", 9.96pt) and the sidehead printed directly beneath it on the
+/// section's opening page (10.5pt, 27.5pt lower on the page, ~2.6 line-heights) —
+/// must stay separate. On verso pages both start at the left margin (x≈72), so
+/// the x-projection guard below sees full overlap and cannot refuse the merge;
+/// only the vertical rhythm distinguishes a wrap from two display lines, and
+/// 27.5pt is twice a wrap's leading. Welding them produces a bold run-on whose
+/// text no longer equals any furniture string, which silently disables the
+/// cross-page running-head detection for the chapter's every verso page
+/// ("**RAM Examples** ×12" residual + DUP_SPAM in the fulltest report). ~keep
+const MAX_BOLD_DISPLAY_LINE_GAP_MULTIPLE: f32 = 1.8;
 
 /// Merge consecutive body-text paragraphs that are continuations of the same logical paragraph.
 ///
@@ -66,6 +82,20 @@ pub(super) fn merge_continuation_paragraphs(paragraphs: &mut Vec<PdfParagraph>) 
         // test the grouper uses, applied to the boundary segments so both passes agree
         // on the same wrap. See #1467. ~keep
         let current_starts_section = starts_numbered_section(&current);
+        // A wrapped continuation line shares its predecessor's horizontal
+        // extent: it starts at (or left of) the previous line's right edge and
+        // ends past its left edge. Zero x-projection overlap between the two
+        // boundary lines means the paragraphs are spatially distinct blocks —
+        // the Tessent manual's right-margin chapter thumb tab sitting 27pt
+        // above a left-aligned section sidehead ("RAM Examples" / "Single
+        // Posedge Ports With Write Enable", x 467.8–539.9 vs x 72–209) or
+        // adjacent column fragments. Welding them produces a bold run-on whose
+        // text no longer equals any furniture string, which silently disables
+        // the cross-page running-head detection for the chapter's every page.
+        // Geometry-free inputs keep the prior merge behavior, mirroring
+        // [`baselines_within_continuation_gap`]. ~keep
+        let horizontal_overlap = boundary_lines_overlap_horizontally(&current, &next);
+        let bold_display_lines_apart = bold_display_lines_too_far_apart(&current, &next);
         let boundary_is_heading_wrap = current
             .lines
             .last()
@@ -74,6 +104,41 @@ pub(super) fn merge_continuation_paragraphs(paragraphs: &mut Vec<PdfParagraph>) 
             .is_some_and(|(prev_segment, next_segment)| {
                 super::pipeline::heading_wraps_onto(prev_segment, next_segment)
             });
+        // `heading_wraps_onto` alone cannot decide this. It compares the two lines'
+        // RIGHT EDGES, but its own doc comment states the correct rule -- a wrapping
+        // heading "fills its column before continuing below" -- and that is a property
+        // of the FIRST line. The continuation is by definition whatever is left over,
+        // so its right edge is arbitrary and the two coincide only by accident.
+        // Measured on GH#1605's reproducer (12pt, x=72), the metric is ANTI-correlated
+        // with the answer: the page that must merge differs by 58.7pt while the page
+        // that must split differs by 28.5pt, so no tolerance separates them.
+        //
+        // A lowercase opening tracks a wrap -- a heading continuing mid-phrase resumes
+        // in lowercase -- but it is NOT sufficient on its own, and shipping it alone
+        // was a mistake: body prose beginning lowercase under a COMPLETE numbered
+        // heading has the same signature, and GH#1609's reproducer welded on both of
+        // its pages, control included. "Widening can only merge more" was true and was
+        // the wrong safety argument, because merging more is precisely that regression.
+        //
+        // The second conjunct is the half `heading_wraps_onto`'s doc comment always
+        // claimed and never measured: a wrapping heading FILLS its column before
+        // continuing below. That is a property of the heading's own line, measured
+        // against the width of what would be merged onto it -- not of the continuation,
+        // whose right edge is arbitrary. See [`super::pipeline::heading_fills_column`]. ~keep
+        let next_right_edge = next
+            .lines
+            .iter()
+            .filter_map(|line| line.segments.last())
+            .map(|segment| segment.upright_advance_extent().1)
+            .filter(|edge| edge.is_finite())
+            .fold(f32::NEG_INFINITY, f32::max);
+        let heading_fills_column = current
+            .lines
+            .last()
+            .and_then(|line| line.segments.last())
+            .is_some_and(|prev_segment| super::pipeline::heading_fills_column(prev_segment, next_right_edge));
+        let heading_wrap_exempt =
+            boundary_is_heading_wrap || (starts_with_lowercase_continuation(&next) && heading_fills_column);
         let should_merge = both_body
             && fonts_compatible
             && bold_compatible
@@ -81,8 +146,10 @@ pub(super) fn merge_continuation_paragraphs(paragraphs: &mut Vec<PdfParagraph>) 
             && same_region
             && same_rotation
             && vertical_gap_compatible
+            && horizontal_overlap
+            && !bold_display_lines_apart
             && !next_starts_section
-            && (!current_starts_section || boundary_is_heading_wrap);
+            && (!current_starts_section || heading_wrap_exempt);
 
         if should_merge {
             current.text.clear();
@@ -104,6 +171,65 @@ fn paragraphs_share_rotation(current: &PdfParagraph, next: &PdfParagraph) -> boo
         (Some(current), Some(next)) => current.has_same_rotation(next),
         _ => true,
     }
+}
+
+/// Whether the boundary lines — `current`'s last visual line and `next`'s
+/// first — overlap on the x-axis. See the `horizontal_overlap` merge conjunct
+/// for why zero overlap must forbid a continuation merge. Returns `true` when
+/// either line carries no usable geometry so the decision falls through to the
+/// existing signals.
+fn boundary_lines_overlap_horizontally(current: &PdfParagraph, next: &PdfParagraph) -> bool {
+    let (Some(prev_line), Some(next_line)) = (current.lines.last(), next.lines.first()) else {
+        return true;
+    };
+    let (Some(prev_extent), Some(next_extent)) = (line_upright_x_extent(prev_line), line_upright_x_extent(next_line))
+    else {
+        return true;
+    };
+    let (prev_left, prev_right) = prev_extent;
+    let (next_left, next_right) = next_extent;
+    next_left < prev_right && prev_left < next_right
+}
+
+/// Whether two single-line BOLD paragraphs sit more than
+/// [`MAX_BOLD_DISPLAY_LINE_GAP_MULTIPLE`] line-heights apart — two distinct
+/// display lines rather than a wrapped continuation. See the constant's doc
+/// comment for the verso running-head geometry this refuses to weld.
+///
+/// Returns `false` when either paragraph carries no usable baseline so the
+/// geometry-free struct-tree path keeps the prior merge behavior.
+fn bold_display_lines_too_far_apart(current: &PdfParagraph, next: &PdfParagraph) -> bool {
+    if !current.is_bold || !next.is_bold {
+        return false;
+    }
+    if current.lines.len() != 1 || next.lines.len() != 1 {
+        return false;
+    }
+    let (Some(current_line), Some(next_line)) = (current.lines.last(), next.lines.first()) else {
+        return false;
+    };
+    if current_line.baseline_y == 0.0 || next_line.baseline_y == 0.0 {
+        return false;
+    }
+    let line_height = current.dominant_font_size.max(next.dominant_font_size).max(1.0);
+    let gap = (current_line.baseline_y - next_line.baseline_y).abs();
+    gap > line_height * MAX_BOLD_DISPLAY_LINE_GAP_MULTIPLE
+}
+
+/// Minimal and maximal upright x over one line's segments. `None` when the
+/// line has no segments or any extent is non-finite (geometry-free input).
+fn line_upright_x_extent(line: &PdfLine) -> Option<(f32, f32)> {
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+    for segment in &line.segments {
+        let (start, end) = segment.upright_advance_extent();
+        if !start.is_finite() || !end.is_finite() {
+            return None;
+        }
+        left = left.min(start);
+        right = right.max(end);
+    }
+    (left.is_finite() && right.is_finite() && left <= right).then_some((left, right))
 }
 
 /// Whether `next`'s first baseline is close enough below `current`'s last
@@ -462,6 +588,107 @@ mod tests {
         assert!(paragraphs[1].is_bold, "the bold header paragraph must be preserved");
     }
 
+    /// Like [`make_body_paragraph_at`], but with an explicit x position/width and
+    /// bold flag so horizontal-overlap behaviour can be exercised.
+    fn make_body_paragraph_with_x(
+        text: &str,
+        font_size: f32,
+        baseline_y: f32,
+        x: f32,
+        width: f32,
+        is_bold: bool,
+    ) -> PdfParagraph {
+        let mut para = make_body_paragraph(text, font_size);
+        para.lines[0].baseline_y = baseline_y;
+        para.is_bold = is_bold;
+        if let Some(segment) = para.lines[0].segments.first_mut() {
+            segment.baseline_y = baseline_y;
+            segment.y = baseline_y;
+            segment.x = x;
+            segment.width = width;
+            segment.is_bold = is_bold;
+        }
+        para
+    }
+
+    #[test]
+    fn test_no_merge_x_disjoint_margin_tab_and_sidehead() {
+        // Tessent 手册页顶：右缘章名页签（粗体）与其下 28pt 处的左对齐节标题。
+        // 垂直间距 28pt < 3×9.96pt 行高上限、同为粗体、上段无句号——旧的全部
+        // 合并条件都放行，唯独两行 x 投影零重叠（467.8–539.9 vs 72–209）。
+        // 合并把页签文本焊进节标题，跨页书眉检测（整串精确匹配）随之失效，
+        // "RAM Examples" ×12 的书眉残留即由此而来。
+        let tab = make_body_paragraph_with_x("RAM Examples", 9.96, 746.0, 467.8, 72.1, true);
+        let sidehead =
+            make_body_paragraph_with_x("Single Posedge Ports With Write Enable", 9.96, 718.0, 72.0, 137.0, true);
+        let mut paragraphs = vec![tab, sidehead];
+        merge_continuation_paragraphs(&mut paragraphs);
+        assert_eq!(
+            paragraphs.len(),
+            2,
+            "x-disjoint boundary lines are spatially distinct blocks and must not merge"
+        );
+    }
+
+    #[test]
+    fn test_no_merge_verso_margin_tab_and_sidehead_overlapping_x() {
+        // 偶数页（verso）：页签在左缘 x≈72，与下方左对齐的节标题 x 投影完全
+        // 重叠——x-disjoint 守卫（上一条用例）够不着。实测 tessent 语料：
+        // 页签 9.96pt（baseline 45.6）、节标题 10.5pt（baseline 73.1），基线距
+        // 27.5pt ≈ 2.6×10.5pt，是换行 leading（≤1.6×）的两倍。两行同为粗体
+        // 单行，唯一可判据是垂直节奏：超过 1.8× 行高的 bold-bold 边界必须
+        // 拒绝合并，否则焊接串破坏整段跨页书眉 streak（"RAM Examples" 26 页
+        // 连续出现却注册不上家具），DUP_SPAM ×12 与 RUNNING_HEAD 残留即由此来。
+        let tab = make_body_paragraph_with_x("RAM Examples", 9.96, 45.6, 72.0, 72.2, true);
+        let sidehead = make_body_paragraph_with_x(
+            "Single Level Ports With Separate Port Clocks",
+            10.5,
+            73.1,
+            72.0,
+            306.3,
+            true,
+        );
+        let mut paragraphs = vec![tab, sidehead];
+        merge_continuation_paragraphs(&mut paragraphs);
+        assert_eq!(
+            paragraphs.len(),
+            2,
+            "two bold display lines 2.6 line-heights apart are not a wrapped continuation"
+        );
+    }
+
+    #[test]
+    fn test_merge_bold_wrapped_line_within_leading_still_merges() {
+        // 反例守卫：真正的粗体换行（约 1.2× 行高）必须照常合并，新的间距
+        // 上限不能把 GH#1605 类的粗体标题换行重新拆开。
+        let first =
+            make_body_paragraph_with_x("2.4 Aandachtspunten ten behoeve van de", 12.0, 700.0, 72.0, 235.5, true);
+        let second = make_body_paragraph_with_x("watertechnische installatie", 12.0, 685.5, 72.0, 176.8, true);
+        let mut paragraphs = vec![first, second];
+        merge_continuation_paragraphs(&mut paragraphs);
+        assert_eq!(
+            paragraphs.len(),
+            1,
+            "a bold heading wrapping one leading below must keep merging"
+        );
+    }
+
+    #[test]
+    fn test_merge_x_overlapping_wrapped_lines_still_merges() {
+        // 真正的换行续行：x 投影重叠（左对齐/轻微缩进），照常合并。
+        let paragraphs_vec = vec![
+            make_body_paragraph_with_x("The committee reviewed the annual", 11.0, 712.0, 72.0, 200.0, false),
+            make_body_paragraph_with_x("report and approved the budget", 11.0, 698.0, 90.0, 200.0, false),
+        ];
+        let mut paragraphs = paragraphs_vec;
+        merge_continuation_paragraphs(&mut paragraphs);
+        assert_eq!(
+            paragraphs.len(),
+            1,
+            "overlapping wrapped continuation should still merge"
+        );
+    }
+
     /// Text of a paragraph's first line, joined from its segments.
     fn first_line_text(para: &PdfParagraph) -> String {
         para.lines
@@ -596,5 +823,131 @@ mod tests {
         merge_continuation_paragraphs(&mut paragraphs);
         assert_eq!(paragraphs.len(), 1);
         assert!(paragraphs[0].text.is_empty());
+    }
+
+    /// GH#1605. A numbered heading wrapping onto a SHORT continuation line was
+    /// split in two, losing the section number from the second half.
+    ///
+    /// `heading_wraps_onto` gates the merge on the two lines' right edges landing
+    /// within 2.0 font-sizes of each other. Its own doc comment states the correct
+    /// rule -- a wrapping heading "fills its column before continuing below" --
+    /// but that is a property of the FIRST line; the code instead measures the
+    /// SECOND line's length, and a continuation is by definition whatever is left
+    /// over. Measured from the reproducer at 12pt Helvetica-Bold, x=72:
+    ///
+    ///   page 1  |307.5 - 248.8| = 58.7pt  must MERGE  (tolerance 24pt -> split)
+    ///   page 2  |307.5 - 325.5| = 18.0pt  must MERGE  (tolerance 24pt -> merge)
+    ///   page 3  |374.2 - 402.7| = 28.5pt  must SPLIT  (tolerance 24pt -> split)
+    ///
+    /// The page that must merge has a LARGER edge difference than the page that
+    /// must split, so the metric is anti-correlated with the answer and no
+    /// tolerance can separate the three. ~keep
+    fn wrapped_heading_paragraph(text: &str, x: f32, right_edge: f32, baseline_y: f32) -> PdfParagraph {
+        use crate::pdf::hierarchy::SegmentData;
+        let segments = vec![SegmentData {
+            text: text.to_string(),
+            x,
+            y: baseline_y,
+            width: right_edge - x,
+            height: 12.0,
+            font_size: 12.0,
+            is_bold: true,
+            is_italic: false,
+            is_monospace: false,
+            baseline_y,
+            rotation_degrees: 0.0,
+            assigned_role: None,
+        }];
+        let lines = vec![super::super::types::PdfLine {
+            segments,
+            baseline_y,
+            dominant_font_size: 12.0,
+            is_bold: true,
+            is_monospace: false,
+        }];
+        let word_count = PdfParagraph::compute_word_count("", &lines);
+        PdfParagraph {
+            text: String::new(),
+            lines,
+            dominant_font_size: 12.0,
+            heading_level: None,
+            is_bold: true,
+            is_list_item: false,
+            is_code_block: false,
+            is_formula: false,
+            is_page_furniture: false,
+            layout_class: None,
+            layout_region_path: None,
+            caption_for: None,
+            block_bbox: None,
+            word_count,
+        }
+    }
+
+    #[test]
+    fn numbered_heading_wrapping_onto_a_short_line_stays_one_paragraph() {
+        let mut paragraphs = vec![
+            wrapped_heading_paragraph("2.4 Aandachtspunten ten behoeve van de", 72.0, 307.5, 700.0),
+            wrapped_heading_paragraph("watertechnische installatie", 72.0, 248.8, 684.0),
+        ];
+        merge_continuation_paragraphs(&mut paragraphs);
+        assert_eq!(
+            paragraphs.len(),
+            1,
+            "GH#1605: a heading wrapping onto a short continuation must stay one paragraph; \
+             the continuation starts lowercase and carries no section number of its own"
+        );
+    }
+
+    #[test]
+    fn numbered_heading_wrapping_onto_a_long_line_stays_one_paragraph() {
+        let mut paragraphs = vec![
+            wrapped_heading_paragraph("2.4 Aandachtspunten ten behoeve van de", 72.0, 307.5, 700.0),
+            wrapped_heading_paragraph("watertechnische installatie en de meting", 72.0, 325.5, 684.0),
+        ];
+        merge_continuation_paragraphs(&mut paragraphs);
+        assert_eq!(
+            paragraphs.len(),
+            1,
+            "GH#1605 control: this case already merged and must keep merging"
+        );
+    }
+
+    #[test]
+    fn numbered_heading_followed_by_unrelated_capitalised_text_still_splits() {
+        let mut paragraphs = vec![
+            wrapped_heading_paragraph("1.1.1 Pictogrammen in het installatievoorschrift", 72.0, 374.2, 700.0),
+            wrapped_heading_paragraph("VOORZICHTIG / BELANGRIJK Procedures die schade", 72.0, 402.7, 684.0),
+        ];
+        merge_continuation_paragraphs(&mut paragraphs);
+        assert_eq!(
+            paragraphs.len(),
+            2,
+            "GH#1605 negative control: unrelated capitalised text after a heading must NOT be absorbed"
+        );
+    }
+
+    /// GH#1609: body prose beginning lowercase under a COMPLETE numbered heading
+    /// carries the same lowercase signature as a wrap, and the first version of the
+    /// GH#1605 fix merged it -- on the reporter's control page as well as the
+    /// defective one. The heading's own line separates the two cases: a wrap fills
+    /// its column, and this heading stops far short of the body's width.
+    #[test]
+    fn numbered_heading_followed_by_wider_lowercase_body_still_splits() {
+        let mut paragraphs = vec![
+            wrapped_heading_paragraph("3.1.7 Innovatie/ontwikkelingen", 104.42, 230.0, 700.0),
+            wrapped_heading_paragraph(
+                "innovatie ontwikkelingen toekomstige verwachten gebied",
+                104.42,
+                500.0,
+                688.0,
+            ),
+        ];
+        merge_continuation_paragraphs(&mut paragraphs);
+        assert_eq!(
+            paragraphs.len(),
+            2,
+            "a complete heading must not absorb wider body prose merely because it opens lowercase"
+        );
     }
 }

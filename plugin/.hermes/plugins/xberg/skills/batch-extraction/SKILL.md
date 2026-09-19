@@ -1,14 +1,14 @@
+<!--
+AI-RULEZ :: GENERATED FILE — DO NOT EDIT
+Content-Hash: blake3:97cb59fb7e89ac26da5ea2b694c24bc208f7a4102b7117dc46bcab1052e6b456
+Source-Hash: blake3:8436911387ca6e92e089da7c4165303e587d88cbff8b705ce66d7cd4eaaa5497
+Schema-Version: v1
+-->
+
 ---
 name: batch-extraction
 description: Use when extracting from many files at once with shared config, bounded parallelism, per-file overrides, and error recovery. Covers the `batch` command, `--file-configs`, `--max-concurrent`, and output layout.
 ---
-
-<!--
-AI-RULEZ :: GENERATED FILE — DO NOT EDIT
-Content-Hash: blake3:3a70b47dd77fcd3f37e83bed3d32b1ad1ea9d6c1642ae8e0ff7b09b55939858a
-Source-Hash: blake3:a92a53795b15c1bfb0f4ee65d2ec8e7475ff291f9271b5bbf404957b82eb790a
-Schema-Version: v1
--->
 
 # Batch extraction
 

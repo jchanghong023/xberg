@@ -194,9 +194,8 @@ function pagesToDocuments(document: ExtractedDoc, source: string): Document[] {
   const documents: Document[] = [];
 
   for (const page of document.pages ?? []) {
-    const metadata: Record<string, unknown> = { ...baseMetadata };
     // Xberg uses 1-indexed pages; LangChain convention is 0-indexed. ~keep
-    metadata.page = page.pageNumber - 1;
+    const metadata: Record<string, unknown> = { ...baseMetadata, page: page.pageNumber - 1 };
     if (page.isBlank != null) {
       metadata.is_blank = page.isBlank;
     }

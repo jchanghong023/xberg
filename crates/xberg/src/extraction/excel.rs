@@ -42,6 +42,8 @@ use crate::extractors::security::SecurityLimits;
 use crate::types::revisions::{DocumentRevision, RevisionDelta, RevisionKind};
 use crate::types::{ExcelSheet, ExcelWorkbook, ProcessingWarning};
 
+pub(crate) mod images;
+
 /// Maximum number of cells in a Range's bounding box before we consider it pathological.
 /// This threshold is set to prevent OOM when processing files with sparse data at extreme
 /// positions (e.g., Excel Solver files that have cells at A1 and XFD1048575).
@@ -115,8 +117,16 @@ pub(crate) type ExcelReadResult = (ExcelWorkbook, Vec<ProcessingWarning>);
 /// Silently returns `Ok(())` when `reader` is not a readable ZIP at all (e.g. a legacy
 /// `.xls`/`.xla` OLE2 file misrouted here) — the subsequent calamine open then reports a
 /// format error with clearer context than this pre-check could.
+///
+/// `declared_legacy` names a format calamine reads as an OLE2/CFB container, never as a ZIP
+/// (`.xls`/`.xla`). Only those may tolerate an unreadable entry header — what a stray central
+/// directory inside an OLE2 container produces: the ZIP validator stops at the first entry it
+/// cannot read, so tolerating it on a real ZIP would stop the accounting for every entry after
+/// it. The flag comes from the declared format, supplemented for `.xls` spellings only by
+/// whether calamine's sniffing actually selects its CFB reader — the exact condition under
+/// which no ZIP entry is ever decompressed.
 #[cfg(feature = "excel")]
-fn validate_zip_container<R: Read + Seek>(reader: R, limits: &SecurityLimits) -> Result<()> {
+fn validate_zip_container<R: Read + Seek>(reader: R, limits: &SecurityLimits, declared_legacy: bool) -> Result<()> {
     let mut archive = match zip::ZipArchive::new(reader) {
         Ok(archive) => archive,
         Err(_) => return Ok(()),
@@ -129,8 +139,42 @@ fn validate_zip_container<R: Read + Seek>(reader: R, limits: &SecurityLimits) ->
             limits.max_files_in_archive
         )));
     }
-    crate::extractors::security::ZipBombValidator::new(limits.clone()).validate(&mut archive)?;
-    Ok(())
+    match crate::extractors::security::ZipBombValidator::new(limits.clone()).validate(&mut archive) {
+        Ok(()) => Ok(()),
+        Err(crate::extractors::security::SecurityError::UnreadableEntry { .. }) if declared_legacy => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Whether calamine's reader selection for this file lands on the CFB `Xls` reader.
+/// An exact `xls` extension is picked by name; every other spelling goes through
+/// content sniffing, which tries the CFB reader before the ZIP-based one — so
+/// `Xls::new` succeeding is exactly the condition under which no ZIP entry is ever
+/// decompressed. (A ZIP may carry arbitrary prefix data, so a CFB magic prefix alone
+/// proves nothing: a prefix-plus-ZIP file fails the CFB parse, sniffs to the Xlsx
+/// reader, and must stay on the strict, fully-accounted path.)
+#[cfg(feature = "excel")]
+fn sniffs_to_cfb_reader(file: &std::fs::File) -> bool {
+    match file.try_clone() {
+        Ok(clone) => calamine::Xls::new(std::io::BufReader::new(clone)).is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Whether `validate_zip_container`'s unreadable-entry tolerance applies to this
+/// spreadsheet. Calamine reads an exact-`xls` by extension and an any-case `xla`
+/// through its explicit `Xls` (CFB) branch; every other spelling goes through content
+/// sniffing, which hands the file to the CFB reader exactly when `Xls::new` succeeds
+/// (`cfb_reader`) — and only then is no ZIP entry ever decompressed, which is what
+/// makes tolerating a stray central directory harmless. A renamed ZIP sniffs to the
+/// Xlsx reader and stays on the strict, fully-accounted path. `cfb_reader` is a
+/// closure, consulted only for a non-exact `.xls` spelling: the probe parses the whole
+/// workbook, a cost the already-decided extensions must not pay.
+#[cfg(feature = "excel")]
+fn xls_zip_tolerance(raw_extension: &str, cfb_reader: impl FnOnce() -> bool) -> bool {
+    raw_extension == "xls"
+        || raw_extension.eq_ignore_ascii_case("xla")
+        || (raw_extension.eq_ignore_ascii_case("xls") && cfb_reader())
 }
 
 pub(crate) fn read_excel_file(file_path: &str, limits: &SecurityLimits) -> Result<ExcelReadResult> {
@@ -140,7 +184,20 @@ pub(crate) fn read_excel_file(file_path: &str, limits: &SecurityLimits) -> Resul
     #[cfg(feature = "excel")]
     {
         let check_file = std::fs::File::open(file_path)?;
-        validate_zip_container(std::io::BufReader::new(check_file), limits)?;
+        // Calamine picks its reader from the *raw* extension: only an exact `xls` reaches its
+        // CFB reader through `open_workbook_auto`, while `xla` in any casing hits the explicit
+        // `Xls` branch below. Every other spelling falls into content sniffing — which hands a
+        // CFB container to the same Xls reader but a ZIP to the Xlsx reader — so the tolerance
+        // has to follow the reader calamine will actually choose, not a lowercased path, or a
+        // ZIP renamed `BOOK.XLS` would be parsed as Xlsx without any zip validation. An
+        // upper-case `.XLS` that calamine really reads as CFB earns the same tolerance as an
+        // exact `.xls`; a prefix-plus-ZIP polyglot does not (it sniffs to Xlsx).
+        let raw_extension = Path::new(file_path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or_default();
+        let declared_legacy = xls_zip_tolerance(raw_extension, || sniffs_to_cfb_reader(&check_file));
+        validate_zip_container(std::io::BufReader::new(check_file), limits, declared_legacy)?;
     }
     #[cfg(not(feature = "excel"))]
     let _ = limits;
@@ -254,7 +311,14 @@ pub(crate) fn read_excel_bytes(data: &[u8], file_extension: &str, limits: &Secur
     let mut warnings: Vec<ProcessingWarning> = Vec::new();
 
     #[cfg(feature = "excel")]
-    validate_zip_container(Cursor::new(data), limits)?;
+    {
+        // `.xls`/`.xla` are dispatched straight to calamine's CFB reader below (no content
+        // sniffing on this bytes path), so an unreadable entry header in a stray central
+        // directory must not reject them. Every other extension — including unknown ones the
+        // auto-detector may read as a ZIP — is accounted for in full.
+        let extension = file_extension.to_lowercase();
+        validate_zip_container(Cursor::new(data), limits, extension == ".xls" || extension == ".xla")?;
+    }
     #[cfg(not(feature = "excel"))]
     let _ = limits;
 
@@ -602,17 +666,25 @@ fn process_sparse_sheet_from_cells(
 
     for &row in rows.iter().skip(1).take(display_rows - 1) {
         let mut row_cells_vec = Vec::with_capacity(display_cols);
-        markdown.push_str("| ");
-        for (i, &col) in cols.iter().take(display_cols).enumerate() {
-            if i > 0 {
-                markdown.push_str(" | ");
-            }
+        for &col in cols.iter().take(display_cols) {
             let cell_str = cell_map
                 .get(&(row, col))
                 .map(|d| format_cell_to_string(d))
                 .unwrap_or_default();
-            escape_markdown_into(&mut markdown, &cell_str);
             row_cells_vec.push(cell_str);
+        }
+        // Same used-range-filler rule as the dense path: a row whose rendered
+        // columns are all empty (its one cell sits beyond the display cap) is
+        // dropped instead of emitting an empty Markdown row.
+        if row_cells_vec.iter().all(|cell| cell.trim().is_empty()) {
+            continue;
+        }
+        markdown.push_str("| ");
+        for (i, cell_str) in row_cells_vec.iter().enumerate() {
+            if i > 0 {
+                markdown.push_str(" | ");
+            }
+            escape_markdown_into(&mut markdown, cell_str);
         }
         markdown.push_str(" |\n");
         table_cells.push(row_cells_vec);
@@ -845,19 +917,22 @@ fn generate_markdown_and_cells(
 
     for row in rows.iter().skip(1) {
         let mut row_cells = Vec::with_capacity(header_len);
-        markdown.push_str("| ");
         for i in 0..header_len {
+            let cell_str = row.get(i).map(format_cell_to_string).unwrap_or_default();
+            row_cells.push(cell_str);
+        }
+        // A row that is empty in every rendered column is used-range filler, not
+        // content: in a Markdown table it can only come out as `|  |  |` noise, so
+        // it is dropped rather than padding the sheet with blank rows. ~keep
+        if row_cells.iter().all(|cell| cell.trim().is_empty()) {
+            continue;
+        }
+        markdown.push_str("| ");
+        for (i, cell_str) in row_cells.iter().enumerate() {
             if i > 0 {
                 markdown.push_str(" | ");
             }
-            let cell_str = if let Some(cell) = row.get(i) {
-                let cell_str = format_cell_to_string(cell);
-                escape_markdown_into(&mut markdown, &cell_str);
-                cell_str
-            } else {
-                String::new()
-            };
-            row_cells.push(cell_str);
+            escape_markdown_into(&mut markdown, cell_str);
         }
         markdown.push_str(" |\n");
         cells.push(row_cells);
@@ -1535,6 +1610,40 @@ mod tests {
         }
     }
 
+    /// The unreadable-entry tolerance follows calamine's reader: an exact `xls`, an
+    /// any-case `xla`, and an any-case `.xls` that calamine reads as CFB (`Xls::new`
+    /// succeeds — content sniffing tries the CFB reader before the ZIP one). An
+    /// upper-case `.XLS` that is really a ZIP sniffs to the Xlsx reader and stays
+    /// strict. The probe must only run for the spelling that needs it.
+    #[cfg(feature = "excel")]
+    #[test]
+    fn xls_zip_tolerance_follows_calamines_reader() {
+        assert!(xls_zip_tolerance("xls", || panic!("exact xls never probes")));
+        assert!(xls_zip_tolerance("xla", || panic!("any-case xla never probes")));
+        assert!(xls_zip_tolerance("XLA", || panic!("any-case xla never probes")));
+        assert!(xls_zip_tolerance("XLS", || true));
+        assert!(!xls_zip_tolerance("XLS", || false), "a renamed ZIP stays strict");
+        assert!(!xls_zip_tolerance("xlsx", || true));
+        assert!(!xls_zip_tolerance("", || true));
+    }
+
+    /// A legacy `.xls` fixture parses with calamine's CFB reader — the probe's positive
+    /// side; without it the tolerance for an upper-case `.XLS` would never engage.
+    /// Skips when the fixture is absent.
+    #[cfg(feature = "excel")]
+    #[test]
+    fn cfb_reader_probe_recognizes_a_legacy_workbook() {
+        let legacy = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_documents/xls/test_excel.xls");
+        let Ok(file) = std::fs::File::open(&legacy) else {
+            eprintln!("skipping: fixture not present at {legacy:?}");
+            return;
+        };
+        assert!(
+            sniffs_to_cfb_reader(&file),
+            "a real legacy workbook must open with calamine's CFB reader"
+        );
+    }
+
     /// Regression test for #102: office metadata was computed only for the OOXML
     /// spreadsheet extensions, so an `.ods` reached `ExcelWorkbook` with an empty
     /// metadata map — no title, no author, no dates — even though ODT and ODP read
@@ -1773,7 +1882,9 @@ mod tests {
 
         assert!(markdown.contains("X"));
         assert!(markdown.contains("Z"));
-        assert_eq!(cells.len(), 3);
+        // Row 2 of the range carries no cells at all, so it is dropped as
+        // used-range filler instead of padding the grid to 3 rows.
+        assert_eq!(cells.len(), 2);
     }
 
     #[test]
@@ -1824,6 +1935,41 @@ mod tests {
         assert!(lines[2].starts_with("| "));
         assert!(lines[3].contains("---"));
         assert!(lines[4].starts_with("| "));
+    }
+
+    /// A source row that is empty in every rendered column is used-range filler:
+    /// it must be dropped from both the Markdown and `table_cells` rather than
+    /// padding the sheet with `|  |  |` noise rows.
+    #[test]
+    fn test_empty_used_range_rows_are_dropped() {
+        let mut range: Range<Data> = Range::new((0, 0), (4, 1));
+        range.set_value((0, 0), Data::String("H1".to_owned()));
+        range.set_value((0, 1), Data::String("H2".to_owned()));
+        range.set_value((1, 0), Data::String("A".to_owned()));
+        range.set_value((1, 1), Data::String("B".to_owned()));
+        // Row 2 entirely empty; row 3 carries data; row 4 whitespace-only.
+        range.set_value((3, 0), Data::String("C".to_owned()));
+        range.set_value((3, 1), Data::String("D".to_owned()));
+        range.set_value((4, 0), Data::String("   ".to_owned()));
+
+        let mut warnings = Vec::new();
+        let (markdown, cells) = generate_markdown_and_cells("Test", &range, 100, &mut warnings);
+
+        assert!(
+            !markdown.lines().any(|line| line.trim() == "|  |  |"),
+            "no all-empty row may be emitted; got: {markdown}"
+        );
+        assert!(markdown.contains("| A | B |"), "data row must survive: {markdown}");
+        assert!(markdown.contains("| C | D |"), "data row must survive: {markdown}");
+        assert_eq!(
+            cells
+                .iter()
+                .filter(|row| row.iter().all(|cell| cell.trim().is_empty()))
+                .count(),
+            0,
+            "cells grid must not carry empty rows: {cells:?}"
+        );
+        assert_eq!(cells.len(), 3, "header plus two data rows: {cells:?}");
     }
 
     #[test]

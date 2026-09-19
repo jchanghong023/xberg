@@ -1,14 +1,14 @@
+<!--
+AI-RULEZ :: GENERATED FILE — DO NOT EDIT
+Content-Hash: blake3:31197db8db85c5f544730c480ead8ea20f7fb68984d3b307b5f48ef92c7f0faf
+Source-Hash: blake3:8436911387ca6e92e089da7c4165303e587d88cbff8b705ce66d7cd4eaaa5497
+Schema-Version: v1
+-->
+
 ---
 name: extracting-with-ocr
 description: Use when extracting text from scanned PDFs, photographed pages, or images that have no embedded text layer. Covers OCR backends, language packs, force-OCR, and performance tuning.
 ---
-
-<!--
-AI-RULEZ :: GENERATED FILE — DO NOT EDIT
-Content-Hash: blake3:3ec8b7cf60f56cbe5cc15a5a0b29d0c2f8e3cf4c3823503eb1128fb7f9ee11db
-Source-Hash: blake3:a92a53795b15c1bfb0f4ee65d2ec8e7475ff291f9271b5bbf404957b82eb790a
-Schema-Version: v1
--->
 
 # Extracting with OCR
 

@@ -2,6 +2,7 @@
 #define XBERG_H
 
 /* Cargo features enabled in this build. */
+#define XBERG_FEATURE_ANALYSIS 1
 #define XBERG_FEATURE_API 1
 #define XBERG_FEATURE_API_TYPES 1
 #define XBERG_FEATURE_ARCHIVES 1
@@ -18,6 +19,7 @@
 #define XBERG_FEATURE_EMBEDDING_PRESETS 1
 #define XBERG_FEATURE_ENRICHMENT 1
 #define XBERG_FEATURE_EXCEL 1
+#define XBERG_FEATURE_FORMULA_RECOGNITION 1
 #define XBERG_FEATURE_HEURISTICS 1
 #define XBERG_FEATURE_HTML 1
 #define XBERG_FEATURE_HWP 1
@@ -33,6 +35,7 @@
 #define XBERG_FEATURE_LITER_LLM 1
 #define XBERG_FEATURE_MARKDOWN_FOOTNOTES 1
 #define XBERG_FEATURE_MCP 1
+#define XBERG_FEATURE_MCP_HTTP 1
 #define XBERG_FEATURE_MDX 1
 #define XBERG_FEATURE_NER_LLM 1
 #define XBERG_FEATURE_NER_ONNX 1
@@ -45,17 +48,23 @@
 #define XBERG_FEATURE_QR_CODES 1
 #define XBERG_FEATURE_QUALITY 1
 #define XBERG_FEATURE_REDACTION 1
+#define XBERG_FEATURE_REDACTION_ML 1
+#define XBERG_FEATURE_REDACTION_REHYDRATE 1
 #define XBERG_FEATURE_RERANKER 1
 #define XBERG_FEATURE_RERANKER_PRESETS 1
 #define XBERG_FEATURE_SCEPTRE_OCR 1
 #define XBERG_FEATURE_SPARSE_EMBEDDINGS 1
 #define XBERG_FEATURE_SPARSE_EMBEDDING_PRESETS 1
+#define XBERG_FEATURE_STATIC_EMBEDDINGS 1
 #define XBERG_FEATURE_STOPWORDS 1
 #define XBERG_FEATURE_STRUCTURED 1
+#define XBERG_FEATURE_SUMMARIZATION 1
+#define XBERG_FEATURE_SUMMARIZATION_LLM 1
 #define XBERG_FEATURE_SVG 1
 #define XBERG_FEATURE_TOKIO_RUNTIME 1
 #define XBERG_FEATURE_TRANSCRIPTION 1
 #define XBERG_FEATURE_TRANSCRIPTION_TYPES 1
+#define XBERG_FEATURE_TRANSLATION 1
 #define XBERG_FEATURE_TREE_SITTER 1
 #define XBERG_FEATURE_URL_CONFIG_TYPES 1
 #define XBERG_FEATURE_URL_INGESTION 1
@@ -1629,6 +1638,14 @@ typedef struct XBERGNodeContent XBERGNodeContent;
  */
 typedef uint64_t XBERGOcrBackend;
 /**
+ * A registered OCR backend's declared name and language capabilities.
+ *
+ * Returned by `list_ocr_backend_capabilities`. See that function's
+ * documentation for the determinism guarantees and the important caveat about
+ * what an empty `supported_languages` means.
+ */
+typedef struct XBERGOcrBackendCapabilities XBERGOcrBackendCapabilities;
+/**
  * OCR backend types.
  */
 typedef struct XBERGOcrBackendType XBERGOcrBackendType;
@@ -1863,6 +1880,17 @@ typedef struct XBERGPageDimensions XBERGPageDimensions;
  */
 typedef struct XBERGPageHierarchy XBERGPageHierarchy;
 typedef struct XBERGPageInfo XBERGPageInfo;
+/**
+ * Aggregate OCR legibility score for a page, reported by the backend that
+ * produced its text.
+ *
+ * This is distinct from `OcrConfidence`, which scores a single detected element
+ * (a word or line) using detection/recognition confidence from the OCR engine
+ * itself. `PageOcrConfidence` is a page-level summary computed after noise
+ * filtering, intended for triage of which pages are worth a closer look, not
+ * for comparing OCR engines against each other.
+ */
+typedef struct XBERGPageOcrConfidence XBERGPageOcrConfidence;
 /**
  * How a backend copes with a page raster whose text is not upright.
  *
@@ -2454,6 +2482,7 @@ typedef struct XBERGSecurityLimits XBERGSecurityLimits;
  * - `cors_origins`: empty vector (allows all origins)
  * - `max_request_body_bytes`: 104_857_600 (100 MB)
  * - `max_multipart_field_bytes`: 104_857_600 (100 MB)
+ * - `job_timeout_secs`: 600 (10 minutes)
  */
 typedef struct XBERGServerConfig XBERGServerConfig;
 /**
@@ -2557,6 +2586,15 @@ typedef struct XBERGTable XBERGTable;
  * Future extension point for rich table support with cell-level metadata.
  */
 typedef struct XBERGTableCell XBERGTableCell;
+/**
+ * The paragraph style a single table cell's text carries, located by grid
+ * position.
+ *
+ * Flat rather than a nested `Vec<Vec<Option<..>>>`: the nested shape marshals
+ * badly across the FFI bindings, and the data is sparse anyway. See
+ * `Table.cell_styles`.
+ */
+typedef struct XBERGTableCellStyle XBERGTableCellStyle;
 /**
  * Controls how markdown tables are handled when they exceed the chunk size
  * limit.
@@ -13401,6 +13439,35 @@ int32_t xberg_grid_cell_is_header(XBERGAlefHandle handle);
 XBERGAlefHandle xberg_grid_cell_bbox(XBERGAlefHandle handle);
 
 /**
+ * Get the `heading_level` field from a `GridCell`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint8_t xberg_grid_cell_heading_level(XBERGAlefHandle handle);
+
+/**
+ * Report whether the `heading_level` field on a `GridCell` is `Some`.
+ *
+ * `xberg_grid_cell_heading_level` cannot distinguish a `None` field from a
+ * legitimate zero-valued `Some` at the C ABI boundary -- there is no null
+ * representation for a numeric return, so both collapse to the same sentinel.
+ * Call this function first: `1` means the field getter's return value is
+ * meaningful, `0` means the field is absent and the getter's sentinel must be
+ * ignored, `-1` reports an invalid handle (see `xberg_last_error_code`). #
+ * Safety Pointer must be a valid handle returned by this library.
+ */
+int32_t xberg_grid_cell_has_heading_level(XBERGAlefHandle handle);
+
+/**
+ * Get the `style_name` field from a `GridCell`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_grid_cell_style_name(XBERGAlefHandle handle);
+
+/**
  * Create a `HeaderMetadata` from a JSON string. Returns null on failure.
  * # Safety
  * JSON string must be valid UTF-8 and null-terminated.
@@ -16329,6 +16396,26 @@ uintptr_t xberg_llm_config_max_concurrency(XBERGAlefHandle handle);
 int32_t xberg_llm_config_has_max_concurrency(XBERGAlefHandle handle);
 
 /**
+ * Get the `max_response_bytes` field from a `LlmConfig`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uintptr_t xberg_llm_config_max_response_bytes(XBERGAlefHandle handle);
+
+/**
+ * Report whether the `max_response_bytes` field on a `LlmConfig` is `Some`.
+ *
+ * `xberg_llm_config_max_response_bytes` cannot distinguish a `None` field from
+ * a legitimate zero-valued `Some` at the C ABI boundary -- there is no null
+ * representation for a numeric return, so both collapse to the same sentinel.
+ * Call this function first: `1` means the field getter's return value is
+ * meaningful, `0` means the field is absent and the getter's sentinel must be
+ * ignored, `-1` reports an invalid handle (see `xberg_last_error_code`). #
+ * Safety Pointer must be a valid handle returned by this library.
+ */
+int32_t xberg_llm_config_has_max_response_bytes(XBERGAlefHandle handle);
+
+/**
  * Validate the request-time sampling parameters that have a documented range:
  * `top_p` (`[0.0, 1.0]`), `presence_penalty`, and `frequency_penalty` (both
  * `[-2.0, 2.0]`, matching liter-llm's/OpenAI's semantics). An unset field is
@@ -17374,6 +17461,46 @@ uintptr_t xberg_ngram_range_max(XBERGAlefHandle handle);
  */
 XBERGAlefHandle xberg_ngram_range_default(void);
 #endif
+
+/**
+ * Create a `OcrBackendCapabilities` from a JSON string. Returns null on
+ * failure. # Safety JSON string must be valid UTF-8 and null-terminated.
+ * Returned handle must be freed with `xberg_ocr_backend_capabilities_free`.
+ */
+XBERGAlefHandle xberg_ocr_backend_capabilities_from_json(const char *json);
+
+/**
+ * Serialize a `OcrBackendCapabilities` to a JSON string. Returns null on
+ * failure. # Safety `handle` must be a valid, non-zero handle returned by a
+ * `xberg` function. The returned string must be freed with `xberg_free_string`.
+ */
+char *xberg_ocr_backend_capabilities_to_json(XBERGAlefHandle handle);
+
+/**
+ * Free a `OcrBackendCapabilities` handle.
+ * # Safety
+ * Handle must have been returned by this library, or be zero.
+ */
+void xberg_ocr_backend_capabilities_free(XBERGAlefHandle handle);
+
+/**
+ * Get the `name` field from a `OcrBackendCapabilities`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_ocr_backend_capabilities_name(XBERGAlefHandle handle);
+
+/**
+ * Get the `supported_languages` field from a `OcrBackendCapabilities`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *
+xberg_ocr_backend_capabilities_supported_languages(XBERGAlefHandle handle);
 
 /**
  * Create a `OcrConfidence` from a JSON string. Returns null on failure.
@@ -19229,6 +19356,15 @@ char *xberg_page_content_section_name(XBERGAlefHandle handle);
 char *xberg_page_content_sheet_name(XBERGAlefHandle handle);
 
 /**
+ * Get the `ocr_confidence` field from a `PageContent`.
+ * A non-null returned handle is owned by the caller.
+ * It must be freed with `xberg_page_ocr_confidence_free`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+XBERGAlefHandle xberg_page_content_ocr_confidence(XBERGAlefHandle handle);
+
+/**
  * Create a `PageDimensions` from a JSON string. Returns null on failure.
  * # Safety
  * JSON string must be valid UTF-8 and null-terminated.
@@ -19438,6 +19574,65 @@ int32_t xberg_page_info_has_is_blank(XBERGAlefHandle handle);
  * Pointer must be a valid handle returned by this library.
  */
 int32_t xberg_page_info_has_vector_graphics(XBERGAlefHandle handle);
+
+/**
+ * Create a `PageOcrConfidence` from a JSON string. Returns null on failure.
+ * # Safety
+ * JSON string must be valid UTF-8 and null-terminated.
+ * Returned handle must be freed with `xberg_page_ocr_confidence_free`.
+ */
+XBERGAlefHandle xberg_page_ocr_confidence_from_json(const char *json);
+
+/**
+ * Serialize a `PageOcrConfidence` to a JSON string. Returns null on failure.
+ * # Safety
+ * `handle` must be a valid, non-zero handle returned by a `xberg` function.
+ * The returned string must be freed with `xberg_free_string`.
+ */
+char *xberg_page_ocr_confidence_to_json(XBERGAlefHandle handle);
+
+/**
+ * Free a `PageOcrConfidence` handle.
+ * # Safety
+ * Handle must have been returned by this library, or be zero.
+ */
+void xberg_page_ocr_confidence_free(XBERGAlefHandle handle);
+
+/**
+ * Get the `score` field from a `PageOcrConfidence`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+double xberg_page_ocr_confidence_score(XBERGAlefHandle handle);
+
+/**
+ * Report whether the `score` field on a `PageOcrConfidence` is `Some`.
+ *
+ * `xberg_page_ocr_confidence_score` cannot distinguish a `None` field from a
+ * legitimate zero-valued `Some` at the C ABI boundary -- there is no null
+ * representation for a numeric return, so both collapse to the same sentinel.
+ * Call this function first: `1` means the field getter's return value is
+ * meaningful, `0` means the field is absent and the getter's sentinel must be
+ * ignored, `-1` reports an invalid handle (see `xberg_last_error_code`). #
+ * Safety Pointer must be a valid handle returned by this library.
+ */
+int32_t xberg_page_ocr_confidence_has_score(XBERGAlefHandle handle);
+
+/**
+ * Get the `word_count` field from a `PageOcrConfidence`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint32_t xberg_page_ocr_confidence_word_count(XBERGAlefHandle handle);
+
+/**
+ * Get the `backend` field from a `PageOcrConfidence`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_page_ocr_confidence_backend(XBERGAlefHandle handle);
 
 #if defined(XBERG_FEATURE_HEURISTICS)
 /**
@@ -22766,6 +22961,15 @@ uintptr_t xberg_server_config_max_multipart_field_bytes(XBERGAlefHandle handle);
 
 #if defined(XBERG_FEATURE_API_TYPES)
 /**
+ * Get the `job_timeout_secs` field from a `ServerConfig`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint64_t xberg_server_config_job_timeout_secs(XBERGAlefHandle handle);
+#endif
+
+#if defined(XBERG_FEATURE_API_TYPES)
+/**
  * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
  * Returned pointers must be freed with the appropriate free function.
  */
@@ -23658,6 +23862,15 @@ XBERGAlefHandle xberg_table_bounding_box(XBERGAlefHandle handle);
 char *xberg_table_table_id(XBERGAlefHandle handle);
 
 /**
+ * Get the `cell_styles` field from a `Table`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_table_cell_styles(XBERGAlefHandle handle);
+
+/**
  * Get the `columns` field from a `Table`.
  * A non-null returned pointer is owned by the caller.
  * It must be freed with `xberg_free_string`.
@@ -23718,6 +23931,72 @@ uint32_t xberg_table_cell_col_span(XBERGAlefHandle handle);
  * Pointer must be a valid handle returned by this library.
  */
 int32_t xberg_table_cell_is_header(XBERGAlefHandle handle);
+
+/**
+ * Create a `TableCellStyle` from a JSON string. Returns null on failure.
+ * # Safety
+ * JSON string must be valid UTF-8 and null-terminated.
+ * Returned handle must be freed with `xberg_table_cell_style_free`.
+ */
+XBERGAlefHandle xberg_table_cell_style_from_json(const char *json);
+
+/**
+ * Serialize a `TableCellStyle` to a JSON string. Returns null on failure.
+ * # Safety
+ * `handle` must be a valid, non-zero handle returned by a `xberg` function.
+ * The returned string must be freed with `xberg_free_string`.
+ */
+char *xberg_table_cell_style_to_json(XBERGAlefHandle handle);
+
+/**
+ * Free a `TableCellStyle` handle.
+ * # Safety
+ * Handle must have been returned by this library, or be zero.
+ */
+void xberg_table_cell_style_free(XBERGAlefHandle handle);
+
+/**
+ * Get the `row` field from a `TableCellStyle`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint32_t xberg_table_cell_style_row(XBERGAlefHandle handle);
+
+/**
+ * Get the `col` field from a `TableCellStyle`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint32_t xberg_table_cell_style_col(XBERGAlefHandle handle);
+
+/**
+ * Get the `heading_level` field from a `TableCellStyle`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint8_t xberg_table_cell_style_heading_level(XBERGAlefHandle handle);
+
+/**
+ * Report whether the `heading_level` field on a `TableCellStyle` is `Some`.
+ *
+ * `xberg_table_cell_style_heading_level` cannot distinguish a `None` field from
+ * a legitimate zero-valued `Some` at the C ABI boundary -- there is no null
+ * representation for a numeric return, so both collapse to the same sentinel.
+ * Call this function first: `1` means the field getter's return value is
+ * meaningful, `0` means the field is absent and the getter's sentinel must be
+ * ignored, `-1` reports an invalid handle (see `xberg_last_error_code`). #
+ * Safety Pointer must be a valid handle returned by this library.
+ */
+int32_t xberg_table_cell_style_has_heading_level(XBERGAlefHandle handle);
+
+/**
+ * Get the `style_name` field from a `TableCellStyle`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_table_cell_style_style_name(XBERGAlefHandle handle);
 
 #if defined(XBERG_FEATURE_DIFF)
 /**
@@ -23861,6 +24140,19 @@ char *xberg_tesseract_config_language(XBERGAlefHandle handle);
  * Pointer must be a valid handle returned by this library.
  */
 int32_t xberg_tesseract_config_psm(XBERGAlefHandle handle);
+
+/**
+ * Report whether the `psm` field on a `TesseractConfig` is `Some`.
+ *
+ * `xberg_tesseract_config_psm` cannot distinguish a `None` field from a
+ * legitimate zero-valued `Some` at the C ABI boundary -- there is no null
+ * representation for a numeric return, so both collapse to the same sentinel.
+ * Call this function first: `1` means the field getter's return value is
+ * meaningful, `0` means the field is absent and the getter's sentinel must be
+ * ignored, `-1` reports an invalid handle (see `xberg_last_error_code`). #
+ * Safety Pointer must be a valid handle returned by this library.
+ */
+int32_t xberg_tesseract_config_has_psm(XBERGAlefHandle handle);
 
 /**
  * Get the `output_format` field from a `TesseractConfig`.
@@ -29369,6 +29661,52 @@ char *xberg_list_embedding_backends(void);
 uintptr_t xberg_list_embedding_backends_len(void);
 
 /**
+ * List every registered OCR backend's name alongside its declared supported
+ * languages.
+ *
+ * This is the capability-enumeration counterpart to `list_ocr_backends`: where
+ * that function exposes only backend names, this exposes each backend's
+ * `supported_languages()` too, so a consumer (for example, a job-acceptance
+ * gate) does not need to hardcode a second list of backend languages.
+ *
+ * # Determinism
+ *
+ * The returned vector is sorted by `name`, regardless of registration order or
+ * the order reported by the underlying registry. `supported_languages` within
+ * each entry is **not** sorted â see
+ * `OcrBackendCapabilities.supported_languages` for why.
+ *
+ * # Cost
+ *
+ * Calling this is not free for every backend. In particular,
+ * `TesseractBackend`'s `supported_languages()` allocates a Tesseract API and
+ * initializes it (`init("", "eng")`) the first time it is called, to enumerate
+ * installed tessdata languages; subsequent calls are served from a cache.
+ * \note Returns an error only if the registry lock cannot be acquired in the
+ * current environment.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
+ * \code
+ * use xberg::plugins::list_ocr_backend_capabilities;
+ *
+ * for capability in list_ocr_backend_capabilities()? {
+ *     println!("{}: {:?}", capability.name, capability.supported_languages);
+ * }
+ * \endcode
+ */
+char *xberg_list_ocr_backend_capabilities(void);
+
+/**
+ * Return the byte length of the C string most recently returned by
+ * `xberg_list_ocr_backend_capabilities` on this thread. Returns 0 when the
+ * primary call returned null or failed before producing a string. Enables safe
+ * slice construction in Zig and Java FFM Panama without a NUL-scan.
+ * \note SAFETY: Pointer arguments are ignored and are present only to keep the
+ * companion ABI aligned with `xberg_list_ocr_backend_capabilities`.
+ */
+uintptr_t xberg_list_ocr_backend_capabilities_len(void);
+
+/**
  * List all registered OCR backends.
  *
  * Returns the names of all OCR backends currently registered in the global
@@ -29612,6 +29950,32 @@ uintptr_t xberg_max_sim_rank_len(XBERGAlefHandle _query, const char *_docs);
  */
 double xberg_max_sim_score(XBERGAlefHandle query, XBERGAlefHandle doc);
 #endif
+
+/**
+ * Check whether a specific registered OCR backend supports a language.
+ *
+ * Delegates to the named backend's own `OcrBackend.supports_language`, which is
+ * the correct
+ * per-language decision â do not infer support (or its absence) from
+ * whether `list_ocr_backend_capabilities` reports an empty
+ * `supported_languages` list for that backend, since an empty list can mean
+ * "does not enumerate" rather than "supports nothing" (see
+ * `OcrBackendCapabilities.supported_languages`).
+ * \param backend Name of a registered OCR backend, as returned by
+ * `list_ocr_backends`. Lookup is case-insensitive and resolves the same
+ * `paddleocr` alias as backend dispatch.
+ * \param language Language code to check (e.g. `"eng"`, `"deu"`).
+ * \note Returns an error if no backend with that name (or alias) is registered.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
+ * \code
+ * use xberg::plugins::ocr_backend_supports_language;
+ *
+ * let supported = ocr_backend_supports_language("tesseract", "eng")?;
+ * \endcode
+ */
+int32_t xberg_ocr_backend_supports_language(const char *backend,
+                                            const char *language);
 
 #if defined(XBERG_FEATURE_MARKDOWN_FOOTNOTES)
 /**

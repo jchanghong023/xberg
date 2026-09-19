@@ -2,21 +2,21 @@
 
 Deploy the [Xberg](https://github.com/xberg-io/xberg) document-intelligence server
 (HTTP API + MCP) on Kubernetes. Extract text, tables, metadata, and structured data
-from PDFs, Office documents, images, and 106 formats, with optional OCR.
+from PDFs, Office documents, images, and 110 formats, with optional OCR.
 
 The chart is published as an OCI artifact to GHCR.
 
 ## Install
 
 ```bash
-helm install xberg oci://ghcr.io/xberg-io/charts/xberg --version 1.1.0
+helm install xberg oci://ghcr.io/xberg-io/charts/xberg --version 1.2.5
 ```
 
 Override values inline or with a file:
 
 ```bash
 helm install xberg oci://ghcr.io/xberg-io/charts/xberg \
-  --version 1.1.0 \
+  --version 1.2.5 \
   --set service.type=LoadBalancer \
   --set cache.size=5Gi
 ```

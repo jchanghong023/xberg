@@ -58,11 +58,12 @@ const TOC_ENTRY_ATTRIBUTE: &str = "toc_entry";
 /// cannot disagree about what a given image is called.
 fn drawing_alt_text(drawing: &crate::extraction::docx::drawing::Drawing) -> Option<String> {
     let properties = drawing.doc_properties.as_ref()?;
-    properties
+    let raw = properties
         .description
         .clone()
         .filter(|description| !description.is_empty())
-        .or_else(|| properties.name.clone().filter(|name| !name.is_empty()))
+        .or_else(|| properties.name.clone().filter(|name| !name.is_empty()));
+    crate::extraction::markdown_utils::sanitize_image_alt_text(raw)
 }
 
 /// Build an `InternalDocument` from parsed DOCX data.
@@ -97,6 +98,25 @@ fn build_internal_document(
     // `push_heading` generates intact.
     let mut bookmark_elements: AHashMap<String, u32> = AHashMap::new();
     let mut pending_anchor_links: Vec<(u32, String, RelationshipKind)> = Vec::new();
+
+    // `doc.images` is produced by the caller from the same `doc.drawings` list, in order,
+    // emitting one entry per drawing that has an image relationship and none for shape-only
+    // drawings (text boxes, rules). Renderers resolve an `ElementKind::Image` by indexing
+    // `doc.images`, so the element must carry that sequential index — not the raw drawing
+    // index, which is shifted by every skipped shape and would drop or mis-point markers.
+    // The two derivations must agree, so both key on exactly `image_ref.is_some()`. ~keep
+    let mut next_image_index: u32 = 0;
+    let image_indices: Vec<Option<u32>> = doc
+        .drawings
+        .iter()
+        .map(|drawing| {
+            drawing.image_ref.as_ref().map(|_| {
+                let index = next_image_index;
+                next_image_index += 1;
+                index
+            })
+        })
+        .collect();
 
     for element in &doc.elements {
         match element {
@@ -308,44 +328,14 @@ fn build_internal_document(
                 {
                     builder.push_paragraph(caption, vec![], Some(current_page), None);
                 }
-                let mut cells: Vec<Vec<String>> = Vec::new();
-                for row in &table.rows {
-                    let mut row_cells = Vec::new();
-                    for cell in &row.cells {
-                        let text = cell
-                            .paragraphs
-                            .iter()
-                            .map(|p| p.runs_to_markdown())
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                            .trim()
-                            .to_string();
-                        let span = cell.properties.as_ref().and_then(|p| p.grid_span).unwrap_or(1);
-                        for _ in 0..span {
-                            row_cells.push(text.clone());
-                        }
-                    }
-                    cells.push(row_cells);
-                }
-                for row_idx in 1..table.rows.len() {
-                    let mut col = 0usize;
-                    for cell in &table.rows[row_idx].cells {
-                        let span = cell.properties.as_ref().and_then(|p| p.grid_span).unwrap_or(1) as usize;
-                        let is_vmerge_continue = cell.properties.as_ref().is_some_and(|p| {
-                            matches!(p.v_merge, Some(crate::extraction::docx::table::VerticalMerge::Continue))
-                        });
-                        if is_vmerge_continue {
-                            for c in col..col + span {
-                                if c < cells[row_idx].len() && c < cells[row_idx - 1].len() {
-                                    cells[row_idx][c] = cells[row_idx - 1][c].clone();
-                                }
-                            }
-                        }
-                        col += span;
-                    }
-                }
+                // A gridSpan/vMerge cell is written once at its origin and left blank in the
+                // columns/rows it covers, matching `Table::to_cell_grid` — the grid a
+                // consumer sees must not diverge from the one `Table::to_markdown` already
+                // renders correctly (xberg-io/xberg#1549). ~keep
+                let cells = table.to_cell_grid(crate::extraction::docx::parser::Paragraph::runs_to_markdown);
                 if !cells.is_empty() {
-                    builder.push_table_from_cells(&cells, Some(current_page), None);
+                    let cell_styles = resolve_table_cell_styles(doc, table);
+                    builder.push_table_from_cells_with_styles(&cells, &cell_styles, Some(current_page), None);
                 }
             }
             crate::extraction::docx::parser::DocumentElement::Drawing(idx) => {
@@ -361,13 +351,13 @@ fn build_internal_document(
                     builder.push_paragraph(textbox_text, vec![], Some(current_page), None);
                 }
 
-                if drawing.image_ref.is_none() {
-                    continue;
-                }
-
                 if !inject_placeholders {
                     continue;
                 }
+
+                let Some(image_index) = image_indices.get(*idx).copied().flatten() else {
+                    continue;
+                };
 
                 if current_list_numbering_id.is_some() {
                     builder.end_list();
@@ -395,9 +385,7 @@ fn build_internal_document(
                     _ => None,
                 };
 
-                let kind = ElementKind::Image {
-                    image_index: *idx as u32,
-                };
+                let kind = ElementKind::Image { image_index };
                 let text_val = description.as_deref().unwrap_or("");
                 let elem = InternalElement::text(kind, text_val, 0).with_page(current_page);
                 let elem = if let Some(b) = bbox { elem.with_bbox(b) } else { elem };
@@ -506,24 +494,10 @@ fn push_header_footer_content(
     }
 
     for table in &hf.tables {
-        let cells: Vec<Vec<String>> = table
-            .rows
-            .iter()
-            .map(|row| {
-                row.cells
-                    .iter()
-                    .map(|cell| {
-                        cell.paragraphs
-                            .iter()
-                            .map(|p| p.runs_to_markdown())
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                            .trim()
-                            .to_string()
-                    })
-                    .collect()
-            })
-            .collect();
+        // Previously read no span at all, so a merged header/footer cell shifted every
+        // following cell left; now shares the same origin-once grid as body tables
+        // (xberg-io/xberg#1549). ~keep
+        let cells = table.to_cell_grid(crate::extraction::docx::parser::Paragraph::runs_to_markdown);
         if !cells.is_empty() {
             let idx = builder.push_table_from_cells(&cells, None, None);
             builder.set_layer(idx, layer);
@@ -704,6 +678,8 @@ type DocxParseResult = (
     Vec<Table>,
     Option<Vec<PageBoundary>>,
     Vec<crate::extraction::docx::drawing::Drawing>,
+    // 1-based page number per drawing, index-aligned with the drawings vec. ~keep
+    Vec<usize>,
     AHashMap<String, String>,
     InternalDocument,
 );
@@ -722,11 +698,11 @@ fn parse_docx_core(
     limits: crate::extractors::security::SecurityLimits,
 ) -> crate::error::Result<DocxParseResult> {
     let mut doc = crate::extraction::docx::parser::parse_document(content, &mut budget, &limits)?;
-    // `is_markdown` gates `to_markdown()` (which bakes `![desc](image_N)` placeholders into
-    // the flat text) vs. `to_plain_text()`. That placeholder is what the image-to-page
-    // association below (`text.find(&placeholder)`) relies on; without it every image
-    // silently defaults to page 1. DocTags needs the same per-image page fidelity as
-    // Markdown, so it takes the same branch here. ~keep
+    // `is_markdown` gates `to_markdown()` vs. `to_plain_text()` for the flat text; DocTags takes
+    // the markdown branch because it wants the same rendered shape. It no longer has any bearing
+    // on image page numbers: those come from `Document::drawing_page_numbers()`, walked from the
+    // parsed elements. The placeholders `to_markdown` writes are all the same `![alt](image)`
+    // target, so they never could identify an individual image (GH#1546). ~keep
     let (text, page_boundaries) = doc.extract_text_with_boundaries(
         matches!(
             output_format,
@@ -742,7 +718,7 @@ fn parse_docx_core(
         .enumerate()
         .map(|(idx, table)| {
             let page_number = table_page_nums.get(idx).copied().unwrap_or(1) as u32;
-            convert_docx_table_to_table(table, page_number)
+            convert_docx_table_to_table(&doc, table, page_number)
         })
         .collect();
 
@@ -761,9 +737,21 @@ fn parse_docx_core(
             .processing_warnings
             .extend(std::mem::take(&mut doc.warnings));
     }
+    // Must run before the `mem::take` below: `drawing_page_numbers` sizes its result off
+    // `self.drawings.len()`, so taking `doc.drawings` first left it building against an
+    // already-emptied vec, always returning `[]` and defaulting every image to page 1 (GH#1546). ~keep
+    let drawing_page_nums = doc.drawing_page_numbers();
     let drawings = std::mem::take(&mut doc.drawings);
     let image_rels = std::mem::take(&mut doc.image_relationships);
-    Ok((text, tables, page_boundaries, drawings, image_rels, internal_doc))
+    Ok((
+        text,
+        tables,
+        page_boundaries,
+        drawings,
+        drawing_page_nums,
+        image_rels,
+        internal_doc,
+    ))
 }
 
 impl Plugin for DocxExtractor {
@@ -798,46 +786,47 @@ impl Plugin for DocxExtractor {
 /// * `docx_table` - The parsed DOCX table
 /// * `page_number` - 1-based page number the table appears on
 ///
+/// Resolve each table cell's paragraph style into the sparse list `Table::cell_styles` carries.
+///
+/// Only cells that declare a style produce an entry, and an entry is kept only when the style
+/// resolves to an outline level or a display name -- a cell styled `Normal` adds nothing. Grid
+/// positions come from `Table::to_cell_style_grid`, which lays out `gridSpan`/`vMerge` exactly
+/// as the text grid does, so a style always lands on the cell whose text it belongs to (GH#1587).
+fn resolve_table_cell_styles(
+    doc: &crate::extraction::docx::parser::Document,
+    table: &crate::extraction::docx::parser::Table,
+) -> Vec<crate::types::TableCellStyle> {
+    let mut resolved = Vec::new();
+    for (row_idx, row) in table.to_cell_style_grid().iter().enumerate() {
+        for (col_idx, style_id) in row.iter().enumerate() {
+            let Some(style_id) = style_id else { continue };
+            let heading_level = doc.resolve_heading_level(style_id);
+            let style_name = doc.resolve_style_name(style_id);
+            if heading_level.is_none() && style_name.is_none() {
+                continue;
+            }
+            resolved.push(crate::types::TableCellStyle {
+                row: row_idx as u32,
+                col: col_idx as u32,
+                heading_level,
+                style_name,
+            });
+        }
+    }
+    resolved
+}
+
 /// # Returns
 /// * `Table` - Converted table with cells and markdown representation
-fn convert_docx_table_to_table(docx_table: &crate::extraction::docx::parser::Table, page_number: u32) -> Table {
-    let mut cells: Vec<Vec<String>> = Vec::new();
-    for row in &docx_table.rows {
-        let mut row_cells = Vec::new();
-        for cell in &row.cells {
-            let cell_text = cell
-                .paragraphs
-                .iter()
-                .map(|para| para.runs_to_markdown())
-                .collect::<Vec<_>>()
-                .join(" ")
-                .trim()
-                .to_string();
-            let span = cell.properties.as_ref().and_then(|p| p.grid_span).unwrap_or(1);
-            for _ in 0..span {
-                row_cells.push(cell_text.clone());
-            }
-        }
-        cells.push(row_cells);
-    }
-    for row_idx in 1..docx_table.rows.len() {
-        let mut col = 0usize;
-        for cell in &docx_table.rows[row_idx].cells {
-            let span = cell.properties.as_ref().and_then(|p| p.grid_span).unwrap_or(1) as usize;
-            let is_vmerge_continue = cell
-                .properties
-                .as_ref()
-                .is_some_and(|p| matches!(p.v_merge, Some(crate::extraction::docx::table::VerticalMerge::Continue)));
-            if is_vmerge_continue {
-                for c in col..col + span {
-                    if c < cells[row_idx].len() && c < cells[row_idx - 1].len() {
-                        cells[row_idx][c] = cells[row_idx - 1][c].clone();
-                    }
-                }
-            }
-            col += span;
-        }
-    }
+fn convert_docx_table_to_table(
+    doc: &crate::extraction::docx::parser::Document,
+    docx_table: &crate::extraction::docx::parser::Table,
+    page_number: u32,
+) -> Table {
+    // Same grid as the element builder's Table arm above, and the same reason: a
+    // gridSpan/vMerge cell must appear once, not cloned per covered column/row
+    // (xberg-io/xberg#1549). ~keep
+    let cells = docx_table.to_cell_grid(crate::extraction::docx::parser::Paragraph::runs_to_markdown);
 
     let markdown = cells_to_markdown(&cells);
 
@@ -846,6 +835,7 @@ fn convert_docx_table_to_table(docx_table: &crate::extraction::docx::parser::Tab
         markdown,
         page_number,
         bounding_box: None,
+        cell_styles: resolve_table_cell_styles(doc, docx_table),
         ..Default::default()
     }
 }
@@ -861,7 +851,7 @@ impl InternalDocumentExtractor for DocxExtractor {
     ) -> Result<InternalDocument> {
         tracing::debug!("extract_docx: starting");
 
-        let output_format = if config.images.as_ref().is_some_and(|i| i.extract_images) {
+        let output_format = if config.images.as_ref().map(|i| i.extract_images).unwrap_or(true) {
             crate::core::config::OutputFormat::Markdown
         } else {
             config.output_format.clone()
@@ -871,7 +861,7 @@ impl InternalDocumentExtractor for DocxExtractor {
         let budget = SecurityBudget::from_config(config);
         let limits = config.security_limits.clone().unwrap_or_default();
         let content_owned: Arc<[u8]> = Arc::from(content);
-        let (text, tables, page_boundaries, drawings, image_rels, mut internal_doc) = {
+        let (text, tables, page_boundaries, drawings, drawing_page_nums, image_rels, mut internal_doc) = {
             #[cfg(feature = "tokio-runtime")]
             if crate::core::batch_mode::is_batch_mode() {
                 if config.cancel_token.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
@@ -1158,37 +1148,33 @@ impl InternalDocumentExtractor for DocxExtractor {
                 (Bytes::new(), format, None, None)
             };
 
-            let page_number = {
-                let placeholder = format!("![](image_{})", idx);
-                let placeholder_with_desc = description.as_ref().map(|d| format!("![{}](image_{})", d, idx));
+            // A drawing with no relationship is a shape (text box, rule, rectangle), not an
+            // image: it can never yield bytes, and reporting it as an image with an empty
+            // `data` buffer and a placeholder `format` misleads every consumer. `doc.images`
+            // therefore contains exactly the drawings with a relationship, in order — the
+            // same rule `build_internal_document` uses to assign each `ElementKind::Image`
+            // its index, so the two can never disagree. ~keep
+            if drawing.image_ref.is_none() {
+                continue;
+            }
 
-                let byte_pos = text
-                    .find(&placeholder)
-                    .or_else(|| placeholder_with_desc.as_deref().and_then(|p| text.find(p)));
-
-                if let Some(pos) = byte_pos {
-                    if let Some(ref ps) = page_structure
-                        && let Some(ref boundaries) = ps.boundaries
-                    {
-                        boundaries
-                            .iter()
-                            .find(|b| pos >= b.byte_start && pos < b.byte_end)
-                            .map(|b| b.page_number)
-                    } else {
-                        Some(1)
-                    }
-                } else {
-                    Some(1)
-                }
-            };
+            // Taken from the parsed element list, not by searching rendered markdown for a
+            // placeholder: `to_markdown` renders every drawing to the same `![alt](image)`
+            // target, so the per-image key this used to look for never existed and every image
+            // fell through to page 1 (GH#1546). The element walk is also independent of
+            // `inject_placeholders`, which suppresses those placeholders entirely. ~keep
+            let page_number = Some(drawing_page_nums.get(idx).copied().unwrap_or(1) as u32);
 
             let (image_kind, kind_confidence) =
                 crate::extraction::image_kind::classify(&data, format.as_ref(), width, height, None, None, false);
 
+            // Sequential over emitted images only: skipping shape-only drawings above must not
+            // leave gaps, and `page_contents[].image_indices` is built by position.
+            let image_index = extracted_images.len() as u32;
             extracted_images.push(ExtractedImage {
                 data,
                 format,
-                image_index: idx as u32,
+                image_index,
                 page_number,
                 width,
                 height,
@@ -1261,6 +1247,7 @@ impl InternalDocumentExtractor for DocxExtractor {
                         speaker_notes: None,
                         section_name: None,
                         sheet_name: None,
+                        ocr_confidence: None,
                     });
                 }
                 Some(pages)
@@ -1277,6 +1264,7 @@ impl InternalDocumentExtractor for DocxExtractor {
                     speaker_notes: None,
                     section_name: None,
                     sheet_name: None,
+                    ocr_confidence: None,
                 }])
             }
         };
@@ -1350,6 +1338,7 @@ impl InternalDocumentExtractor for DocxExtractor {
             .await;
             if !children.is_empty() {
                 internal_doc.children = Some(children);
+                crate::extraction::ooxml_embedded::append_embedded_object_text(&mut internal_doc);
             }
             internal_doc.processing_warnings.extend(embed_warnings);
         }
@@ -1448,7 +1437,8 @@ mod tests {
 
         table.rows.push(data_row);
 
-        let result = convert_docx_table_to_table(&table, 1);
+        let doc = crate::extraction::docx::parser::Document::default();
+        let result = convert_docx_table_to_table(&doc, &table, 1);
 
         assert_eq!(result.page_number, 1);
         assert_eq!(result.cells.len(), 2);
@@ -1456,6 +1446,59 @@ mod tests {
         assert_eq!(result.cells[1], vec!["Alice", "30"]);
         assert!(result.markdown.contains("| Name | Age |"));
         assert!(result.markdown.contains("| Alice | 30 |"));
+    }
+
+    /// GH#1587: a `Heading2` paragraph in a table cell reached consumers as anonymous cell
+    /// text. The cell text must stay bare -- prefixing it with `##` would put a markdown
+    /// heading inside a table cell -- so the style travels beside it in `cell_styles`. ~keep
+    #[test]
+    fn should_report_a_heading_styled_table_cell_in_cell_styles() {
+        use crate::extraction::docx::parser::{Document, Paragraph, Run, Table as DocxTable, TableCell, TableRow};
+
+        let mut banner_row = TableRow::default();
+        let mut banner_cell = TableCell::default();
+        let mut banner_para = Paragraph::new();
+        banner_para.add_run(Run::new("Cell Section".to_string()));
+        banner_para.style = Some("Heading2".to_string());
+        banner_cell.paragraphs.push(banner_para);
+        banner_row.cells.push(banner_cell);
+
+        let mut plain_row = TableRow::default();
+        let mut plain_cell = TableCell::default();
+        let mut plain_para = Paragraph::new();
+        plain_para.add_run(Run::new("left".to_string()));
+        plain_cell.paragraphs.push(plain_para);
+        plain_row.cells.push(plain_cell);
+
+        let mut table = DocxTable::new();
+        table.rows.push(banner_row);
+        table.rows.push(plain_row);
+
+        let doc = Document::default();
+        let result = convert_docx_table_to_table(&doc, &table, 1);
+
+        assert_eq!(
+            result.cells[0][0], "Cell Section",
+            "cell text must stay bare, with no heading markers"
+        );
+        assert_eq!(
+            result.cell_styles.len(),
+            1,
+            "only the styled cell should produce an entry"
+        );
+        let style = &result.cell_styles[0];
+        assert_eq!((style.row, style.col), (0, 0));
+        assert_eq!(
+            style.heading_level,
+            Some(2),
+            "Heading2 must resolve to outline level 2 even with no StyleCatalog"
+        );
+
+        let unstyled = convert_docx_table_to_table(&doc, &DocxTable::new(), 1);
+        assert!(
+            unstyled.cell_styles.is_empty(),
+            "a table with no styled cells must not gain entries"
+        );
     }
 
     /// Helper: build a minimal DOCX ZIP in memory with given document.xml content.
@@ -2481,6 +2524,65 @@ mod tests {
         );
         assert_eq!(result.pages.as_ref().map(Vec::len), Some(3));
         assert_eq!(result.metadata.pages.as_ref().map(|pages| pages.total_count), Some(3));
+    }
+
+    /// GH#1592: a table row that straddles a page boundary gets Word's
+    /// `lastRenderedPageBreak` hint written into *every* cell of that row — one
+    /// physical break, one hint per cell. Three such rows must report four pages
+    /// end-to-end (`metadata.pages.total_count` and the highest element `page_number`),
+    /// exactly as three rows with the hint in only their first cell would (the shape
+    /// covered by `should_attribute_docx_elements_to_pages_and_preserve_break_order`'s
+    /// sibling tests in `extraction::docx::parser`).
+    #[tokio::test]
+    async fn gh1592_table_row_break_duplicated_into_every_cell_reports_correct_page_count() {
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    <w:p><w:r><w:t>before</w:t></w:r></w:p>
+    <w:tbl>
+      <w:tblPr></w:tblPr>
+      <w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+      <w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r0c0</w:t></w:r></w:p>
+        </w:tc><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r0c1</w:t></w:r></w:p>
+        </w:tc></w:tr>
+      <w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r1c0</w:t></w:r></w:p>
+        </w:tc><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r1c1</w:t></w:r></w:p>
+        </w:tc></w:tr>
+      <w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r2c0</w:t></w:r></w:p>
+        </w:tc><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+          <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r2c1</w:t></w:r></w:p>
+        </w:tc></w:tr>
+    </w:tbl>
+    <w:p><w:r><w:t>after</w:t></w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+        let data = build_test_docx(document_xml);
+        let extractor = DocxExtractor::new();
+        let result = extractor
+            .extract_content(
+                &data,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                &ExtractionConfig::default(),
+            )
+            .await
+            .unwrap();
+        let result =
+            crate::extraction::derive::derive_extraction_result(result, true, crate::core::config::OutputFormat::Plain);
+        let elements = crate::extraction::transform::transform_extraction_result_to_elements(&result);
+
+        assert_eq!(
+            result.metadata.pages.as_ref().map(|pages| pages.total_count),
+            Some(4),
+            "three straddling rows must report four pages, not one collapsed page nor six inflated ones"
+        );
+        let max_page_number = elements.iter().filter_map(|element| element.metadata.page_number).max();
+        assert_eq!(max_page_number, Some(4));
     }
 
     #[tokio::test]
@@ -4197,6 +4299,209 @@ mod tests {
             internal_doc.images[0].data.as_ref(),
             payload.as_bytes(),
             "an honestly-declared media member must be read back in full"
+        );
+    }
+
+    /// REV-C6 regression for GH#1662: an OCR-only config (no `extract_images`, no
+    /// captioning, no QR codes) must still read the real embedded-image bytes out of the
+    /// container, not an empty buffer. Before the fix, `needs_image_data` did not count
+    /// embedded-image OCR, so the `else` arm attached `Bytes::new()` with a format guessed
+    /// from the file extension, and OCR then ran on zero bytes and reported "Could not
+    /// determine image format".
+    #[tokio::test]
+    async fn test_docx_ocr_only_config_reads_real_embedded_image_bytes() {
+        let payload = "PNGPAYLOAD".repeat(64);
+        let data = build_docx_with_media(&payload);
+
+        let config = ExtractionConfig {
+            ocr: Some(crate::core::config::OcrConfig::default()),
+            ..Default::default()
+        };
+
+        let extractor = DocxExtractor::new();
+        let internal_doc = extractor
+            .extract_content(
+                &data,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                &config,
+            )
+            .await
+            .expect("an ordinary media member must extract");
+
+        assert_eq!(internal_doc.images.len(), 1, "the single drawing must yield one image");
+        assert_eq!(
+            internal_doc.images[0].data.as_ref(),
+            payload.as_bytes(),
+            "an OCR-only config must still read the real embedded-image bytes, not an empty buffer"
+        );
+    }
+
+    /// Two drawings separated by two explicit page breaks, both referencing the same media part.
+    const PAGED_IMAGES_DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r>
+      <w:drawing><wp:inline>
+        <wp:extent cx="914400" cy="914400"/>
+        <wp:docPr id="1" name="Picture 1" descr="First"/>
+        <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+          <pic:pic><pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill></pic:pic>
+        </a:graphicData></a:graphic>
+      </wp:inline></w:drawing>
+    </w:r></w:p>
+    <w:p><w:r><w:br w:type="page"/></w:r></w:p>
+    <w:p><w:r><w:br w:type="page"/></w:r></w:p>
+    <w:p><w:r>
+      <w:drawing><wp:inline>
+        <wp:extent cx="914400" cy="914400"/>
+        <wp:docPr id="2" name="Picture 2" descr="Second"/>
+        <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+          <pic:pic><pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill></pic:pic>
+        </a:graphicData></a:graphic>
+      </wp:inline></w:drawing>
+    </w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+    /// GH#1546: every DOCX image reported `page_number == Some(1)`. The page was resolved by
+    /// searching the rendered text for `![](image_N)`, but `to_markdown` writes the same literal
+    /// `![alt](image)` target for every drawing, so that key never matched and each image fell
+    /// through to the page-1 default.
+    ///
+    /// Asserting the exact pair is deliberate: a check that the two page numbers merely *differ*
+    /// would also pass on `[2, 5]`, and one that they are "not all 1" would pass on `[1, 2]`.
+    ///
+    /// Neutralisation that must break this test: resolve `page_number` by searching `text` for a
+    /// per-image placeholder again instead of consulting `Document::drawing_page_numbers()`.
+    #[tokio::test]
+    async fn test_docx_image_page_numbers_follow_explicit_page_breaks() {
+        let data = build_test_docx_with_files(
+            PAGED_IMAGES_DOCUMENT_XML,
+            &[
+                ("word/_rels/document.xml.rels", FORGED_MEDIA_RELS_XML),
+                ("word/media/bomb.png", "PNGPAYLOAD"),
+            ],
+        );
+
+        let extractor = DocxExtractor::new();
+        let internal_doc = extractor
+            .extract_content(
+                &data,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                &image_extraction_config(),
+            )
+            .await
+            .expect("a two-image document must extract");
+        let result = crate::extraction::derive::derive_extraction_result(
+            internal_doc,
+            true,
+            crate::core::config::OutputFormat::Plain,
+        );
+
+        let images = result
+            .images
+            .as_ref()
+            .expect("image extraction is enabled, so images must be populated");
+        let page_numbers: Vec<Option<u32>> = images.iter().map(|image| image.page_number).collect();
+        assert_eq!(
+            page_numbers,
+            vec![Some(1), Some(3)],
+            "the first drawing sits on page 1 and the second after two page breaks on page 3, got {page_numbers:?}"
+        );
+    }
+
+    /// Regression: an `ElementKind::Image`'s `image_index` indexes `doc.images`, but it was
+    /// assigned the raw *drawing* index. A shape-only drawing (no `a:blip`) produces no image,
+    /// so once shapes were excluded from `doc.images` every later element pointed one slot too
+    /// far — renderers silently dropped the marker or pointed it at the wrong image. A
+    /// two-image document with a shape between the images must therefore number its image
+    /// elements `[0, 1]`, exactly matching the two entries in `doc.images`.
+    #[tokio::test]
+    async fn test_image_elements_index_doc_images_not_drawings() {
+        const DOCUMENT_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+            xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
+            xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+            xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"
+            xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape"
+            xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <w:body>
+    <w:p><w:r>
+      <w:drawing><wp:inline>
+        <wp:extent cx="914400" cy="914400"/>
+        <wp:docPr id="1" name="Picture 1" descr="First"/>
+        <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+          <pic:pic><pic:blipFill><a:blip r:embed="rId5"/></pic:blipFill></pic:pic>
+        </a:graphicData></a:graphic>
+      </wp:inline></w:drawing>
+    </w:r></w:p>
+    <w:p><w:r>
+      <w:drawing><wp:inline>
+        <wp:extent cx="914400" cy="457200"/>
+        <wp:docPr id="2" name="Rectangle 1"/>
+        <a:graphic><a:graphicData uri="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+          <wps:wsp><wps:cNvSpPr/></wps:wsp>
+        </a:graphicData></a:graphic>
+      </wp:inline></w:drawing>
+    </w:r></w:p>
+    <w:p><w:r>
+      <w:drawing><wp:inline>
+        <wp:extent cx="914400" cy="914400"/>
+        <wp:docPr id="3" name="Picture 2" descr="Second"/>
+        <a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+          <pic:pic><pic:blipFill><a:blip r:embed="rId6"/></pic:blipFill></pic:pic>
+        </a:graphicData></a:graphic>
+      </wp:inline></w:drawing>
+    </w:r></w:p>
+  </w:body>
+</w:document>"#;
+
+        const RELS_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/one.png"/>
+  <Relationship Id="rId6" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/two.png"/>
+</Relationships>"#;
+
+        let data = build_test_docx_with_files(
+            DOCUMENT_XML,
+            &[
+                ("word/_rels/document.xml.rels", RELS_XML),
+                ("word/media/one.png", "ONEPAYLOAD"),
+                ("word/media/two.png", "TWOPAYLOAD"),
+            ],
+        );
+
+        let extractor = DocxExtractor::new();
+        let internal_doc = extractor
+            .extract_content(
+                &data,
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                &image_extraction_config(),
+            )
+            .await
+            .expect("a two-image document with a shape between the images must extract");
+
+        assert_eq!(
+            internal_doc.images.len(),
+            2,
+            "the shape-only drawing must not be reported as an image"
+        );
+        let element_indices: Vec<u32> = internal_doc
+            .elements
+            .iter()
+            .filter_map(|element| match element.kind {
+                crate::types::internal::ElementKind::Image { image_index } => Some(image_index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            element_indices,
+            vec![0, 1],
+            "image elements must index the two-entry `doc.images`, not the three-drawing list"
         );
     }
 

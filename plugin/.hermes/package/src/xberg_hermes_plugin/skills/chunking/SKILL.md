@@ -1,14 +1,14 @@
+<!--
+AI-RULEZ :: GENERATED FILE — DO NOT EDIT
+Content-Hash: blake3:4a8b908e7ee7956641b9e34dc252cb460a924cb2d8c3d3d40a781b0e796a8fca
+Source-Hash: blake3:8436911387ca6e92e089da7c4165303e587d88cbff8b705ce66d7cd4eaaa5497
+Schema-Version: v1
+-->
+
 ---
 name: chunking
 description: Use when splitting extracted text into chunks for LLM context windows or RAG ingestion. Covers chunk size, overlap, markdown/yaml/semantic chunkers, tokenizer-based sizing, and the standalone `chunk` command.
 ---
-
-<!--
-AI-RULEZ :: GENERATED FILE — DO NOT EDIT
-Content-Hash: blake3:0b5cd4bec9d2a8f3452e07139ef56d6b87f9f7990714d15483a03435e751af59
-Source-Hash: blake3:a92a53795b15c1bfb0f4ee65d2ec8e7475ff291f9271b5bbf404957b82eb790a
-Schema-Version: v1
--->
 
 # Chunking
 

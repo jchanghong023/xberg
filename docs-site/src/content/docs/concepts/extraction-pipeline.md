@@ -85,8 +85,9 @@ extractor implementations, managed by the [plugin system](/concepts/plugin-syste
 
 If multiple extractors are registered for the same MIME type (for example, you registered a
 custom PDF extractor alongside the built-in one), the one with the higher `priority()` value
-is selected. All built-in extractors have a priority of 0, so any custom extractor with a
-priority above 0 takes precedence.
+is selected. Built-in extractors default to a priority of 50 (0-25 is reserved for
+fallback/low-quality extractors, 51-100 for premium or specialized ones), so a custom
+extractor needs a priority above 50 to take precedence over the built-in default.
 
 ```rust title="registry_lookup.rs"
 let registry = get_document_extractor_registry();
@@ -149,7 +150,7 @@ Xberg ships multiple OCR backends:
 
 | Backend       | Engine               | When to use it                                                                                                               |
 | ------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| **Tesseract** | Native Rust bindings | Default. Fast, solid accuracy for Latin scripts. Good general-purpose choice.                                                |
+| **Tesseract** | Native Rust bindings | Fast, solid accuracy for Latin scripts. Good general-purpose choice.                                                |
 | **PaddleOCR** | ONNX Runtime         | Best accuracy for Chinese, Japanese, Korean (CJK) scripts. Runs natively without Python.                                     |
 | **Sceptre**   | ORT or tract         | EasyOCR Gen2 CRAFT and CRNN pipeline with structured line geometry and confidence.                                          |
 | **VLM OCR**   | liter-llm providers  | Best for handwriting, poor scans, and complex layouts. Requires a vision-capable model.                                      |

@@ -21,6 +21,7 @@ Enable the `transcription` Cargo feature and set a `TranscriptionConfig` block i
 | `video/mp4`  | `.mp4`, `.mpg4`, `.mp4v`, `.m4v` | MP4 video (audio track only) |
 | `video/mpeg` | `.mpeg`, `.mpg`, `.mpe`, `.m1v`, `.m2v` | MPEG video (audio track only) |
 | `video/webm` | `.webm`        | WebM video (audio track only) |
+| `video/x-ms-wmv` | `.wmv`, `.asf` | Windows Media (audio track only). Decoded through Windows Media Foundation, so Windows builds need no extra tooling; on systems without the media codecs (Server SKUs, "N" editions) an `ffmpeg` on `PATH` — or one named by `XBERG_FFMPEG` — is used instead. `XBERG_ASF_DECODER=mf\|ffmpeg` pins one mechanism. |
 
 ## Model sizes
 

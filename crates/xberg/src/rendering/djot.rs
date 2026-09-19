@@ -17,7 +17,22 @@ pub(crate) fn render_djot(doc: &InternalDocument) -> String {
     let mut state = RenderState::default();
     let mut out = String::with_capacity(doc.elements.len() * 80);
 
+    // Same duplicate suppression as the markdown/plain renderers: a body
+    // paragraph whose text reproduces an image's recognized text is the
+    // inlined OCR copy, not document text, and must not print beside the
+    // image's own OCR block. `respect_ocr_flags = false` matches this
+    // renderer's own printing: the OCR block is gated per-element only, so
+    // the dedup must run regardless of the doc-level flags.
+    let repeated_ocr = super::ocr_duplicate_indices(
+        &super::plain::body_paragraph_texts(doc),
+        &super::image_ocr_contents(doc, false),
+    );
+
     for (i, elem) in doc.elements.iter().enumerate() {
+        if repeated_ocr[i] {
+            continue;
+        }
+
         if !is_body_element(elem) {
             continue;
         }
@@ -123,9 +138,17 @@ pub(crate) fn render_djot(doc: &InternalDocument) -> String {
             }
             ElementKind::Image { image_index } => {
                 let image = doc.images.get(image_index as usize);
-                let desc = image
-                    .and_then(|img| img.description.as_deref())
-                    .unwrap_or(elem.text.as_str());
+                // Same alt policy as the comrak writers (`comrak_bridge`): a path-like
+                // `@descr` Office bakes into the image is dropped rather than leaking host
+                // paths. The element's own text is the caption fallback and goes through the
+                // same sanitizer — the pptx promotion path mirrors the unsanitized
+                // description into it, so an unsanitized fallback would keep leaking.
+                let desc = crate::extraction::markdown_utils::sanitize_image_alt_text(
+                    image.and_then(|img| img.description.clone()),
+                )
+                .or_else(|| crate::extraction::markdown_utils::sanitize_image_alt_text(Some(elem.text.clone())))
+                .map(|alt| escape_image_alt(&alt))
+                .unwrap_or_default();
 
                 if image.is_none() && desc.is_empty() {
                     continue;
@@ -140,7 +163,11 @@ pub(crate) fn render_djot(doc: &InternalDocument) -> String {
                         }
                     })
                     .unwrap_or_default();
-                let block = format!("![{}]({})\n\n", desc, url);
+                // Djot image markers share the `![alt](url)` shape with
+                // CommonMark, so the same destination sanitization applies: a
+                // space or an unbalanced paren in a source path would break the
+                // marker.
+                let block = format!("![{}]({})\n\n", desc, super::comrak_bridge::sanitize_marker_url(&url));
                 push_with_bq(&mut out, &block, bq_depth);
 
                 if elem.should_render_image_ocr()
@@ -297,6 +324,26 @@ pub(crate) fn render_djot(doc: &InternalDocument) -> String {
     }
 
     finalize_output(out)
+}
+
+/// Escape the characters that would end an alt text's `![…]` bracket early: a `]` closes
+/// the alt, a `[` opens a nested one, and a `\` starts an escape sequence. Backslash
+/// escaping is the minimal CommonMark contract; the comrak writers get it from comrak's
+/// own text nodes, while this line is assembled by hand. Control characters are dropped
+/// with the same policy as the comrak marker alt — an embedded newline in a caption
+/// would otherwise split the marker across lines.
+fn escape_image_alt(alt: &str) -> String {
+    let mut escaped = String::with_capacity(alt.len());
+    for character in alt.chars() {
+        if character.is_control() {
+            continue;
+        }
+        if matches!(character, '[' | ']' | '\\') {
+            escaped.push('\\');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 /// Render the document-level PDF annotations (issue #63) as a Djot section:

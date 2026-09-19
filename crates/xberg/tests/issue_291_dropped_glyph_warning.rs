@@ -18,11 +18,12 @@ use xberg::pdf::render::{
 /// resolved object to be a dictionary; here it fails with `Error::ParseError
 /// { reason: "Font object is not a dictionary" }`.
 ///
-/// Per issue #1364, that failure does not abort the page: `load_resources`
-/// logs it via `tracing::warn!("Failed to parse font '{}': {}. Text using this
-/// font may render incorrectly.", ...)` and continues, so every glyph the
-/// content stream later paints with `/F1` is dropped (the renderer has no
-/// font to shape it with) while the page still renders `Ok`. Unlike a
+/// Per issue #1364, that failure does not abort the page: `load_resources` logs it via
+/// `tracing::warn!("rendering text with fallback font data")` -- a sanitized static
+/// message, with the actual diagnosis carried in structured tracing fields rather than
+/// the message -- and continues, so every glyph the content stream later paints with
+/// `/F1` is dropped (the renderer has no font to shape it with) while the page still
+/// renders `Ok`. Unlike a
 /// missing font *name* (which `xberg_native_pdf` best-effort substitutes via
 /// `fontdb` system-font matching and may or may not warn about depending on
 /// which fonts happen to be installed), a structurally invalid font
@@ -215,8 +216,9 @@ fn test_dropped_glyphs_from_malformed_font_produce_one_deduped_warning() {
         warning.message
     );
     assert!(
-        warning.message.contains("Failed to parse font"),
-        "warning must carry xberg_native_pdf's own diagnosis of the cause, got: {}",
+        warning.message.contains("rendering text with fallback font data"),
+        "warning must carry xberg_native_pdf's sanitized static message; the actual \
+         diagnosis now lives in structured tracing fields, not the message, got: {}",
         warning.message
     );
 
