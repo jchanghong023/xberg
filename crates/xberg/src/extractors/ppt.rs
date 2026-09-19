@@ -121,8 +121,7 @@ impl PptExtractor {
                 &object.data,
                 &path,
                 max_object_bytes as u64,
-            )
-            else {
+            ) else {
                 warnings.push(crate::types::ProcessingWarning {
                     source: Cow::Borrowed(SOURCE),
                     message: Cow::Owned(format!(

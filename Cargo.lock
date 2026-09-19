@@ -12135,7 +12135,7 @@ dependencies = [
 
 [[package]]
 name = "xberg-windows-metafile"
-version = "1.2.2"
+version = "1.2.5"
 dependencies = [
  "windows-sys 0.61.2",
 ]
