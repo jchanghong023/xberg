@@ -245,9 +245,15 @@ opt-level = 2
 
 [profile.dev]
 opt-level = 0
-# Line tables + some debug info: cuts Windows PDB/link time and target size
-# vs full `debug = true`; backtraces stay usable. `profiling` keeps full debug.
-debug = 1
+# 用户强制规则「dev 构建减少 debug/PDB，优先 debug = 0」：本地开发/验收（fulltest.py）
+# 用的就是本 profile，PDB 与链接时间是主要开销。要栈符号时按次覆盖：
+#   CARGO_PROFILE_DEV_DEBUG=1 cargo build -p xberg-cli --no-default-features --features <fork 集>
+debug = 0
+
+# `test` 继承 `dev`，这里显式钉死 0（防 dev 哪天加回符号时静默复活 88 GB 产物）：
+# crates/xberg 的 ~200 个集成测试各自静态链接整个 xberg lib，每份 PDB ≈410 MB。
+[profile.test]
+debug = 0
 
 [profile.profiling]
 inherits = "release"

@@ -45,7 +45,7 @@
 
 - **fastcheck ＝ `python testgate.py fastcheck`**：agent 可自主执行，无需授权，60 秒墙钟硬超时。内容：`fulltest.py`/`slowtest.py`/`testgate.py` 语法自检 → `fulltest.py --selftest`（判定器自测）→ `package-cli-windows.ps1`/`offline-smoke.ps1`/`verify-windows-dll-closure.ps1` 的 PS1 解析 → 三 crate 的 `cargo fmt --check`（2026-09-19 经用户授权执行 `cargo fmt -p xberg` 清掉 155 文件量级既有漂移后，xberg crate 纳入 fastcheck）。fastcheck 通过≠完整验证。
 - **fulltest 门 ＝ `python testgate.py fulltest`**：当前平台（Windows）完整本地验证，**仅限用户对本次运行明确授权**。阶段独立汇报、任一 FAIL 即门失败：三 crate `cargo fmt --check` → `cargo build -p xberg-cli`（fork feature 集）→ `python fulltest.py --keep-going`（依赖 build 成功）→ `test-documents-corpus` 存在性预检（缺语料给出 fetch 命令，见「测试要求」）→ `cargo test`（`-p xberg --features formats-no-heic,analysis,ocr,paddle-ocr,transcription,layout-detection,api`、`-p xberg-cli --no-default-features --features <fork 集>`、`-p xberg-windows-metafile`；test 阶段以 `CARGO_BUILD_JOBS=8` 限编译并行度，防 jobs=28 耗尽页面文件 os error 1455，覆盖语义不变）→ `cargo clippy`（同三目标，`-D warnings`）。2026-09-19 首次授权运行即修到全绿（此前 fmt-xberg 155 文件漂移、clippy 既有告警等已一并清理，见当次提交）。
-- **slowtest 门 ＝ `python testgate.py slowtest`**：最高级验证，**仅限用户对本次运行明确授权**。先跑完整 fulltest 门（失败即止，后续阶段记 SKIPPED_PRIOR_FAIL，不在已知失败状态上打包/发布），再跑 `python slowtest.py`（完整打包 + 打包版 fulltest.py）。远程阶段：`build-windows-cli.yml` 会创建带时间戳 tag 的**公开 GitHub Release**（真实发布副作用），因此**只有用户明确授权发布目标并显式加 `--with-release-ci`** 才触发并轮询到最终结论（要求工作区干净且 HEAD 已推到 origin）；默认该阶段记 SKIPPED_NOT_AUTHORIZED，此时只能宣称「本地部分通过」，不得说完整 slowtest 已通过。WSL/跨平台：SKIPPED_NOT_APPLICABLE（本 fork 仅支持 Windows，见「仓库性质」）。该 workflow 只调打包脚本、不回调 testgate，无远程递归。
+- **slowtest 门 ＝ `python testgate.py slowtest`**：最高级验证，**仅限用户对本次运行明确授权**。先跑完整 fulltest 门（失败即止，后续阶段记 SKIPPED_PRIOR_FAIL，不在已知失败状态上打包/发布），再跑 `python slowtest.py`（完整打包 + 打包版 fulltest.py；解压目录固定在仓库 `target/slowtest-tmp/`，**成功即删**并只保留 `target/slowtest-report-<时间戳>.md|.json` 副本，失败或加 `--keep-tmp` 才保留供检查——旧行为是每轮在系统 `%TEMP%` 留 0.6~0.9 GB 且永不清）。远程阶段：`build-windows-cli.yml` 会创建带时间戳 tag 的**公开 GitHub Release**（真实发布副作用），因此**只有用户明确授权发布目标并显式加 `--with-release-ci`** 才触发并轮询到最终结论（要求工作区干净且 HEAD 已推到 origin）；默认该阶段记 SKIPPED_NOT_AUTHORIZED，此时只能宣称「本地部分通过」，不得说完整 slowtest 已通过。WSL/跨平台：SKIPPED_NOT_APPLICABLE（本 fork 仅支持 Windows，见「仓库性质」）。该 workflow 只调打包脚本、不回调 testgate，无远程递归。
 - **称呼区分（消歧规则）**：用户点名「fulltest.py / slowtest.py」（带 .py）＝只跑那两个脚本本身，既有语义与验收地位不变；点名「fulltest / slowtest 门」「完整本地验证」「testgate xxx」＝跑对应的门。口语「跑 fulltest」按既有习惯默认指 fulltest.py 脚本。
 
 ## fulltest.py 的作用（本仓库的验收标准）
@@ -100,6 +100,24 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 
 ## 编译 / 打包 / 测试（仅在用户明确要求时执行）
 
+### Rust 构建优化规则（用户强制，2026-09-20）
+
+以下 9 条为用户定下的构建纪律，改 profile / 清产物 / 调 features 前先对照；每条都指向本仓库的具体落点。
+
+1. **必须用 incremental 编译，禁止无理由 `cargo clean`**：`incremental = true` 在 `.cargo/config.toml`（alef 生成，DO NOT EDIT）。要清东西必须能说出「它属于哪个废弃 profile/feature/target」。
+2. **优先保留当前有效 target 缓存，避免冷编译**：删除前先确认产物是否还是当前 profile/feature 的（`target/debug/deps` 里的 rlib/rmeta、`target/debug/build`、`target/debug/incremental` 是热缓存，默认不动）。
+3. **dev 构建减少 debug/PDB，优先 `debug = 0`**：`Cargo.toml` 的 `[profile.dev] debug = 0`，`[profile.test] debug = 0`（test 显式钉死，防继承回潮）。要符号按次开：`CARGO_PROFILE_DEV_DEBUG=1` / `CARGO_PROFILE_TEST_DEBUG=1`。
+4. **保持 toolchain / features / RUSTFLAGS / target / profile 稳定**：fork feature 集固定为上表那 8 个（改能力必须同步本文件与打包脚本 `$Features`）；不要临时加 `RUSTFLAGS` 或切换 `--target` 三元组（会另生成一整套 `target/<triple>/` 缓存）。
+5. **Windows 链接优先 LLD**：`.cargo/config.toml [target.x86_64-pc-windows-msvc] linker = "rust-lld"`（本机 + 交叉目标都走这份配置；回退就删该段）。
+6. **开发阶段禁止 LTO 等昂贵 release 优化**：日常验证/编译一律 dev profile，不要用 `--release` 跑 fulltest。
+7. **LTO / strip / codegen-units / opt-level=3 只用于最终打包**：只在 `[profile.release]`（当前 `lto = false`、`codegen-units = 256`、`opt-level = 3`、`strip = true`），服务对象是 `package-cli-windows.ps1` 与 slowtest。
+8. **磁盘不足按下述优先级删（先废弃、后缓存）**：① 废弃 profile 的产物——`target/debug/**/*.pdb`（PDB 是纯调试副产物，删了不影响增量构建正确性；注意本仓库 dev 与 test 共用 `target/debug/`，`cargo clean --profile test` 实测等于 `cargo clean`，禁用）；② 不再使用的 `target/<triple>/`（旧 feature 集或旧三元组）；③ 旧 release 产物；**最后**才考虑 dev 热缓存。`cargo clean` 无参数＝清空一切，视为最后手段。
+9. **定位慢点用 `cargo build --timings`**（产物在 `target/cargo-timings/`）：先看慢 crate / `build.rs` / proc-macro / 最终链接，再决定是否调 `-Jobs`、拆 target 或换 profile，不要凭感觉加并行度。
+
+配套实测（2026-09-20，见「已知坑」第 1 条）：`debug = 1` 下一次冷 `cargo test` 写 88 GB `.pdb` + 38 GB 测试 exe；`debug = 0` 后同一批 ~200 个测试目标仍会写 ~27 GB PDB（MSVC 链接器即便 `debuginfo = 0` 也生成公共符号表，无法归零），单份从 ~410 MB 降到 ~125–150 MB，链接时间同步下降。
+
+**门禁实测（2026-09-20，用户授权连跑三级）**：`fastcheck` PASS 4.2s → `fulltest` 门 PASS 2789s（12 阶段全绿：build-cli 74s、e2e 258s、test-xberg 2226s、test-xberg-cli 159s、clippy ×3 共 67s）→ `slowtest` 门 PASS（`slowtest.py` 615s：打包 zip 361.7 MiB + PE 闭包/正负 smoke 全过 + 打包版 fulltest 验收 FAIL=0 WARN=7、与基线比 新增 2/已修复 0/恶化 0；远程发布阶段未授权记 SKIPPED_NOT_AUTHORIZED，WSL 记 SKIPPED_NOT_APPLICABLE）。滑动窗口内的一次失败值得记住：首轮 `fulltest` 门在 `build-cli` 阶段报 `failed to write ...librustfft-*.rmeta: 另一个程序正在使用此文件 (os error 32)`，同一条命令重跑即过——当时无第二个 cargo、无孤立 rustc，本机实时防护是 腾讯电脑管家（Defender 服务已停），建议把 `E:\xberg\target` 加入其排除项以消除这类随机文件锁。整套跑完 `target/debug` 从 58.9 GB 涨回 157.5 GB（含新旧两代产物），E: 可用空间 179 → 76 GB。
+
 编译和打包是两条独立路径。**跑 fulltest.py 只需要编译，不需要打包**——编译出 exe 直接 `python fulltest.py` 就能测。**唯一例外**：`cargo check -p xberg-cli`（fork feature 集，见「硬性约束」）属类型检查，agent 改完 Rust 代码可主动跑，不算"费时操作"。
 
 ### 编译（供开发与 fulltest.py 使用）
@@ -142,7 +160,7 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 ### 测试入口与发布流程
 
 - **默认快速验证**：`python fulltest.py`——用本地编译的二进制快速验证（只需编译，无需打包），质量报告打印到终端并写入 `<输出目录>/_quality-report.md`。
-- **发布前慢速验证**：`python slowtest.py`——① 跑完整打包生成 zip；② 解压到临时目录，对打包版 CLI 全量跑端到端文档转换 + 音频/视频转写测试（`--keep-going`）；③ 输出转码质量报告。**是否发布版本，以该报告为准。**
+- **发布前慢速验证**：`python slowtest.py`——① 跑完整打包生成 zip；② 解压到 `target/slowtest-tmp/`，对打包版 CLI 全量跑端到端文档转换 + 音频/视频转写测试（`--keep-going`）；③ 输出转码质量报告（报告副本 `target/slowtest-report-<时间戳>.md|.json`），成功后解压目录自动删除（`--keep-tmp` 保留）。**是否发布版本，以该报告为准。**
 
 ### 其他验证（同样仅在明确要求时执行）
 
@@ -151,6 +169,10 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 
 ## 已知坑
 
+- **测试/构建产物体量（2026-09-20 实测，决定磁盘与速度）**：`crates/xberg` 有 ~200 个集成测试目标，每个都静态链接整个 xberg lib。
+  - `Cargo.toml` 的 `[profile.dev] debug = 0` 与 `[profile.test] debug = 0` 就是为此：`debug = 1` 时每个测试二进制各写一份 ~410 MB PDB，实测一次冷 `cargo test` 在 `target/debug/deps` 留下 **88 GB `.pdb`（198 个文件 >300 MB）+ 38 GB 测试 exe**，`E:` 总共 240 GB，直接顶到只剩几十 GB；改 `debug = 0` 后（2026-09-20 复测）同一批 ~200 个测试目标仍写 **533 个 PDB / ~27 GB**（单份 ~125–150 MB）——**MSVC 链接器即使 `debuginfo = 0` 也会写公共符号表，PDB 压不到 0**，剩下的是行号/类型信息的减少。要栈符号时按次开：`CARGO_PROFILE_TEST_DEBUG=1 cargo test -p xberg --test <name>`、`CARGO_PROFILE_DEV_DEBUG=1 cargo build ...`。
+  - profile 一变，cargo 的指纹目录也变，**旧 PDB 不会被自动回收**（它们只增不减）。清理按「Rust 构建优化规则」第 8 条的优先级：先删 `target/debug/**/*.pdb`（纯调试副产物，删掉不影响增量构建与测试正确性），最后才动 dev 热缓存。**不要用 `cargo clean --profile test`**：本仓库 dev 与 test 共用 `target/debug/`，2026-09-20 实测它的 dry-run 报「89361 files, 137.9 GiB」——等于 `cargo clean`，会把 dev 热缓存一并清掉（违反规则 1/2）。
+  - `target/x86_64-pc-windows-msvc/`（release 产物）与 `target/package-models-x86_64-pc-windows-msvc/`（打包模型缓存，~200 MiB）属于第 8 条的②③档：删了下次打包要全量重下模型 + 全量 release 重编（30 分钟量级，且卡在联网阶段，2026-09-20 就撞上过：`target/package-cpu-*.csv` 只剩 ORT 一行标记就中断）。真要删，先确认缓存在别处有备份或接受这次冷编。
 - CLI `--format json` 模式**不落盘图片**（只有 text/toon 模式调用 `write_extracted_images`）；JSON 里图片是内联字节数组（`result.images[].data`），需要自己解码写出。
 - `--config-json` 只做顶层字段替换后整体反序列化 + 校验（`crates/xberg/src/core/config/merge.rs`），feature 未编译的字段会直接报错。
 - heic 默认关闭（Windows 无 libheif 构建路径），本 fork **不要**开 `heic`；pdfium 后端同样不要（`pdf-pdfium-surface` 仅编 wrapper，还要另供 libpdfium）。
