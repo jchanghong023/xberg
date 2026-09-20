@@ -2493,7 +2493,14 @@ impl PdfExtractor {
                             // heuristic asked for OCR. ~keep
                             let information_loss =
                                 ocr::destructive_ocr_information_loss(&native_text, &ocr_text, &thresholds);
-                            if !native_text.trim().is_empty()
+                            // The provenance signal (issue #1667) is a fact about the *source*
+                            // font mapping, not a shape heuristic: the native text on those
+                            // pages is fabricated — structurally clean, semantically wrong — so
+                            // "the OCR pass would discard most of it" is the intended outcome,
+                            // not a reason to keep it. Only a shape-driven fallback may be
+                            // vetoed by the loss guard. ~keep
+                            if !decision.fabricated_provenance
+                                && !native_text.trim().is_empty()
                                 && let Some((native_alnum, ocr_alnum)) = information_loss
                             {
                                 tracing::warn!(
@@ -4940,6 +4947,7 @@ mod tests {
             fallback,
             failing_pages,
             whole_doc_failure,
+            fabricated_provenance: false,
         }
     }
 
@@ -7583,8 +7591,14 @@ mod tests {
         );
         let content = std::fs::read(&pdf_path).expect("failed to read embedded_images_tables.pdf");
 
+        // `output_format: Plain` is pinned in both configs on purpose: this test is about
+        // what `include_document_structure` changes on the *flat* Plain path, and this fork's
+        // library default is `Markdown` (fork.md), which already routes through the structured
+        // document for every PDF. Leaving the default in place would make both extractions
+        // take the structured path and the flag would appear to do nothing.
         let flat_config = crate::core::config::ExtractionConfig {
             include_document_structure: false,
+            output_format: OutputFormat::Plain,
             ..Default::default()
         };
         let flat_result = extractor
@@ -7595,6 +7609,7 @@ mod tests {
 
         let structured_config = crate::core::config::ExtractionConfig {
             include_document_structure: true,
+            output_format: OutputFormat::Plain,
             ..Default::default()
         };
         let structured_result = extractor

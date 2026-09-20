@@ -865,6 +865,7 @@ mod tests {
             fallback,
             failing_pages: Vec::new(),
             whole_doc_failure,
+            fabricated_provenance: false,
         }
     }
 
@@ -1158,6 +1159,7 @@ mod tests {
             fallback: true,
             failing_pages: vec![2],
             whole_doc_failure: false,
+            fabricated_provenance: false,
         };
 
         apply_fabricated_provenance_pages(&mut decision, &[1, 2], true, Some(3));

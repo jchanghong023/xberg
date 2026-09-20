@@ -67,6 +67,14 @@ pub struct OcrFallbackDecision {
     /// independently of any per-page analysis. When this is true the gate routes to
     /// `RunFallback` (full OCR) regardless of whether `failing_pages` is populated.
     pub whole_doc_failure: bool,
+    /// Set when `fallback` was forced by the font-mapping *provenance* signal
+    /// (`MappingProvenance::Fallback`, issue #1667) rather than by a text-shape heuristic.
+    ///
+    /// The native text on those pages is known to be a fabricated mapping — structurally
+    /// clean-looking, semantically wrong — so a caller must not let a "keeping the native
+    /// text loses nothing" guard (the destructive-OCR information-loss check) veto the OCR
+    /// replacement: the text being kept is exactly the garbage #1667 exists to drop.
+    pub fabricated_provenance: bool,
 }
 /// Which branch the OCR skip gate selects, given pre-rendered doc presence,
 /// text statistics, and the per-page fallback decision.
@@ -276,6 +284,7 @@ pub(super) fn evaluate_native_text_for_ocr_with_garbage_threshold(
             fallback: true,
             failing_pages: Vec::new(),
             whole_doc_failure: true,
+            fabricated_provenance: false,
         };
     }
 
@@ -333,6 +342,7 @@ pub(super) fn evaluate_native_text_for_ocr_with_garbage_threshold(
         fallback,
         failing_pages: Vec::new(),
         whole_doc_failure: fallback,
+        fabricated_provenance: false,
     }
 }
 /// Normalize structural Markdown markers out of OCR text **for scoring only**.
@@ -1115,6 +1125,7 @@ pub(crate) fn apply_fabricated_provenance_pages(
     }
 
     decision.fallback = true;
+    decision.fabricated_provenance = true;
 
     if !has_boundaries {
         // No boundaries to split mixed OCR by, so the whole document is the only
