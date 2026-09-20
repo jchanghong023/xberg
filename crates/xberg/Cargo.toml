@@ -539,7 +539,10 @@ late-interaction-presets = []
 # WASM-incompatible). Builds on the shared crate::onnx helper (onnx-runtime).
 late-interaction = ["late-interaction-presets", "onnx-runtime", "dep:ndarray", "dep:lru", "tokio-runtime"]
 stopwords = []
-quality = ["dep:unicode-normalization", "dep:chardetng", "stopwords"]
+# heuristics: the OCR-confidence fold quality_processor's evidence-floor cap shares with
+# ConfidenceSignals::ocr_aggregate (issue #1694). heuristics itself has zero deps, so this
+# costs nothing on WASM/Android.
+quality = ["dep:unicode-normalization", "dep:chardetng", "stopwords", "heuristics"]
 
 # Cloud-upstreamed infrastructure (pure-Rust; see gap-closing plan). Generic overridable
 # defaults only — no domain knowledge. `heuristics` text-layer detection is gated separately
@@ -1453,8 +1456,8 @@ xberg-gliner = { workspace = true, optional = true }
 # (xberg-io/xberg#1541). `xberg-libheif` gates every version-dependent call, including a
 # `#[cfg(not(feature = "v1_20"))]` fallback to `heif_image_get_plane_readonly`, so this only
 # gives up newer libheif APIs, not functionality. ~keep
-xberg-libheif = { path = "../xberg-libheif", version = "1.2.5", optional = true, default-features = false, features = ["v1_19"] }
-xberg-libwpd = { path = "../xberg-libwpd", version = "1.2.5", optional = true }
+xberg-libheif = { path = "../xberg-libheif", version = "1.2.6", optional = true, default-features = false, features = ["v1_19"] }
+xberg-libwpd = { path = "../xberg-libwpd", version = "1.2.6", optional = true }
 xberg-native-pdf = { workspace = true, optional = true }
 # No `version` on this path-dep: xberg-tesseract carries `links =
 # "xberg_tesseract"`, and a versioned path-dep makes the maturin sdist
@@ -1514,11 +1517,10 @@ tokenizers = { version = "0.23", default-features = false, features = ["fancy-re
 # why `candle-vlm-ocr` is safe in `full`/`windows-target`. GPU acceleration (cudarc / metal) is
 # strictly opt-in via candle-cuda/metal/mkl/accelerate and must be enabled with platform awareness.
 # CI uses `--features full` which keeps GPU accel off.
-xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.2.5", optional = true }
+xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.2.6", optional = true }
 # PaddleOCR via ONNX Runtime or tract (vendored from paddle-ocr-rs). The backend is selected
 # by the enabling feature (`paddle-ocr-ort` / `paddle-ocr-tract`), never by a default.
-xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.2.5", optional = true, default-features = false }
-
+xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.2.6", optional = true, default-features = false }
 # Desktop / server hosts (Linux + macOS, NOT Android): xberg's direct `ureq` client uses
 # ring-backed rustls plus `platform-verifier`, which trusts the OS certificate store
 # (rustls-native-certs on Linux, Security.framework on macOS) and honors SSL_CERT_FILE/
@@ -1556,13 +1558,13 @@ ureq = { version = "3.4", default-features = false, features = [
     "json",
 ], optional = true }
 # Candle-based VLM OCR backends - pure-Rust transformer inference, not on WASM yet.
-xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.2.5", optional = true }
+xberg-candle-ocr = { path = "../xberg-candle-ocr", version = "1.2.6", optional = true }
 # PaddleOCR via ONNX Runtime or tract (vendored from paddle-ocr-rs). The backend is selected
 # by the enabling feature (`paddle-ocr-ort` / `paddle-ocr-tract`), never by a default.
-xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.2.5", optional = true, default-features = false }
+xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.2.6", optional = true, default-features = false }
 # Windows GDI/GDI+ rasterization of EMF/WMF metafiles so OCR can run on Office vector
 # images (Visio OLE previews, legacy VML shapes). Windows-only: the crate is `#![cfg(windows)]`.
-xberg-windows-metafile = { path = "../xberg-windows-metafile", version = "1.2.5" }
+xberg-windows-metafile = { path = "../xberg-windows-metafile", version = "1.2.6" }
 # Media Foundation decodes the audio track of Windows Media (ASF/WMV) inputs, which
 # symphonia cannot demux. The high-level `windows` crate is already in the tree at this
 # version, so this adds an edge, not a second copy. See src/transcription/wmf.rs.
@@ -1616,7 +1618,7 @@ optional = true
 # the reported failure exactly as-is for anyone depending on the published crate.
 # See the wasm32 block below for the WASM-safe alternative.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies.model2vec-rs]
-version = "0.2"
+version = "0.3"
 default-features = false
 features = []
 optional = true
@@ -1659,7 +1661,7 @@ liter-llm = { workspace = true, optional = true, features = ["wasm-http"] }
 # `tokenizers/unstable_wasm`, which avoids the `esaxx_fast` C++ build entirely.
 # Model acquisition is `StaticEmbeddingEngine::from_bytes`-only on this target —
 # see `embeddings/static_engine.rs`.
-model2vec-rs = { version = "0.2", default-features = false, features = ["wasm"], optional = true }
+model2vec-rs = { version = "0.3", default-features = false, features = ["wasm"], optional = true }
 tree-sitter-language-pack = { workspace = true, default-features = false, features = ["serde"], optional = true }
 # On wasm32, swap xberg-tesseract from its native default ("static-linking" -> "build-tesseract")
 # to the WASI-SDK build path ("build-tesseract-wasm") and bundle eng.traineddata so OCR works

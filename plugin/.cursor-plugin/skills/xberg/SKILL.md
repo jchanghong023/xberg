@@ -1,10 +1,3 @@
-<!--
-AI-RULEZ :: GENERATED FILE — DO NOT EDIT
-Content-Hash: blake3:ac56d88712e315923b65b09781837ab5638bdc429fb543c365fe4968a617c1eb
-Source-Hash: blake3:8436911387ca6e92e089da7c4165303e587d88cbff8b705ce66d7cd4eaaa5497
-Schema-Version: v1
--->
-
 ---
 name: xberg
 description: >-
@@ -19,6 +12,13 @@ metadata:
   version: "0.1.0"
   repository: https://github.com/xberg-io/xberg
 ---
+
+<!--
+AI-RULEZ :: GENERATED FILE — DO NOT EDIT
+Content-Hash: blake3:a350cdaa08f8e82becd82ed51d10fc81771a4cf74c1b619e65b424101f0a612c
+Source-Hash: blake3:f79e237a18f1a82015a4afa2849bed273c868ba290ee6601a79c5946aee7a8e7
+Schema-Version: v1
+-->
 
 # Xberg Document Extraction
 
