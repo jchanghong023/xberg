@@ -10,7 +10,7 @@ use crate::types::annotations::PdfAnnotation;
 use crate::types::document_structure::ContentLayer;
 use crate::types::internal::{ElementKind, InternalDocument};
 
-use super::{image_ocr_contents, ocr_duplicate_indices};
+use super::{image_ocr_contents, inline_attributes_suffix, ocr_duplicate_indices};
 
 use super::common::{
     annotation_display_text, annotation_type_label, get_admonition_kind, get_admonition_title, parse_metadata_entries,
@@ -57,22 +57,11 @@ pub(crate) fn render_plain(doc: &InternalDocument) -> String {
                         out.push_str(&indent);
                     }
 
-                    if let (true, Some(attrs)) = (matches!(elem.kind, ElementKind::Heading { .. }), &elem.attributes) {
-                        out.push_str(&elem.text);
-                        let mut filtered_attrs: Vec<_> = attrs
-                            .iter()
-                            .filter(|(k, v)| !k.starts_with("xmlns") && !v.is_empty())
-                            .collect();
-                        filtered_attrs.sort_by_key(|(k, _)| k.as_str());
-                        let formatted_attrs: Vec<String> =
-                            filtered_attrs.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
-                        if !formatted_attrs.is_empty() {
-                            out.push_str(" (");
-                            out.push_str(&formatted_attrs.join(", "));
-                            out.push(')');
-                        }
-                    } else {
-                        out.push_str(&elem.text);
+                    out.push_str(&elem.text);
+                    if matches!(elem.kind, ElementKind::Heading { .. })
+                        && let Some(suffix) = elem.attributes.as_ref().and_then(inline_attributes_suffix)
+                    {
+                        out.push_str(&suffix);
                     }
 
                     if matches!(elem.kind, ElementKind::Heading { .. }) {

@@ -310,6 +310,21 @@ fn build_inlines<'a>(
     }
 }
 
+/// Append an element's attributes to a heading as inline text, matching the Plain
+/// renderer's ` (key: value, ...)` form (see `inline_attributes_suffix`).
+///
+/// XML/OPML extractors store attributes on the element rather than in its text, so
+/// without this the Markdown output drops data the source carried (#131's `_note`).
+fn append_attribute_suffix<'a>(
+    arena: &'a comrak::Arena<'a>,
+    heading: &'a AstNode<'a>,
+    attributes: Option<&ahash::AHashMap<String, String>>,
+) {
+    if let Some(suffix) = attributes.and_then(super::inline_attributes_suffix) {
+        heading.append(mk_text(arena, &suffix));
+    }
+}
+
 /// Create a comrak inline wrapper node for the given annotation kind and
 /// append it to `parent`.
 ///
@@ -867,6 +882,7 @@ pub(crate) fn build_comrak_ast<'a>(
                     }),
                 );
                 build_inlines(arena, heading, elem_text, elem_annotations);
+                append_attribute_suffix(arena, heading, elem_attributes);
                 parent.append(heading);
             }
 
@@ -880,6 +896,7 @@ pub(crate) fn build_comrak_ast<'a>(
                     }),
                 );
                 build_inlines(arena, heading, elem_text, elem_annotations);
+                append_attribute_suffix(arena, heading, elem_attributes);
                 parent.append(heading);
             }
 

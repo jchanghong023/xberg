@@ -268,8 +268,14 @@ fn corpus_fixture(relative_path: &str) -> Option<PathBuf> {
 
 /// Extract a corpus PDF from disk through the public API and return its text.
 async fn extract_corpus_text(path: &Path) -> String {
+    extract_corpus_text_with(path, &default_config_without_cache()).await
+}
+
+/// [`extract_corpus_text`] with an explicit config, for tests that must pin which
+/// pipeline path they measure.
+async fn extract_corpus_text_with(path: &Path, config: &ExtractionConfig) -> String {
     let input = ExtractInput::from_uri(path.to_string_lossy());
-    let result = extract(input, &default_config_without_cache())
+    let result = extract(input, config)
         .await
         .unwrap_or_else(|error| panic!("extraction of {} must succeed: {error}", path.display()));
     result
@@ -524,7 +530,18 @@ async fn real_rotated_arxiv_stamp_survives_the_repair_unchanged() {
     let Some(path) = corpus_fixture("test_documents/pdf/tatr.pdf") else {
         return;
     };
-    let text = normalize_whitespace(&extract_corpus_text(&path).await);
+    // Pinned to the flat-text path, which is the one the rotation repair governs. The
+    // structured (Markdown/Djot/HTML) path additionally runs the structure pipeline's
+    // arXiv-watermark pass (`mark_arxiv_noise`), which classifies a short standalone
+    // `arXiv:...` paragraph as page furniture and drops it — so on this fork's Markdown
+    // default (fork.md) the stamp is legitimately absent, and this damage detector would
+    // report a "lost" run that the repair never touched. The assertion below is
+    // unchanged; only the path it measures is pinned.
+    let config = ExtractionConfig {
+        output_format: xberg::core::config::OutputFormat::Plain,
+        ..default_config_without_cache()
+    };
+    let text = normalize_whitespace(&extract_corpus_text_with(&path, &config).await);
 
     assert_words_in_order(
         &text,

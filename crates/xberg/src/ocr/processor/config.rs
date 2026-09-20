@@ -98,6 +98,27 @@ fn hash_config_for_schema(config: &TesseractConfig, result_schema_version: u8) -
     // did in #687.
     hasher.update(&config.page_number.to_le_bytes());
 
+    // `security_limits` gates the decode itself: `load_image_for_ocr` refuses an image whose
+    // live bytes exceed `max_content_size`. Two calls with byte-identical images but different
+    // limits therefore do not have the same result — without this, whichever call ran first
+    // decided the outcome for the rest, and a limit that should have refused the decode was
+    // served a cached success instead. That is exactly how GH#1651's own regression tests went
+    // order-dependent (they share this cache inside one test process) and how a stale
+    // on-disk entry could keep a lowered limit from ever running. Serialized as a whole rather
+    // than field-by-field so a limit added to `SecurityLimits` later moves the key without a
+    // second edit here; the object holds only integers, so the encoding is deterministic. ~keep
+    match config.security_limits.as_ref() {
+        Some(limits) => {
+            hasher.update(&[1]);
+            if let Ok(json) = serde_json::to_vec(limits) {
+                hash_bytes(&mut hasher, &json);
+            }
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+
     let hash = hasher.finalize();
     hex::encode(&hash.as_bytes()[..16])
 }
@@ -257,6 +278,41 @@ mod tests {
             hash_config(&page_one),
             hash_config(&page_two),
             "two different declared page numbers must not collide"
+        );
+    }
+
+    /// `security_limits` gates the decode itself (`load_image_for_ocr` refuses an image whose
+    /// live bytes exceed `max_content_size`), so two calls with byte-identical images but
+    /// different limits must not share a cache entry — otherwise the first call's result is
+    /// served for the second and the limit never runs. The GH#1651 regression tests share this
+    /// cache inside one test process, which is what made them order-dependent before this.
+    #[test]
+    fn should_distinguish_cache_keys_by_security_limits() {
+        let unset = create_test_config();
+        let constraining = TesseractConfig {
+            security_limits: Some(crate::extractors::security::SecurityLimits {
+                max_content_size: 5_000,
+                ..Default::default()
+            }),
+            ..create_test_config()
+        };
+        let raised = TesseractConfig {
+            security_limits: Some(crate::extractors::security::SecurityLimits {
+                max_content_size: 5 * 1024 * 1024 * 1024,
+                ..Default::default()
+            }),
+            ..create_test_config()
+        };
+
+        assert_ne!(
+            hash_config(&unset),
+            hash_config(&constraining),
+            "an unset limit must not collide with a constraining one"
+        );
+        assert_ne!(
+            hash_config(&constraining),
+            hash_config(&raised),
+            "a constraining limit must not collide with a raised one"
         );
     }
 

@@ -420,10 +420,26 @@ const PDFIUM_KNOWN_REGRESSIONS: &[&str] = &[
 ];
 
 /// Extract a PDF with the given output format.
+///
+/// Image OCR is switched off for these gates: they score extracted text-layer content
+/// against a `pdftotext`-style ground truth, and this fork's default additionally runs OCR
+/// over embedded images and renders each image's recognised text as a fenced block
+/// (fork.md). Those blocks carry content the ground truth structurally cannot contain —
+/// the images' own text — so counting them as extraction precision penalises a documented
+/// fork default instead of measuring extraction quality. Measured on this corpus
+/// (2026-09-20): with the fenced image-OCR text scored, 9 fixtures drop below their
+/// calibrated floors (pdfa_026 0.684 vs 0.90, pr-136-example 0.220 vs 0.36, 2206.01062
+/// 0.741 vs 0.79, …); with it excluded every one of them clears its floor (pdfa_026 0.979,
+/// pr-136-example 0.625, 2206.01062 0.962). Body-text extraction is untouched, which is
+/// what these floors are calibrated for.
 fn extract_with_format(pdf_path: &std::path::Path, format: OutputFormat) -> Option<xberg::types::ExtractedDocument> {
     let config = ExtractionConfig {
         output_format: format,
         use_cache: false,
+        images: Some(xberg::core::config::ImageExtractionConfig {
+            run_ocr_on_images: false,
+            ..Default::default()
+        }),
         ..Default::default()
     };
     extract_uri_document_blocking(pdf_path, None, &config).ok()

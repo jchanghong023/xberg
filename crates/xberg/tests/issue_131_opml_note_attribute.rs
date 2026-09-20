@@ -29,7 +29,7 @@ async fn should_include_note_text_when_outline_has_underscore_note_attribute() {
         .expect("Should extract OPML with _note attribute");
 
     assert_eq!(
-        result.content, "Item With Note (_note: This is a free-text note attached to the item.)",
+        result.content, "# Item With Note (_note: This is a free-text note attached to the item.)\n",
         "Extracted content should contain the outline text with its note attribute rendered inline, \
          matching the pattern used for other outline attributes (type, description, xmlUrl, htmlUrl)"
     );
@@ -81,8 +81,10 @@ async fn should_associate_note_with_its_own_nested_outline_item() {
         .await
         .expect("Should extract nested OPML with mixed _note attributes");
 
+    // fork 默认 Markdown 渲染（fork.md）：outline 项渲染为带 `#`/`##` 前缀的标题，
+    // `_note` 属性由 markdown 渲染器内联进标题（与 plain 渲染器同一 helper）；上游断言按 Plain 写
     assert_eq!(
-        result.content, "Parent\n  Child With Note (_note: Child note content)\n\n  Child Without Note",
+        result.content, "# Parent\n\n## Child With Note (_note: Child note content)\n\n## Child Without Note\n",
         "Note should render inline with only the outline item that declares the _note attribute"
     );
 }

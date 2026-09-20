@@ -225,8 +225,22 @@ fn test_ocr_quality_numeric_accuracy() {
 
     let file_path = get_test_file_path("pdf/embedded_images_tables.pdf");
 
-    let truth_result = extract_uri_document_blocking(&file_path, None, &ExtractionConfig::default())
-        .expect("Should extract ground truth text");
+    // Ground truth is the source's own text layer, so OCR is hard-disabled for this
+    // extraction. `embedded_images_tables.pdf` carries numbers inside its chart images,
+    // and this fork extracts *and OCRs* embedded images by default (fork.md:
+    // `append_ocr_text` defaults on) — with OCR left on, the truth would hold the
+    // default backend's (paddle-ocr's) reading of those chart ticks and the candidate
+    // below (tesseract) would be graded against another engine's guesses rather than
+    // against the source. Measured on this fixture: image-OCR text in the truth gives
+    // numeric recall 0.881 (below the 0.90 gate) purely from backend-vs-backend
+    // differences on the chart axis; against the text layer it is 0.962. The property
+    // under test — numbers present in the source text must survive OCR — is unchanged.
+    let truth_config = ExtractionConfig {
+        disable_ocr: true,
+        ..Default::default()
+    };
+    let truth_result =
+        extract_uri_document_blocking(&file_path, None, &truth_config).expect("Should extract ground truth text");
 
     assert!(
         truth_result.chunks.is_none(),

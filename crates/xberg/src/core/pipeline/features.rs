@@ -69,9 +69,28 @@ fn locate_page_boundaries(content: &str, pages: &[crate::types::PageContent]) ->
             continue;
         }
 
-        let normalized = normalize_page_content(&page.content);
+        // `pages[n].content` is normally the same renderer's output for that page's own
+        // element subset, so it is a verbatim slice of `content` and matches exactly. The
+        // paragraph-normalised form is the fallback for the other shape — a page still
+        // carrying the extractor's raw text while `content` was rendered — where paragraph
+        // trimming (`normalize_page_content`) is what makes the two comparable.
+        //
+        // Order matters: normalising first breaks the verbatim case. Segment trimming turns
+        // a markdown bullet line `"- "` (an item with no body) into `"-"`, so the needle no
+        // longer matches `content`, the single-line fallback anchors on that bare `"-"`
+        // instead, and the mis-anchored page boundary swallows the following pages' text —
+        // every chunk whose bytes fall in the resulting gap loses its `first_page`/
+        // `last_page` (#1105 regression, multi-page fixture).
+        let verbatim = page.content.trim();
+        if let Some(boundary) = locate_exact_block(content, verbatim, page.page_number, &mut search_offset) {
+            located.push(Some(boundary));
+            continue;
+        }
 
-        if let Some(boundary) = locate_exact_block(content, &normalized, page.page_number, &mut search_offset) {
+        let normalized = normalize_page_content(&page.content);
+        if normalized != verbatim
+            && let Some(boundary) = locate_exact_block(content, &normalized, page.page_number, &mut search_offset)
+        {
             located.push(Some(boundary));
             continue;
         }
@@ -83,6 +102,9 @@ fn locate_page_boundaries(content: &str, pages: &[crate::types::PageContent]) ->
 
         tracing::debug!(
             page = page.page_number,
+            search_offset,
+            first_line = %page.content.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().trim(),
+            content_len = content.len(),
             "Could not locate page content in rendered text — will interpolate boundary"
         );
         located.push(None);
@@ -960,6 +982,41 @@ mod tests {
         assert_eq!(&content[boundaries[0].byte_start..boundaries[0].byte_end], p1_norm);
         assert_eq!(&content[boundaries[1].byte_start..boundaries[1].byte_end], p2_norm);
         assert_eq!(&content[boundaries[2].byte_start..boundaries[2].byte_end], p3_norm);
+    }
+
+    #[test]
+    fn recompute_boundaries_verbatim_marker_line_resolves_exactly() {
+        // A markdown bullet line `"- "` (a list item with no body) survives in `content`
+        // *with* its trailing space, but `normalize_page_content` trims every `"\n\n"`
+        // segment, so the normalised needle is `"-"` and the exact-block match fails. The
+        // single-line fallback then anchors on whichever bare `"-"` it finds first and
+        // estimates the page's end from the truncated length, so the boundary is short (and,
+        // on a real document, a following page's mis-anchor leaves a byte gap between
+        // boundaries — every chunk in that gap loses its page metadata, #1105).
+        let p1 = "Intro paragraph.\n\n- \n\nFirst item body";
+        let p2 = "Second page paragraph.\n\n- \n\nSecond item body";
+        let content = format!("{p1}\n\n{p2}");
+
+        let pages = vec![make_page(1, p1), make_page(2, p2)];
+        let boundaries = recompute_boundaries_from_pages(&content, &pages);
+
+        assert_eq!(boundaries.len(), 2, "both pages must resolve");
+        assert_eq!(
+            &content[boundaries[0].byte_start..boundaries[0].byte_end],
+            p1,
+            "page 1 must match its verbatim text, trailing space on the marker line included"
+        );
+        assert_eq!(
+            &content[boundaries[1].byte_start..boundaries[1].byte_end],
+            p2,
+            "page 2 must match its verbatim text"
+        );
+        assert_eq!(
+            &content[boundaries[0].byte_end..boundaries[1].byte_start],
+            "\n\n",
+            "the only bytes between the two boundaries may be the paragraph separator, \
+             not text swallowed by a mis-anchored page"
+        );
     }
 
     #[test]

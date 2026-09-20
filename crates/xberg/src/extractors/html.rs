@@ -333,26 +333,27 @@ pub(crate) static MATHML_COMMENT_RE: std::sync::LazyLock<regex::Regex> =
 /// calls (`crate::extraction::mathml::convert_mathml_str_to_latex`), and appends one
 /// `ElementKind::Formula` element per recovered equation.
 fn recover_mathml_formulas(html: &str, doc: &mut InternalDocument) {
-    doc.pre_rendered_content = doc
+    let stripped_pre_rendered = doc
         .pre_rendered_content
         .take()
         .map(|content| MATHML_COMMENT_RE.replace_all(&content, "").into_owned());
 
     #[cfg(feature = "office")]
-    {
+    let recovered = {
         let mut budget = crate::extractors::security::SecurityBudget::from_limits(
             &crate::extractors::security::SecurityLimits::default(),
         );
-        let push_formula = |latex: String, doc: &mut InternalDocument| {
+        let push_formula = |latex: String, doc: &mut InternalDocument| -> bool {
             let trimmed = latex.trim();
             if trimmed.is_empty() {
-                return;
+                return false;
             }
             doc.push_element(crate::types::internal::InternalElement::text(
                 crate::types::internal::ElementKind::Formula,
                 trimmed.to_string(),
                 0,
             ));
+            true
         };
 
         // A `math/tex` script and a `mwe-math-fallback-image` are what a page
@@ -364,9 +365,11 @@ fn recover_mathml_formulas(html: &str, doc: &mut InternalDocument) {
         // whether two formulas share their text.
         let has_mathml = MATH_TAG_RE.is_match(html);
 
+        let mut recovered = 0usize;
+
         for m in MATH_TAG_RE.find_iter(html) {
             if let Ok(latex) = crate::extraction::mathml::convert_mathml_str_to_latex(m.as_str(), &mut budget) {
-                push_formula(latex, doc);
+                recovered += usize::from(push_formula(latex, doc));
             }
         }
 
@@ -378,7 +381,7 @@ fn recover_mathml_formulas(html: &str, doc: &mut InternalDocument) {
             let latex = crate::extraction::mathml::strip_style_wrapper(
                 crate::extraction::derive::strip_math_delimiters(raw.trim()),
             );
-            push_formula(latex.to_string(), doc);
+            recovered += usize::from(push_formula(latex.to_string(), doc));
         }
 
         // A rendered-equation image carries its source in `alt`, which is the
@@ -391,14 +394,28 @@ fn recover_mathml_formulas(html: &str, doc: &mut InternalDocument) {
             let latex = crate::extraction::mathml::strip_style_wrapper(
                 crate::extraction::derive::strip_math_delimiters(raw.trim()),
             );
-            push_formula(latex.to_string(), doc);
+            recovered += usize::from(push_formula(latex.to_string(), doc));
         }
-    }
+
+        recovered
+    };
 
     // MathML-to-LaTeX conversion needs `roxmltree`, gated behind the `office` feature (see
     // `crate::extraction::mathml`). Without it, equations are dropped rather than mangled.
     #[cfg(not(feature = "office"))]
-    let _ = html;
+    let recovered = {
+        let _ = html;
+        0usize
+    };
+
+    // The library's own markdown conversion of a `<math>` is concatenated token text
+    // ("12" for ½) — `html-to-markdown-rs` has no node kind for it. When at least one
+    // equation was recovered as a `Formula` element, that pre-rendered text is strictly
+    // worse than the element tree: the Markdown fast path hands it back verbatim, so the
+    // recovered equations would never reach the output (#129). Drop it in that case and
+    // let the renderers walk the elements; pages without math keep the library's
+    // conversion verbatim.
+    doc.pre_rendered_content = if recovered == 0 { stripped_pre_rendered } else { None };
 }
 
 /// Matches a `<caption>...</caption>` element's inner content (case-insensitive, spanning

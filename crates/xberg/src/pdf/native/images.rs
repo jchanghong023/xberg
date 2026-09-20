@@ -157,7 +157,7 @@ fn packed_pixel_rows<'a>(w: u32, h: u32, bpp: usize, pixels: &'a [u8]) -> Option
         return Some(std::borrow::Cow::Borrowed(pixels));
     }
     let height = h as usize;
-    if pixels.len() > required && pixels.len() % height == 0 {
+    if pixels.len() > required && pixels.len().is_multiple_of(height) {
         let stride = pixels.len() / height;
         let packed_row = w as usize * bpp;
         if stride >= packed_row {

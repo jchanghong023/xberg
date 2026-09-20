@@ -2,7 +2,7 @@
 
 上游 = `https://github.com/xberg-io/xberg.git`（remote 名 `upstream`）。本文件是 **merge 上游时解决冲突的依据**、fork 改动的唯一索引，也是本仓库的需求权威（`AGENTS.md` 只写开发规则）：改动下列任何能力，必须同步更新本文件。保持精简，细节以代码与提交历史为准（`git log upstream/main..main`）。
 
-**状态与核对约定**：本清单描述「同步上游后仍需在本 fork 成立的行为」，不是 Git 差异摘要或开发日志；对照基线 = `git merge-base main upstream/main`。下列条目由现行实现与本地提交恢复而来，验收 = `fulltest.py` 对应检查不回归 + 各条给出的可观察行为。同步上游后必须逐项复核（上游可能已独立实现或改变同一行为），不能只看有没有 Git 冲突。最近一次复核：2026-09-19 对 upstream/main（`470af61733`，92 提交合并）逐项核对——清单涉及的新增文件与默认行为（含默认输出格式、图片抽取默认、`needs_image_data`/`wants_own_bytes_in_result` 的默认真语义、OCR 默认后端与回退移除、CLI 行为、引擎槽位、配置合并 API）上游均无等价实现，全部仍需本地维护；上游 1.2.5 的新增（GH#1651 security_limits 传播、GH#1662 内嵌图片 OCR 字节、ppt OLE 抽取、表格/结构修复）已合入且与 fork 行为正交。
+**状态与核对约定**：本清单描述「同步上游后仍需在本 fork 成立的行为」，不是 Git 差异摘要或开发日志；对照基线 = `git merge-base main upstream/main`。下列条目由现行实现与本地提交恢复而来，验收 = `fulltest.py` 对应检查不回归 + 各条给出的可观察行为。同步上游后必须逐项复核（上游可能已独立实现或改变同一行为），不能只看有没有 Git 冲突。最近一次复核：2026-09-20 对 upstream/main（`aa7da5bc46`，在 `470af61733` 之上再并 9 提交）逐项核对——本轮并入的 7 个上游提交只动 `heuristics/confidence.rs`、`engine_cache.rs` 与 candle OCR 后端（fork feature 集不编译后两者），对清单的默认行为零影响，逐条现状与前次复核一致；清单涉及的新增文件与默认行为（含默认输出格式、图片抽取默认、`needs_image_data`/`wants_own_bytes_in_result` 的默认真语义、OCR 默认后端与回退移除、CLI 行为、引擎槽位、配置合并 API）上游仍无等价实现，全部仍需本地维护。
 
 ## 定位
 
@@ -31,6 +31,7 @@
 - **PDF 质量大改**：表格重建（`pdf/table_reconstruct.rs`）、原生文本抽取（`pdf/native/text.rs`）、结构分类/段落/页眉页脚剔除（`pdf/structure/`）。验收：有原生文本的页面不做破坏性整页 OCR 回退（原生文本保留），表格按重建结果输出、页眉页脚被剔除；`content_filter.include_headers/include_footers` 在扁平文本与结构化两条路径上一致生效（跨页页眉/页脚的 streak 剔除同样受其约束）。
 - **Windows Media 转写**：Media Foundation 读 ASF/WMV 音轨，解码失败回退外部 ffmpeg（`transcription/container.rs`、`transcription/wmf.rs`，fork 新增）。验收：`.wmv`/`.asf` 能转写出音轨文本；MF 读不了的文件回退 ffmpeg 后仍能出文本。
 - **Markdown 渲染**：图片 alt 路径清理、图片 marker 独立段落与 OCR 文本围栏等输出修复（`rendering/markdown.rs`、`rendering/comrak_bridge.rs`、`extraction/markdown_utils.rs`）。验收：输出不残留本地路径垃圾，改动围栏内文本的改写不发生。
+- **标题属性内联**：XML/OPML 抽取器把元素的 `id`/`type`/`_note` 等属性挂在元素上而非文本里，plain 与 Markdown 两个渲染器共用 `rendering::inline_attributes_suffix` 把属性以 ` (k: v, …)` 内联进标题（过滤 `xmlns*`、空值与 `xberg:` 内部标记），两渲染器不再漂移（`# Item (_note: …)`）。验收：`issue_131_opml_note_attribute` 与 `xml_embedding_quality` 的默认配置断言成立。
 
 ## 性能 / 资源策略
 

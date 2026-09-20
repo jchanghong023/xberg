@@ -28,6 +28,43 @@ pub(crate) use html::render_html;
 pub use html_styled::StyledHtmlRenderer;
 pub use json::render_json;
 
+/// Attribute keys the pipeline attaches as *element metadata* rather than source content.
+///
+/// These are surfaced through `Element.metadata.additional` (that is their documented
+/// destination — see `STYLE_NAME_ATTRIBUTE` / `TOC_ENTRY_ATTRIBUTE` in the DOCX extractor)
+/// and no source document authors them, so inlining them would print bookkeeping into the
+/// rendered text (`# Swimming in the lake (style_name: Title)` for a DOCX heading).
+const METADATA_ONLY_ATTRIBUTE_KEYS: [&str; 2] = ["style_name", "toc_entry"];
+
+/// ` (key: value, ...)` suffix that inlines an element's attributes into its own line.
+///
+/// The XML and OPML extractors keep an element's attributes on the element instead of in
+/// its text, so a renderer that ignores `attributes` silently drops source data (OPML
+/// `_note` from issue #131, XML `id`/`type`). Both the plain and the Markdown renderer
+/// append this to headings; one helper keeps the two from drifting. Namespace
+/// declarations (`xmlns*`), empty values, pipeline-metadata keys
+/// ([`METADATA_ONLY_ATTRIBUTE_KEYS`]) and internal `xberg:` markers (book-keeping the
+/// pipeline reads back, e.g. the image-OCR suppression flag) are not source data and are
+/// never emitted.
+pub(crate) fn inline_attributes_suffix(attributes: &ahash::AHashMap<String, String>) -> Option<String> {
+    let mut filtered: Vec<(&str, &str)> = attributes
+        .iter()
+        .filter(|(key, value)| {
+            !key.starts_with("xmlns")
+                && !key.starts_with("xberg:")
+                && !METADATA_ONLY_ATTRIBUTE_KEYS.contains(&key.as_str())
+                && !value.is_empty()
+        })
+        .map(|(key, value)| (key.as_str(), value.as_str()))
+        .collect();
+    if filtered.is_empty() {
+        return None;
+    }
+    filtered.sort_by_key(|(key, _)| *key);
+    let rendered: Vec<String> = filtered.iter().map(|(key, value)| format!("{key}: {value}")).collect();
+    Some(format!(" ({})", rendered.join(", ")))
+}
+
 /// Indices of body paragraphs that reproduce an image's recognized text line for line.
 ///
 /// The pipeline inlines an embedded image's OCR text into the document as body paragraphs — one
