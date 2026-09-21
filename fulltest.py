@@ -3316,6 +3316,8 @@ def main():
     ap.add_argument("--pkg-dir", default=str(PKG_DIR),
                     help="提供 models/ 的目录（用于 HF_HUB_CACHE 与 PATH），默认仓库内打包目录")
     ap.add_argument("--keep-going", action="store_true", help="遇到 FAIL 不终止，继续测完")
+    ap.add_argument("--deep", action="store_true",
+                    help="包含最重测试项（音视频转写）。日常 fulltest 默认跳过；slowtest.py 固定携带，打包版验收不丢覆盖")
     ap.add_argument("--strict", action="store_true",
                     help="WARN 也视为验收失败（CI 门禁用）")
     ap.add_argument("--recall-fail", type=float, default=RECALL_FAIL,
@@ -3371,7 +3373,17 @@ def main():
         # $HF_HOME/hub，指向包内不存在的子目录，等于让引擎回退到用户缓存或联网下载。
         env["HF_HUB_CACHE"] = str(pkg_dir / "models")
 
-    files = sorted(p for p in src.iterdir() if p.is_file() and not _is_windows_noise(p))
+    # (耗时治理) 最重的测试段（音视频转写；基线实测 219s 总耗时中 mp4 一项占 96.7s）默认
+    # 不进日常 fulltest 队列；--deep（slowtest.py 固定携带）才包含，打包版验收不丢覆盖。
+    all_files = sorted(p for p in src.iterdir() if p.is_file() and not _is_windows_noise(p))
+    n_av_all = sum(1 for f in all_files if f.suffix.lower().lstrip(".") in AV_EXTS)
+    if args.deep:
+        files = all_files
+    else:
+        files = [p for p in all_files if p.suffix.lower().lstrip(".") not in AV_EXTS]
+        if n_av_all:
+            print(f"[preflight] 音视频转写 {n_av_all} 个已跳过（--deep 或 slowtest 通路才包含）",
+                  flush=True)
     if not files:
         sys.exit(f"测试目录为空: {src}")
     n_av = sum(1 for f in files if f.suffix.lower().lstrip(".") in AV_EXTS)
@@ -3405,6 +3417,7 @@ def main():
 
     results = []
     stopped_early, early_reason = False, ""
+    adversarial_s = 0.0
     t_start = time.time()
     n = len(files)
     # 代码指纹（进报告与基线；失败不阻断，记 null）
@@ -3465,6 +3478,9 @@ def main():
                 break
             continue
 
+        # (性能打点) 检查段耗时：从结构指标起，到判定链/源文基准全部结束
+        t_judge0 = time.time()
+        src_s = 0.0
         m = structural_metrics(md_text, img_dir)
         issues = []
         ocr_info = None
@@ -3499,6 +3515,9 @@ def main():
                     f, md_text, out_dir / f"{tag}.err.txt", issues, exp, OCR_CONFIG, m=m)
 
             if rc == 0:
+                # (性能打点) 源文基准段：extract_source_text + 召回计算 + 页级抽查，
+                # 是 Python 侧最可能的大头（pymupdf/python-docx 逐页抽取）
+                t_src0 = time.time()
                 print("  抽取源文本基准并计算召回率 ...", flush=True)
                 src_text, note, extras = extract_source_text(f)
                 source_pages = extras.get("pages") if extras else None
@@ -3555,12 +3574,14 @@ def main():
                 judge_toc_levels(f, md_text, issues)
                 judge_xlsx_cell_folding(f, md_text, issues, exp)
                 judge_bullet_levels(f, md_text, issues, exp)
+                src_s = time.time() - t_src0
         except Exception as e:  # noqa: BLE001 - 判定器异常只记单个文件，不中止整轮
             issues.append(make_issue(
                 "JUDGE_CRASH", f"判定阶段异常({type(e).__name__}): {str(e)[:160]}"))
             emit(f"  [JUDGE_CRASH] 判定阶段异常({type(e).__name__}): {str(e)[:160]}"
                  "（该文件按 FAIL 记录，报告与基线对比照常）")
 
+        check_s = time.time() - t_judge0
         verdict = issues_to_verdict(issues)
         report_file(f.name, verdict, m, recall_info, meta, elapsed, issues, used_cli,
                     ocr_info=ocr_info)
@@ -3575,6 +3596,9 @@ def main():
         })
         JSON_RESULTS.append({
             "name": f.name, "verdict": verdict, "elapsed_s": round(elapsed, 2),
+            # (性能打点) 检查段/源文基准段耗时（秒）；超时路径无此键，消费方按缺失处理
+            "check_time_s": round(check_s, 2),
+            "source_time_s": round(src_s, 2),
             "recall": recall_info.get("bigram"),
             "num_recall": recall_info.get("num_recall"),
             "ident_recall": recall_info.get("ident_recall"),
@@ -3607,7 +3631,9 @@ def main():
         p.is_file() and p.suffix.lower().lstrip(".") not in AV_EXTS and not _is_windows_noise(p)
         for p in adv_dir.iterdir()
     ):
+        t_adv0 = time.time()
         results.extend(run_adversarial(cli, adv_dir, out_dir, args.timeout, env, tags=tags))
+        adversarial_s = time.time() - t_adv0
 
     n_fail, n_warn = print_summary(results, stopped_early, early_reason, strict=args.strict)
 
@@ -3675,7 +3701,22 @@ def main():
             }, ensure_ascii=False, indent=2), encoding="utf-8")
             print(f"回归基线已保存: {args.baseline}")
 
-    emit(f"\n总耗时 {time.time()-t_start:.0f}s")
+    wall_s = time.time() - t_start
+    convert_total_s = sum(r.get("elapsed_s") or 0 for r in JSON_RESULTS)
+    check_total_s = sum(r.get("check_time_s") or 0 for r in JSON_RESULTS)
+    source_total_s = sum(r.get("source_time_s") or 0 for r in JSON_RESULTS)
+    overhead_s = max(0.0, wall_s - convert_total_s - check_total_s)
+    emit(f"\n总耗时 {wall_s:.0f}s")
+    # (性能打点) 耗时分布：区分「被测转换器的时间」与「测试框架自身的时间」，
+    # 供把最重的测试段移往 slowtest 与转换性能优化定位依据
+    emit("\n## 耗时分布")
+    emit(f"  转换合计 {convert_total_s:.1f}s | 检查合计 {check_total_s:.1f}s"
+         f"（其中源文基准段 {source_total_s:.1f}s）| 对抗段 {adversarial_s:.1f}s"
+         f" | 框架开销 {overhead_s:.1f}s")
+    emit("  最慢 Top10（转换=CLI 子进程耗时，检查=Python 判定+源文基准）:")
+    for r in sorted(JSON_RESULTS, key=lambda r: r.get("elapsed_s") or 0, reverse=True)[:10]:
+        emit(f"    - {r['name']:<42} 转换 {r.get('elapsed_s') or 0:>7.1f}s"
+             f"  检查 {(r.get('check_time_s') or 0):>6.1f}s  [{r['verdict']}]")
     header = (f"# xberg 转换质量报告\n\n- CLI: `{cli}`\n- 源目录: `{src}`\n"
               f"- 生成时间: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
               f"- 代码: commit `{git_info['commit'] or '?'}`"
@@ -3712,6 +3753,14 @@ def main():
             "fail": n_fail,
             "stopped_early": stopped_early,
             "early_reason": early_reason,
+        },
+        "timing": {
+            "wall_s": round(wall_s, 1),
+            "convert_total_s": round(convert_total_s, 1),
+            "check_total_s": round(check_total_s, 1),
+            "source_total_s": round(source_total_s, 1),
+            "adversarial_s": round(adversarial_s, 1),
+            "overhead_s": round(overhead_s, 1),
         },
         "files": JSON_RESULTS,
     }, ensure_ascii=False, indent=2), encoding="utf-8")

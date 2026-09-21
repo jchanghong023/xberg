@@ -100,7 +100,9 @@ def main():
            "--cli", str(exe),
            "--out", str(tmp / "fulltest-out"),
            "--pkg-dir", str(exe.parent),
-           "--keep-going"]
+           "--keep-going",
+           # 打包版验收必须覆盖最重测试段（音视频转写）：fulltest.py 默认跳过它们，见 --deep
+           "--deep"]
     if args.src:
         cmd += ["--src", args.src]
     if args.timeout:
