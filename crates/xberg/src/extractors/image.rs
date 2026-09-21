@@ -1124,6 +1124,13 @@ async fn extract_layout_regions(
 #[derive(Debug)]
 struct WholeImageOcr {
     document: InternalDocument,
+    // The provenance flag is read by the layout path and by the selection tests; with
+    // `layout-detection` compiled out (fork requirement: no layout model) only the tests
+    // read it, so a plain build would warn about it.
+    #[cfg_attr(
+        not(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm"))),
+        allow(dead_code)
+    )]
     from_whole_image: bool,
 }
 

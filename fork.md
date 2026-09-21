@@ -6,7 +6,7 @@
 
 ## 定位
 
-仅 Windows 11 的个人 fork：只做「文件 → Markdown」+ OCR + 音视频转写 + HTTP 服务（`xberg serve`）。不维护上游的语言绑定、heic、pdfium、embedding、NER、MCP 等能力（feature 集见 AGENTS.md）。
+仅 Windows 11 的个人 fork：只做「文件 → Markdown」+ OCR + 音视频转写 + HTTP 服务（`xberg serve`）。**不使用版面/表格模型**（不编 `layout-detection`，RT-DETR/TATR 不编入也不随包；图片输入只走 OCR，见「图片 OCR 渲染」）。不维护上游的语言绑定、heic、pdfium、embedding、NER、MCP 等能力（feature 集见 AGENTS.md）。
 
 ## 用户可见默认行为（与上游不同）
 
@@ -22,7 +22,7 @@
 ## 引擎定制（crates/，冲突时保 fork 行为）
 
 - **OCR 后端与调度**：`paddle_ocr/`、`core/config/ocr.rs`——承载上节的默认后端、语言解析与线程预算规则。
-- **图片 OCR 渲染**：每张图片的 marker 是独立段落，其后紧跟装 OCR 文本的 ` ```text ` 围栏块（网格布局优先、放不下整行回退平文本；`rendering/ocr_layout.rs`，fork 新增）；`ocr_text_only` 开启时两部分都保留。验收：marker 段落与其 OCR 围栏块相邻且位置不变，围栏内既有文本不被改写，OCR 文本不因段落去重而丢失。
+- **图片 OCR 渲染（版面信息的唯一来源）**：每张图片的 marker 是独立段落，其后紧跟装 OCR 文本的 ` ```text ` 围栏块——网格布局优先（`rendering/ocr_layout.rs`，fork 新增：按每个 OCR 行的 bbox 还原到等宽网格的行/列，CJK 记 2 列，行高/半行高换算行距与列距），放不下整行或行数超上限时**整体回退平文本而不是静默丢行**；`ocr_text_only` 开启时两部分都保留。**需求（2026-09-21）**：不用 layout/table 模型，图片的版面相对位置就靠这条网格承载，所以「尽量保留文字相对位置」= 网格优先且不得截断丢行。**独立图片（`image/*` 直接输入）与文档内嵌图片一视同仁**：独立图片同样只走 OCR，同样必须产出网格围栏（当前实测独立图片仍回退平文本，属待修缺陷——见 `_note_no_tables` 同期记录）。验收：marker 段落与其 OCR 围栏块相邻且位置不变，围栏内既有文本不被改写，OCR 文本不因段落去重而丢失，网格拒绝时平文本完整；**独立图片输入（如 `测试识别.png`）的围栏块必须含列对齐行（同一视觉行上的多个文本块落在同一输出行）**。
 - **EMF/WMF 图元文件 → PNG**：新 crate `crates/xberg-windows-metafile`（纯 GDI 栅格化，fork 新增），Office 内嵌图元文件因此可落盘、可 OCR（`docker/`、`.dockerignore` 需同步该 member）。验收：Office 文档里的 EMF/WMF 以 PNG 落盘并在 Markdown 中被引用。
 - **Visio 抽取**：`.vsd`/`.vsdx`/`.vsdm` 形状文本（`extraction/visio.rs`、`extractors/visio.rs`，fork 新增；MIME 表同步登记）。验收：三类扩展名都能抽到形状文本并走到 Visio 抽取器。
 - **xlsx 内嵌图片**：提取并 OCR（`extraction/excel/images.rs`，fork 新增）。验收：表格内嵌图片落盘并被 OCR。
@@ -41,8 +41,8 @@
 ## 打包 / CI（fork 独有或大改）
 
 - `.github/workflows/build-windows-cli.yml`（新增）：fork 自有的打包流水线（仅手动 `workflow_dispatch` 触发），调用 `package-cli-windows.ps1`，含带时间戳的 Windows release 发布。上游 ci-rust / ci-e2e 等编译测试类 workflow 被仓库守卫 skip；ci-lint / ci-docs / ci-scripts 无守卫，push 命中路径仍会自动跑。
-- `scripts/publish/cli/package-cli-windows.ps1`（大改）：模型随包分发（Whisper tiny + RT-DETR + TATR + PaddleOCR tiny）、MSVC CRT 部署、并行度与打包门禁；**fork feature 集的来源之一**。
-- `scripts/publish/cli/offline-smoke.ps1`（新增）：离线 smoke 与空缓存缺模型诊断探测。
+- `scripts/publish/cli/package-cli-windows.ps1`（大改）：模型随包分发（Whisper tiny + PaddleOCR pp-ocrv6 tiny；2026-09-21 起不再含 RT-DETR/TATR）、MSVC CRT 部署、并行度与打包门禁；**fork feature 集的来源之一**。
+- `scripts/publish/cli/offline-smoke.ps1`（新增）：离线 smoke 与空缓存缺模型诊断探测；正向断言 2026-09-21 起为 `PaddleOCR engine initialized successfully`（原 `Layout detection completed`，随 layout 移除而换）。
 - `scripts/ci/lib/pe-imports.ps1`（新增）+ `scripts/ci/verify-windows-dll-closure.ps1`（改造）：PE 导入闭包校验。
 - `.ai-rulez/` 与 `plugin/` 的规则 bundle：格式计数等随引擎改动伴生同步，其中 release profile 的描述按 fork 的 LTO 设置改写（bundle 由固定版本 ai-rulez 生成，改规则后须用同一版本重新生成，见 AGENTS.md）。
 
@@ -56,8 +56,8 @@
 
 ## 构建配置刻意背离上游的点
 
-- feature 集固定为 `formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,layout-detection,api`（`--no-default-features`；AGENTS.md 与打包脚本两边保持一致）。
-- 根 `Cargo.toml`：`[profile.release]` `lto = false`、`codegen-units = 256`（上游 `lto = "fat"`，打包墙钟时间不可接受）；`[profile.dev]` `debug = 1`；workspace 新增 member `crates/xberg-windows-metafile`。
+- feature 集固定为 `formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api`（`--no-default-features`；AGENTS.md 与打包脚本两边保持一致）。2026-09-21 需求变更移除 `layout-detection`（同时删掉打包脚本的 RT-DETR/TATR 模型条目与 layout smoke 断言）。
+- 根 `Cargo.toml`：`[profile.release]` `lto = false`、`codegen-units = 256`（上游 `lto = "fat"`，打包墙钟时间不可接受）；`[profile.dev] debug = 0` 与 `[profile.test] debug = 0`（2026-09-20：`debug = 1` 时一次冷 `cargo test` 写 88 GB PDB，见 AGENTS.md「Rust 构建优化规则」）；workspace 新增 member `crates/xberg-windows-metafile`。
 - `.cargo/config.toml`：`jobs = 28`（同步自 `alef.toml` 的 build_jobs）。
 
 ## 文档计数同步

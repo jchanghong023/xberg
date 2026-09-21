@@ -11,16 +11,16 @@ artifact upload, version stamping and `gh release create`.
 
 The cargo feature set matches the fork's development build: document formats
 (no HEIC), analysis, CLI core, Tesseract OCR as a fallback, PaddleOCR
-(pp-ocrv6 tiny — the default OCR backend), audio/video transcription,
-layout detection with TATR table structure recognition, plus the `xberg serve`
-HTTP API server (axum).
+(pp-ocrv6 tiny — the default OCR backend), audio/video transcription, plus the
+`xberg serve` HTTP API server (axum). The layout/table models (RT-DETR + TATR)
+are deliberately not compiled or bundled: image input is handled by OCR alone,
+with the recognized lines re-laid-out as a monospace `text` grid
+(`rendering/ocr_layout.rs`) so their relative positions survive.
 `--no-default-features` drops the heavy default stacks (embeddings,
 candle-VLM). Deliberately excluded: heic (no stock Windows libheif build path),
-pdfium, mcp, embedding/NER. Whisper tiny is bundled so video/audio inputs
-transcribe offline; the two layout models the image/PDF path resolves
-(RT-DETR 161.3 MiB + TATR 28.8 MiB) and the PaddleOCR pp-ocrv6 tiny set
-(~13 MiB: det + rec + dict + textline cls) are bundled so image tables,
-layout regions, and OCR work offline.
+pdfium, mcp, embedding/NER, layout detection. Whisper tiny is bundled so
+video/audio inputs transcribe offline; the PaddleOCR pp-ocrv6 tiny set
+(~13 MiB: det + rec + dict + textline cls) is bundled so OCR works offline.
 
 Before zipping, the staged tree must pass: a cleaned-PATH `--version` probe,
 in-tree MSVC CRT deployment, the shared PE import-closure gate
@@ -98,13 +98,15 @@ $ZipPath = Join-Path $RepoRoot "$StageName.zip"
 $StageExe = Join-Path $Stage "xberg.exe"
 $ModelsRoot = Join-Path $Stage "models"
 # Persistent local model cache (same HF layout as the bundle). Whisper + any
-# already-verified OCR/layout file is reused across runs; the Stage wipe never
+# already-verified OCR file is reused across runs; the Stage wipe never
 # touches this directory.
 $ModelCacheRoot = Join-Path $RepoRoot "target/package-models-$Target"
 
 # Keep in sync with AGENTS.md「编译」小节. Fork scope: file→Markdown + OCR +
-# transcription + layout/table structure + HTTP API (`xberg serve`). No
-# heic/pdfium/candle/mcp/embeddings/NER. PaddleOCR (pp-ocrv6 tiny) is the
+# transcription + HTTP API (`xberg serve`). No heic/pdfium/candle/mcp/
+# embeddings/NER, and no layout detection: the layout/table models are not
+# compiled, image text comes from OCR and keeps its relative positions through
+# the `text` grid in rendering/ocr_layout.rs. PaddleOCR (pp-ocrv6 tiny) is the
 # default OCR backend; Tesseract stays compiled as a fallback.
 $Features = @(
   "formats-no-heic"
@@ -113,24 +115,20 @@ $Features = @(
   "ocr"
   "paddle-ocr"
   "transcription"
-  "layout-detection"
   "api"
 )
 
-# Layout ONNX models staged from the CLI's own `cache manifest` (checksums and
-# sizes come from the binary, so they cannot drift). Only the two models the
-# image/PDF extraction path actually resolves are selected -- RT-DETR (layout
-# regions, 161.3 MiB) and TATR (table structure, 28.8 MiB); the manifest also
-# lists SLANeXT/SLANet_plus/table-classifier/pp_doclayout_v3, but those are for
-# table models and layout backends this build does not use, and each spec below
-# must match exactly one entry. Whisper tiny is staged separately via
+# ONNX models staged from the CLI's own `cache manifest` (checksums and sizes
+# come from the binary, so they cannot drift). The RT-DETR/TATR layout entries
+# were removed together with the layout feature (2026-09-21 requirement change:
+# no layout model, image input is OCR-only); the manifest still lists them plus
+# SLANeXT/SLANet_plus/table-classifier/pp_doclayout_v3, and each spec below must
+# match exactly one entry. Whisper tiny is staged separately via
 # $TranscriptionFiles (not listed by `cache manifest`).
 # PaddleOCR pp-ocrv6 tiny (~13 MiB): det + rec + dict + the v2 textline
 # orientation classifier the v6 path still resolves. `small`/`medium`
 # det/rec entries stay out of the bundle — only the default tier ships.
 $RequiredModels = @(
-  @{ Label = "layout RT-DETR"; Regex = 'models--xberg-io--layout-models/snapshots/[0-9a-f]+/rtdetr/model\.onnx$' }
-  @{ Label = "layout TATR"; Regex = 'models--xberg-io--layout-models/snapshots/[0-9a-f]+/tatr/model\.onnx$' }
   @{ Label = "paddle det tiny"; Regex = '^v6/det/tiny/model\.onnx$' }
   @{ Label = "paddle rec tiny"; Regex = '^v6/rec/tiny/model\.onnx$' }
   @{ Label = "paddle dict tiny"; Regex = '^v6/rec/tiny/dict\.txt$' }
@@ -408,8 +406,9 @@ function Test-ModelFile([string]$Path, [string]$Sha256, [int64]$SizeBytes) {
 }
 
 function Get-RequiredModelEntries([string]$Exe, [string]$ModelsRoot) {
-  # No layout models requested (lean feature set); Whisper is handled by
-  # Get-TranscriptionModelEntries. Skip the cache-manifest probe entirely.
+  # No layout models requested (fork no longer compiles the layout feature);
+  # Whisper is handled by Get-TranscriptionModelEntries. Skip the cache-manifest
+  # probe entirely.
   if ($RequiredModels.Count -eq 0) {
     return @()
   }
@@ -781,7 +780,7 @@ try {
   }
 
   # Manifest only needs the freshly built target exe (normal PATH / MSVC CRT),
-  # not the staged tree. Resolve OCR/layout edges here so downloads can overlap
+  # not the staged tree. Resolve OCR edges here so downloads can overlap
   # Stage + CRT instead of waiting for both.
   $selected = @(Get-RequiredModelEntries -Exe $builtExe -ModelsRoot $ModelsRoot)
   $selected += @(Get-TranscriptionModelEntries -ModelsRoot $ModelsRoot)
@@ -795,7 +794,7 @@ try {
   Write-Host "  staged xberg.exe"
 
   # Start model installs into the freshly created Stage/models while the rest
-  # of Stage and CRT run. Cache hits (Whisper + previous OCR/layout) copy
+  # of Stage and CRT run. Cache hits (Whisper + previous OCR) copy
   # locally; misses download.
   $modelPlan = @($selected | Where-Object { -not (Test-ModelFile $_.Target $_.Sha256 $_.SizeBytes) })
   $modelSkipped = $selected.Count - $modelPlan.Count
@@ -932,13 +931,11 @@ try {
       Env = @{}
     }
   )
-  # Empty-cache probe: with HF models bundled, offline-smoke.ps1 runs the
-  # fixture with the layout path enabled (`{"layout":{},"ocr":{}}`), so the
-  # extract resolves RT-DETR/TATR through the cache under test. Against an empty
-  # cache the run must report the offline model-cache miss instead of silently
-  # downloading. The exit code is deliberately not asserted: the layout path
-  # falls back to whole-image OCR, whose own model needs depend on the compiled
-  # OCR backend, so the diagnostic is what proves the cache was consulted.
+  # Empty-cache probe: with HF models bundled, offline-smoke.ps1 extracts the
+  # fixture so the run resolves the PaddleOCR models through the cache under
+  # test. Against an empty cache the run must report the offline model-cache
+  # miss instead of silently downloading. The exit code is deliberately not
+  # asserted (the diagnostic is what proves the cache was consulted).
   if ($RequiredModels.Count -gt 0) {
     $checks += @(
       @{

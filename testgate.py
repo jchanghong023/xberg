@@ -37,10 +37,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent
 
 # fork feature 集，与 AGENTS.md / scripts/publish/cli/package-cli-windows.ps1 保持一致。
-FEATURES_FORK = "formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,layout-detection,api"
+FEATURES_FORK = "formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api"
 # xberg lib 侧没有 core-cli（那是 xberg-cli 的聚合 feature）；lib default
 # （tokio-runtime、simd-utf8）保持开启，等价于 CLI 构建转发到 lib 的能力面。
-FEATURES_LIB = "formats-no-heic,analysis,ocr,paddle-ocr,transcription,layout-detection,api"
+FEATURES_LIB = "formats-no-heic,analysis,ocr,paddle-ocr,transcription,api"
 
 FASTCHECK_BUDGET_SECONDS = 60.0
 

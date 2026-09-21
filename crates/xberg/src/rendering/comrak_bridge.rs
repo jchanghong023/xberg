@@ -1125,8 +1125,19 @@ pub(crate) fn build_comrak_ast<'a>(
                     // the document is whole; otherwise the fallback below carries
                     // the complete text, tables included.
                     let grid_usable = !result.internal_doc_excludes_tables;
+                    if !grid_usable {
+                        tracing::debug!(
+                            "OCR grid skipped: the backend's table rebuild claimed paragraphs out of the internal document"
+                        );
+                    }
+                    let internal_document = result.ocr_internal_document.as_ref();
+                    if grid_usable && internal_document.is_none() {
+                        tracing::debug!(
+                            "OCR grid skipped: the image OCR result carries no internal document; falling back to flat OCR text"
+                        );
+                    }
                     grid_usable
-                        .then_some(result.ocr_internal_document.as_ref())
+                        .then_some(internal_document)
                         .flatten()
                         .and_then(crate::rendering::ocr_layout::layout_ocr_text)
                         .or_else(|| {

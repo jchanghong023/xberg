@@ -2662,7 +2662,7 @@ def convert_one(cli: Path, src_file: Path, out_dir: Path, timeout: int, env: dic
         err_text = (err or b"").decode("utf-8", errors="replace")
         if transcription and "unknown field `transcription`" in err_text:
             notes.append("当前 CLI 未启用 transcription feature，音视频必须用本地编译的全功能版测试："
-                         "cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,layout-detection,api")
+                         "cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api")
         err_lines = err_text.splitlines()
         first_err = next((l for l in err_lines
                           if re.search(r"ERROR|Error|error \[", l)),
@@ -3298,7 +3298,7 @@ def preflight(cli: Path, env: dict, files: list):
             sys.exit(f"transcription feature 探测失败: {e}")
         if "unknown field `transcription`" in probe.stderr.decode("utf-8", errors="replace"):
             sys.exit("当前 CLI 未启用 transcription feature，无法按约定用本地编译版测试音视频。\n"
-                     "请先执行: cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,layout-detection,api\n"
+                     "请先执行: cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api\n"
                      f"  CLI: {cli}")
         print("[preflight] transcription feature 就绪（音视频将用本地编译版转写）", flush=True)
     else:

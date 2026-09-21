@@ -10,26 +10,23 @@ HF_HUB_OFFLINE=1 and HF_HUB_CACHE set to -CacheDir, and asserts one of two
 outcomes:
 
   default                      exit 0, parseable JSON on stdout, non-empty
-                               result.content, a `Layout detection completed`
-                               line on stderr (the bundled RT-DETR/TATR loaded
-                               from -CacheDir) and no model-cache miss --
-                               extraction works offline off the bundle's cache.
+                               result.content, a `PaddleOCR engine initialized
+                               successfully` line on stderr (the bundled
+                               PaddleOCR models loaded from -CacheDir) and no
+                               model-cache miss -- extraction works offline off
+                               the bundle's cache.
   -ExpectEmptyCacheFailure     stderr reports the offline model-cache miss
                                ("Hugging Face offline mode is enabled and ...
                                is not available in the local cache"). Whether
                                the process also fails is not asserted: the
-                               layout path falls back to whole-image OCR, and
-                               whether that fallback needs its own HF model
-                               depends on the OCR backend the build compiles in
-                               (bundled PaddleOCR does, Tesseract does not). The
                                diagnostic, not the exit code, is the contract --
                                a run that never reports a miss is not reading
                                the cache under test.
 
-The fixture is extracted with layout detection enabled (an inline config that
-also sets `ocr`, so `should_use_layout_ocr` is true and the RT-DETR/TATR files
-are part of the extract path). Without that config the PNG smoke needs no
-HF-cached model and neither probe proves anything about the bundled models.
+The fixture is extracted with OCR enabled (an inline config that sets `ocr`), so
+the run resolves the bundled PaddleOCR models through the cache under test. The
+fork does not compile the layout/table models (no RT-DETR/TATR), so the OCR
+engine is the only HF-cached consumer an image extraction reaches.
 
 One `smoke=ok ...` line on stdout and exit 0 on success; otherwise the reason
 goes to stderr and the exit code is 1. package-cli-windows.ps1 runs it twice, as
@@ -100,13 +97,13 @@ $env:HF_HUB_CACHE = $CacheDir
 $env:HF_HUB_OFFLINE = "1"
 $env:HUGGINGFACE_HUB_OFFLINE = "1"
 
-# base64 of {"layout":{},"ocr":{}} -- inline JSON would need quoting through the native
+# base64 of {"ocr":{"enabled":true}} -- inline JSON would need quoting through the native
 # argv handoff; the base64 form is exactly one argument with no escaping. The `ocr`
-# section is what enables the layout path for an image (`should_use_layout_ocr`), and
-# therefore what makes the bundled RT-DETR/TATR files part of the extract path.
-$layoutConfigB64 = "eyJsYXlvdXQiOnt9LCJvY3IiOnt9fQ=="
+# section pins the OCR path on, which is what makes the bundled PaddleOCR files part of
+# the extract path (the fork compiles no layout/table models).
+$ocrConfigB64 = "eyJvY3IiOnsiZW5hYmxlZCI6dHJ1ZX19"
 $extractArgs = @("extract", $Fixture, "--format", "json",
-                 "--config-json-base64", $layoutConfigB64)
+                 "--config-json-base64", $ocrConfigB64)
 $result = Invoke-Captured -FilePath $Exe -Arguments $extractArgs
 
 if ($ExpectEmptyCacheFailure) {
@@ -144,14 +141,15 @@ catch {
 if ([string]::IsNullOrWhiteSpace($content)) {
   Fail "extraction produced empty content with HF_HUB_CACHE=$CacheDir"
 }
-# The config enables the layout path, so this run resolved RT-DETR/TATR through the cache
-# under test. A miss here means the bundled models did not satisfy the extract path; no
-# `Layout detection completed` line means the path never ran and nothing was proven.
+# The config pins the OCR path on, so this run resolved the bundled PaddleOCR models
+# through the cache under test. A miss here means the staged cache did not satisfy the
+# extract path; no `PaddleOCR engine initialized successfully` line means the OCR path
+# never ran and nothing was proven.
 if ($result.Stderr -match "offline mode") {
   Fail "the staged cache at $CacheDir did not satisfy the extract path: stderr reports a model-cache miss: $($result.Stderr)"
 }
-if ($result.Stderr -notmatch "Layout detection completed") {
-  Fail "the layout path never ran, so the bundled models were not exercised (no 'Layout detection completed' on stderr): $($result.Stderr)"
+if ($result.Stderr -notmatch "PaddleOCR engine initialized successfully") {
+  Fail "the OCR path never ran, so the bundled models were not exercised (no 'PaddleOCR engine initialized successfully' on stderr): $($result.Stderr)"
 }
 Write-Host "smoke=ok kind=positive content_len=$($content.Length) cache=$CacheDir"
 exit 0
