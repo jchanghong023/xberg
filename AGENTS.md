@@ -120,6 +120,8 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 
 **门禁实测（2026-09-20，用户授权连跑三级）**：`fastcheck` PASS 4.2s → `fulltest` 门 PASS 2789s（12 阶段全绿：build-cli 74s、e2e 258s、test-xberg 2226s、test-xberg-cli 159s、clippy ×3 共 67s）→ `slowtest` 门 PASS（`slowtest.py` 615s：打包 zip 361.7 MiB + PE 闭包/正负 smoke 全过 + 打包版 fulltest 验收 FAIL=0 WARN=7、与基线比 新增 2/已修复 0/恶化 0；远程发布阶段未授权记 SKIPPED_NOT_AUTHORIZED，WSL 记 SKIPPED_NOT_APPLICABLE）。滑动窗口内的一次失败值得记住：首轮 `fulltest` 门在 `build-cli` 阶段报 `failed to write ...librustfft-*.rmeta: 另一个程序正在使用此文件 (os error 32)`，同一条命令重跑即过——当时无第二个 cargo、无孤立 rustc，本机实时防护是 腾讯电脑管家（Defender 服务已停），建议把 `E:\xberg\target` 加入其排除项以消除这类随机文件锁。整套跑完 `target/debug` 从 58.9 GB 涨回 157.5 GB（含新旧两代产物），E: 可用空间 179 → 76 GB。
 
+**门禁实测（2026-09-22，用户授权 slowtest + 发布）**：首轮 slowtest 门在 clippy 阶段才失败——9-22 新增的 whisper 并行装配代码此前只跑过 `cargo check`（不执行 clippy lint），被 `clippy::question_mark` 拦下（修复 commit `00efbacf88`）；门禁行为正确：本地未全绿时 slowtest.py 与 release-ci 记 SKIPPED_PRIOR_FAIL、不触发发布。修复后重跑全绿：fulltest 门 PASS 2373s（test-xberg 2005s、clippy ×3 全过）→ `slowtest.py` PASS 179s（zip 实测 191.9 MB，打包版验收 FAIL=0 WARN=7、与基线比 新增 2/已修复 1/恶化 0，与 9-22 发布前两轮本地验证一致）→ release-ci PASS 1976s → 公开 Release `v2026.9.22-0714-run39.1`（构建自 `00efbacf88`，资产 193.2 MB）。教训：**改 Rust 代码后只跑 `cargo check` 不挡 clippy lint**，涉新代码的大改动交付前值得主动跑一次 clippy（需用户点名）。
+
 编译和打包是两条独立路径。**跑 fulltest.py 只需要编译，不需要打包**——编译出 exe 直接 `python fulltest.py` 就能测。**唯一例外**：`cargo check -p xberg-cli`（fork feature 集，见「硬性约束」）属类型检查，agent 改完 Rust 代码可主动跑，不算"费时操作"。
 
 ### 编译（供开发与 fulltest.py 使用）
@@ -168,7 +170,7 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 - 产物：`xberg-cli-x86_64-pc-windows-msvc\` 目录（xberg.exe + onnxruntime/CRT DLL + Whisper tiny 模型）并压成同名 zip。
 - **feature 集与开发编译一致**：`formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api`（`--no-default-features`），打包版 exe 含 `xberg serve` HTTP API。**不含** heic、pdfium、candle、mcp、embedding、NER。因此包内**不**附带 pdfium.dll。
 - **模型随包分发（离线可用）**：Whisper tiny（`$TranscriptionFiles` 固定校验和）+ **PaddleOCR pp-ocrv6 tiny ≈13 MiB**（det/rec/dict/textline-cls 四条正则，经 `xberg.exe cache manifest` 取二进制里的 sha256/大小后 stage 到 `models/` 的 HF 缓存布局）。**layout 模型（RT-DETR 169.1 MB + TATR 30.2 MB）已随需求变更移除**：feature 集不编 `layout-detection`，`$RequiredModels` 里那两条正则也删了——不要加回来（加了也解析不到，且打包门禁会因为 OCR 断言通过而掩盖它）。`$RequiredModels` 非空会**启用**离线空缓存探测（`scripts/publish/cli/offline-smoke.ps1 -ExpectEmptyCacheFailure`）：该探测用带 `ocr` 配置的抽取跑，空缓存下必须报出 HF 离线缺模型诊断（不保证进程一定失败，所以断言的是诊断而非退出码）。清单里另有 SLANeXT/SLANet_plus/table_classifier/pp_doclayout_v3，本构建不用，**不要**加进 `$RequiredModels`（每条正则必须命中且仅命中 1 条）。
-- 包体参考：含 layout + paddle tiny 时 zip 实测 **361.7 MiB**；2026-09-21 移除 layout 模型（RT-DETR 169.1 MB + TATR 30.2 MB，未压缩计）后应显著变小——**尚未重新打包实测**，下次打包以实测值更新此数。`target/package-models-<target>` 缓存跨次复用（删掉要重下）。
+- 包体实测（2026-09-22，无 layout 模型，paddle tiny + whisper tiny）：本地打包 zip **191.9 MB**（同一 commit 的远程 CI 产物 193.2 MB）；此前含 layout 模型时为 361.7 MiB（RT-DETR 169.1 MB + TATR 30.2 MB 已移除）。`target/package-models-<target>` 缓存跨次复用（删掉要重下）。
 - 打包前有门禁：干净 PATH 的 `--version` 探测、MSVC CRT 部署、PE 导入闭包校验（`scripts/ci/verify-windows-dll-closure.ps1`）、离线 smoke（`offline-smoke.ps1`：带 `ocr` 配置的抽取必须成功，且 stderr 出现 `PaddleOCR engine initialized successfully` 而无离线缺模型诊断——2026-09-21 起 layout 断言换成 OCR 断言，因为本构建不再编 layout；`$RequiredModels` 非空时再跑一次空缓存探测，stderr 必须报出 HF 离线缺模型诊断）。
 - 用打包版跑音视频时：`HF_HUB_CACHE` 指向包目录下 `models`（hf-hub 的缓存根；`HF_HOME` 会被它解析成 `$HF_HOME/hub`，指不到包内模型），`PATH` 前置包目录（fulltest.py 已自动处理）。
 
