@@ -527,10 +527,7 @@ impl WhisperEngine {
             .into_iter()
             .enumerate()
         {
-            let chunk_segments = match slot.expect("every chunk must have a result after the worker scope joins") {
-                Ok(chunk_segments) => chunk_segments,
-                Err(error) => return Err(error),
-            };
+            let chunk_segments = slot.expect("every chunk must have a result after the worker scope joins")?;
             let chunk_offset_ms = (index * WHISPER_CHUNK_SAMPLES) as f64 * ms_per_sample;
             for (start_ms, end_ms, text) in chunk_segments {
                 if text.is_empty() {
