@@ -40,7 +40,11 @@ REPO = Path(__file__).resolve().parent
 FEATURES_FORK = "formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api"
 # xberg lib 侧没有 core-cli（那是 xberg-cli 的聚合 feature）；lib default
 # （tokio-runtime、simd-utf8）保持开启，等价于 CLI 构建转发到 lib 的能力面。
-FEATURES_LIB = "formats-no-heic,analysis,ocr,paddle-ocr,transcription,api"
+# `layout-detection` 只留在这套 **测试** feature 里：出厂二进制/打包版不含它
+# （fork.md 需求：不用 layout/table 模型），但上游有一批 layout 专属测试
+# （reading_order.rs / layout_for_markdown.rs / pdf_two_column_reading_order.rs …）
+# 要靠它成立——按 fork 规则不改上游断言，所以测试集保持原样。
+FEATURES_LIB = "formats-no-heic,analysis,ocr,paddle-ocr,transcription,layout-detection,api"
 
 FASTCHECK_BUDGET_SECONDS = 60.0
 

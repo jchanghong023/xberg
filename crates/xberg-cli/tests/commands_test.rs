@@ -631,6 +631,9 @@ fn test_batch_help() {
     assert!(stdout.contains("Batch extract from multiple documents"));
 }
 
+// The layout override flags (`--layout`, `--layout-confidence`, `--layout-table-model`) only
+// exist in a build that compiles `layout-detection`; the fork ships without it (fork.md: no
+// layout/table models), so both help-parity tests check them only when the feature is on.
 #[test]
 fn test_extract_help_shows_all_extraction_override_flags() {
     let output = Command::new(get_binary_path())
@@ -657,9 +660,6 @@ fn test_extract_help_shows_all_extraction_override_flags() {
         "--include-structure",
         "--quality",
         "--detect-language",
-        "--layout",
-        "--layout-confidence",
-        "--layout-table-model",
         "--acceleration",
         "--max-concurrent",
         "--max-threads",
@@ -679,6 +679,17 @@ fn test_extract_help_shows_all_extraction_override_flags() {
             flag,
             stdout
         );
+    }
+
+    if cfg!(feature = "layout-detection") {
+        for flag in ["--layout", "--layout-confidence", "--layout-table-model"] {
+            assert!(
+                stdout.contains(flag),
+                "Extract --help should show flag '{}', but it was not found in output:\n{}",
+                flag,
+                stdout
+            );
+        }
     }
 }
 
@@ -712,9 +723,6 @@ fn test_batch_has_same_extraction_flags_as_extract() {
         "--content-format",
         "--quality",
         "--detect-language",
-        "--layout",
-        "--layout-confidence",
-        "--layout-table-model",
         "--acceleration",
         "--max-concurrent",
         "--max-threads",
@@ -738,6 +746,19 @@ fn test_batch_has_same_extraction_flags_as_extract() {
             "Batch should have flag '{}' (parity with extract) but it's missing",
             flag
         );
+    }
+
+    if cfg!(feature = "layout-detection") {
+        for flag in ["--layout", "--layout-confidence", "--layout-table-model"] {
+            assert!(
+                extract_help.contains(flag),
+                "Extract should have flag '{flag}' but it's missing"
+            );
+            assert!(
+                batch_help.contains(flag),
+                "Batch should have flag '{flag}' but it's missing"
+            );
+        }
     }
 }
 

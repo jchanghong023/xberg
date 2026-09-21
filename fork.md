@@ -56,7 +56,8 @@
 
 ## 构建配置刻意背离上游的点
 
-- feature 集固定为 `formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api`（`--no-default-features`；AGENTS.md 与打包脚本两边保持一致）。2026-09-21 需求变更移除 `layout-detection`（同时删掉打包脚本的 RT-DETR/TATR 模型条目与 layout smoke 断言）。
+- **出厂 feature 集**（开发编译 / 打包 / 三级门）固定为 `formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api`（`--no-default-features`；AGENTS.md 与打包脚本两边保持一致）。2026-09-21 需求变更移除 `layout-detection`（同时删掉打包脚本的 RT-DETR/TATR 模型条目与 layout smoke 断言）。
+- **lib 测试集例外**：`cargo test -p xberg` 用的 `FEATURES_LIB` 仍带 `layout-detection`——上游有一批 layout 专属测试（`reading_order.rs`、`layout_for_markdown.rs`、`pdf_two_column_reading_order.rs` …）以及 `pdf_options.reading_order` 的校验都要求该 feature，按「不改上游断言」的约定，出厂集与测试集分离；这也意味着 `pdf_options.reading_order` 在出厂二进制里是配置错误（`core/config/pdf.rs` 的校验）。
 - 根 `Cargo.toml`：`[profile.release]` `lto = false`、`codegen-units = 256`（上游 `lto = "fat"`，打包墙钟时间不可接受）；`[profile.dev] debug = 0` 与 `[profile.test] debug = 0`（2026-09-20：`debug = 1` 时一次冷 `cargo test` 写 88 GB PDB，见 AGENTS.md「Rust 构建优化规则」）；workspace 新增 member `crates/xberg-windows-metafile`。
 - `.cargo/config.toml`：`jobs = 28`（同步自 `alef.toml` 的 build_jobs）。
 

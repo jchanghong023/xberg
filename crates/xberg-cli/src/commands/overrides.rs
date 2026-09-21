@@ -2724,7 +2724,9 @@ mod tests {
     /// `tracing::warn!` reached on some other test's thread first isn't cached as
     /// `Interest::never()` for the whole process and lost to `capture_logs` below.
     /// Mirrors the pattern documented at `crates/xberg/src/cache/mod.rs` (#272/#301).
-    #[cfg(feature = "layout-detection")]
+    ///
+    /// Ungated with `capture_logs` above: the output-format/flag tests use it and the CLI
+    /// ships without `layout-detection` (only the three layout-warning tests below stay gated).
     fn install_permissive_global_subscriber() {
         struct AlwaysInterested;
 
@@ -2760,7 +2762,10 @@ mod tests {
     }
 
     /// Capture `tracing` output emitted on this thread while `body` runs.
-    #[cfg(feature = "layout-detection")]
+    ///
+    /// Not gated on `layout-detection` (the upstream gate was too broad): the output-format
+    /// and flag-precedence tests below capture logs too, and the CLI ships without that
+    /// feature — a gated helper left them uncompilable there.
     fn capture_logs<T>(body: impl FnOnce() -> T) -> (T, String) {
         use std::sync::{Arc, Mutex};
 
