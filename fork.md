@@ -30,8 +30,10 @@
 - **PPTX 质量**：标题/演讲者备注读取与归属守卫（`extractors/pptx.rs`、`extraction/pptx/`）。验收：标题与备注归属到正确幻灯片，不串页、不重复。
 - **PDF 质量大改**：表格重建（`pdf/table_reconstruct.rs`）、原生文本抽取（`pdf/native/text.rs`）、结构分类/段落/页眉页脚剔除（`pdf/structure/`）。验收：有原生文本的页面不做破坏性整页 OCR 回退（原生文本保留），表格按重建结果输出、页眉页脚被剔除；`content_filter.include_headers/include_footers` 在扁平文本与结构化两条路径上一致生效（跨页页眉/页脚的 streak 剔除同样受其约束）。
 - **Windows Media 转写**：Media Foundation 读 ASF/WMV 音轨，解码失败回退外部 ffmpeg（`transcription/container.rs`、`transcription/wmf.rs`，fork 新增）。验收：`.wmv`/`.asf` 能转写出音轨文本；MF 读不了的文件回退 ffmpeg 后仍能出文本。
+- **Whisper 分块并行推理（2026-09-22，fork 性能改动）**：`WhisperEngine::transcribe_segments` 把 30s 分块交给最多 8 个 worker（`available_parallelism` 与块数取小）并发推理、按块序号还原顺序——输出与顺序版逐条一致，失败返回最低失败块序号的错误（与顺序版语义一致）。实测 17 分钟 mp4 转换 96.7s→29.9s（−69%），整轮 fulltest 转换合计 −32.9%。验收：fulltest `--deep` 下 mp4/wmv 的 PASS 判定与转写量交叉核对不回归。
 - **Markdown 渲染**：图片 alt 路径清理、图片 marker 独立段落与 OCR 文本围栏等输出修复（`rendering/markdown.rs`、`rendering/comrak_bridge.rs`、`extraction/markdown_utils.rs`）。验收：输出不残留本地路径垃圾，改动围栏内文本的改写不发生。
 - **标题属性内联**：XML/OPML 抽取器把元素的 `id`/`type`/`_note` 等属性挂在元素上而非文本里，plain 与 Markdown 两个渲染器共用 `rendering::inline_attributes_suffix` 把属性以 ` (k: v, …)` 内联进标题（过滤 `xmlns*`、空值与 `xberg:` 内部标记），两渲染器不再漂移（`# Item (_note: …)`）。验收：`issue_131_opml_note_attribute` 与 `xml_embedding_quality` 的默认配置断言成立。
+- **性能打点体系**：`perf-tracing` feature（fork 新增，上游无）：`xberg` 纯 marker + `xberg-cli` 侧 `tracing-appender` 独立日志（`crates/xberg-cli/src/perf.rs`）。启用时给单/批抽取整体、引擎、文件/字节抽取、格式分发、pipeline、图片 OCR、Whisper 转写与输出渲染、PaddleOCR 初始化/推理加 `target="perf"` span，按天滚动落 `logs/perf.log.<日期>`（`XBERG_PERF_LOG_DIR` 可覆盖，`**/logs/` 已 gitignore）；耗时 = `FmtSpan::CLOSE` 的 `time.busy`/`time.idle`。默认构建零影响（出厂集不含该 feature），不随包分发。注意 otel 在本 fork 经 `core-cli → cli → services` 恒开，perf span 不得用 `not(feature = "otel")` 守卫（会全部静默失效）；`format_extract` 与 otel stage span 的调用点三分支互斥且 perf 优先。验收：默认构建依赖图与告警不变；性能构建跑 `xberg extract` 在日志目录产出含各阶段耗时记录的性能日志，stderr 业务日志不变。
 
 ## 性能 / 资源策略
 

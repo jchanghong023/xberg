@@ -148,6 +148,20 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 - **不要** `--features all`（在标准集之上额外拉 mcp/heic/pdfium/ner/summarization 等，且 heic 在 Windows 常编不过）。
 - 音视频与本地编译版：fulltest.py 对所有文件（含音视频）只用 `--cli` 指定的本地 CLI，无任何打包回退；缺 transcription feature 时预检即失败并提示重编。
 
+### 性能打点构建（可选 perf-tracing feature，fork 特有）
+
+- **是什么**：编译期开关的性能耗时打点体系（2026-09-21 新建）。`xberg` crate 的 `perf-tracing` 是纯 marker feature（不新增依赖），给关键阶段加 `target="perf"` 的 tracing span；`xberg-cli` 的 `perf-tracing` ＝ `dep:tracing-appender` + 转发 `xberg/perf-tracing`，把 span 落到独立性能日志（`crates/xberg-cli/src/perf.rs`：按天滚动 `logs/perf.log.<日期>`，默认目录相对 CWD，`XBERG_PERF_LOG_DIR` 可覆盖；`**/logs/` 已 gitignore）。耗时字段来自 `FmtSpan::CLOSE` 的 `time.busy`/`time.idle`。
+- **span 契约（只增不改）**：target 固定 `"perf"`；既有 span 名 `extract_command` / `batch_command` / `engine_extract` / `engine_extract_batch` / `extract_file` / `extract_bytes` / `format_extract` / `pipeline` / `image_ocr` / `whisper_model_load` / `whisper_transcribe` / `render_output` / `paddle_engine_init` / `paddle_ocr_infer`，动态信息（路径、MIME、元素数等）只作为字段记录。**otel 在本 fork 所有标准构建里都是开着的**（`core-cli → xberg/cli → services → otel`），所以 perf span 不得用 `not(feature = "otel")` 守卫（那会全部静默失效，2026-09-22 实证过）：普通函数直接 `#[cfg_attr(feature = "perf-tracing", …)]`；`extract_bytes`/`run_pipeline` 这类自带 otel instrument 的函数两者叠加为嵌套 span（tracing 支持重复 instrument）；`format_extract` 与 otel stage span 同一调用点的两处用三分支 cfg 互斥、**perf 优先**（perf 开 → otel stage span 让位）。
+- **读数口径**：`time.busy` = span 处于 enter 状态的时间；spawn_blocking/子任务里的工作不会计入父 span 的 busy（表现为父 span 的 idle），这是 2026-09-22 给 `paddle_ocr_infer`/`whisper_*` 补 span 的原因——分析时必须看「最深处的 busy」，不要拿父 span busy 当总耗时。
+- **标准构建零影响**：出厂 feature 集不含 `perf-tracing`，标准构建/fulltest/slowtest/打包脚本 `$Features` 都不变（性能构建不随包）。默认构建不得出现新增依赖与新增告警。
+- **性能构建（改打点代码后验证用，属编译类命令，仅在用户点名时执行）**：
+
+  ```bat
+  cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api,perf-tracing
+  ```
+
+  运行任一 `xberg extract` / `batch` 即在 CWD 下生成 `logs/perf.log.<日期>`；`WorkerGuard` 由 `run_cli` 持有至进程退出（flush 保证），不要改成 `let _ =`。
+
 ### 打完整包（发布用，含模型与 DLL）
 
 - 一条命令：`pwsh -NoProfile -File scripts/publish/cli/package-cli-windows.ps1`。需 PowerShell ≥ 7.4（`Start-Process -Environment` 等依赖，脚本头 `#Requires -Version 7.4` 已声明）。本地默认并行度 min(30, 逻辑核数)，可用 `-Jobs N` 覆盖；CI（`.github/workflows/build-windows-cli.yml`）调用的是同一脚本，是打包的唯一入口。
@@ -161,7 +175,9 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 ### 测试入口与发布流程
 
 - **默认快速验证**：`python fulltest.py`——用本地编译的二进制快速验证（只需编译，无需打包），质量报告打印到终端并写入 `<输出目录>/_quality-report.md`。
-- **发布前慢速验证**：`python slowtest.py`——① 跑完整打包生成 zip；② 解压到 `target/slowtest-tmp/`，对打包版 CLI 全量跑端到端文档转换 + 音频/视频转写测试（`--keep-going`）；③ 输出转码质量报告（报告副本 `target/slowtest-report-<时间戳>.md|.json`），成功后解压目录自动删除（`--keep-tmp` 保留）。**是否发布版本，以该报告为准。**
+  - **耗时打点（2026-09-22 新增）**：逐文件记录转换耗时（`elapsed_s`）与 Python 侧检查耗时（`check_time_s`，其中源文基准段单列 `source_time_s`），报告新增「## 耗时分布」段（转换/检查/对抗/框架开销 + 最慢 Top10），JSON 报告新增 `timing` 块。
+  - **`--deep` 门（2026-09-22 新增）**：最重的测试段（音视频转写，基线实测占转换合计近半）默认不进 fulltest 队列，`--deep` 才包含；**slowtest.py 固定携带 `--deep`**，打包版验收不丢覆盖。改 fulltest/slowtest 判定语义前先想清楚这一层的分工。
+- **发布前慢速验证**：`python slowtest.py`——① 跑完整打包生成 zip；② 解压到 `target/slowtest-tmp/`，对打包版 CLI 全量跑端到端文档转换 + 音频/视频转写测试（`--keep-going --deep`，自动包含 fulltest 默认跳过的音视频段）；③ 输出转码质量报告（报告副本 `target/slowtest-report-<时间戳>.md|.json`），成功后解压目录自动删除（`--keep-tmp` 保留）。**是否发布版本，以该报告为准。**
 
 ### 其他验证（同样仅在明确要求时执行）
 
