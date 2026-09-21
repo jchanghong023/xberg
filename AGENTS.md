@@ -100,7 +100,9 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 
 ## 编译 / 打包 / 测试（仅在用户明确要求时执行）
 
-### Rust 构建优化规则（用户强制，2026-09-20）
+### 构建与缓存纪律（Rust 构建优化规则，用户强制，2026-09-20）
+
+**缓存纪律（改动 / 清理 / 提速前先过这四条）**：① 禁止无理由 `cargo clean`；② 禁止删除当前有效的 `target` 缓存（要删必须能指出它属于哪个废弃 profile / feature 集 / target 三元组，并按第 8 条的优先级定点删除、留痕）；③ 保持构建配置与 target 目录稳定——不为提速切换 profile / `--target-dir` / RUSTFLAGS，也不重建缓存来「让 fastcheck 更干净」；④ 最终打包 / 发布 profile 的构建只出现在 `fulltest` / `slowtest` 里（打包属这两级语义，`fastcheck` 只做 fmt / 解析 / 判定器自测这类秒级检查）。
 
 以下 9 条为用户定下的构建纪律，改 profile / 清产物 / 调 features 前先对照；每条都指向本仓库的具体落点。
 
