@@ -17,10 +17,10 @@ use std::fs::{File, OpenOptions};
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
-#[cfg(feature = "otel")]
-use tracing::Instrument;
-
+// (fork) perf-tracing 的 format_extract span 与 otel 的 stage span 共用 Instrument。
 use super::helpers::get_extractor;
+#[cfg(any(feature = "otel", feature = "perf-tracing"))]
+use tracing::Instrument;
 
 fn ensure_builtin_extraction_method(doc: &mut crate::types::internal::InternalDocument, is_builtin: bool) {
     if !is_builtin {
@@ -356,6 +356,16 @@ fn is_extractor_fallback_eligible(error: &XbergError) -> bool {
 /// Fetches extractor candidates for `mime_type` from the process-global
 /// [`crate::plugins::registry::DocumentExtractorRegistry`] and delegates the
 /// dispatch/fallback logic to [`extract_with_candidates`].
+// (fork) perf-tracing：文件路径抽取阶段 span（MIME 探测 + 读文件 + 格式抽取 + pipeline）。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(
+        target = "perf",
+        name = "extract_file",
+        skip_all,
+        fields(file = %path.display(), mime = mime_type)
+    )
+)]
 async fn extract_file_uncached(path: &Path, mime_type: &str, config: &ExtractionConfig) -> Result<ExtractedDocument> {
     let budget = crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref());
     crate::core::config::concurrency::init_thread_pools(budget);
@@ -399,7 +409,22 @@ pub(crate) async fn extract_with_candidates(
     for (index, candidate) in candidates.into_iter().enumerate() {
         // The extraction stage span wraps only the extractor invocation — post-processing
         // is covered by `run_pipeline` below and must not be nested inside it.
-        #[cfg(feature = "otel")]
+        // (fork) perf-tracing 优先：perf 构建只产出 perf span；otel 构建让位（两者叠用
+        // 会让同一调用点出现双层 stage span，语义重复）。
+        #[cfg(feature = "perf-tracing")]
+        let extraction = {
+            let stage_span = tracing::info_span!(
+                target: "perf",
+                "format_extract",
+                format = candidate.plugin().name(),
+                mime = mime_type
+            );
+            candidate
+                .extract_path(path, mime_type, config)
+                .instrument(stage_span)
+                .await
+        };
+        #[cfg(all(feature = "otel", not(feature = "perf-tracing")))]
         let extraction = {
             let stage_span = crate::telemetry::spans::extraction_stage_span(
                 candidate.plugin().name(),
@@ -410,7 +435,7 @@ pub(crate) async fn extract_with_candidates(
                 .instrument(stage_span)
                 .await
         };
-        #[cfg(not(feature = "otel"))]
+        #[cfg(all(not(feature = "otel"), not(feature = "perf-tracing")))]
         let extraction = candidate.extract_path(path, mime_type, config).await;
 
         match extraction {
@@ -615,14 +640,27 @@ pub(in crate::core::extractor) async fn extract_bytes_with_extractor(
 
     let (extractor, is_builtin) = get_extractor(mime_type)?;
 
-    #[cfg(feature = "otel")]
+    // (fork) perf-tracing 优先：perf 构建只产出 perf span，otel 构建让位（见 extract_with_candidates）。
+    #[cfg(feature = "perf-tracing")]
+    let mut doc = {
+        let stage_span = tracing::info_span!(
+            target: "perf",
+            "format_extract",
+            format = extractor.name(),
+            mime = mime_type
+        );
+        Box::pin(extractor.extract_content(content, mime_type, config))
+            .instrument(stage_span)
+            .await?
+    };
+    #[cfg(all(feature = "otel", not(feature = "perf-tracing")))]
     let mut doc = {
         let stage_span = crate::telemetry::spans::extraction_stage_span(extractor.name(), extractor.priority());
         Box::pin(extractor.extract_content(content, mime_type, config))
             .instrument(stage_span)
             .await?
     };
-    #[cfg(not(feature = "otel"))]
+    #[cfg(all(not(feature = "otel"), not(feature = "perf-tracing")))]
     let mut doc = Box::pin(extractor.extract_content(content, mime_type, config)).await?;
 
     ensure_builtin_extraction_method(&mut doc, is_builtin);

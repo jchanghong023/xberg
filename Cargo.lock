@@ -11863,6 +11863,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+ "tracing-appender",
  "tracing-subscriber",
  "tree-sitter-language-pack",
  "ureq 3.4.2",

@@ -27,6 +27,11 @@ use std::borrow::Cow;
 /// * `result` - The extraction result to modify
 /// * `output_format` - The desired output format
 #[cfg_attr(alef, alef(skip))]
+// (fork) perf-tracing：输出格式化/渲染阶段 span。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(target = "perf", name = "render_output", skip_all)
+)]
 pub fn apply_output_format(result: ExtractedDocument, output_format: OutputFormat) -> ExtractedDocument {
     let mut result = result;
 

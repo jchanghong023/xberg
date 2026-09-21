@@ -684,6 +684,11 @@ impl PaddleOcrBackend {
         }
     }
 
+    // (fork) perf-tracing：会话初始化耗时（每个进程首次 OCR 都要付一次）。
+    #[cfg_attr(
+        feature = "perf-tracing",
+        tracing::instrument(target = "perf", name = "paddle_engine_init", skip_all)
+    )]
     fn initialize_engine(
         family: &str,
         tier: &str,
@@ -1230,6 +1235,16 @@ impl PaddleOcrBackend {
     /// requires `&mut self`. Concurrent calls into one engine serialize on that mutex, which is
     /// why callers hold a distinct engine slot per in-flight image (see `MAX_PADDLE_ENGINE_SLOTS`)
     /// instead of sharing one session with a wider intra-op budget.
+    // (fork) perf-tracing：单图 OCR 推理全程（阻塞线程上执行：解码+检测+分类+识别）。
+    #[cfg_attr(
+        feature = "perf-tracing",
+        tracing::instrument(
+            target = "perf",
+            name = "paddle_ocr_infer",
+            skip_all,
+            fields(bytes = image_bytes.len())
+        )
+    )]
     fn perform_ocr(
         image_bytes: &[u8],
         ocr_engine: &Arc<PaddleOcrEngine>,

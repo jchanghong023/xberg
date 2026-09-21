@@ -137,6 +137,9 @@ tokio = { version = "1.53.1", features = [
 ] }
 toml = "1.1.6"
 tracing = "0.1"
+# (fork) perf-tracing 专用：性能日志独立文件的 rolling + 非阻塞 writer。只在 xberg-cli
+# 里作为可选依赖被 perf-tracing feature 拉入，默认构建不进依赖图。
+tracing-appender = "0.2"
 # Pure-Rust ONNX inference engine (Sonos). Alternative InferenceBackend to `ort` on
 # no-ORT targets (wasm32, x86_64-linux-android). The ONNX frontend crate is CPU-only
 # and WASM-safe; the top-level `tract` facade instead defaults to CUDA and bundles

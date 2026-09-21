@@ -50,6 +50,14 @@ default = ["tokio-runtime", "simd-utf8"]
 # `task rust:build:profiling` turns both on in one workspace build.
 profiling = []
 
+# (fork) 性能打点开关：纯 marker feature，不引入依赖（tracing 本就是必需依赖）。启用后给
+# 引擎整体抽取、文件/字节抽取、格式分发、pipeline、图片 OCR、Whisper 转写与输出渲染等
+# 关键阶段加 target="perf" 的 tracing span（全部 `#[cfg_attr(all(feature = "perf-tracing",
+# not(feature = "otel")), …)]` 门控，otel 优先、默认构建完全不编译）。span 只由 xberg-cli
+# 的同名 feature 落到独立性能日志文件（见 crates/xberg-cli/src/perf.rs）。默认关闭时对
+# 标准构建/fulltest/slowtest 零影响。
+perf-tracing = []
+
 simd-utf8 = ["dep:simdutf8"]
 
 tokio-runtime = ["dep:tokio"]

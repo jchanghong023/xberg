@@ -65,6 +65,17 @@ use super::file::extract_bytes_with_extractor;
         { crate::telemetry::conventions::ERROR_MESSAGE } = tracing::field::Empty,
     )
 ))]
+// (fork) perf-tracing：字节输入抽取整体 span。otel 与 perf 的 instrument 同时启用时
+// 叠加为嵌套 span（tracing 支持重复 instrument），互不干扰。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(
+        target = "perf",
+        name = "extract_bytes",
+        skip_all,
+        fields(mime = mime_type, size_bytes = content.len())
+    )
+)]
 pub(crate) async fn extract_bytes(
     content: &[u8],
     mime_type: &str,

@@ -64,6 +64,8 @@ mod input;
 mod logging;
 mod output;
 mod peak_memory;
+#[cfg(feature = "perf-tracing")]
+mod perf;
 mod style;
 
 use anyhow::{Context, Result};
@@ -743,10 +745,27 @@ fn run_cli() -> Result<()> {
 
     let env_filter = logging::build_env_filter(cli.log_level.as_deref());
 
-    let subscriber = tracing_subscriber::fmt()
-        .with_env_filter(env_filter)
-        .with_writer(std::io::stderr)
-        .finish();
+    // (fork) perf-tracing：先建独立性能日志，再把性能 layer 组合进同一个全局 subscriber。
+    // guard 拆出来绑定到存活至进程退出的真实变量——退出时才 flush 非阻塞队列，不能丢。
+    // 目录不可建时 init 返回 None（perf.rs 内已 stderr 提示）：业务照常，只是没有性能日志；
+    // `Option<Layer>` 本身实现 `Layer`（None = no-op），两种情形统一组合。
+    #[cfg(feature = "perf-tracing")]
+    let (_perf_guard, perf_layer) = match perf::init_perf_layer() {
+        Some((guard, layer)) => (Some(guard), Some(layer)),
+        None => (None, None),
+    };
+
+    use tracing_subscriber::layer::Layer as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    // registry + fmt layer 组合与原先的 `fmt().…finish()` 输出一致（同一 EnvFilter、同一
+    // stderr writer、同一默认格式），但 registry 提供 `LookupSpan`——性能 layer 的
+    // `FmtSpan::CLOSE` 耗时字段（time.busy/time.idle）需要它，`fmt::Subscriber` 没有。
+    let subscriber = tracing_subscriber::registry().with(
+        tracing_subscriber::fmt::layer()
+            .with_writer(std::io::stderr)
+            .with_filter(env_filter),
+    );
 
     // The PDF glyph-drop capture is COMPOSED IN, not installed on its own. `tracing` has a
     // single global dispatcher slot and the `try_init()` below claims it at the top of
@@ -755,10 +774,11 @@ fn run_cli() -> Result<()> {
     // and so wins the slot and passes. Warnings arriving in a test say nothing about whether
     // they arrive in the CLI. See `xberg::pdf::render::install_pdf_render_diagnostics`. ~keep
     #[cfg(feature = "pdf-surface")]
-    let subscriber = {
-        use tracing_subscriber::layer::SubscriberExt as _;
-        subscriber.with(xberg::pdf::render::glyph_drop_capture_layer())
-    };
+    let subscriber = { subscriber.with(xberg::pdf::render::glyph_drop_capture_layer()) };
+
+    // (fork) 性能 layer 只收 target "perf" 的 span 并写独立文件，不影响 stderr 业务日志。
+    #[cfg(feature = "perf-tracing")]
+    let subscriber = { subscriber.with(perf_layer) };
 
     let _ = subscriber.try_init();
 

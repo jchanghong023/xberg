@@ -207,6 +207,16 @@ fn prefix_image_refs(content: &str, dir: &Path) -> String {
 /// to compute `process_init_ms` for the optional stage-timing breakdown (see
 /// [`stage_timing_requested`]); pass `None` to skip that measurement entirely (e.g. from tests
 /// that construct this call directly).
+// (fork) perf-tracing：单文档整体任务级性能 span；URI 等动态上下文由内层 lib span 记录。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(
+        target = "perf",
+        name = "extract_command",
+        skip_all,
+        fields(format = ?format)
+    )
+)]
 #[expect(
     clippy::print_stdout,
     reason = "extracted content and JSON/TOON envelope are the command's stdout result output"
@@ -329,6 +339,16 @@ pub fn extract_command(
 #[expect(
     clippy::print_stdout,
     reason = "batch extraction results are the command's stdout result output"
+)]
+// (fork) perf-tracing：批处理整体任务级性能 span；逐文档耗时由内层 lib span 记录。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(
+        target = "perf",
+        name = "batch_command",
+        skip_all,
+        fields(count = uris.len())
+    )
 )]
 pub fn batch_command(
     uris: Vec<String>,

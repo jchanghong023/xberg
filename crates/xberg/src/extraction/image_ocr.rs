@@ -351,6 +351,16 @@ pub(crate) fn rasterize_metafile_to_dynamic_image(
 /// budget (never a VLM-specific request limit — see the module docs) using a
 /// replenished task set, so queued images do not create an unbounded number of
 /// futures. Concurrent document extractions each enforce their own limit.
+// (fork) perf-tracing：图片 OCR 批处理阶段 span（一次调用 = 一份文档的全部图片）。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(
+        target = "perf",
+        name = "image_ocr",
+        skip_all,
+        fields(images = images.len())
+    )
+)]
 #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
 pub(crate) async fn process_images_with_ocr(
     mut images: Vec<ExtractedImage>,

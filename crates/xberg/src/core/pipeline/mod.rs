@@ -325,6 +325,16 @@ async fn run_captioning_prepass(
     )
 ))]
 #[cfg_attr(alef, alef(skip))]
+// (fork) perf-tracing：后处理管线整体 span（图片 OCR、后处理器、chunking、输出渲染都在其中）。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(
+        target = "perf",
+        name = "pipeline",
+        skip_all,
+        fields(elements = doc.elements.len())
+    )
+)]
 pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) -> Result<ExtractedDocument> {
     doc.ocr_text_only = config.images.as_ref().map(|i| i.ocr_text_only).unwrap_or(false);
     doc.append_ocr_text = config.images.as_ref().map(|i| i.append_ocr_text).unwrap_or(true);

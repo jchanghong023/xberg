@@ -70,6 +70,11 @@ const BATCH_CACHE_KEY_NAMESPACE: &[u8] = b"xberg-engine-extract-batch-v2";
 /// ([`NoopCache`](crate::engine::seams::NoopCache),
 /// [`NoopProgressSink`](crate::engine::seams::NoopProgressSink)), so callers who
 /// inject nothing see byte-identical behavior.
+// (fork) perf-tracing：引擎单文档抽取整体 span（含缓存查取与真实抽取）。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(target = "perf", name = "engine_extract", skip_all)
+)]
 pub(crate) async fn extract(
     inner: &super::EngineInner,
     input: ExtractInput,
@@ -214,6 +219,16 @@ fn batch_content_cache_key(inputs: &[ExtractInput], base_config: &ExtractionConf
 }
 
 /// Extract content from multiple bytes or URI inputs.
+// (fork) perf-tracing：引擎批量抽取整体 span；逐文档耗时由内层 extract_file/extract_bytes 记录。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(
+        target = "perf",
+        name = "engine_extract_batch",
+        skip_all,
+        fields(count = inputs.len())
+    )
+)]
 pub(crate) async fn extract_batch(
     inner: &super::EngineInner,
     inputs: Vec<ExtractInput>,
