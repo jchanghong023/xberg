@@ -1189,6 +1189,7 @@ mod tests {
             fallback: false,
             failing_pages: Vec::new(),
             whole_doc_failure: false,
+            fabricated_provenance: false,
         };
 
         apply_flagged_pages(&mut decision, &[5], true, Some(2));
@@ -1221,6 +1222,7 @@ mod tests {
             fallback: false,
             failing_pages: Vec::new(),
             whole_doc_failure: false,
+            fabricated_provenance: false,
         };
 
         apply_flagged_pages(&mut decision, &[1, 5], true, Some(2));
