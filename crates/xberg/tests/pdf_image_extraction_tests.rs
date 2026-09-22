@@ -1410,30 +1410,29 @@ fn test_ocr_only_config_returns_no_images() {
 
     let result = extract_uri_document_blocking(&path, None, &config).expect("extraction must succeed");
 
-    assert!(
-        result.images.as_ref().map(|v| v.is_empty()).unwrap_or(true),
-        "ocr-only config (images: None) must not retain embedded image bytes; got {} image(s)",
-        result.images.as_ref().map(|v| v.len()).unwrap_or(0)
+    // (fork) 本 fork 与上游 GH#1703 的取舍相反：缺省 `images` 段视为抽取图片
+    //（`wants_own_bytes_in_result()` 默认真，见 fork.md「默认抽取图片」），所以
+    // 字节保留、image_indices 指向保留的图片；counts 与 content 断言不变。
+    assert_eq!(
+        result.images.as_ref().map(|v| v.len()).unwrap_or(0),
+        1,
+        "fork default: an absent images section retains the embedded image bytes that fed OCR"
     );
     assert_eq!(
         result.counts.images, 1,
-        "DocumentCounts::images is documented as always populated, so dropping the bytes must not zero it"
+        "DocumentCounts::images is documented as always populated"
     );
 
     if let Some(pages) = result.pages.as_ref() {
-        for page in pages {
-            assert!(
-                page.image_indices.is_empty(),
-                "page {} image_indices must be empty once images are dropped, got {:?}",
-                page.page_number,
-                page.image_indices
-            );
-        }
+        assert!(
+            pages.iter().any(|page| !page.image_indices.is_empty()),
+            "fork default: the retained image must stay referenced by its page's image_indices"
+        );
     }
 
     assert!(
         !result.content.trim().is_empty(),
-        "document content must still be extracted when images are dropped"
+        "document content must still be extracted alongside the retained images"
     );
 }
 
@@ -1519,10 +1518,20 @@ fn test_ocr_only_config_with_placeholders_preserves_ocr_text() {
          got {} image(s)",
         result.images.as_ref().map(|v| v.len()).unwrap_or(0)
     );
+    // (fork) 与上游 GH#1703 的第二半相反：本 fork 把 PDF 占位符注入收紧到「图片
+    // 输出门」（`pdf_image_output_requested`，#796：extract_images=false 时不注入
+    // 占位符，避免渲染出指向永不落盘文件的 `![]()` 悬空引用）。没有占位符，
+    // Markdown 渲染就没有挂 OCR 文本的锚点，所以这条配置形态下 OCR 文本不进
+    // content。fork 的「不出图片、只要 OCR 文本」模式由 `images.ocr_text_only =
+    // true` 承担（extract_images 仍为 true），那条路径的守卫在
+    // comrak_bridge 的 `doc.ocr_text_only && has_ocr` 分支。
     assert!(
-        result.content.contains(SENTINEL_OCR_TEXT),
-        "embedded-image OCR text must still land in content even though the raw image \
-         bytes are dropped; got content:\n{}",
-        result.content
+        !result.content.contains(SENTINEL_OCR_TEXT),
+        "fork behavior: with extract_images=false no placeholder anchors the OCR text, \
+         so it must not land in content either (see pdf_image_output_requested, #796)"
+    );
+    assert!(
+        !result.content.trim().is_empty(),
+        "document content must still be extracted"
     );
 }
