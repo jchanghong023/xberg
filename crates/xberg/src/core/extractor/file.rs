@@ -367,8 +367,7 @@ fn is_extractor_fallback_eligible(error: &XbergError) -> bool {
     )
 )]
 async fn extract_file_uncached(path: &Path, mime_type: &str, config: &ExtractionConfig) -> Result<ExtractedDocument> {
-    let budget = crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref());
-    crate::core::config::concurrency::init_thread_pools(budget);
+    crate::core::config::concurrency::init_thread_pools(config.concurrency.as_ref());
 
     crate::extractors::ensure_initialized()?;
 
@@ -633,8 +632,7 @@ pub(in crate::core::extractor) async fn extract_bytes_with_extractor(
     let config = config.normalized();
     let config = config.as_ref();
 
-    let budget = crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref());
-    crate::core::config::concurrency::init_thread_pools(budget);
+    crate::core::config::concurrency::init_thread_pools(config.concurrency.as_ref());
 
     crate::extractors::ensure_initialized()?;
 

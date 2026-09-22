@@ -213,6 +213,15 @@ typedef struct XBERGCacheStats XBERGCacheStats;
  */
 typedef struct XBERGCallMode XBERGCallMode;
 /**
+ * Floating-point precision accepted by `candle-deepseek-ocr` backend options.
+ *
+ * `Auto` (the default) resolves per compute device: BF16 on CUDA, F16 on Metal,
+ * F32 on CPU. A dtype with no kernel on the selected device fails the load hard
+ * rather than silently falling back to another precision -- this is not a
+ * tuning knob.
+ */
+typedef struct XBERGCandleDeepseekOcrDtype XBERGCandleDeepseekOcrDtype;
+/**
  * Device selection shared by the typed candle backend option objects.
  */
 typedef struct XBERGCandleDevicePreference XBERGCandleDevicePreference;
@@ -412,7 +421,12 @@ typedef struct XBERGCodeMetadata XBERGCodeMetadata;
  * Controls thread usage for constrained environments.
  *
  * Set `max_threads` to cap all internal thread pools (Rayon, ONNX Runtime
- * intra-op) and batch concurrency to a single limit.
+ * intra-op), batch concurrency and Tesseract recognition to a single limit.
+ * Set `max_concurrent_ocr` to give recognition a limit of its own, which is
+ * the knob to reach for when the host has cores to spare but not the memory
+ * to run a recognition session on each of them. It is applied as given and
+ * is not capped by `max_threads`. The first extraction in a process fixes
+ * it for that process â see the field's own documentation.
  *
  * # Default budget when `max_threads` is unset
  *
@@ -438,6 +452,7 @@ typedef struct XBERGCodeMetadata XBERGCodeMetadata;
  *
  * let config = ConcurrencyConfig {
  *     max_threads: Some(2),
+ *     max_concurrent_ocr: None,
  * };
  * \endcode
  */
@@ -6026,6 +6041,27 @@ uintptr_t xberg_concurrency_config_max_threads(XBERGAlefHandle handle);
 int32_t xberg_concurrency_config_has_max_threads(XBERGAlefHandle handle);
 
 /**
+ * Get the `max_concurrent_ocr` field from a `ConcurrencyConfig`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uintptr_t xberg_concurrency_config_max_concurrent_ocr(XBERGAlefHandle handle);
+
+/**
+ * Report whether the `max_concurrent_ocr` field on a `ConcurrencyConfig` is
+ * `Some`.
+ *
+ * `xberg_concurrency_config_max_concurrent_ocr` cannot distinguish a `None`
+ * field from a legitimate zero-valued `Some` at the C ABI boundary -- there is
+ * no null representation for a numeric return, so both collapse to the same
+ * sentinel. Call this function first: `1` means the field getter's return value
+ * is meaningful, `0` means the field is absent and the getter's sentinel must
+ * be ignored, `-1` reports an invalid handle (see `xberg_last_error_code`). #
+ * Safety Pointer must be a valid handle returned by this library.
+ */
+int32_t xberg_concurrency_config_has_max_concurrent_ocr(XBERGAlefHandle handle);
+
+/**
  * Create a `ContentConfig` from a JSON string. Returns null on failure.
  * # Safety
  * JSON string must be valid UTF-8 and null-terminated.
@@ -7625,6 +7661,39 @@ char *xberg_deepseek_ocr_backend_options_model_path(XBERGAlefHandle handle);
 
 #if defined(XBERG_FEATURE_CANDLE_OCR)
 /**
+ * Get the `model_id` field from a `DeepseekOcrBackendOptions`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_deepseek_ocr_backend_options_model_id(XBERGAlefHandle handle);
+#endif
+
+#if defined(XBERG_FEATURE_CANDLE_OCR)
+/**
+ * Get the `hf_revision` field from a `DeepseekOcrBackendOptions`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_deepseek_ocr_backend_options_hf_revision(XBERGAlefHandle handle);
+#endif
+
+#if defined(XBERG_FEATURE_CANDLE_OCR)
+/**
+ * Get the `cache_dir` field from a `DeepseekOcrBackendOptions`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_deepseek_ocr_backend_options_cache_dir(XBERGAlefHandle handle);
+#endif
+
+#if defined(XBERG_FEATURE_CANDLE_OCR)
+/**
  * Get the `device` field from a `DeepseekOcrBackendOptions`.
  * A non-null returned handle is owned by the caller.
  * It must be freed with `xberg_candle_device_preference_free`.
@@ -7658,6 +7727,18 @@ uint32_t xberg_deepseek_ocr_backend_options_version(XBERGAlefHandle handle);
  * Safety Pointer must be a valid handle returned by this library.
  */
 int32_t xberg_deepseek_ocr_backend_options_has_version(XBERGAlefHandle handle);
+#endif
+
+#if defined(XBERG_FEATURE_CANDLE_OCR)
+/**
+ * Get the `dtype` field from a `DeepseekOcrBackendOptions`.
+ * A non-null returned handle is owned by the caller.
+ * It must be freed with `xberg_candle_deepseek_ocr_dtype_free`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+XBERGAlefHandle
+xberg_deepseek_ocr_backend_options_dtype(XBERGAlefHandle handle);
 #endif
 
 #if defined(XBERG_FEATURE_API)
@@ -18447,6 +18528,22 @@ double xberg_ocr_quality_thresholds_min_provenance_fallback_ratio(
     XBERGAlefHandle handle);
 
 /**
+ * Get the `enable_plausibility_ocr_routing` field from a
+ * `OcrQualityThresholds`. # Safety Pointer must be a valid handle returned by
+ * this library.
+ */
+int32_t xberg_ocr_quality_thresholds_enable_plausibility_ocr_routing(
+    XBERGAlefHandle handle);
+
+/**
+ * Get the `min_reliable_language_chunk_ratio` field from a
+ * `OcrQualityThresholds`. # Safety Pointer must be a valid handle returned by
+ * this library.
+ */
+double xberg_ocr_quality_thresholds_min_reliable_language_chunk_ratio(
+    XBERGAlefHandle handle);
+
+/**
  * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
  * Returned pointers must be freed with the appropriate free function.
  */
@@ -20635,6 +20732,17 @@ char *xberg_pdf_metadata_scanned_pages(XBERGAlefHandle handle);
  * Pointer must be a valid handle returned by this library.
  */
 char *xberg_pdf_metadata_fabricated_text_pages(XBERGAlefHandle handle);
+#endif
+
+#if defined(XBERG_FEATURE_PDF)
+/**
+ * Get the `implausible_text_pages` field from a `PdfMetadata`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_pdf_metadata_implausible_text_pages(XBERGAlefHandle handle);
 #endif
 
 #if defined(XBERG_FEATURE_PDF)
@@ -26110,6 +26218,20 @@ int32_t xberg_call_mode_from_i32(int32_t value);
 int32_t xberg_call_mode_from_str(const char *name);
 
 /**
+ * Convert an integer to a `CandleDeepseekOcrDtype` variant. Returns -1 on
+ * invalid input. # Safety Caller must ensure all pointer arguments are valid or
+ * null. Returned pointers must be freed with the appropriate free function.
+ */
+int32_t xberg_candle_deepseek_ocr_dtype_from_i32(int32_t value);
+
+/**
+ * Convert a `CandleDeepseekOcrDtype` serde wire value (C string) to its integer
+ * discriminant. Returns -1 on invalid input. # Safety Caller must ensure `ptr`
+ * is a valid pointer to a `c_char` or null.
+ */
+int32_t xberg_candle_deepseek_ocr_dtype_from_str(const char *name);
+
+/**
  * Convert an integer to a `CandleDevicePreference` variant. Returns -1 on
  * invalid input. # Safety Caller must ensure all pointer arguments are valid or
  * null. Returned pointers must be freed with the appropriate free function.
@@ -27667,6 +27789,36 @@ char *xberg_call_mode_to_json(XBERGAlefHandle handle);
  * The returned string must be freed with `xberg_free_string`.
  */
 char *xberg_call_mode_to_string(XBERGAlefHandle handle);
+
+#if defined(XBERG_FEATURE_CANDLE_OCR)
+/**
+ * Free a `CandleDeepseekOcrDtype` handle.
+ * # Safety
+ * Handle must have been returned by this library, or be zero.
+ */
+void xberg_candle_deepseek_ocr_dtype_free(XBERGAlefHandle handle);
+#endif
+
+#if defined(XBERG_FEATURE_CANDLE_OCR)
+/**
+ * Serialize a `CandleDeepseekOcrDtype` to a JSON string. Returns null on
+ * failure. # Safety `handle` must be a valid, non-zero handle returned by a
+ * `xberg` function. The returned string must be freed with `xberg_free_string`.
+ */
+char *xberg_candle_deepseek_ocr_dtype_to_json(XBERGAlefHandle handle);
+#endif
+
+#if defined(XBERG_FEATURE_CANDLE_OCR)
+/**
+ * Render a `CandleDeepseekOcrDtype` as its string representation
+ * (the unit-variant name as serialized by serde — e.g. `"completed"`,
+ * without surrounding JSON quotes).
+ * # Safety
+ * `handle` must be a valid, non-zero handle returned by a `xberg` function.
+ * The returned string must be freed with `xberg_free_string`.
+ */
+char *xberg_candle_deepseek_ocr_dtype_to_string(XBERGAlefHandle handle);
+#endif
 
 #if defined(XBERG_FEATURE_CANDLE_OCR)
 /**

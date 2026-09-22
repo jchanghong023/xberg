@@ -18,17 +18,13 @@ impl PdfDocument {
     /// Returns an error if the PDF data is invalid, unsupported, or cannot be parsed.
     #[tracing::instrument(name = "pdf.from_bytes", skip_all, fields(bytes = data.len()))]
     pub fn from_bytes(data: Vec<u8>) -> Result<Self> {
-        let source_bytes = data.clone();
-        let reader = PdfReader::Memory(BufReader::new(Cursor::new(data)));
-        let mut doc = match Self::open_from_reader(reader) {
-            Ok(document) => document,
+        match Self::open_from_bytes_inner(data) {
+            Ok(document) => Ok(document),
             Err(error) => {
                 trace_open_error(&error);
-                return Err(error);
+                Err(error)
             }
-        };
-        doc.source_bytes = source_bytes;
-        Ok(doc)
+        }
     }
 
     /// Deprecated alias for `from_bytes`.
@@ -81,7 +77,11 @@ impl PdfDocument {
         Self::from_bytes(data)
     }
 
-    fn open_from_reader(mut reader: PdfReader) -> Result<Self> {
+    /// Parse `data` into a document. The reader built here lives only for the
+    /// header, xref and trailer parse; the finished document keeps the bytes and
+    /// reads them by offset instead. ~keep
+    fn open_from_bytes_inner(data: Vec<u8>) -> Result<Self> {
+        let mut reader = PdfReader::Memory(BufReader::new(Cursor::new(data)));
         // Parse header with lenient mode by default (handle PDFs with binary prefixes) ~keep
         let (major, minor, header_offset) = parse_header(&mut reader, true)?;
         let version = (major, minor);
@@ -210,13 +210,16 @@ impl PdfDocument {
             None
         };
 
+        // The reader ends here: the document keeps the bytes and reads them by
+        // offset, so nothing downstream shares a cursor. ~keep
+        let PdfReader::Memory(buffered) = reader;
+        let source_bytes = buffered.into_inner().into_inner();
+
         // Note: Encryption initialization was originally lazy, but decode_stream_with_encryption
         // only has &self access which prevents initialization.
         // We now initialize eagerly to ensure the handler is ready when needed. ~keep
         let document = Self {
-            reader: Mutex::new(reader),
-            load_lock: Mutex::new(()),
-            source_bytes: Vec::new(),
+            source_bytes,
             version,
             xref,
             trailer,
@@ -233,6 +236,13 @@ impl PdfDocument {
             font_set_cache: Mutex::new(BoundedEntryCache::new(256)),
             font_fingerprint_cache: Mutex::new(BoundedEntryCache::new(256)),
             font_name_set_cache: Mutex::new(BoundedEntryCache::new(256)),
+            font_set_donated_cache: Mutex::new(BoundedEntryCache::new(256)),
+            font_fingerprint_donated_cache: Mutex::new(BoundedEntryCache::new(256)),
+            font_name_set_donated_cache: Mutex::new(BoundedEntryCache::new(256)),
+            #[cfg(test)]
+            donation_call_count: AtomicUsize::new(0),
+            #[cfg(test)]
+            donation_apply_count: AtomicUsize::new(0),
             font_identity_cache: Mutex::new(BoundedEntryCache::new(512)),
             font_id_hash_cache: Mutex::new(HashMap::new()),
             font_reference_hash_cache: Mutex::new(BoundedEntryCache::new(FONT_IDENTITY_MAX_RESOLVED_REFERENCES)),
@@ -647,7 +657,6 @@ impl PdfDocument {
         Option<crate::extractors::auto::ReasonCode>,
     )> {
         use crate::content::{Operator, TextElement};
-        use crate::extractors::ImageData;
         use crate::extractors::auto::{ImageCodecClass, PageSignals, ProducerPrior};
 
         let (llx, lly, urx, ury) = self.get_page_media_box(page)?;
@@ -706,20 +715,45 @@ impl PdfDocument {
             (frag, rep)
         };
 
-        let images = self.extract_images(page).unwrap_or_default();
+        // Classify each embedded image from the cheap Phase 1 handle enumeration
+        // (`page_image_handles`, content-stream/CTM walk only) instead of
+        // `extract_images`, which fully decodes pixel data. `handle.bbox` and
+        // `handle.filter_chain` carry everything this loop needs -- bbox is
+        // computed during the same Phase 1 walk `decode()` would later reuse
+        // unchanged, and DCTDecode/CCITTFaxDecode presence in `filter_chain`
+        // reproduces `ImageData::Jpeg` vs `ccitt_params().is_some()` exactly,
+        // since those are the same filter checks `extract_image_from_xobject`
+        // uses to pick a decode branch. The embedded-image extraction pass
+        // (`pdf/native/images.rs` in the `xberg` crate) is the only remaining
+        // caller that actually needs decoded pixels for these images (GH#1732). ~keep
+        //
+        // `extract_images` also dropped anything under `ImageExtractFilter::default()`'s
+        // 8 x 8 px floor, and scan detection relied on that: a 1 x 1 px image stretched
+        // full-bleed is a background fill, not a raster scan, and counting its bbox would
+        // send a born-digital slide with one headline to OCR. Keep the same floor here. ~keep
+        let images = self.page_image_handles(page).unwrap_or_default();
+        let size_floor = ImageExtractFilter::default();
         let mut img_area = 0.0f32;
         let mut codec = ImageCodecClass::None;
         for im in &images {
-            if let Some(b) = im.bbox() {
-                img_area += Self::rect_isect_area(b, px0, py0, px1, py1);
+            if i64::from(im.width) < size_floor.min_width || i64::from(im.height) < size_floor.min_height {
+                continue;
             }
-            let c = if im.ccitt_params().is_some() {
+            img_area += Self::rect_isect_area(&im.bbox, px0, py0, px1, py1);
+            let has_ccitt = im
+                .filter_chain
+                .iter()
+                .any(|f| matches!(f, crate::extractors::images::PdfFilter::CCITTFaxDecode));
+            let has_dct = im
+                .filter_chain
+                .iter()
+                .any(|f| matches!(f, crate::extractors::images::PdfFilter::DCTDecode));
+            let c = if has_ccitt {
                 ImageCodecClass::Ccitt
+            } else if has_dct {
+                ImageCodecClass::Dct
             } else {
-                match im.data() {
-                    ImageData::Jpeg(_) => ImageCodecClass::Dct,
-                    _ => ImageCodecClass::Other,
-                }
+                ImageCodecClass::Other
             };
             codec = match (codec, c) {
                 (ImageCodecClass::None, x) => x,

@@ -1028,7 +1028,10 @@ mod tests {
     #[test]
     fn runtime_worker_threads_honors_explicit_budget() {
         let config = ExtractionConfig {
-            concurrency: Some(xberg::core::config::ConcurrencyConfig { max_threads: Some(3) }),
+            concurrency: Some(xberg::core::config::ConcurrencyConfig {
+                max_threads: Some(3),
+                max_concurrent_ocr: None,
+            }),
             ..Default::default()
         };
 
@@ -1038,7 +1041,10 @@ mod tests {
     #[test]
     fn runtime_worker_threads_clamps_zero_budget() {
         let config = ExtractionConfig {
-            concurrency: Some(xberg::core::config::ConcurrencyConfig { max_threads: Some(0) }),
+            concurrency: Some(xberg::core::config::ConcurrencyConfig {
+                max_threads: Some(0),
+                max_concurrent_ocr: None,
+            }),
             ..Default::default()
         };
 
@@ -1055,7 +1061,10 @@ mod tests {
     #[test]
     fn batch_runtime_worker_threads_caps_b4_to_four_with_eight_thread_budget() {
         let config = ExtractionConfig {
-            concurrency: Some(xberg::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+            concurrency: Some(xberg::core::config::ConcurrencyConfig {
+                max_threads: Some(8),
+                max_concurrent_ocr: None,
+            }),
             max_concurrent_extractions: Some(8),
             ..Default::default()
         };
@@ -1066,7 +1075,10 @@ mod tests {
     #[test]
     fn batch_runtime_worker_threads_uses_one_worker_for_zero_or_one_input() {
         let config = ExtractionConfig {
-            concurrency: Some(xberg::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+            concurrency: Some(xberg::core::config::ConcurrencyConfig {
+                max_threads: Some(8),
+                max_concurrent_ocr: None,
+            }),
             max_concurrent_extractions: Some(4),
             ..Default::default()
         };
@@ -1078,7 +1090,10 @@ mod tests {
     #[test]
     fn batch_runtime_worker_threads_respects_document_worker_limit() {
         let config = ExtractionConfig {
-            concurrency: Some(xberg::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+            concurrency: Some(xberg::core::config::ConcurrencyConfig {
+                max_threads: Some(8),
+                max_concurrent_ocr: None,
+            }),
             max_concurrent_extractions: Some(2),
             ..Default::default()
         };
@@ -1089,7 +1104,10 @@ mod tests {
     #[test]
     fn batch_runtime_worker_threads_never_exceeds_total_cpu_budget() {
         let config = ExtractionConfig {
-            concurrency: Some(xberg::core::config::ConcurrencyConfig { max_threads: Some(3) }),
+            concurrency: Some(xberg::core::config::ConcurrencyConfig {
+                max_threads: Some(3),
+                max_concurrent_ocr: None,
+            }),
             max_concurrent_extractions: Some(8),
             ..Default::default()
         };

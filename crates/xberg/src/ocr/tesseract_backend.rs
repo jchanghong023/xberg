@@ -47,7 +47,7 @@ pub struct TesseractBackend {
     processor: OnceCell<Arc<OcrProcessor>>,
     available_languages: OnceCell<Vec<String>>,
     #[cfg(not(target_arch = "wasm32"))]
-    concurrency: Arc<tokio::sync::Semaphore>,
+    concurrency: OnceCell<Arc<tokio::sync::Semaphore>>,
 }
 
 impl TesseractBackend {
@@ -60,8 +60,23 @@ impl TesseractBackend {
             processor: OnceCell::new(),
             available_languages: OnceCell::new(),
             #[cfg(not(target_arch = "wasm32"))]
-            concurrency: Arc::new(tokio::sync::Semaphore::new(crate::ocr::processor::MAX_TESSERACT_APIS)),
+            concurrency: OnceCell::new(),
         }
+    }
+
+    /// The semaphore that holds async callers back to the recognition limit.
+    ///
+    /// Built on first use, like the processor above: the registry constructs
+    /// this backend before any extraction resolves a thread budget, and sizing
+    /// the semaphore here keeps it from fixing the limit while the configured
+    /// one is still unknown.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn concurrency(&self) -> &Arc<tokio::sync::Semaphore> {
+        self.concurrency.get_or_init(|| {
+            Arc::new(tokio::sync::Semaphore::new(
+                crate::ocr::processor::tesseract_api_capacity(),
+            ))
+        })
     }
 
     /// Get or initialize the Tesseract processor.
@@ -282,7 +297,7 @@ impl OcrBackend for TesseractBackend {
         let processor = Arc::clone(self.processor()?);
 
         #[cfg(not(target_arch = "wasm32"))]
-        let permit = Arc::clone(&self.concurrency)
+        let permit = Arc::clone(self.concurrency())
             .acquire_owned()
             .await
             .map_err(|error| crate::XbergError::Ocr {
@@ -387,7 +402,7 @@ impl OcrBackend for TesseractBackend {
         let path_str = path.to_string_lossy().to_string();
 
         #[cfg(not(target_arch = "wasm32"))]
-        let permit = Arc::clone(&self.concurrency)
+        let permit = Arc::clone(self.concurrency())
             .acquire_owned()
             .await
             .map_err(|error| crate::XbergError::Ocr {
@@ -823,6 +838,16 @@ mod tests {
 
         let previous = std::env::var("XBERG_CACHE_DIR").ok();
         unsafe { std::env::set_var("XBERG_CACHE_DIR", temp_dir.path()) };
+        // `resolve_tessdata_path` checks `TESSDATA_PREFIX` before `XBERG_CACHE_DIR` (by
+        // design -- an explicit TESSDATA_PREFIX is meant to win). CI's unit-test runner
+        // (scripts/lib/tessdata.sh::setup_tessdata) sets TESSDATA_PREFIX process-wide to
+        // the runner's real tessdata directory before `cargo test` starts, so without
+        // clearing it here the probe resolves THAT directory -- which already has every
+        // language this test requests -- instead of this fixture, and the marker is never
+        // found. Clear it for the duration of the test so XBERG_CACHE_DIR is actually
+        // reached, matching the resolver's documented precedence. ~keep
+        let previous_tessdata_prefix = std::env::var("TESSDATA_PREFIX").ok();
+        unsafe { std::env::remove_var("TESSDATA_PREFIX") };
 
         let backend = TesseractBackend::new();
         let languages = backend.supported_languages();
@@ -830,6 +855,10 @@ mod tests {
         match previous {
             Some(value) => unsafe { std::env::set_var("XBERG_CACHE_DIR", value) },
             None => unsafe { std::env::remove_var("XBERG_CACHE_DIR") },
+        }
+        match previous_tessdata_prefix {
+            Some(value) => unsafe { std::env::set_var("TESSDATA_PREFIX", value) },
+            None => unsafe { std::env::remove_var("TESSDATA_PREFIX") },
         }
 
         assert!(
@@ -898,6 +927,13 @@ mod tests {
 
         let previous = std::env::var("XBERG_CACHE_DIR").ok();
         unsafe { std::env::set_var("XBERG_CACHE_DIR", temp_dir.path()) };
+        // See the identical guard in the sibling `bundle-tessdata-eng` test above:
+        // `resolve_tessdata_path` checks `TESSDATA_PREFIX` before `XBERG_CACHE_DIR`, and
+        // CI's unit-test runner sets TESSDATA_PREFIX process-wide before `cargo test`
+        // starts, so this fixture is never reached unless the prefix is cleared here too.
+        // ~keep
+        let previous_tessdata_prefix = std::env::var("TESSDATA_PREFIX").ok();
+        unsafe { std::env::remove_var("TESSDATA_PREFIX") };
 
         let backend = TesseractBackend::new();
         let languages = backend.supported_languages();
@@ -905,6 +941,10 @@ mod tests {
         match previous {
             Some(value) => unsafe { std::env::set_var("XBERG_CACHE_DIR", value) },
             None => unsafe { std::env::remove_var("XBERG_CACHE_DIR") },
+        }
+        match previous_tessdata_prefix {
+            Some(value) => unsafe { std::env::set_var("TESSDATA_PREFIX", value) },
+            None => unsafe { std::env::remove_var("TESSDATA_PREFIX") },
         }
 
         assert!(
@@ -931,21 +971,47 @@ mod tests {
         );
     }
 
+    /// Both limiters on the recognition path must take the same number. Each
+    /// used to read its own copy of a compile-time four, so raising one alone
+    /// left recognition exactly as wide as before.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn recognition_limiters_share_one_capacity() {
+        let capacity = crate::ocr::processor::tesseract_api_capacity();
+        let cache_dir = tempfile::TempDir::new().expect("failed to create a cache directory");
+        let processor = crate::ocr::processor::OcrProcessor::new(Some(cache_dir.path().to_path_buf()))
+            .expect("failed to create the OCR processor");
+
+        assert_eq!(
+            processor.api_pool_capacity(),
+            capacity,
+            "the Tesseract handle pool must take the shared recognition capacity"
+        );
+        assert_eq!(
+            TesseractBackend::new().concurrency().available_permits(),
+            capacity,
+            "the admission semaphore must take the shared recognition capacity"
+        );
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test]
     async fn test_tesseract_backend_limits_concurrent_calls() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let backend = Arc::new(TesseractBackend::new());
+        let capacity = crate::ocr::processor::tesseract_api_capacity();
         let active = Arc::new(AtomicUsize::new(0));
         let peak = Arc::new(AtomicUsize::new(0));
         let mut tasks = Vec::new();
-        for _ in 0..12 {
+        // Oversubscribe the limit rather than a fixed count, which only reached
+        // the limit while it was the compile-time four.
+        for _ in 0..capacity * 3 {
             let backend = Arc::clone(&backend);
             let active = Arc::clone(&active);
             let peak = Arc::clone(&peak);
             tasks.push(tokio::spawn(async move {
-                let _permit = backend.concurrency.acquire().await.unwrap();
+                let _permit = backend.concurrency().acquire().await.unwrap();
                 let current = active.fetch_add(1, Ordering::SeqCst) + 1;
                 peak.fetch_max(current, Ordering::SeqCst);
                 tokio::task::yield_now().await;
@@ -955,21 +1021,21 @@ mod tests {
         for task in tasks {
             task.await.unwrap();
         }
-        assert_eq!(peak.load(Ordering::SeqCst), crate::ocr::processor::MAX_TESSERACT_APIS);
+        assert_eq!(peak.load(Ordering::SeqCst), capacity);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_tesseract_permit_outlives_cancelled_async_caller() {
         let backend = Arc::new(TesseractBackend::new());
-        let reserved = Arc::clone(&backend.concurrency)
-            .acquire_many_owned((crate::ocr::processor::MAX_TESSERACT_APIS - 1) as u32)
+        let reserved = Arc::clone(backend.concurrency())
+            .acquire_many_owned((crate::ocr::processor::tesseract_api_capacity() - 1) as u32)
             .await
             .unwrap();
         let rendezvous = Arc::new(std::sync::Barrier::new(2));
         let (done_tx, done_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn({
-            let semaphore = Arc::clone(&backend.concurrency);
+            let semaphore = Arc::clone(backend.concurrency());
             let rendezvous = Arc::clone(&rendezvous);
             async move {
                 let permit = semaphore.acquire_owned().await.unwrap();
@@ -988,14 +1054,14 @@ mod tests {
 
         rendezvous.wait();
         task.abort();
-        assert!(Arc::clone(&backend.concurrency).try_acquire_owned().is_err());
+        assert!(Arc::clone(backend.concurrency()).try_acquire_owned().is_err());
         rendezvous.wait();
         done_rx.await.unwrap();
         drop(reserved);
 
         assert_eq!(
-            backend.concurrency.available_permits(),
-            crate::ocr::processor::MAX_TESSERACT_APIS
+            backend.concurrency().available_permits(),
+            crate::ocr::processor::tesseract_api_capacity()
         );
     }
 

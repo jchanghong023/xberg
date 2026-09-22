@@ -15,8 +15,23 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use xberg_native_pdf::document::ReadingOrder;
 
+/// Per-page fabricated-mapping character counts `(fabricated, total)`, indexed by zero-based
+/// page number, gathered while the main text pass reads each page's raw `ColumnAware` spans.
+///
+/// `None` when the document has default-off optional-content (OCG) layers: the text pass then
+/// reads layer-*filtered* spans for content assembly, which is not the same span set
+/// `scan_detect::page_has_fabricated_text` grades, so provenance falls back to reading each
+/// page separately for such documents rather than reporting counts that would silently change
+/// `fabricated_text_pages` (issue #1744).
+type PageProvenanceCounts = Option<Vec<(usize, usize)>>;
+
 /// Result type for PDF text extraction with optional page tracking.
-type PdfTextExtractionResult = (String, Option<Vec<PageBoundary>>, Option<Vec<PageContent>>);
+type PdfTextExtractionResult = (
+    String,
+    Option<Vec<PageBoundary>>,
+    Option<Vec<PageContent>>,
+    PageProvenanceCounts,
+);
 
 // #1574: these were 0.06/0.05 through 1.1.0. `top_margin_fraction`/`bottom_margin_fraction`
 // went from a dead config knob (unread before commit ddba546dca5) to an active OCR-paragraph
@@ -130,7 +145,7 @@ pub(crate) fn extract_text_and_metadata(
 ) -> Result<NativeUnifiedExtractionResult> {
     let page_config = extraction_config.and_then(|c| c.pages.as_ref());
     let margins = PageMarginFractions::from_extraction_config(extraction_config);
-    let (text, boundaries, page_contents) =
+    let (text, boundaries, page_contents, provenance_counts) =
         extract_text_from_native_document(doc, page_config, extraction_config, margins)?;
 
     let scanned_min_confidence = extraction_config
@@ -146,6 +161,7 @@ pub(crate) fn extract_text_and_metadata(
         &text,
         scanned_min_confidence,
         &ocr_quality_thresholds,
+        provenance_counts.as_deref(),
     )?;
 
     Ok((text, boundaries, page_contents, metadata))
@@ -214,59 +230,95 @@ pub(crate) fn extract_text_from_native_document(
     }
 }
 
-/// Fast path: extract text without page tracking.
+/// The blank line written between two pages when no page marker is configured.
 ///
-/// Iterates pages one-by-one, applies control-char fixes and optional HTML
-/// conversion, and builds a single concatenated string. Pre-allocates capacity
-/// after sampling the first 5 pages.
-fn extract_text_fast_path(
-    doc: &mut NativeDocument,
+/// `extractors::pdf::extraction::join_pages_with_boundaries` re-joins the same pages after
+/// reading-order reordering and has to produce the same offsets, so it reads this rather
+/// than repeating the literal. ~keep
+pub(crate) const PAGE_SEPARATOR: &str = "\n\n";
+
+/// Extract and clean one page's text, alongside its fabricated-mapping counts when available.
+///
+/// See [`PageProvenanceCounts`] for when the second element is `None`.
+fn extract_one_page_text(
+    doc: &xberg_native_pdf::PdfDocument,
+    page_index: usize,
+    excluded_layers: &std::collections::HashSet<String>,
     margins: PageMarginFractions,
-    furniture_permissions: FurniturePermissions,
-) -> Result<PdfTextExtractionResult> {
+) -> Result<(String, Option<(usize, usize)>)> {
+    let (page_text, provenance_counts) = extract_page_text_column_aware(doc, page_index, excluded_layers, margins)?;
+    Ok((apply_text_cleanup(&page_text).into_owned(), provenance_counts))
+}
+
+/// Extract every page's cleaned text, in page order.
+///
+/// Pages are read in ascending order and that order is load-bearing, not incidental. A
+/// page's text depends on which pages were read before it: the document handle shares
+/// resolved font sets and TrueType CMaps between pages through its own caches, and where
+/// two subsets of one base font disagree about a glyph id the first one loaded wins (see
+/// `share_truetype_cmaps` and the font caches in `xberg-native-pdf`'s `document::fonts`).
+/// Reading the pages in any other order, including concurrently, silently changes the
+/// extracted text. Measured on a 731-page document: ascending order reproduces the same
+/// bytes on every run, while parsing the same pages two at a time over one handle drops
+/// text and lands on a different result each run. Removing that order dependence is
+/// GH#1725; until it is gone this loop must stay in page order. ~keep
+///
+/// Also returns each page's fabricated-mapping character counts (see [`PageProvenanceCounts`]),
+/// captured from the same raw `ColumnAware` spans this loop already reads for content, so the
+/// provenance pass in `pdf/scan_detect.rs` no longer has to read every page a second time
+/// (issue #1744).
+fn extract_all_page_texts(
+    doc: &xberg_native_pdf::PdfDocument,
+    margins: PageMarginFractions,
+) -> Result<(Vec<String>, PageProvenanceCounts)> {
     let page_count = doc
-        .doc
         .page_count()
         .map_err(|e| PdfError::TextExtractionFailed(format!("Failed to get page count: {}", e)))?;
 
     // Issue #67: default-off optional-content (OCG/layer) groups per
     // `/OCProperties/D` (ISO 32000-1:2008 §8.11.4). Computed once per
     // document; empty for the common case of no `/OCProperties`.
-    let excluded_layers = xberg_native_pdf::optional_content::compute_default_off_ocgs(&doc.doc);
+    let excluded_layers = xberg_native_pdf::optional_content::compute_default_off_ocgs(doc);
+    let mut provenance_counts = excluded_layers.is_empty().then(|| Vec::with_capacity(page_count));
 
-    let mut content = String::new();
-    let mut total_sample_size = 0usize;
-    let mut sample_count = 0;
-
-    let mut page_texts: Vec<String> = Vec::with_capacity(page_count);
-
+    let mut texts = Vec::with_capacity(page_count);
     for page_idx in 0..page_count {
-        let page_text = extract_page_text_column_aware(&mut doc.doc, page_idx, &excluded_layers, margins)?;
-        page_texts.push(apply_text_cleanup(&page_text).into_owned());
-
-        let page_size = page_text.len();
-        if page_idx < 5 {
-            total_sample_size += page_size;
-            sample_count += 1;
-        }
-
-        if page_idx == 4 && sample_count > 0 && page_count > 5 {
-            let avg_page_size = total_sample_size / sample_count;
-            let estimated_remaining = avg_page_size * (page_count - 5);
-            content.reserve(estimated_remaining + (estimated_remaining / 10));
+        let (text, counts) = extract_one_page_text(doc, page_idx, &excluded_layers, margins)?;
+        texts.push(text);
+        if let Some(collected) = provenance_counts.as_mut() {
+            collected
+                .push(counts.expect("extract_one_page_text must report provenance counts when no layers are excluded"));
         }
     }
+
+    Ok((texts, provenance_counts))
+}
+
+/// Fast path: extract text without page tracking.
+///
+/// Extracts every page through [`extract_all_page_texts`], then concatenates the
+/// pages in order into a single string. (fork) Cross-page furniture stripping runs
+/// on the collected page texts before they are joined.
+fn extract_text_fast_path(
+    doc: &NativeDocument,
+    margins: PageMarginFractions,
+    furniture_permissions: FurniturePermissions,
+) -> Result<PdfTextExtractionResult> {
+    let (mut page_texts, provenance_counts) = extract_all_page_texts(&doc.doc, margins)?;
 
     strip_repeated_edge_furniture(&mut page_texts, furniture_permissions);
 
-    for (page_idx, cleaned) in page_texts.iter().enumerate() {
+    let separators = page_texts.len().saturating_sub(1) * PAGE_SEPARATOR.len();
+    let mut content = String::with_capacity(page_texts.iter().map(String::len).sum::<usize>() + separators);
+
+    for (page_idx, page_text) in page_texts.iter().enumerate() {
         if page_idx > 0 {
-            content.push_str("\n\n");
+            content.push_str(PAGE_SEPARATOR);
         }
-        content.push_str(cleaned);
+        content.push_str(page_text);
     }
 
-    Ok((content, None, None))
+    Ok((content, None, None, provenance_counts))
 }
 
 /// Extract text with page boundary and content tracking.
@@ -275,20 +327,29 @@ fn extract_text_fast_path(
 /// offsets for each page, optionally collects per-page `PageContent`, and inserts
 /// page markers when configured.
 fn extract_text_with_tracking(
-    doc: &mut NativeDocument,
+    doc: &NativeDocument,
     config: &PageConfig,
     margins: PageMarginFractions,
     furniture_permissions: FurniturePermissions,
 ) -> Result<PdfTextExtractionResult> {
-    let page_count = doc
-        .doc
-        .page_count()
-        .map_err(|e| PdfError::TextExtractionFailed(format!("Failed to get page count: {}", e)))?;
+    let (mut page_texts, provenance_counts) = extract_all_page_texts(&doc.doc, margins)?;
+    let page_count = page_texts.len();
 
-    // Issue #67: see `extract_text_fast_path` for rationale.
-    let excluded_layers = xberg_native_pdf::optional_content::compute_default_off_ocgs(&doc.doc);
+    let markers: Vec<String> = if config.insert_page_markers {
+        (1..=page_count)
+            .map(|page_number| config.marker_format.replace("{page_num}", &page_number.to_string()))
+            .collect()
+    } else {
+        Vec::new()
+    };
 
-    let mut content = String::new();
+    let separators: usize = if config.insert_page_markers {
+        markers.iter().map(String::len).sum()
+    } else {
+        page_count.saturating_sub(1) * PAGE_SEPARATOR.len()
+    };
+
+    let mut content = String::with_capacity(page_texts.iter().map(String::len).sum::<usize>() + separators);
     let mut boundaries = Vec::with_capacity(page_count);
     let mut page_contents = if config.extract_pages {
         Some(Vec::with_capacity(page_count))
@@ -296,45 +357,19 @@ fn extract_text_with_tracking(
         None
     };
 
-    let mut total_sample_size = 0usize;
-    let mut sample_count = 0;
-
-    let mut page_texts: Vec<String> = Vec::with_capacity(page_count);
-
-    for page_idx in 0..page_count {
-        let page_text = extract_page_text_column_aware(&mut doc.doc, page_idx, &excluded_layers, margins)?;
-
-        let page_size = page_text.len();
-
-        if page_idx < 5 {
-            total_sample_size += page_size;
-            sample_count += 1;
-        }
-
-        page_texts.push(apply_text_cleanup(&page_text).into_owned());
-
-        if page_idx == 4 && page_count > 5 && sample_count > 0 {
-            let avg_page_size = total_sample_size / sample_count;
-            let estimated_remaining = avg_page_size * (page_count - 5);
-            let separator_overhead = (page_count - 5) * 3;
-            content.reserve(estimated_remaining + separator_overhead + (estimated_remaining / 10));
-        }
-    }
-
     strip_repeated_edge_furniture(&mut page_texts, furniture_permissions);
 
-    for (page_idx, cleaned) in page_texts.iter().enumerate() {
+    for (page_idx, cleaned) in page_texts.into_iter().enumerate() {
         let page_number = page_idx + 1;
 
         if config.insert_page_markers {
-            let marker = config.marker_format.replace("{page_num}", &page_number.to_string());
-            content.push_str(&marker);
+            content.push_str(&markers[page_idx]);
         } else if page_idx > 0 {
-            content.push_str("\n\n");
+            content.push_str(PAGE_SEPARATOR);
         }
 
         let byte_start = content.len();
-        content.push_str(cleaned);
+        content.push_str(&cleaned);
         let byte_end = content.len();
 
         boundaries.push(PageBoundary {
@@ -344,10 +379,10 @@ fn extract_text_with_tracking(
         });
 
         if let Some(ref mut pages) = page_contents {
-            let is_blank = Some(crate::extraction::blank_detection::is_page_text_blank(cleaned));
+            let is_blank = Some(crate::extraction::blank_detection::is_page_text_blank(&cleaned));
             pages.push(PageContent {
                 page_number: page_number as u32,
-                content: cleaned.clone(),
+                content: cleaned,
                 tables: Vec::new(),
                 image_indices: Vec::new(),
                 image_preprocessing: None,
@@ -362,7 +397,7 @@ fn extract_text_with_tracking(
         }
     }
 
-    Ok((content, Some(boundaries), page_contents))
+    Ok((content, Some(boundaries), page_contents, provenance_counts))
 }
 
 /// Edge-zone size for furniture detection: a page's first/last `EDGE_LINES`
@@ -1349,6 +1384,55 @@ fn line_has_width_furniture(
     line.iter().any(|&index| spans[index].bbox.width >= furniture_width)
 }
 
+// GH#1742: a table row's own multiple internal cell gaps are not gutter evidence, but
+// nothing before this excluded them from the vote. A two-column line with a hanging
+// number on EACH margin -- both the GH#1484/#1603 fixtures and the reporter's own
+// carrier construct rows shaped exactly this way -- already opens three internal gaps
+// (the left number-to-text indent, the gutter itself, and the right number-to-text
+// indent), so three is not a safe ceiling: `redirect_split_out_of_content_must_not_
+// relocate_into_a_hanging_number_indent_gh1603` and `split_inside_a_column_is_moved_
+// to_a_gutter_one_footer_line_crosses` both regress at three, because it excludes the
+// very lines that carry the true gutter. A genuine table row does not stop at three:
+// the reporter's own reproducer tables are five columns (four gaps) and the issue's
+// own narrower three-column shape is called out as *not* covered by this rule at all.
+// Four sits one above the two-hanging-number ceiling and at the four-gap floor the
+// reproducer's own tables measure. ~keep
+const MIN_GRID_ROW_GAP_COUNT: usize = 4;
+
+/// True if `line`'s inked spans are separated by at least `MIN_GRID_ROW_GAP_COUNT`
+/// internal gaps each at least `min_gutter` wide -- the shape of a multi-column table
+/// row, never a hanging-number or ordinary prose line.
+///
+/// GH#1742: on a two-column page that also carries a table, a table row on its own
+/// leading is never grouped into a shared line with the opposite column (see
+/// `redirect_split_out_of_content`'s doc comment), so its own internal cell gaps are
+/// the only gaps `widest_gap_midpoint` ever sees for that line -- and the widest of
+/// them, deep inside the table, was being counted as if it were gutter evidence.
+/// Excluding a line with this many internal gaps from the vote (in `detect_split_x`)
+/// and from the hanging-label snap's candidate pool (in `aligned_hanging_label_left_edge`)
+/// removes that pollution at its source, before any downstream redirect or guard has
+/// to reason about it. ~keep
+fn line_has_grid_row_gaps(spans: &[xberg_native_pdf::layout::TextSpan], line: &SpanLine, min_gutter: f32) -> bool {
+    let mut edges: Vec<(f32, f32)> = line
+        .iter()
+        .filter(|&&index| span_has_ink(&spans[index]))
+        .map(|&index| (spans[index].bbox.left(), spans[index].bbox.right()))
+        .collect();
+    edges.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut edges = edges.into_iter();
+    let Some((_, mut running_right)) = edges.next() else {
+        return false;
+    };
+    let mut gap_count = 0usize;
+    for (left, right) in edges {
+        if left - running_right >= min_gutter {
+            gap_count += 1;
+        }
+        running_right = running_right.max(right);
+    }
+    gap_count >= MIN_GRID_ROW_GAP_COUNT
+}
+
 /// Establish the page's gutter x-position from independent per-line evidence.
 ///
 /// Each line is checked in isolation for an internal gap at least
@@ -1381,6 +1465,7 @@ fn detect_split_x(spans: &[xberg_native_pdf::layout::TextSpan], lines: &[SpanLin
         .iter()
         .filter(|&line| !line_has_width_furniture(spans, line, furniture_width))
         .filter(|&line| line.iter().any(|&index| span_has_ink(&spans[index])))
+        .filter(|&line| !line_has_grid_row_gaps(spans, line, min_gutter))
         .filter_map(|line| {
             let edges = line
                 .iter()
@@ -1483,31 +1568,49 @@ fn redirect_split_out_of_content(
     widest_within_reach(corridors).unwrap_or(split_x)
 }
 
-/// True if the page's non-furniture spans on either side of `x` each form a
-/// column the reorder would accept (`RegionClass::Prose` or `Reference`).
+/// True if a split at `x` is one `reorder_band_columns` would actually accept once it
+/// is handed one: both sides read as a column (`RegionClass::Prose` or `Reference`),
+/// or one side does and the two sides do not pair up row for row.
 ///
-/// This is the occupancy test a corridor has to pass before a split is moved
-/// into it from inside a column: a gutter separates two columns of running
-/// text, whereas the gap between a table's cells, between a legend's letters
-/// and their captions, or between a narrative column and a chart, separates
-/// content the per-band reorder gates would refuse -- and a split placed there
-/// still reorders whatever band those gates happen to let through. Requiring
-/// both sides to read as columns keeps the widened search on the pages it was
-/// written for.
+/// This is the occupancy test a corridor has to pass before a split is moved into it
+/// from inside a column: a gutter separates two columns of running text, whereas the
+/// gap between a table's cells, between a legend's letters and their captions, or
+/// between a narrative column and a chart, separates content the per-band reorder
+/// gates would refuse -- and a split placed there still reorders whatever band those
+/// gates happen to let through.
+///
+/// GH#1742: requiring literally *both* sides to classify as `Prose`/`Reference` was
+/// stricter than the gate `reorder_band_columns` itself applies once a band is handed
+/// a split -- that gate already accepts one `Table`/`Form`/`Mixed` side, provided the
+/// two sides do not pair up row for row (`MAX_CROSS_GUTTER_ROW_PAIRING_FRACTION`, the
+/// GH#1545 fix). A page whose left column is a table top to bottom and whose right
+/// column is ordinary prose (reproducer p4) never passed the stricter gate, so the
+/// widened search always discarded the true gutter and left the split inside the
+/// table. Mirroring the same two-part test here closes that gap without weakening it:
+/// a label/value table that pairs almost every row (`split_inside_a_table_column_is_
+/// not_moved_to_the_cell_gap`) still fails on pairing fraction alone. ~keep
 fn both_sides_are_columns(
     spans: &[xberg_native_pdf::layout::TextSpan],
     lines: &[SpanLine],
     furniture_width: f32,
     x: f32,
 ) -> bool {
-    let (left, right): (Vec<usize>, Vec<usize>) = lines
+    let indices: Vec<usize> = lines
         .iter()
         .filter(|&line| !line_has_width_furniture(spans, line, furniture_width))
         .flat_map(|line| line.iter().copied())
         .filter(|&index| span_has_ink(&spans[index]))
-        .partition(|&index| spans[index].bbox.x < x);
-    xberg_native_pdf::layout::classify_region(spans, &left).is_reorderable_column()
-        && xberg_native_pdf::layout::classify_region(spans, &right).is_reorderable_column()
+        .collect();
+    let (left, right): (Vec<usize>, Vec<usize>) = indices.iter().copied().partition(|&index| spans[index].bbox.x < x);
+    let left_reorderable = xberg_native_pdf::layout::classify_region(spans, &left).is_reorderable_column();
+    let right_reorderable = xberg_native_pdf::layout::classify_region(spans, &right).is_reorderable_column();
+    if left_reorderable && right_reorderable {
+        return true;
+    }
+    if !left_reorderable && !right_reorderable {
+        return false;
+    }
+    cross_gutter_row_pairing_fraction(spans, &indices, x) <= MAX_CROSS_GUTTER_ROW_PAIRING_FRACTION
 }
 
 /// How many non-furniture lines have an inked span written across `x`.
@@ -1598,6 +1701,20 @@ fn page_low_occupancy_corridors(
     corridors
 }
 
+/// True if `line` carries an inked span that starts on or after `far_wall` --
+/// text following a label on the label's own line, rather than unrelated content
+/// in a neighbouring column across the corridor.
+///
+/// GH#1742: a hanging label always has its clause text on the *same visual line*,
+/// immediately after the label-to-text indent. A table's edge column has nothing
+/// there -- the row's other cells sit on the label side of the corridor, and
+/// whatever text appears past the corridor on that same `y` belongs to an
+/// unrelated, unpaired line in the opposite column. ~keep
+fn line_has_far_side_successor(spans: &[xberg_native_pdf::layout::TextSpan], line: &SpanLine, far_wall: f32) -> bool {
+    line.iter()
+        .any(|&index| span_has_ink(&spans[index]) && spans[index].bbox.left() >= far_wall)
+}
+
 /// True if `corridor` is a hanging-label indent rather than a column gutter:
 /// its left wall is a stack of narrow spans (at most `max_label_width` wide)
 /// that share a left edge, `MIN_DENSE_COLUMN_SPLIT_LINES` or more of them --
@@ -1609,6 +1726,15 @@ fn page_low_occupancy_corridors(
 /// wall. Only the left wall is examined, because a hanging label always
 /// precedes the text it labels; the *right* wall of a real gutter is very
 /// often the right column's own label stack, which must not disqualify it.
+///
+/// GH#1742: a narrow left-aligned stack alone is not enough -- a multi-column
+/// table's edge column (the reporter's `ignotum` stack, reproducer p1's own last
+/// column) is exactly that shape too, but labels *nothing*: no inked span
+/// follows on the far side of the corridor on the same line, because the row's
+/// remaining cells sit on the label side and whatever text starts past the
+/// corridor belongs to an unrelated, unpaired line. `line_has_far_side_successor`
+/// requires the label's own successor text to be present before a line counts
+/// toward the population, which a table's edge cells never satisfy. ~keep
 fn corridor_is_hanging_label_indent(
     spans: &[xberg_native_pdf::layout::TextSpan],
     lines: &[SpanLine],
@@ -1618,6 +1744,7 @@ fn corridor_is_hanging_label_indent(
     let wall = corridor.0;
     let mut left_edges: Vec<f32> = lines
         .iter()
+        .filter(|line| line_has_far_side_successor(spans, line, corridor.1))
         .filter_map(|line| {
             line.iter()
                 .filter_map(|&index| {
@@ -1696,8 +1823,9 @@ fn snap_split_left_of_hanging_labels(
     mut split_x: f32,
 ) -> f32 {
     let max_snap_width = page_width * MAX_DENSE_COLUMN_SPLIT_SNAP_SPAN_FRACTION;
+    let min_gutter = (page_width * MIN_DENSE_COLUMN_GUTTER_FRACTION).max(MIN_DENSE_COLUMN_GUTTER_PTS);
     for _ in 0..MAX_DENSE_COLUMN_SPLIT_SNAP_PASSES {
-        let Some(left_edge) = aligned_hanging_label_left_edge(spans, lines, max_snap_width, split_x) else {
+        let Some(left_edge) = aligned_hanging_label_left_edge(spans, lines, max_snap_width, min_gutter, split_x) else {
             break;
         };
         split_x = left_edge;
@@ -1705,14 +1833,20 @@ fn snap_split_left_of_hanging_labels(
     split_x
 }
 
+/// GH#1742: `min_gutter` excludes a table's own grid rows from the candidate pool the
+/// same way `detect_split_x` does (`line_has_grid_row_gaps`) -- a numeric table column
+/// whose cells straddle the split is otherwise indistinguishable from a stack of
+/// hanging clause numbers, and was being snapped to as if it were one.
 fn aligned_hanging_label_left_edge(
     spans: &[xberg_native_pdf::layout::TextSpan],
     lines: &[SpanLine],
     max_snap_width: f32,
+    min_gutter: f32,
     split_x: f32,
 ) -> Option<f32> {
     let mut left_edges = lines
         .iter()
+        .filter(|&line| !line_has_grid_row_gaps(spans, line, min_gutter))
         .filter_map(|line| {
             line.iter()
                 .filter_map(|&index| {
@@ -2285,12 +2419,21 @@ fn retain_spans_inside_page_margins(
 ///
 /// Applies sparse-column and glyph-fragmentation repairs before assembling the
 /// page text.
+///
+/// Also returns the page's fabricated-mapping character counts, captured from the raw spans
+/// before margin filtering or reordering mutate them — `Some` only when `excluded_layers` is
+/// empty, i.e. `page_text_with_options_excluding_layers` took its fast path and made exactly
+/// the same `extract_page_text_with_options(.., ColumnAware)` call that
+/// `scan_detect::page_has_fabricated_text` used to make separately for every page (issue
+/// #1744). When layers are excluded the two callers would otherwise read different span sets,
+/// so provenance is left to its own separate read for such documents; see
+/// [`PageProvenanceCounts`]. ~keep
 fn extract_page_text_column_aware(
-    doc: &mut xberg_native_pdf::PdfDocument,
+    doc: &xberg_native_pdf::PdfDocument,
     page_index: usize,
     excluded_layers: &std::collections::HashSet<String>,
     margins: PageMarginFractions,
-) -> Result<String> {
+) -> Result<(String, Option<(usize, usize)>)> {
     let (page_bottom, page_top) = page_vertical_bounds(doc, page_index)?;
     let mut widgets = collect_widget_field_values(doc, page_index);
     widgets
@@ -2311,32 +2454,31 @@ fn extract_page_text_column_aware(
         },
     )?;
 
+    let provenance_counts = excluded_layers
+        .is_empty()
+        .then(|| crate::pdf::scan_detect::fabricated_char_counts(&page_text_data.spans));
+
     retain_spans_inside_page_margins(&mut page_text_data.spans, page_bottom, page_top, margins);
 
     reorder_sparse_two_column_page(&mut page_text_data.spans, page_text_data.page_width);
     reorder_dense_two_column_page(&mut page_text_data.spans, page_text_data.page_width);
 
     let rotation_spans = page_text_data.spans.iter().map(rotation_span).collect::<Vec<_>>();
-    if let Some(mut text) = crate::extractors::pdf::rotation::repair_rotated_page_text(&rotation_spans) {
-        append_missing_widget_values(&mut text, &widgets);
-        return Ok(text);
-    }
-
-    if is_fragmented_span_list(&page_text_data.spans) {
+    let mut text = if let Some(repaired) = crate::extractors::pdf::rotation::repair_rotated_page_text(&rotation_spans) {
+        repaired
+    } else if is_fragmented_span_list(&page_text_data.spans) {
         tracing::debug!(
             span_count = page_text_data.spans.len(),
             "glyph fragmentation detected — rebuilding text from span positions (#962)"
         );
-        let mut text = rebuild_text_from_fragmented_spans(&page_text_data.spans);
-        append_missing_widget_values(&mut text, &widgets);
-        return Ok(text);
-    }
-
-    let mut text = assemble_page_text(&page_text_data.spans);
+        rebuild_text_from_fragmented_spans(&page_text_data.spans)
+    } else {
+        assemble_page_text(&page_text_data.spans)
+    };
 
     append_missing_widget_values(&mut text, &widgets);
 
-    Ok(text)
+    Ok((text, provenance_counts))
 }
 
 fn rotation_span(span: &xberg_native_pdf::layout::TextSpan) -> crate::extractors::pdf::rotation::TextSpan {
@@ -3346,13 +3488,14 @@ mod tests {
         let order = spans_sorted_top_to_bottom(&spans);
         let lines = group_into_lines(&spans, &order);
         let max_snap_width = PAGE_WIDTH * MAX_DENSE_COLUMN_SPLIT_SNAP_SPAN_FRACTION;
+        let min_gutter = (PAGE_WIDTH * MIN_DENSE_COLUMN_GUTTER_FRACTION).max(MIN_DENSE_COLUMN_GUTTER_PTS);
 
         assert_eq!(
-            aligned_hanging_label_left_edge(&spans, &lines, max_snap_width, INITIAL_SPLIT_X),
+            aligned_hanging_label_left_edge(&spans, &lines, max_snap_width, min_gutter, INITIAL_SPLIT_X),
             Some(FIRST_FRAGMENT_LEFT)
         );
         assert_eq!(
-            aligned_hanging_label_left_edge(&spans, &lines, max_snap_width, FIRST_FRAGMENT_LEFT),
+            aligned_hanging_label_left_edge(&spans, &lines, max_snap_width, min_gutter, FIRST_FRAGMENT_LEFT),
             Some(SECOND_FRAGMENT_LEFT)
         );
         assert_eq!(
@@ -4568,6 +4711,631 @@ mod tests {
         assert_eq!(strict.len(), 2);
     }
 
+    const GH1742_PAGE_WIDTH: f32 = 595.0;
+    const GH1742_LEFT_X: f32 = 38.0;
+    const GH1742_RIGHT_X: f32 = 307.0;
+    const GH1742_LEFT_WIDTH: f32 = 250.0;
+    const GH1742_RIGHT_WIDTH: f32 = 240.0;
+    const GH1742_TRUE_GUTTER_MID_X: f32 = (288.0 + 307.0) / 2.0;
+    const GH1742_TABLE_COLUMNS: [(f32, f32); 5] =
+        [(38.0, 30.0), (84.0, 30.0), (130.0, 30.0), (176.0, 30.0), (222.0, 10.0)];
+    const GH1742_TABLE_ROWS: usize = 10;
+    const GH1742_TABLE_ROW_HEIGHT: f32 = 9.0;
+
+    /// GH#1742 (reproducer p1 shape): six paired prose rows carry the page's real
+    /// gutter evidence (left column ends at 288, right column starts at 307), then a
+    /// 5-column table -- own, denser leading, last column narrow -- fills the rest of
+    /// the left column, and a single centred page number sits in the gutter near the
+    /// foot of the page. Before the fix, the table's 10 rows each vote once for their
+    /// own widest *internal* cell gap (deep inside the table, nowhere near the real
+    /// gutter), outvoting the 6 genuine gutter lines and landing the median at 76.0 --
+    /// measured directly in `detect_split_x_ignores_table_grid_row_votes_gh1742` below.
+    fn gh1742_two_column_page_with_lower_table_and_page_number() -> Vec<TextSpan> {
+        let mut spans = Vec::new();
+        for row in 0..MIN_DENSE_COLUMN_SPLIT_LINES {
+            let y = 900.0 - row as f32 * 14.0;
+            spans.push(span_with_width(
+                &format!("left column body text for row {row}"),
+                GH1742_LEFT_X,
+                y,
+                GH1742_LEFT_WIDTH,
+                11.0,
+                11.0,
+            ));
+            spans.push(span_with_width(
+                &format!("right column body text for row {row}"),
+                GH1742_RIGHT_X,
+                y,
+                GH1742_RIGHT_WIDTH,
+                11.0,
+                11.0,
+            ));
+        }
+        let table_top = 900.0 - MIN_DENSE_COLUMN_SPLIT_LINES as f32 * 14.0 - 6.0;
+        for row in 0..GH1742_TABLE_ROWS {
+            let y = table_top - row as f32 * GH1742_TABLE_ROW_HEIGHT;
+            for (column, &(x, width)) in GH1742_TABLE_COLUMNS.iter().enumerate() {
+                spans.push(span_with_width(&format!("c{column}"), x, y, width, 6.5, 6.5));
+            }
+        }
+        let page_number_width = 4.5;
+        let page_number_x = GH1742_TRUE_GUTTER_MID_X - page_number_width / 2.0;
+        spans.push(span_with_width("6", page_number_x, 40.0, page_number_width, 8.0, 8.0));
+        spans
+    }
+
+    /// GH#1742: `detect_split_x`'s median must survive a table's own internal-gap
+    /// votes and land in the true gutter. Measured on this fixture pre-fix: the
+    /// table's 10 rows each contribute one vote for their widest internal cell gap
+    /// (76.0, between the table's first two columns), outvoting the 6 real gutter
+    /// votes (297.5) and landing the median at 76.0 -- deep inside the left column.
+    #[test]
+    fn detect_split_x_ignores_table_grid_row_votes_gh1742() {
+        let spans = gh1742_two_column_page_with_lower_table_and_page_number();
+        let order = spans_sorted_top_to_bottom(&spans);
+        let lines = group_into_lines(&spans, &order);
+
+        let detected = detect_split_x(&spans, &lines, GH1742_PAGE_WIDTH)
+            .expect("six paired prose rows meet the quorum on their own");
+        assert!(
+            (detected - GH1742_TRUE_GUTTER_MID_X).abs() < 0.5,
+            "the table's grid rows must not pollute the vote; expected the true gutter \
+             at {GH1742_TRUE_GUTTER_MID_X}, got {detected}"
+        );
+    }
+
+    /// GH#1742 end to end (reproducer p1 shape): the page must reorder column-major --
+    /// the whole left column (prose then table, in their existing top-to-bottom order)
+    /// followed by the whole right column, with the page number left as its own
+    /// trailing boundary line. Before the fix, the polluted vote (76.0) lands inside
+    /// both the left prose spans and one of the table's own columns, every line
+    /// becomes a single-line boundary band, no band ever reorders, and the page is
+    /// left exactly as extracted -- interleaved left/right rows, exactly the reported
+    /// defect. Measured directly against unmodified code: `reorder_dense_two_column_page`
+    /// returns `false` and every span keeps its original (interleaved) position.
+    #[test]
+    fn dense_two_column_page_with_lower_table_and_page_number_reorders_by_column_gh1742() {
+        let mut spans = gh1742_two_column_page_with_lower_table_and_page_number();
+
+        assert!(
+            reorder_dense_two_column_page(&mut spans, GH1742_PAGE_WIDTH),
+            "a two-column page with a table in the lower half of one column and a \
+             page number in the gutter must still be reordered"
+        );
+
+        let mut expected: Vec<String> = (0..MIN_DENSE_COLUMN_SPLIT_LINES)
+            .map(|row| format!("left column body text for row {row}"))
+            .collect();
+        for _row in 0..GH1742_TABLE_ROWS {
+            expected.extend((0..GH1742_TABLE_COLUMNS.len()).map(|column| format!("c{column}")));
+        }
+        expected.extend((0..MIN_DENSE_COLUMN_SPLIT_LINES).map(|row| format!("right column body text for row {row}")));
+        expected.push("6".to_string());
+
+        assert_eq!(
+            spans.iter().map(|span| span.text.as_str()).collect::<Vec<_>>(),
+            expected.iter().map(String::as_str).collect::<Vec<_>>(),
+            "left column (prose then table) must precede the right column, with the \
+             page number trailing as its own boundary line"
+        );
+    }
+
+    const GH1742_P6_TABLE_ROWS: usize = 8;
+    const GH1742_P6_TABLE_COLUMNS: [(f32, f32); 4] = [(38.0, 30.0), (84.0, 30.0), (130.0, 30.0), (176.0, 30.0)];
+    // The table's fifth column starts just inside the left column and straddles the
+    // gutter, matching the reporter's own measurement of a numeric column that begins
+    // in-column and runs past the true split. ~keep
+    const GH1742_P6_STRADDLE_COLUMN_X: f32 = 283.0;
+    const GH1742_P6_STRADDLE_COLUMN_WIDTH: f32 = 32.0;
+
+    /// GH#1742 (reproducer p6 shape): a full-width table sits above two ordinary prose
+    /// columns; the table's fifth column starts inside the left column and straddles
+    /// the true gutter. Before the fix, `aligned_hanging_label_left_edge` read that
+    /// numeric column as a stack of hanging clause numbers and snapped the split from
+    /// the true gutter into the table's own fourth-column gap; `detect_split_x` was
+    /// separately polluted by the table's own multi-column internal gaps. Fixing the
+    /// vote (`line_has_grid_row_gaps` in both `detect_split_x` and
+    /// `aligned_hanging_label_left_edge`) removes both failure paths at once: the table
+    /// rows never enter the vote, so the median comes only from the six real gutter
+    /// lines below, and the same exclusion removes the straddling column from the
+    /// snap's candidate pool. Every table row still straddles the (correct) split, so
+    /// each stays a single boundary line in its own top-to-bottom, left-to-right
+    /// order -- "table, then prose", matching the reporter's own expected output.
+    fn gh1742_full_width_table_above_two_column_prose() -> Vec<TextSpan> {
+        let mut spans = Vec::new();
+        for row in 0..GH1742_P6_TABLE_ROWS {
+            let y = 950.0 - row as f32 * 9.0;
+            for (column, &(x, width)) in GH1742_P6_TABLE_COLUMNS.iter().enumerate() {
+                spans.push(span_with_width(&format!("c{column}"), x, y, width, 6.5, 6.5));
+            }
+            spans.push(span_with_width(
+                "269,533",
+                GH1742_P6_STRADDLE_COLUMN_X,
+                y,
+                GH1742_P6_STRADDLE_COLUMN_WIDTH,
+                6.5,
+                6.5,
+            ));
+        }
+        let prose_top = 950.0 - GH1742_P6_TABLE_ROWS as f32 * 9.0 - 20.0;
+        for row in 0..MIN_DENSE_COLUMN_SPLIT_LINES {
+            let y = prose_top - row as f32 * 14.0;
+            spans.push(span_with_width(
+                &format!("left column body text for row {row}"),
+                GH1742_LEFT_X,
+                y,
+                GH1742_LEFT_WIDTH,
+                11.0,
+                11.0,
+            ));
+            spans.push(span_with_width(
+                &format!("right column body text for row {row}"),
+                GH1742_RIGHT_X,
+                y,
+                GH1742_RIGHT_WIDTH,
+                11.0,
+                11.0,
+            ));
+        }
+        spans
+    }
+
+    #[test]
+    fn detect_split_x_ignores_full_width_table_grid_row_votes_gh1742() {
+        let spans = gh1742_full_width_table_above_two_column_prose();
+        let order = spans_sorted_top_to_bottom(&spans);
+        let lines = group_into_lines(&spans, &order);
+
+        let detected = detect_split_x(&spans, &lines, GH1742_PAGE_WIDTH)
+            .expect("six paired prose rows meet the quorum on their own");
+        assert!(
+            (detected - GH1742_TRUE_GUTTER_MID_X).abs() < 0.5,
+            "the full-width table's grid rows must not pollute the vote; expected the \
+             true gutter at {GH1742_TRUE_GUTTER_MID_X}, got {detected}"
+        );
+
+        let snapped = snap_split_left_of_hanging_labels(&spans, &lines, GH1742_PAGE_WIDTH, detected);
+        assert_eq!(
+            snapped, detected,
+            "the straddling numeric column must not be read as a hanging-label stack"
+        );
+    }
+
+    #[test]
+    fn dense_two_column_page_with_full_width_table_above_reorders_table_then_prose_gh1742() {
+        let mut spans = gh1742_full_width_table_above_two_column_prose();
+
+        assert!(
+            reorder_dense_two_column_page(&mut spans, GH1742_PAGE_WIDTH),
+            "a full-width table above a two-column prose body must still be reordered"
+        );
+
+        let mut expected = Vec::new();
+        for _row in 0..GH1742_P6_TABLE_ROWS {
+            expected.extend((0..GH1742_P6_TABLE_COLUMNS.len()).map(|column| format!("c{column}")));
+            expected.push("269,533".to_string());
+        }
+        expected.extend((0..MIN_DENSE_COLUMN_SPLIT_LINES).map(|row| format!("left column body text for row {row}")));
+        expected.extend((0..MIN_DENSE_COLUMN_SPLIT_LINES).map(|row| format!("right column body text for row {row}")));
+
+        assert_eq!(
+            spans.iter().map(|span| span.text.as_str()).collect::<Vec<_>>(),
+            expected.iter().map(String::as_str).collect::<Vec<_>>(),
+            "the table must stay in its own row order, followed by the reordered \
+             left-then-right prose columns"
+        );
+    }
+
+    const GH1742_P4_NORMAL_ROWS: usize = 10;
+    const GH1742_P4_COLLAPSED_ROWS: usize = 6;
+    // Three columns, wide last column -- only two internal gaps per row, below
+    // `MIN_GRID_ROW_GAP_COUNT`, so fix #1 alone does not remove these rows from the
+    // vote. Left column occupies the full page height; the right column is ordinary
+    // prose on its own (unrelated) leading, never sharing a baseline with the table.
+    // Positioned so the (wrong) per-row vote sits within `MAX_REDIRECT_DISTANCE_FRACTION`
+    // of the true gutter -- otherwise the pre-existing GH#1603 distance cap discards
+    // any candidate the widened search finds, independent of fix #3. ~keep
+    const GH1742_P4_TABLE_COLUMNS: [(f32, f32); 3] = [(38.0, 147.0), (200.0, 30.0), (245.0, 45.0)];
+    const GH1742_P4_TABLE_ROW_HEIGHT: f32 = 9.0;
+    // A deliberately offset leading (not a multiple of the table's or prose's own row
+    // height) so no table row ever lands on the same visual line as a prose row. ~keep
+    const GH1742_P4_TABLE_Y_OFFSET: f32 = 0.7;
+
+    /// GH#1742 (reproducer p4 shape): the entire left column, top to bottom, is a
+    /// 3-column table (wide last column, so only two internal gaps per row -- fix #1's
+    /// `MIN_GRID_ROW_GAP_COUNT` of four does not exclude these rows from the vote);
+    /// the right column is ordinary prose; a centred page number sits in the gutter.
+    ///
+    /// Ten rows keep the plain 3-column shape and vote for their own internal gap
+    /// (deep inside the table); six rows collapse the second column into the third
+    /// (one wide cell starting right after the first), so they contribute no vote but
+    /// their wide cell occupies exactly the x-range the other ten rows vote for --
+    /// forcing that wrong median to both cut a span and cross
+    /// `MIN_DENSE_COLUMN_SPLIT_LINES` lines, which is what sends
+    /// `redirect_split_out_of_content` into the widened low-occupancy search rather
+    /// than leaving the (already-wrong) median untouched. `page_whitespace_corridors`
+    /// still finds nothing there (the page number closes the true gutter), and the
+    /// widened search's own candidate is refused by `both_sides_are_columns` unless
+    /// the left (table) side is allowed to be `Table`/`Mixed`/`Form` -- exactly the gap
+    /// fix #3 closes, mirroring what `reorder_band_columns` already accepts once a
+    /// split is actually handed to it.
+    fn gh1742_full_height_table_column_with_page_number() -> Vec<TextSpan> {
+        let mut spans = Vec::new();
+        for row in 0..GH1742_P4_NORMAL_ROWS {
+            let y = 900.0 - row as f32 * GH1742_P4_TABLE_ROW_HEIGHT - GH1742_P4_TABLE_Y_OFFSET;
+            for (column, &(x, width)) in GH1742_P4_TABLE_COLUMNS.iter().enumerate() {
+                spans.push(span_with_width(&format!("t{column}"), x, y, width, 6.5, 6.5));
+            }
+        }
+        for row in 0..GH1742_P4_COLLAPSED_ROWS {
+            let y =
+                900.0 - (GH1742_P4_NORMAL_ROWS + row) as f32 * GH1742_P4_TABLE_ROW_HEIGHT - GH1742_P4_TABLE_Y_OFFSET;
+            let (col0_x, col0_width) = GH1742_P4_TABLE_COLUMNS[0];
+            let (col2_x, col2_width) = GH1742_P4_TABLE_COLUMNS[2];
+            spans.push(span_with_width("t0", col0_x, y, col0_width, 6.5, 6.5));
+            spans.push(span_with_width(
+                "wide",
+                col0_x + col0_width,
+                y,
+                col2_x + col2_width - (col0_x + col0_width),
+                6.5,
+                6.5,
+            ));
+        }
+        for row in 0..(GH1742_P4_NORMAL_ROWS + GH1742_P4_COLLAPSED_ROWS) {
+            let y = 900.0 - row as f32 * 14.0;
+            spans.push(span_with_width(
+                &format!("right column body text for row {row}"),
+                GH1742_RIGHT_X,
+                y,
+                GH1742_RIGHT_WIDTH,
+                11.0,
+                11.0,
+            ));
+        }
+        let page_number_width = 4.5;
+        let page_number_x = GH1742_TRUE_GUTTER_MID_X - page_number_width / 2.0;
+        spans.push(span_with_width("6", page_number_x, 40.0, page_number_width, 8.0, 8.0));
+        spans
+    }
+
+    #[test]
+    fn dense_two_column_page_with_full_height_table_column_reorders_table_then_prose_gh1742() {
+        let mut spans = gh1742_full_height_table_column_with_page_number();
+
+        assert!(
+            reorder_dense_two_column_page(&mut spans, GH1742_PAGE_WIDTH),
+            "a full-height table column beside ordinary prose, with a page number in \
+             the gutter, must still be reordered"
+        );
+
+        let mut expected = Vec::new();
+        for _row in 0..GH1742_P4_NORMAL_ROWS {
+            expected.extend((0..GH1742_P4_TABLE_COLUMNS.len()).map(|column| format!("t{column}")));
+        }
+        for _row in 0..GH1742_P4_COLLAPSED_ROWS {
+            expected.push("t0".to_string());
+            expected.push("wide".to_string());
+        }
+        expected.extend(
+            (0..(GH1742_P4_NORMAL_ROWS + GH1742_P4_COLLAPSED_ROWS))
+                .map(|row| format!("right column body text for row {row}")),
+        );
+        expected.push("6".to_string());
+
+        assert_eq!(
+            spans.iter().map(|span| span.text.as_str()).collect::<Vec<_>>(),
+            expected.iter().map(String::as_str).collect::<Vec<_>>(),
+            "the table column must precede the prose column, with the page number \
+             trailing as its own boundary line"
+        );
+    }
+
+    const GH1742_P1_PAGE_WIDTH: f32 = 595.28;
+
+    /// GH#1742 real reproducer, page 1, transcribed verbatim (one span per
+    /// `PdfDocument::extract_spans` entry, `x`/`y`/`width`/`height` unmodified) from
+    /// `/1742.pdf` -- not committed; see the issue's own geometry table. A five-column
+    /// table (`Pars`/`Ex anno`/`Valor` plus a narrow fifth column at `x=262`, right
+    /// edges up to `286.90`, matching the issue's `ignotum` stack) fills the lower half
+    /// of the left column; a centred page number (`"1"`, `x=295.42..299.87`) sits in
+    /// the gutter. Before fix #2, `corridor_is_hanging_label_indent` reads the fifth
+    /// column's narrow, left-aligned cells as a hanging-label stack (nothing
+    /// distinguishes them from a real clause number) and the widened corridor search
+    /// refuses the true gutter, leaving `detect_split_x`'s polluted median (inside the
+    /// table) as the final split.
+    fn gh1742_p1_real_reproducer_spans() -> Vec<TextSpan> {
+        #[rustfmt::skip]
+        let spans = vec![
+            span_with_width("2.1. Lorem ipsum dolor sit amet", 38.00, 770.00, 133.05, 9.50, 9.50),
+            span_with_width("incididunt ut labore et dolore magna aliqua enim ad minim veniam", 38.00, 759.55, 247.55, 8.50, 8.50),
+            span_with_width("ut labore et dolore magna aliqua enim ad minim veniam quis", 38.00, 749.10, 227.23, 8.50, 8.50),
+            span_with_width("labore et dolore magna aliqua enim ad minim veniam quis nostrud", 38.00, 738.65, 248.49, 8.50, 8.50),
+            span_with_width("et dolore magna aliqua enim ad minim veniam quis nostrud", 38.00, 728.20, 222.50, 8.50, 8.50),
+            span_with_width("dolore magna aliqua enim ad minim veniam quis nostrud", 38.00, 717.75, 213.05, 8.50, 8.50),
+            span_with_width("magna aliqua enim ad minim veniam quis nostrud exercitation", 38.00, 707.30, 232.89, 8.50, 8.50),
+            span_with_width("aliqua enim ad minim veniam quis nostrud exercitation ullamco", 38.00, 696.85, 236.19, 8.50, 8.50),
+            span_with_width("enim ad minim veniam quis nostrud exercitation ullamco laboris", 38.00, 686.40, 238.54, 8.50, 8.50),
+            span_with_width("ut labore et dolore magna aliqua enim ad minim veniam quis", 307.00, 686.40, 227.23, 8.50, 8.50),
+            span_with_width("labore et dolore magna aliqua enim ad minim veniam quis nostrud", 307.00, 675.95, 248.49, 8.50, 8.50),
+            span_with_width("2.2. Consectetur adipiscing elit", 38.00, 665.50, 129.36, 9.50, 9.50),
+            span_with_width("velit esse cillum fugiat nulla pariatur excepteur sint occaecat", 38.00, 655.05, 225.81, 8.50, 8.50),
+            span_with_width("esse cillum fugiat nulla pariatur excepteur sint occaecat cupidatat", 38.00, 644.60, 245.19, 8.50, 8.50),
+            span_with_width("cillum fugiat nulla pariatur excepteur sint occaecat cupidatat non", 38.00, 634.15, 241.42, 8.50, 8.50),
+            span_with_width("fugiat nulla pariatur excepteur sint occaecat cupidatat non proident", 38.00, 623.70, 250.41, 8.50, 8.50),
+            span_with_width("nulla pariatur excepteur sint occaecat cupidatat non proident sunt", 38.00, 613.25, 245.68, 8.50, 8.50),
+            span_with_width("pariatur excepteur sint occaecat cupidatat non proident sunt culpa", 38.00, 602.80, 248.05, 8.50, 8.50),
+            span_with_width("minim veniam quis nostrud exercitation ullamco laboris nisi aliquip", 307.00, 602.80, 247.99, 8.50, 8.50),
+            span_with_width("veniam quis nostrud exercitation ullamco laboris nisi aliquip ex ea", 307.00, 592.35, 246.12, 8.50, 8.50),
+            span_with_width("Table 1", 38.00, 581.90, 23.34, 7.00, 7.00),
+            span_with_width("Lorem ipsum dolor sit amet in consectetur adipiscing elit.", 38.00, 573.85, 175.84, 7.00, 7.00),
+            span_with_width("Pars", 92.00, 563.80, 14.39, 7.00, 7.00),
+            span_with_width("Ex anno", 140.00, 563.80, 25.68, 7.00, 7.00),
+            span_with_width("Valor", 185.00, 563.80, 16.34, 7.00, 7.00),
+            span_with_width("Dolor", 44.00, 555.75, 16.72, 7.00, 7.00),
+            span_with_width("91%", 92.00, 555.75, 14.01, 7.00, 7.00),
+            span_with_width("Anno 1983", 140.00, 555.75, 33.86, 7.00, 7.00),
+            span_with_width("Praedictum", 185.00, 555.75, 35.40, 7.00, 7.00),
+            span_with_width("Sit amet", 44.00, 547.70, 25.68, 7.00, 7.00),
+            span_with_width("80.5%", 92.00, 547.70, 19.85, 7.00, 7.00),
+            span_with_width("Anno 2023", 140.00, 547.70, 33.86, 7.00, 7.00),
+            span_with_width("Exclusio", 185.00, 547.70, 26.06, 7.00, 7.00),
+            span_with_width("Lorem", 44.00, 539.65, 19.84, 7.00, 7.00),
+            span_with_width("40-70%", 92.00, 539.65, 24.12, 7.00, 7.00),
+            span_with_width("Anno 2016", 140.00, 539.65, 33.86, 7.00, 7.00),
+            span_with_width("Conflictus", 185.00, 539.65, 30.73, 7.00, 7.00),
+            span_with_width("Ipsum", 44.00, 531.60, 19.06, 7.00, 7.00),
+            span_with_width("10-20%", 92.00, 531.60, 24.12, 7.00, 7.00),
+            span_with_width("Nulla", 140.00, 531.60, 15.95, 7.00, 7.00),
+            span_with_width("Nullum", 185.00, 531.60, 21.78, 7.00, 7.00),
+            span_with_width("Magna", 44.00, 523.55, 21.40, 7.00, 7.00),
+            span_with_width("10-15%", 92.00, 523.55, 24.12, 7.00, 7.00),
+            span_with_width("Anno 2001", 140.00, 523.55, 33.86, 7.00, 7.00),
+            span_with_width("Peior", 185.00, 523.55, 16.34, 7.00, 7.00),
+            span_with_width("Aliqua", 44.00, 515.50, 19.45, 7.00, 7.00),
+            span_with_width("50-79%", 92.00, 515.50, 24.12, 7.00, 7.00),
+            span_with_width("Anno 2019", 140.00, 515.50, 33.86, 7.00, 7.00),
+            span_with_width("Melior", 185.00, 515.50, 19.05, 7.00, 7.00),
+            span_with_width("Veniam", 44.00, 507.45, 23.73, 7.00, 7.00),
+            span_with_width("5-55%", 92.00, 507.45, 20.23, 7.00, 7.00),
+            span_with_width("Anno 1983", 140.00, 507.45, 33.86, 7.00, 7.00),
+            span_with_width("Praedictum", 185.00, 507.45, 35.40, 7.00, 7.00),
+            span_with_width("Nostrud", 44.00, 499.40, 24.51, 7.00, 7.00),
+            span_with_width("62%", 92.00, 499.40, 14.01, 7.00, 7.00),
+            span_with_width("Anno 2023", 140.00, 499.40, 33.86, 7.00, 7.00),
+            span_with_width("Exclusio", 185.00, 499.40, 26.06, 7.00, 7.00),
+            span_with_width("Ullamco", 44.00, 491.35, 25.28, 7.00, 7.00),
+            span_with_width("33%", 92.00, 491.35, 14.01, 7.00, 7.00),
+            span_with_width("Anno 2016", 140.00, 491.35, 33.86, 7.00, 7.00),
+            span_with_width("Conflictus", 185.00, 491.35, 30.73, 7.00, 7.00),
+            span_with_width("Laboris", 44.00, 483.30, 22.95, 7.00, 7.00),
+            span_with_width("17%", 92.00, 483.30, 14.01, 7.00, 7.00),
+            span_with_width("Nulla", 140.00, 483.30, 15.95, 7.00, 7.00),
+            span_with_width("Nullum", 185.00, 483.30, 21.78, 7.00, 7.00),
+            span_with_width("Nisi", 44.00, 475.25, 11.66, 7.00, 7.00),
+            span_with_width("91%", 92.00, 475.25, 14.01, 7.00, 7.00),
+            span_with_width("Anno 2001", 140.00, 475.25, 33.86, 7.00, 7.00),
+            span_with_width("Peior", 185.00, 475.25, 16.34, 7.00, 7.00),
+            span_with_width("Aliquip", 44.00, 467.20, 21.01, 7.00, 7.00),
+            span_with_width("80.5%", 92.00, 467.20, 19.85, 7.00, 7.00),
+            span_with_width("Anno 2019", 140.00, 467.20, 33.86, 7.00, 7.00),
+            span_with_width("Melior", 185.00, 467.20, 19.05, 7.00, 7.00),
+            span_with_width("Commodo", 44.00, 459.15, 32.28, 7.00, 7.00),
+            span_with_width("40-70%", 92.00, 459.15, 24.12, 7.00, 7.00),
+            span_with_width("Anno 1983", 140.00, 459.15, 33.86, 7.00, 7.00),
+            span_with_width("Praedictum", 185.00, 459.15, 35.40, 7.00, 7.00),
+            span_with_width("Duis", 44.00, 451.10, 14.00, 7.00, 7.00),
+            span_with_width("10-20%", 92.00, 451.10, 24.12, 7.00, 7.00),
+            span_with_width("Anno 2023", 140.00, 451.10, 33.86, 7.00, 7.00),
+            span_with_width("Exclusio", 185.00, 451.10, 26.06, 7.00, 7.00),
+            span_with_width("Aute", 44.00, 443.05, 14.40, 7.00, 7.00),
+            span_with_width("10-15%", 92.00, 443.05, 24.12, 7.00, 7.00),
+            span_with_width("Anno 2016", 140.00, 443.05, 33.86, 7.00, 7.00),
+            span_with_width("Conflictus", 185.00, 443.05, 30.73, 7.00, 7.00),
+            span_with_width("Irure", 44.00, 435.00, 14.39, 7.00, 7.00),
+            span_with_width("50-79%", 92.00, 435.00, 24.12, 7.00, 7.00),
+            span_with_width("Nulla", 140.00, 435.00, 15.95, 7.00, 7.00),
+            span_with_width("Nullum", 185.00, 435.00, 21.78, 7.00, 7.00),
+            span_with_width("Velit", 44.00, 426.95, 13.62, 7.00, 7.00),
+            span_with_width("5-55%", 92.00, 426.95, 20.23, 7.00, 7.00),
+            span_with_width("Anno 2001", 140.00, 426.95, 33.86, 7.00, 7.00),
+            span_with_width("Peior", 185.00, 426.95, 16.34, 7.00, 7.00),
+            span_with_width("Esse", 44.00, 418.90, 15.56, 7.00, 7.00),
+            span_with_width("62%", 92.00, 418.90, 14.01, 7.00, 7.00),
+            span_with_width("Anno 2019", 140.00, 418.90, 33.86, 7.00, 7.00),
+            span_with_width("Melior", 185.00, 418.90, 19.05, 7.00, 7.00),
+            span_with_width("Cillum", 44.00, 410.85, 19.44, 7.00, 7.00),
+            span_with_width("33%", 92.00, 410.85, 14.01, 7.00, 7.00),
+            span_with_width("Anno 1983", 140.00, 410.85, 33.86, 7.00, 7.00),
+            span_with_width("Praedictum", 185.00, 410.85, 35.40, 7.00, 7.00),
+            span_with_width("Fugiat", 44.00, 402.80, 19.45, 7.00, 7.00),
+            span_with_width("17%", 92.00, 402.80, 14.01, 7.00, 7.00),
+            span_with_width("Anno 2023", 140.00, 402.80, 33.86, 7.00, 7.00),
+            span_with_width("Exclusio", 185.00, 402.80, 26.06, 7.00, 7.00),
+            span_with_width("Nulla", 44.00, 394.75, 15.95, 7.00, 7.00),
+            span_with_width("91%", 92.00, 394.75, 14.01, 7.00, 7.00),
+            span_with_width("Anno 2016", 140.00, 394.75, 33.86, 7.00, 7.00),
+            span_with_width("Conflictus", 185.00, 394.75, 30.73, 7.00, 7.00),
+            span_with_width("Sint", 44.00, 386.70, 12.06, 7.00, 7.00),
+            span_with_width("80.5%", 92.00, 386.70, 19.85, 7.00, 7.00),
+            span_with_width("Nulla", 140.00, 386.70, 15.95, 7.00, 7.00),
+            span_with_width("Nullum", 185.00, 386.70, 21.78, 7.00, 7.00),
+            span_with_width("Culpa", 44.00, 378.65, 18.28, 7.00, 7.00),
+            span_with_width("40-70%", 92.00, 378.65, 24.12, 7.00, 7.00),
+            span_with_width("Anno 2001", 140.00, 378.65, 33.86, 7.00, 7.00),
+            span_with_width("Peior", 185.00, 378.65, 16.34, 7.00, 7.00),
+            span_with_width("Officia", 44.00, 370.60, 19.84, 7.00, 7.00),
+            span_with_width("10-20%", 92.00, 370.60, 24.12, 7.00, 7.00),
+            span_with_width("Anno 2019", 140.00, 370.60, 33.86, 7.00, 7.00),
+            span_with_width("Melior", 185.00, 370.60, 19.05, 7.00, 7.00),
+            span_with_width("Mollit", 44.00, 362.55, 16.33, 7.00, 7.00),
+            span_with_width("10-15%", 92.00, 362.55, 24.12, 7.00, 7.00),
+            span_with_width("Anno 1983", 140.00, 362.55, 33.86, 7.00, 7.00),
+            span_with_width("Praedictum", 185.00, 362.55, 35.40, 7.00, 7.00),
+            span_with_width("Anim", 44.00, 354.50, 15.95, 7.00, 7.00),
+            span_with_width("50-79%", 92.00, 354.50, 24.12, 7.00, 7.00),
+            span_with_width("Anno 2023", 140.00, 354.50, 33.86, 7.00, 7.00),
+            span_with_width("Exclusio", 185.00, 354.50, 26.06, 7.00, 7.00),
+            span_with_width("2.3. Sed do eiusmod tempor", 307.00, 770.00, 119.34, 9.50, 9.50),
+            span_with_width("adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore", 307.00, 759.55, 251.34, 8.50, 8.50),
+            span_with_width("elit sed do eiusmod tempor incididunt ut labore et dolore magna", 307.00, 749.10, 239.53, 8.50, 8.50),
+            span_with_width("sed do eiusmod tempor incididunt ut labore et dolore magna aliqua", 307.00, 738.65, 251.34, 8.50, 8.50),
+            span_with_width("do eiusmod tempor incididunt ut labore et dolore magna aliqua", 307.00, 728.20, 235.28, 8.50, 8.50),
+            span_with_width("eiusmod tempor incididunt ut labore et dolore magna aliqua enim", 307.00, 717.75, 244.25, 8.50, 8.50),
+            span_with_width("tempor incididunt ut labore et dolore magna aliqua enim ad minim", 307.00, 707.30, 246.60, 8.50, 8.50),
+            span_with_width("incididunt ut labore et dolore magna aliqua enim ad minim veniam", 307.00, 696.85, 247.55, 8.50, 8.50),
+            span_with_width("et dolore magna aliqua enim ad minim veniam quis nostrud", 307.00, 665.50, 222.50, 8.50, 8.50),
+            span_with_width("dolore magna aliqua enim ad minim veniam quis nostrud", 307.00, 655.05, 213.05, 8.50, 8.50),
+            span_with_width("magna aliqua enim ad minim veniam quis nostrud exercitation", 307.00, 644.60, 232.89, 8.50, 8.50),
+            span_with_width("aliqua enim ad minim veniam quis nostrud exercitation ullamco", 307.00, 634.15, 236.19, 8.50, 8.50),
+            span_with_width("enim ad minim veniam quis nostrud exercitation ullamco laboris", 307.00, 623.70, 238.54, 8.50, 8.50),
+            span_with_width("ad minim veniam quis nostrud exercitation ullamco laboris nisi", 307.00, 613.25, 232.87, 8.50, 8.50),
+            span_with_width("quis nostrud exercitation ullamco laboris nisi aliquip ex ea", 307.00, 581.90, 216.36, 8.50, 8.50),
+            span_with_width("nostrud exercitation ullamco laboris nisi aliquip ex ea commodo", 307.00, 571.45, 238.08, 8.50, 8.50),
+            span_with_width("Cura", 262.00, 563.80, 15.17, 7.00, 7.00),
+            span_with_width("exercitation ullamco laboris nisi aliquip ex ea commodo consequat", 307.00, 561.00, 248.96, 8.50, 8.50),
+            span_with_width("ignotum", 262.00, 555.75, 24.90, 7.00, 7.00),
+            span_with_width("ullamco laboris nisi aliquip ex ea commodo consequat duis aute", 307.00, 550.55, 239.99, 8.50, 8.50),
+            span_with_width("ignotum", 262.00, 547.70, 24.90, 7.00, 7.00),
+            span_with_width("nullum", 262.00, 539.65, 20.62, 7.00, 7.00),
+            span_with_width("laboris nisi aliquip ex ea commodo consequat duis aute irure in", 307.00, 540.10, 236.68, 8.50, 8.50),
+            span_with_width("ignotum", 262.00, 531.60, 24.90, 7.00, 7.00),
+            span_with_width("nisi aliquip ex ea commodo consequat duis aute irure in", 307.00, 529.65, 209.29, 8.50, 8.50),
+            span_with_width("peius", 262.00, 523.55, 16.73, 7.00, 7.00),
+            span_with_width("aliquip ex ea commodo consequat duis aute irure in reprehenderit", 307.00, 519.20, 247.09, 8.50, 8.50),
+            span_with_width("ignotum", 262.00, 515.50, 24.90, 7.00, 7.00),
+            span_with_width("ex ea commodo consequat duis aute irure in reprehenderit", 307.00, 508.75, 220.16, 8.50, 8.50),
+            span_with_width("melius", 262.00, 507.45, 20.22, 7.00, 7.00),
+            span_with_width("ignotum", 262.00, 499.40, 24.90, 7.00, 7.00),
+            span_with_width("ea commodo consequat duis aute irure in reprehenderit voluptate", 307.00, 498.30, 245.68, 8.50, 8.50),
+            span_with_width("ignotum", 262.00, 491.35, 24.90, 7.00, 7.00),
+            span_with_width("nullum", 262.00, 483.30, 20.62, 7.00, 7.00),
+            span_with_width("2.4. Ut labore et dolore magna", 307.00, 477.40, 128.32, 9.50, 9.50),
+            span_with_width("ignotum", 262.00, 475.25, 24.90, 7.00, 7.00),
+            span_with_width("peius", 262.00, 467.20, 16.73, 7.00, 7.00),
+            span_with_width("excepteur sint occaecat cupidatat non proident sunt culpa qui", 307.00, 466.95, 230.57, 8.50, 8.50),
+            span_with_width("ignotum", 262.00, 459.15, 24.90, 7.00, 7.00),
+            span_with_width("sint occaecat cupidatat non proident sunt culpa qui officia deserunt", 307.00, 456.50, 250.89, 8.50, 8.50),
+            span_with_width("melius", 262.00, 451.10, 20.22, 7.00, 7.00),
+            span_with_width("occaecat cupidatat non proident sunt culpa qui officia deserunt", 307.00, 446.05, 235.30, 8.50, 8.50),
+            span_with_width("ignotum", 262.00, 443.05, 24.90, 7.00, 7.00),
+            span_with_width("ignotum", 262.00, 435.00, 24.90, 7.00, 7.00),
+            span_with_width("cupidatat non proident sunt culpa qui officia deserunt mollit anim id", 307.00, 435.60, 250.87, 8.50, 8.50),
+            span_with_width("nullum", 262.00, 426.95, 20.62, 7.00, 7.00),
+            span_with_width("non proident sunt culpa qui officia deserunt mollit anim id est", 307.00, 425.15, 227.72, 8.50, 8.50),
+            span_with_width("ignotum", 262.00, 418.90, 24.90, 7.00, 7.00),
+            span_with_width("proident sunt culpa qui officia deserunt mollit anim id est laborum", 307.00, 414.70, 244.24, 8.50, 8.50),
+            span_with_width("peius", 262.00, 410.85, 16.73, 7.00, 7.00),
+            span_with_width("sunt culpa qui officia deserunt mollit anim id est laborum lorem", 307.00, 404.25, 234.78, 8.50, 8.50),
+            span_with_width("ignotum", 262.00, 402.80, 24.90, 7.00, 7.00),
+            span_with_width("melius", 262.00, 394.75, 20.22, 7.00, 7.00),
+            span_with_width("culpa qui officia deserunt mollit anim id est laborum lorem ipsum", 307.00, 393.80, 241.38, 8.50, 8.50),
+            span_with_width("ignotum", 262.00, 386.70, 24.90, 7.00, 7.00),
+            span_with_width("qui officia deserunt mollit anim id est laborum lorem ipsum dolor sit", 307.00, 383.35, 250.83, 8.50, 8.50),
+            span_with_width("ignotum", 262.00, 378.65, 24.90, 7.00, 7.00),
+            span_with_width("nullum", 262.00, 370.60, 20.62, 7.00, 7.00),
+            span_with_width("officia deserunt mollit anim id est laborum lorem ipsum dolor sit", 307.00, 372.90, 237.12, 8.50, 8.50),
+            span_with_width("ignotum", 262.00, 362.55, 24.90, 7.00, 7.00),
+            span_with_width("deserunt mollit anim id est laborum lorem ipsum dolor sit amet", 307.00, 362.45, 233.82, 8.50, 8.50),
+            span_with_width("peius", 262.00, 354.50, 16.73, 7.00, 7.00),
+            span_with_width("mollit anim id est laborum lorem ipsum dolor sit amet consectetur", 307.00, 352.00, 244.68, 8.50, 8.50),
+            span_with_width("anim id est laborum lorem ipsum dolor sit amet consectetur", 307.00, 341.55, 222.49, 8.50, 8.50),
+            span_with_width("id est laborum lorem ipsum dolor sit amet consectetur adipiscing", 307.00, 331.10, 241.86, 8.50, 8.50),
+            span_with_width("est laborum lorem ipsum dolor sit amet consectetur adipiscing elit", 307.00, 320.65, 246.11, 8.50, 8.50),
+            span_with_width("laborum lorem ipsum dolor sit amet consectetur adipiscing elit sed", 307.00, 310.20, 248.47, 8.50, 8.50),
+            span_with_width("lorem ipsum dolor sit amet consectetur adipiscing elit sed do", 307.00, 299.75, 227.22, 8.50, 8.50),
+            span_with_width("ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod", 307.00, 289.30, 238.09, 8.50, 8.50),
+            span_with_width("dolor sit amet consectetur adipiscing elit sed do eiusmod tempor", 307.00, 278.85, 241.88, 8.50, 8.50),
+            span_with_width("sit amet consectetur adipiscing elit sed do eiusmod tempor", 307.00, 268.40, 220.62, 8.50, 8.50),
+            span_with_width("amet consectetur adipiscing elit sed do eiusmod tempor incididunt", 307.00, 257.95, 248.02, 8.50, 8.50),
+            span_with_width("consectetur adipiscing elit sed do eiusmod tempor incididunt ut", 307.00, 247.50, 236.21, 8.50, 8.50),
+            span_with_width("adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore", 307.00, 237.05, 251.34, 8.50, 8.50),
+            span_with_width("elit sed do eiusmod tempor incididunt ut labore et dolore magna", 307.00, 226.60, 239.53, 8.50, 8.50),
+            span_with_width("sed do eiusmod tempor incididunt ut labore et dolore magna aliqua", 307.00, 216.15, 251.34, 8.50, 8.50),
+            span_with_width("do eiusmod tempor incididunt ut labore et dolore magna aliqua", 307.00, 205.70, 235.28, 8.50, 8.50),
+            span_with_width("eiusmod tempor incididunt ut labore et dolore magna aliqua enim", 307.00, 195.25, 244.25, 8.50, 8.50),
+            span_with_width("tempor incididunt ut labore et dolore magna aliqua enim ad minim", 307.00, 184.80, 246.60, 8.50, 8.50),
+            span_with_width("incididunt ut labore et dolore magna aliqua enim ad minim veniam", 307.00, 174.35, 247.55, 8.50, 8.50),
+            span_with_width("1", 295.42, 30.00, 4.45, 8.00, 8.00),
+        ];
+        spans
+    }
+
+    /// GH#1742: the fifth table column's narrow cells (`x=262`, right edge `286.90`)
+    /// must not be read as a hanging-label stack -- nothing follows any of them on
+    /// their own line past the corridor, unlike a real clause number.
+    #[test]
+    fn corridor_is_hanging_label_indent_rejects_a_table_edge_column_gh1742() {
+        let spans = gh1742_p1_real_reproducer_spans();
+        let order = spans_sorted_top_to_bottom(&spans);
+        let lines = group_into_lines(&spans, &order);
+        let page_width = GH1742_P1_PAGE_WIDTH;
+        let max_label_width = page_width * MAX_DENSE_COLUMN_SPLIT_SNAP_SPAN_FRACTION;
+        // The corridor the widened search actually finds on this page: the true
+        // gutter, narrowed by the centred page number to a single crossing line. ~keep
+        let corridor = (286.899, 307.0);
+
+        assert!(
+            !corridor_is_hanging_label_indent(&spans, &lines, max_label_width, corridor),
+            "a table's edge column must not disqualify the page's real gutter as a \
+             hanging-label indent"
+        );
+    }
+
+    /// GH#1742 end to end (reproducer page 1, verbatim geometry): the page must
+    /// reorder column-major -- the whole left column (prose, then the five-column
+    /// table) followed by the whole right column, with the centred page number left
+    /// as its own trailing boundary line. Before fix #2,
+    /// `reorder_dense_two_column_page` leaves the median inside the table (`~240`),
+    /// every straddling prose line becomes a single-line boundary band, and the page
+    /// comes out with both columns interleaved -- the reported `2.1 … 2.3` weld.
+    #[test]
+    fn dense_two_column_page_reorders_by_column_on_real_reproducer_page_one_gh1742() {
+        let mut spans = gh1742_p1_real_reproducer_spans();
+        let original_order: Vec<String> = spans.iter().map(|span| span.text.clone()).collect();
+
+        assert!(
+            reorder_dense_two_column_page(&mut spans, GH1742_P1_PAGE_WIDTH),
+            "a two-column page with a five-column table in the lower half of one \
+             column and a page number in the gutter must still be reordered"
+        );
+
+        let reordered: Vec<String> = spans.iter().map(|span| span.text.clone()).collect();
+        assert_ne!(
+            reordered, original_order,
+            "the page must not be left in its original interleaved order"
+        );
+
+        // The left column's first heading must now be immediately followed by the
+        // left column's own next paragraph, not by the right column's `2.3` heading
+        // (the reported weld) or by any table cell.
+        let heading_index = reordered
+            .iter()
+            .position(|text| text == "2.1. Lorem ipsum dolor sit amet")
+            .expect("left column's first heading must survive the reorder");
+        assert_eq!(
+            reordered[heading_index + 1],
+            "incididunt ut labore et dolore magna aliqua enim ad minim veniam",
+            "the left column's heading must be followed by its own paragraph, not by \
+             the right column's heading or a table cell"
+        );
+
+        // The whole left column (ending in the table's last row) must precede the
+        // whole right column (starting with its own heading `2.3.`).
+        let last_table_cell_index = reordered
+            .iter()
+            .position(|text| text == "Anim")
+            .expect("the table's last row must survive the reorder");
+        let right_heading_index = reordered
+            .iter()
+            .position(|text| text == "2.3. Sed do eiusmod tempor")
+            .expect("the right column's heading must survive the reorder");
+        assert!(
+            last_table_cell_index < right_heading_index,
+            "the left column, table included, must be emitted before the right column"
+        );
+    }
+
     const GH1655_PAGE_WIDTH: f32 = 595.28;
     const GH1655_NUMBER_X: f32 = 45.22;
     const GH1655_TITLE_X: f32 = 80.68;
@@ -4839,6 +5607,230 @@ mod tests {
         assert!(
             reorder_band_columns(&spans, &band, SPLIT_X).is_none(),
             "only 5 of the left side's 7 spans carry ink; the density gate must still refuse the band"
+        );
+    }
+
+    /// Build a `page_count`-page PDF where every page carries `rows` lines of Standard-14
+    /// text in four columns and opens with a token unique to that page (`PAGEMARK0007`).
+    ///
+    /// The text is real content-stream operators, not an empty `/MediaBox`, so each page
+    /// costs real parsing, font-metric and span-assembly work, so the page-order test
+    /// exercises the same per-page path a real document does.
+    fn build_paged_text_pdf(page_count: usize, rows: usize) -> Vec<u8> {
+        let font_obj = 3 + 2 * page_count;
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets: Vec<usize> = Vec::new();
+
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        offsets.push(pdf.len());
+        let kids: String = (0..page_count).map(|i| format!("{} 0 R ", 3 + i)).collect();
+        pdf.extend_from_slice(
+            format!(
+                "2 0 obj\n<< /Type /Pages /Kids [{}] /Count {} >>\nendobj\n",
+                kids.trim_end(),
+                page_count
+            )
+            .as_bytes(),
+        );
+
+        for page in 0..page_count {
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(
+                format!(
+                    "{} 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+                     /Contents {} 0 R /Resources << /Font << /F1 {} 0 R >> >> >>\nendobj\n",
+                    3 + page,
+                    3 + page_count + page,
+                    font_obj
+                )
+                .as_bytes(),
+            );
+        }
+
+        const COLUMN_X: [f32; 4] = [40.0, 180.0, 320.0, 460.0];
+        for page in 0..page_count {
+            let mut stream = String::new();
+            for row in 0..rows {
+                let y = 760.0 - (row as f32) * 14.0;
+                for (col, x) in COLUMN_X.iter().enumerate() {
+                    let text = if row == 0 && col == 0 {
+                        format!("PAGEMARK{:04}", page + 1)
+                    } else {
+                        format!("p{}r{}c{} lorem ipsum", page + 1, row, col)
+                    };
+                    stream.push_str(&format!("BT /F1 10 Tf {:.1} {:.1} Td ({}) Tj ET\n", x, y, text));
+                }
+            }
+            offsets.push(pdf.len());
+            pdf.extend_from_slice(
+                format!(
+                    "{} 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+                    3 + page_count + page,
+                    stream.len(),
+                    stream
+                )
+                .as_bytes(),
+            );
+        }
+
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            format!(
+                "{} 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica \
+                 /Encoding /WinAnsiEncoding >>\nendobj\n",
+                font_obj
+            )
+            .as_bytes(),
+        );
+
+        let xref_pos = pdf.len();
+        let total_objs = offsets.len() + 1;
+        pdf.extend_from_slice(format!("xref\n0 {}\n", total_objs).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f\r\n");
+        for &off in &offsets {
+            pdf.extend_from_slice(format!("{off:010} 00000 n\r\n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                total_objs, xref_pos
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    /// The page number carried by every `PAGEMARK` token in `text`, in the order they appear.
+    fn pagemark_sequence(text: &str) -> Vec<usize> {
+        text.match_indices("PAGEMARK")
+            .filter_map(|(at, _)| text.get(at + "PAGEMARK".len()..at + "PAGEMARK".len() + 4))
+            .filter_map(|digits| digits.parse::<usize>().ok())
+            .collect()
+    }
+
+    /// #1723: both text paths must emit the pages in ascending order and unaltered. A test
+    /// that only counts pages passes on a shuffled document, so this pins the sequence and
+    /// the per-page bytes: the collected texts must equal a page-by-page run, the
+    /// concatenation must carry the page markers in ascending order, and each tracked page
+    /// boundary must slice out exactly its own page. Page order is what a reader of
+    /// `extract_all_page_texts` is most likely to trade away for speed, and the text it
+    /// feeds is the same text every downstream consumer indexes by offset.
+    #[test]
+    fn native_page_text_preserves_page_order_and_content() {
+        let page_count = 24;
+        let pdf = build_paged_text_pdf(page_count, 10);
+        let mut doc = NativeDocument::open_bytes(&pdf).expect("fixture must open");
+        let margins = PageMarginFractions::default();
+
+        let excluded_layers = xberg_native_pdf::optional_content::compute_default_off_ocgs(&doc.doc);
+        let sequential: Vec<String> = (0..page_count)
+            .map(|page_idx| {
+                extract_one_page_text(&doc.doc, page_idx, &excluded_layers, margins)
+                    .expect("page must extract")
+                    .0
+            })
+            .collect();
+        assert!(
+            sequential.iter().all(|page| !page.trim().is_empty()),
+            "fixture pages must carry text, otherwise this test proves nothing"
+        );
+
+        let (collected, _) = extract_all_page_texts(&doc.doc, margins).expect("collecting every page must succeed");
+        assert_eq!(
+            collected, sequential,
+            "the collected page texts must match a page-by-page run, page for page"
+        );
+
+        let (content, _, _, _) =
+            extract_text_from_native_document(&mut doc, None, None, margins).expect("fast path must succeed");
+        // The separator is spelled out rather than read from `PAGE_SEPARATOR`: an assertion
+        // built from the same constant the code writes cannot fail when that constant
+        // changes, which is the one thing every consumer's byte offsets depend on. ~keep
+        assert_eq!(
+            content,
+            sequential.join("\n\n"),
+            "fast path must concatenate pages in order, separated by one blank line"
+        );
+        assert_eq!(
+            pagemark_sequence(&content),
+            (1..=page_count).collect::<Vec<_>>(),
+            "page markers must appear in ascending page order"
+        );
+
+        let page_config = PageConfig {
+            extract_pages: true,
+            ..PageConfig::default()
+        };
+        let (tracked, boundaries, pages, _) =
+            extract_text_from_native_document(&mut doc, Some(&page_config), None, margins)
+                .expect("tracking path must succeed");
+        let boundaries = boundaries.expect("tracking path must report boundaries");
+        let pages = pages.expect("tracking path must report page contents");
+        assert_eq!(boundaries.len(), page_count);
+        assert_eq!(pages.len(), page_count);
+
+        for (page_idx, boundary) in boundaries.iter().enumerate() {
+            assert_eq!(boundary.page_number, (page_idx + 1) as u32);
+            let slice = &tracked[boundary.byte_start..boundary.byte_end];
+            assert_eq!(
+                slice,
+                sequential[page_idx],
+                "boundary {} must slice out its own page",
+                page_idx + 1
+            );
+            assert_eq!(pages[page_idx].content, sequential[page_idx]);
+            assert_eq!(pages[page_idx].page_number, (page_idx + 1) as u32);
+        }
+    }
+
+    /// #1744: the provenance pass in `pdf/scan_detect.rs` used to read every page's text a
+    /// second time to grade its fabricated-mapping ratio, after the main text pass had already
+    /// read the same raw spans once. `extract_text_and_metadata` must now carry those spans'
+    /// counts forward instead, so the whole-document separate read
+    /// (`scan_detect::fabricated_provenance_page_indices`) is never reached for a document with
+    /// no excluded optional-content layers — the common case.
+    ///
+    /// [`FABRICATED_PROVENANCE_SECOND_PASS_CALLS`](crate::pdf::scan_detect::FABRICATED_PROVENANCE_SECOND_PASS_CALLS)
+    /// is incremented only inside that whole-document function, so a count of zero after this
+    /// call proves the second read did not happen, not just that the final numbers happen to
+    /// agree. The expected page list is computed independently, on its own document handle,
+    /// before the counter is reset, so computing it cannot mask a regression. ~keep
+    #[test]
+    fn provenance_is_not_read_a_second_time_for_a_document_with_no_excluded_layers() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_documents/pdf/non_ascii_text.pdf");
+        let bytes = std::fs::read(&path).expect("corpus document must read");
+        let thresholds = crate::core::config::OcrQualityThresholds::default();
+
+        let baseline_doc = NativeDocument::open_bytes(&bytes).expect("corpus document must open");
+        let expected_fabricated: Vec<u32> = crate::pdf::scan_detect::fabricated_provenance_page_indices(
+            &baseline_doc.doc,
+            thresholds.min_provenance_fallback_ratio,
+            thresholds.min_total_non_whitespace,
+        )
+        .into_iter()
+        .map(|index| index as u32 + 1)
+        .collect();
+        assert!(
+            !expected_fabricated.is_empty(),
+            "fixture must fabricate at least one page for this test to mean anything"
+        );
+
+        crate::pdf::scan_detect::FABRICATED_PROVENANCE_SECOND_PASS_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+
+        let mut doc = NativeDocument::open_bytes(&bytes).expect("corpus document must open a second time");
+        let (_, _, _, metadata) = extract_text_and_metadata(&mut doc, None).expect("extraction must succeed");
+
+        assert_eq!(
+            crate::pdf::scan_detect::FABRICATED_PROVENANCE_SECOND_PASS_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "extract_text_and_metadata must not read every page's text a second time for provenance (issue #1744)"
+        );
+        assert_eq!(
+            metadata.pdf_specific.fabricated_text_pages,
+            Some(expected_fabricated),
+            "fabricated_text_pages must match the pre-#1744 page-by-page computation exactly"
         );
     }
 }

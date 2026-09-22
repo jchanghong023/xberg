@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'lib.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `try_convert_annotation_kind_from_core`, `try_convert_asset_category_from_core`, `try_convert_auth_config_from_core`, `try_convert_block_type_from_core`, `try_convert_boundary_reason_from_core`, `try_convert_browser_backend_from_core`, `try_convert_browser_mode_from_core`, `try_convert_browser_wait_from_core`, `try_convert_call_mode_from_core`, `try_convert_candle_device_preference_from_core`, `try_convert_candle_trocr_variant_from_core`, `try_convert_chunk_sizing_from_core`, `try_convert_chunk_type_from_core`, `try_convert_chunker_type_from_core`, `try_convert_chunking_reason_from_core`, `try_convert_code_content_mode_from_core`, `try_convert_code_data_node_kind_from_core`, `try_convert_confidence_semantics_from_core`, `try_convert_content_filter_kind_from_core`, `try_convert_content_layer_from_core`, `try_convert_crawl_strategy_kind_from_core`, `try_convert_credential_provider_config_from_core`, `try_convert_diff_line_from_core`, `try_convert_document_content_encoding_from_core`, `try_convert_element_type_from_core`, `try_convert_embedding_model_type_from_core`, `try_convert_embeddings_embedding_backend_from_core`, `try_convert_entity_category_from_core`, `try_convert_execution_provider_type_from_core`, `try_convert_extract_input_kind_from_core`, `try_convert_extraction_method_from_core`, `try_convert_form_field_type_from_core`, `try_convert_format_metadata_from_core`, `try_convert_formula_model_from_core`, `try_convert_glm_ocr_layout_mode_from_core`, `try_convert_glm_ocr_task_kind_from_core`, `try_convert_host_matcher_from_core`, `try_convert_html_theme_from_core`, `try_convert_image_kind_from_core`, `try_convert_image_output_format_from_core`, `try_convert_image_type_from_core`, `try_convert_inline_type_from_core`, `try_convert_jupyter_cell_rendering_from_core`, `try_convert_keyword_algorithm_from_core`, `try_convert_late_interaction_model_type_from_core`, `try_convert_layout_class_from_core`, `try_convert_layout_strategy_from_core`, `try_convert_link_type_from_core`, `try_convert_merge_mode_from_core`, `try_convert_mime_detection_policy_from_core`, `try_convert_ner_backend_kind_from_core`, `try_convert_no_chunking_reason_from_core`, `try_convert_node_content_from_core`, `try_convert_ocr_backend_type_from_core`, `try_convert_ocr_bounding_geometry_from_core`, `try_convert_ocr_element_level_from_core`, `try_convert_ocr_strategy_from_core`, `try_convert_output_format_from_core`, `try_convert_paddle_inference_backend_from_core`, `try_convert_paddle_language_from_core`, `try_convert_paddle_ocr_vl_task_kind_from_core`, `try_convert_page_orientation_handling_from_core`, `try_convert_page_unit_type_from_core`, `try_convert_pdf_annotation_type_from_core`, `try_convert_pdf_backend_from_core`, `try_convert_pii_category_from_core`, `try_convert_preset_category_from_core`, `try_convert_probe_status_from_core`, `try_convert_processing_stage_from_core`, `try_convert_psm_mode_from_core`, `try_convert_redaction_strategy_from_core`, `try_convert_reduction_level_from_core`, `try_convert_region_kind_from_core`, `try_convert_relationship_kind_from_core`, `try_convert_reranker_head_from_core`, `try_convert_reranker_model_type_from_core`, `try_convert_result_format_from_core`, `try_convert_revision_anchor_from_core`, `try_convert_revision_kind_from_core`, `try_convert_schema_compliance_from_core`, `try_convert_sparse_embedding_model_type_from_core`, `try_convert_structured_data_type_from_core`, `try_convert_summary_strategy_from_core`, `try_convert_table_chunking_mode_from_core`, `try_convert_table_model_from_core`, `try_convert_table_overlap_preference_from_core`, `try_convert_text_direction_from_core`, `try_convert_tier_strategy_from_core`, `try_convert_uri_kind_from_core`, `try_convert_url_extraction_mode_from_core`, `try_convert_vlm_fallback_policy_from_core`, `try_convert_whisper_model_from_core`
+// These functions are ignored because they are not marked as `pub`: `try_convert_annotation_kind_from_core`, `try_convert_asset_category_from_core`, `try_convert_auth_config_from_core`, `try_convert_block_type_from_core`, `try_convert_boundary_reason_from_core`, `try_convert_browser_backend_from_core`, `try_convert_browser_mode_from_core`, `try_convert_browser_wait_from_core`, `try_convert_call_mode_from_core`, `try_convert_candle_deepseek_ocr_dtype_from_core`, `try_convert_candle_device_preference_from_core`, `try_convert_candle_trocr_variant_from_core`, `try_convert_chunk_sizing_from_core`, `try_convert_chunk_type_from_core`, `try_convert_chunker_type_from_core`, `try_convert_chunking_reason_from_core`, `try_convert_code_content_mode_from_core`, `try_convert_code_data_node_kind_from_core`, `try_convert_confidence_semantics_from_core`, `try_convert_content_filter_kind_from_core`, `try_convert_content_layer_from_core`, `try_convert_crawl_strategy_kind_from_core`, `try_convert_credential_provider_config_from_core`, `try_convert_diff_line_from_core`, `try_convert_document_content_encoding_from_core`, `try_convert_element_type_from_core`, `try_convert_embedding_model_type_from_core`, `try_convert_embeddings_embedding_backend_from_core`, `try_convert_entity_category_from_core`, `try_convert_execution_provider_type_from_core`, `try_convert_extract_input_kind_from_core`, `try_convert_extraction_method_from_core`, `try_convert_form_field_type_from_core`, `try_convert_format_metadata_from_core`, `try_convert_formula_model_from_core`, `try_convert_glm_ocr_layout_mode_from_core`, `try_convert_glm_ocr_task_kind_from_core`, `try_convert_host_matcher_from_core`, `try_convert_html_theme_from_core`, `try_convert_image_kind_from_core`, `try_convert_image_output_format_from_core`, `try_convert_image_type_from_core`, `try_convert_inline_type_from_core`, `try_convert_jupyter_cell_rendering_from_core`, `try_convert_keyword_algorithm_from_core`, `try_convert_late_interaction_model_type_from_core`, `try_convert_layout_class_from_core`, `try_convert_layout_strategy_from_core`, `try_convert_link_type_from_core`, `try_convert_merge_mode_from_core`, `try_convert_mime_detection_policy_from_core`, `try_convert_ner_backend_kind_from_core`, `try_convert_no_chunking_reason_from_core`, `try_convert_node_content_from_core`, `try_convert_ocr_backend_type_from_core`, `try_convert_ocr_bounding_geometry_from_core`, `try_convert_ocr_element_level_from_core`, `try_convert_ocr_strategy_from_core`, `try_convert_output_format_from_core`, `try_convert_paddle_inference_backend_from_core`, `try_convert_paddle_language_from_core`, `try_convert_paddle_ocr_vl_task_kind_from_core`, `try_convert_page_orientation_handling_from_core`, `try_convert_page_unit_type_from_core`, `try_convert_pdf_annotation_type_from_core`, `try_convert_pdf_backend_from_core`, `try_convert_pii_category_from_core`, `try_convert_preset_category_from_core`, `try_convert_probe_status_from_core`, `try_convert_processing_stage_from_core`, `try_convert_psm_mode_from_core`, `try_convert_redaction_strategy_from_core`, `try_convert_reduction_level_from_core`, `try_convert_region_kind_from_core`, `try_convert_relationship_kind_from_core`, `try_convert_reranker_head_from_core`, `try_convert_reranker_model_type_from_core`, `try_convert_result_format_from_core`, `try_convert_revision_anchor_from_core`, `try_convert_revision_kind_from_core`, `try_convert_schema_compliance_from_core`, `try_convert_sparse_embedding_model_type_from_core`, `try_convert_structured_data_type_from_core`, `try_convert_summary_strategy_from_core`, `try_convert_table_chunking_mode_from_core`, `try_convert_table_model_from_core`, `try_convert_table_overlap_preference_from_core`, `try_convert_text_direction_from_core`, `try_convert_tier_strategy_from_core`, `try_convert_uri_kind_from_core`, `try_convert_url_extraction_mode_from_core`, `try_convert_vlm_fallback_policy_from_core`, `try_convert_whisper_model_from_core`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ChunkClassificationEnrichmentConfig`, `DocumentExtractorDartCallbacks`, `EmbeddingBackendDartCallbacks`, `OcrBackendDartCallbacks`, `PostProcessorDartCallbacks`, `RendererDartCallbacks`, `RerankerBackendDartCallbacks`, `TokenizerBackendDartCallbacks`, `ValidatorDartCallbacks`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `backend_type`, `can_handle`, `confidence_semantics`, `count_tokens`, `dimensions`, `embed`, `emits_structured_markdown`, `estimated_duration_ms`, `extract`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `page_orientation_handling`, `priority`, `priority`, `priority`, `process_document`, `process_image_file`, `process_image`, `process`, `processing_stage`, `render_result`, `rerank`, `should_process`, `should_validate`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `supported_languages`, `supported_mime_types`, `supports_document_processing`, `supports_language`, `supports_table_detection`, `validate`, `version`, `version`, `version`, `version`, `version`, `version`, `version`, `version`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `backend_type`, `can_handle`, `confidence_semantics`, `count_tokens`, `dimensions`, `embed`, `emits_structured_markdown`, `estimated_duration_ms`, `extract`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `page_orientation_handling`, `priority`, `priority`, `priority`, `process_document`, `process_image_file`, `process_image`, `process`, `processing_stage`, `render_result`, `rerank`, `should_process`, `should_validate`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `supported_languages`, `supported_mime_types`, `supports_document_processing`, `supports_language`, `supports_table_detection`, `validate`, `version`, `version`, `version`, `version`, `version`, `version`, `version`, `version`
 
 /// Extract content from a single bytes or URI input.
 Future<ExtractionResult> extract({
@@ -1369,6 +1369,11 @@ Future<GlmOcrLayoutMode> createGlmOcrLayoutModeFromJson({
   required String json,
 }) => RustLib.instance.api.crateCreateGlmOcrLayoutModeFromJson(json: json);
 
+Future<CandleDeepseekOcrDtype> createCandleDeepseekOcrDtypeFromJson({
+  required String json,
+}) =>
+    RustLib.instance.api.crateCreateCandleDeepseekOcrDtypeFromJson(json: json);
+
 Future<LayoutClass> createLayoutClassFromJson({required String json}) =>
     RustLib.instance.api.crateCreateLayoutClassFromJson(json: json);
 
@@ -2649,6 +2654,13 @@ enum CallMode {
   textPlusVision,
 }
 
+/// Floating-point precision accepted by `candle-deepseek-ocr` backend options.
+///
+/// `Auto` (the default) resolves per compute device: BF16 on CUDA, F16 on Metal, F32 on CPU.
+/// A dtype with no kernel on the selected device fails the load hard rather than silently
+/// falling back to another precision -- this is not a tuning knob.
+enum CandleDeepseekOcrDtype { auto, f32, f16, bf16 }
+
 /// Device selection shared by the typed candle backend option objects.
 enum CandleDevicePreference { auto, cpu, cuda, metal }
 
@@ -3690,7 +3702,12 @@ class CodeMetadata {
 /// Controls thread usage for constrained environments.
 ///
 /// Set `max_threads` to cap all internal thread pools (Rayon, ONNX Runtime
-/// intra-op) and batch concurrency to a single limit.
+/// intra-op), batch concurrency and Tesseract recognition to a single limit.
+/// Set `max_concurrent_ocr` to give recognition a limit of its own, which is
+/// the knob to reach for when the host has cores to spare but not the memory
+/// to run a recognition session on each of them. It is applied as given and
+/// is not capped by `max_threads`. The first extraction in a process fixes
+/// it for that process — see the field's own documentation.
 ///
 /// # Default budget when `max_threads` is unset
 ///
@@ -3719,6 +3736,7 @@ class CodeMetadata {
 ///
 /// let config = ConcurrencyConfig {
 ///     max_threads: Some(2),
+///     max_concurrent_ocr: None,
 /// };
 /// ```
 class ConcurrencyConfig {
@@ -3733,17 +3751,41 @@ class ConcurrencyConfig {
   /// default will not scale past 8 on its own.
   final PlatformInt64? maxThreads;
 
-  const ConcurrencyConfig({this.maxThreads});
+  /// Maximum number of Tesseract recognition sessions that run at once.
+  ///
+  /// When `None`, recognition follows `max_threads`, reduced to the number
+  /// of sessions the host's free memory holds. Each session keeps its own
+  /// page image and recognition working set resident, so a host with many
+  /// cores and little memory needs this lower than the thread budget. Set
+  /// it to `4` to keep the fixed limit that releases up to 1.2.6 applied.
+  ///
+  /// A value set here is applied as given: neither the thread budget nor
+  /// the memory reading reduces it. Both of those bound the automatic
+  /// limit, and a caller who names a number has already decided what the
+  /// host can carry.
+  ///
+  /// The first extraction in a process fixes the limit for the rest of that
+  /// process, and a later extraction that names a different value keeps the
+  /// first one. The two limiters that enforce it — the admission semaphore
+  /// in the Tesseract backend and the handle pool behind it — are built once
+  /// inside a backend the plugin registry holds for the life of the process,
+  /// and the pool's capacity is fixed when it is constructed. A later value
+  /// could therefore be reported but never enforced. Set it on the first
+  /// extraction, or run one process per value.
+  final PlatformInt64? maxConcurrentOcr;
+
+  const ConcurrencyConfig({this.maxThreads, this.maxConcurrentOcr});
 
   @override
-  int get hashCode => maxThreads.hashCode;
+  int get hashCode => maxThreads.hashCode ^ maxConcurrentOcr.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is ConcurrencyConfig &&
           runtimeType == other.runtimeType &&
-          maxThreads == other.maxThreads;
+          maxThreads == other.maxThreads &&
+          maxConcurrentOcr == other.maxConcurrentOcr;
 }
 
 @freezed
@@ -5069,8 +5111,19 @@ class DbfMetadata {
 
 /// Runtime options accepted by the `candle-deepseek-ocr` backend.
 class DeepseekOcrBackendOptions {
-  /// Local DeepSeek-OCR model directory. The backend requires this option.
+  /// Local DeepSeek-OCR model directory. Takes precedence over `model_id` when present.
   final String? modelPath;
+
+  /// Optional Hugging Face repository identifier. Defaults to the checksum-pinned
+  /// `deepseek-ai/DeepSeek-OCR`. Ignored when `model_path` is set.
+  final String? modelId;
+
+  /// Optional immutable Hugging Face model revision. The default model is pinned
+  /// automatically; a custom `model_id` requires this to be set explicitly.
+  final String? hfRevision;
+
+  /// Optional Hugging Face cache root.
+  final String? cacheDir;
 
   /// Optional per-call device override.
   final CandleDevicePreference? device;
@@ -5078,10 +5131,28 @@ class DeepseekOcrBackendOptions {
   /// DeepSeek-OCR model generation, either 1 or 2. Defaults to 2.
   final PlatformInt64? version;
 
-  const DeepseekOcrBackendOptions({this.modelPath, this.device, this.version});
+  /// Optional weight precision override; see [`CandleDeepseekOcrDtype`].
+  final CandleDeepseekOcrDtype? dtype;
+
+  const DeepseekOcrBackendOptions({
+    this.modelPath,
+    this.modelId,
+    this.hfRevision,
+    this.cacheDir,
+    this.device,
+    this.version,
+    this.dtype,
+  });
 
   @override
-  int get hashCode => modelPath.hashCode ^ device.hashCode ^ version.hashCode;
+  int get hashCode =>
+      modelPath.hashCode ^
+      modelId.hashCode ^
+      hfRevision.hashCode ^
+      cacheDir.hashCode ^
+      device.hashCode ^
+      version.hashCode ^
+      dtype.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -5089,8 +5160,12 @@ class DeepseekOcrBackendOptions {
       other is DeepseekOcrBackendOptions &&
           runtimeType == other.runtimeType &&
           modelPath == other.modelPath &&
+          modelId == other.modelId &&
+          hfRevision == other.hfRevision &&
+          cacheDir == other.cacheDir &&
           device == other.device &&
-          version == other.version;
+          version == other.version &&
+          dtype == other.dtype;
 }
 
 /// MIME type detection response.
@@ -12715,6 +12790,9 @@ class OcrConfig {
   /// deserializing from a config file, JSON body, or the REST/MCP API, a
   /// single string is also accepted, either as one code ("eng") or
   /// "+"-joined ("eng+deu").
+  ///
+  /// The four candle-based backends also use this list to decide which scripts are
+  /// plausible in their output, dropping a line written in an unconfigured script.
   final List<String> language;
 
   /// Tesseract-specific configuration (optional)
@@ -13435,6 +13513,21 @@ class OcrQualityThresholds {
   /// is `true`.
   final double minProvenanceFallbackRatio;
 
+  /// Whether to route a page to OCR when its decoded text does not read as any real,
+  /// detectable language (issue #1696). Unlike `enable_provenance_ocr_routing`, this
+  /// catches a `/ToUnicode` CMap that resolves every glyph to *a* character, but
+  /// consistently the WRONG one (e.g. a ROT-shifted mapping) -- text that is structurally
+  /// indistinguishable from real prose to every character-shape check, including the
+  /// provenance signal, because the mapping tier really is file-backed. Defaults to `true`.
+  final bool enablePlausibilityOcrRouting;
+
+  /// Minimum fraction of a page's language-detection chunks that whatlang classifies as
+  /// reliable (`Info::is_reliable()`) before the page is trusted as legible (issue #1696).
+  /// Below this AND below the mean-confidence guard together, the page's text layer is
+  /// treated as implausible and routed to OCR. Only used when
+  /// `enable_plausibility_ocr_routing` is `true`.
+  final double minReliableLanguageChunkRatio;
+
   const OcrQualityThresholds({
     required this.minTotalNonWhitespace,
     required this.minNonWhitespacePerPage,
@@ -13460,6 +13553,8 @@ class OcrQualityThresholds {
     required this.minUndecodableRatio,
     required this.enableProvenanceOcrRouting,
     required this.minProvenanceFallbackRatio,
+    required this.enablePlausibilityOcrRouting,
+    required this.minReliableLanguageChunkRatio,
   });
 
   @override
@@ -13487,7 +13582,9 @@ class OcrQualityThresholds {
       pipelineMinQuality.hashCode ^
       minUndecodableRatio.hashCode ^
       enableProvenanceOcrRouting.hashCode ^
-      minProvenanceFallbackRatio.hashCode;
+      minProvenanceFallbackRatio.hashCode ^
+      enablePlausibilityOcrRouting.hashCode ^
+      minReliableLanguageChunkRatio.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -13519,7 +13616,9 @@ class OcrQualityThresholds {
           pipelineMinQuality == other.pipelineMinQuality &&
           minUndecodableRatio == other.minUndecodableRatio &&
           enableProvenanceOcrRouting == other.enableProvenanceOcrRouting &&
-          minProvenanceFallbackRatio == other.minProvenanceFallbackRatio;
+          minProvenanceFallbackRatio == other.minProvenanceFallbackRatio &&
+          enablePlausibilityOcrRouting == other.enablePlausibilityOcrRouting &&
+          minReliableLanguageChunkRatio == other.minReliableLanguageChunkRatio;
 }
 
 /// Rotation information for an OCR element.
@@ -15122,9 +15221,21 @@ class PdfMetadata {
   /// structurally like prose (issue #1667: a broken mapping that lands on ordinary
   /// letters and punctuation passes every character-shape check but is still fabricated).
   ///
-  /// `None` when `OcrQualityThresholds::enable_provenance_ocr_routing` is `false` or the
-  /// document could not be inspected; empty when no page qualifies.
+  /// `None` when `OcrQualityThresholds::enable_provenance_ocr_routing` is `false`; empty
+  /// when no page qualifies.
   final Int64List? fabricatedTextPages;
+
+  /// Pages whose native text layer reads as no real detectable language (1-indexed): a
+  /// `/ToUnicode` CMap (or other mapping tier) that resolves every glyph to *a* character,
+  /// consistently the WRONG one (e.g. a ROT-shifted mapping), so the page is structurally
+  /// indistinguishable from real prose to `fabricated_text_pages`'s provenance check and to
+  /// every character-shape heuristic (issue #1696; issue #1667's `quality_score: 1.0` with
+  /// no warning on such a page is the same underlying gap). This is a content-plausibility
+  /// fact, independent of `fabricated_text_pages` and of `scanned_pages`.
+  ///
+  /// `None` when `OcrQualityThresholds::enable_plausibility_ocr_routing` is `false`; empty
+  /// when no page qualifies.
+  final Int64List? implausibleTextPages;
 
   /// Pages the `auto` layout strategy skipped (1-indexed).
   ///
@@ -15149,6 +15260,7 @@ class PdfMetadata {
     this.scannedConfidence,
     this.scannedPages,
     this.fabricatedTextPages,
+    this.implausibleTextPages,
     this.layoutGatedPages,
     this.layoutGateReasons,
   });
@@ -15164,6 +15276,7 @@ class PdfMetadata {
       scannedConfidence.hashCode ^
       scannedPages.hashCode ^
       fabricatedTextPages.hashCode ^
+      implausibleTextPages.hashCode ^
       layoutGatedPages.hashCode ^
       layoutGateReasons.hashCode;
 
@@ -15181,6 +15294,7 @@ class PdfMetadata {
           scannedConfidence == other.scannedConfidence &&
           scannedPages == other.scannedPages &&
           fabricatedTextPages == other.fabricatedTextPages &&
+          implausibleTextPages == other.implausibleTextPages &&
           layoutGatedPages == other.layoutGatedPages &&
           layoutGateReasons == other.layoutGateReasons;
 }
@@ -16882,7 +16996,11 @@ class SecurityLimits {
   /// caught by `max_content_size` instead.
   final PlatformInt64 maxEntityLength;
 
-  /// Maximum string growth and decoded image allocation per document (100 MB)
+  /// Maximum string growth and decoded image allocation per operation (100 MB).
+  ///
+  /// Per-page passes such as layout detection charge each batch against this limit,
+  /// not the whole document; only `max_pages` bounds the rasters retained across a
+  /// document (GH#1721).
   final PlatformInt64 maxContentSize;
 
   /// Maximum iterations per operation
