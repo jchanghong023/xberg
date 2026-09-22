@@ -73,11 +73,12 @@ fn test_docx_ocr_content_injection() {
     }
 }
 
-/// GH#1703: an OCR-only DOCX config (`ocr: Some(_)`, `images: None`) must not retain
-/// every embedded image's raw bytes just because GH#1662's read gate needed them to run
-/// OCR. `images` must come back empty and the fixed text the mock backend produced must
-/// still have landed in `content` -- proving the fix drops the bytes, not the OCR text
-/// they produced.
+/// GH#1703 (fork-adjusted): an OCR-only DOCX config (`ocr: Some(_)`, `images: None`) in
+/// this fork *retains* the embedded images' raw bytes — an absent `images` section means
+/// "extract images" here (`needs_image_data()` defaults true, see fork.md), which is the
+/// deliberate divergence from upstream's read-for-OCR-then-drop fix. What must still hold
+/// from GH#1703: the fixed text the mock backend produced lands in `content`, proving the
+/// OCR pass over the read bytes works, and `counts.images` stays populated.
 #[test]
 fn test_docx_ocr_only_config_returns_no_images() {
     use async_trait::async_trait;
@@ -143,23 +144,26 @@ fn test_docx_ocr_only_config_returns_no_images() {
 
     let result = extract_uri_document_blocking(&file_path, None, &config).expect("extraction must succeed");
 
-    assert!(
-        result.images.as_ref().map(|v| v.is_empty()).unwrap_or(true),
-        "ocr-only config (images: None) must not retain embedded image bytes; got {} image(s)",
-        result.images.as_ref().map(|v| v.len()).unwrap_or(0)
+    // (fork) 本 fork 的默认行为与上游 GH#1703 相反：缺省 `images` 段视为抽取图片
+    //（`needs_image_data()` 默认真，见 fork.md「默认抽取图片」），所以字节要保留、
+    // counts 与 content 断言不变——上游"读给 OCR 用完即丢字节"的修复在默认配置下
+    // 不采纳；需要丢弃字节时由调用方显式配置 `images`。
+    assert_eq!(
+        result.images.as_ref().map(|v| v.len()).unwrap_or(0),
+        1,
+        "fork default: an absent images section retains the embedded image bytes that fed OCR"
     );
     assert_eq!(
         result.counts.images, 1,
-        "DocumentCounts::images is documented as always populated, so dropping the bytes must not zero it"
+        "DocumentCounts::images is documented as always populated"
     );
     assert!(
         !result.content.trim().is_empty(),
-        "document content must still be extracted when images are dropped"
+        "document content must still be extracted alongside the retained images"
     );
     assert!(
         result.content.contains(SENTINEL_OCR_TEXT),
-        "embedded-image OCR text must still land in content even though the raw image \
-         bytes are dropped; got content:\n{}",
+        "embedded-image OCR text must still land in content alongside the retained raw bytes; got content:\n{}",
         result.content
     );
 }
