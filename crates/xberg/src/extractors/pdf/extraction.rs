@@ -1015,6 +1015,15 @@ mod tests {
         fn ocr_only_config() -> ExtractionConfig {
             ExtractionConfig {
                 ocr: Some(OcrConfig::default()),
+                // Fork default: image extraction is ON when the `images` section is absent
+                // (`wants_own_bytes_in_result`), so image bytes always have a consumer until
+                // output is explicitly turned off. The predicate under test here is
+                // "OCR is the sole consumer", so the helper opts out of image output
+                // explicitly; upstream's default leaves it off and needs no such pin. ~keep
+                images: Some(ImageExtractionConfig {
+                    extract_images: false,
+                    ..Default::default()
+                }),
                 ..Default::default()
             }
         }

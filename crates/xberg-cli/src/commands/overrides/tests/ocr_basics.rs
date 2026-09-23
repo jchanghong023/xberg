@@ -8,6 +8,8 @@ use xberg::{ExtractionConfig, OcrConfig};
 #[cfg(feature = "ocr-surface")]
 #[test]
 fn test_ocr_default_backend_and_language() {
+    use super::super::ocr::default_language_for_backend;
+
     let mut config = ExtractionConfig::default();
     let overrides = ExtractionOverrides {
         ocr: Some(true),
