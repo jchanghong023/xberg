@@ -259,12 +259,7 @@ impl Slide {
         let table_rows: Vec<Vec<String>> = table
             .rows
             .iter()
-            .map(|row| {
-                row.cells
-                    .iter()
-                    .map(|cell| join_runs(&cell.runs, extract_fn))
-                    .collect()
-            })
+            .map(|row| row.cells.iter().map(|cell| join_runs(&cell.runs, extract_fn)).collect())
             .collect();
         builder.add_table(&table_rows);
     }

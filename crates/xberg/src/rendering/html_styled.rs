@@ -550,8 +550,8 @@ fn render_image_element(doc: &InternalDocument, elem: &InternalElement, p: &str,
         // `@descr` Office bakes into the image must not surface as an `alt`
         // attribute here either, so the element's caption text goes through the
         // same sanitizer before it is escaped into the tag.
-        let alt = crate::extraction::markdown_utils::sanitize_image_alt_text(Some(elem.text.clone()))
-            .unwrap_or_default();
+        let alt =
+            crate::extraction::markdown_utils::sanitize_image_alt_text(Some(elem.text.clone())).unwrap_or_default();
         render_image(
             image,
             &alt,

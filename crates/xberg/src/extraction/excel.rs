@@ -323,11 +323,7 @@ fn index_sparse_sheet_cells(cells: &[((u32, u32), Data)]) -> SparseSheetIndex<'_
 
 /// Collect one markdown pipe-table row's cell strings for `row` across `display_cols`
 /// (looking each cell up in `cell_map`, defaulting to empty when absent).
-fn sparse_row_cells(
-    cell_map: &HashMap<(u32, u32), &Data>,
-    row: u32,
-    display_cols: &[u32],
-) -> Vec<String> {
+fn sparse_row_cells(cell_map: &HashMap<(u32, u32), &Data>, row: u32, display_cols: &[u32]) -> Vec<String> {
     display_cols
         .iter()
         .map(|&col| {

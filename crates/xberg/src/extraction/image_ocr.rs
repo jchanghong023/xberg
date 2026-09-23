@@ -471,7 +471,6 @@ fn build_pending_ocr_tasks(
     let acceleration = ocr_config.acceleration.clone();
     let security_limits = config.security_limits.clone();
 
-
     // Rasterization runs before any backend sees the image, so it must bound the GDI surface
     // itself; a caller that configured no `security_limits` gets the crate defaults rather
     // than an unbounded allocation. `OcrConfig::security_limits` keeps the `Option` above.
@@ -482,7 +481,6 @@ fn build_pending_ocr_tasks(
 
     let mut pending = std::collections::VecDeque::with_capacity(images.len());
     for (idx, image) in images.iter().cloned().enumerate() {
-
         let mut ocr_config_clone = ocr_config.clone();
         ocr_config_clone.output_format = Some(output_format.clone());
         ocr_config_clone.acceleration = acceleration.clone();

@@ -2,216 +2,213 @@ use super::*;
 use std::io::Write;
 
 /// Embedded document text must land in `elements` so Markdown/`content` is
-    /// searchable, not only on `children`.
-    #[test]
-    fn append_embedded_object_text_merges_child_content_into_body() {
-        use crate::types::ExtractedDocument;
-        use crate::types::internal::{ElementKind, InternalDocument};
+/// searchable, not only on `children`.
+#[test]
+fn append_embedded_object_text_merges_child_content_into_body() {
+    use crate::types::ExtractedDocument;
+    use crate::types::internal::{ElementKind, InternalDocument};
 
-        let child = ExtractedDocument {
-            content: "SCAN设计流程介绍\n\n拟制".to_string(),
-            mime_type: crate::core::mime::LEGACY_WORD_MIME_TYPE.into(),
-            ..Default::default()
-        };
-        let mut doc = InternalDocument::default();
-        doc.children = Some(vec![ArchiveEntry {
-            path: "oleObject15.bin".to_string(),
-            mime_type: crate::core::mime::LEGACY_WORD_MIME_TYPE.into(),
-            result: Box::new(child),
-        }]);
+    let child = ExtractedDocument {
+        content: "SCAN设计流程介绍\n\n拟制".to_string(),
+        mime_type: crate::core::mime::LEGACY_WORD_MIME_TYPE.into(),
+        ..Default::default()
+    };
+    let mut doc = InternalDocument::default();
+    doc.children = Some(vec![ArchiveEntry {
+        path: "oleObject15.bin".to_string(),
+        mime_type: crate::core::mime::LEGACY_WORD_MIME_TYPE.into(),
+        result: Box::new(child),
+    }]);
 
-        append_embedded_object_text(&mut doc);
+    append_embedded_object_text(&mut doc);
 
-        let texts: Vec<&str> = doc.elements.iter().map(|element| element.text.as_str()).collect();
-        assert!(
-            texts.iter().any(|text| text.contains("SCAN设计流程介绍")),
-            "expected child body in elements, got {texts:?}"
-        );
-        // The child's own Markdown has to survive verbatim: as a paragraph, its line
-        // breaks collapse into one line and its markers get escaped.
-        assert!(
-            doc.elements
-                .iter()
-                .any(|element| matches!(element.kind, ElementKind::RawBlock) && element.text.contains("拟制")),
-            "expected the child body as a raw block, got {texts:?}"
-        );
-        // A filename is not a heading of the host document.
-        assert!(
-            !doc.elements
-                .iter()
-                .any(|element| matches!(element.kind, ElementKind::Heading { .. })),
-            "expected no heading for the embedded object, got {texts:?}"
-        );
-    }
+    let texts: Vec<&str> = doc.elements.iter().map(|element| element.text.as_str()).collect();
+    assert!(
+        texts.iter().any(|text| text.contains("SCAN设计流程介绍")),
+        "expected child body in elements, got {texts:?}"
+    );
+    // The child's own Markdown has to survive verbatim: as a paragraph, its line
+    // breaks collapse into one line and its markers get escaped.
+    assert!(
+        doc.elements
+            .iter()
+            .any(|element| matches!(element.kind, ElementKind::RawBlock) && element.text.contains("拟制")),
+        "expected the child body as a raw block, got {texts:?}"
+    );
+    // A filename is not a heading of the host document.
+    assert!(
+        !doc.elements
+            .iter()
+            .any(|element| matches!(element.kind, ElementKind::Heading { .. })),
+        "expected no heading for the embedded object, got {texts:?}"
+    );
+}
 
-    /// A child's images are renumbered into the parent's image table, and a
-    /// reference with no matching child image keeps only its alt text.
-    #[test]
-    fn renumber_embedded_image_refs_moves_refs_onto_the_parent_table() {
-        let image = |index: u32| crate::types::ExtractedImage {
-            image_index: index,
-            ..Default::default()
-        };
-        let images = vec![image(0), image(1)];
-        let input = "前言\n![流程图](image_1.png)\n后记 ![x](image_7.png) 结束";
-        let (rewritten, referenced) = renumber_embedded_image_refs(input, 4, &images);
-        assert!(rewritten.contains("![流程图](image_5.png)"), "got {rewritten}");
-        // Index 7 is not one of the child's images: the alt text stays, the
-        // reference (which would resolve to an unrelated picture) does not.
-        assert!(!rewritten.contains("image_7.png"), "got {rewritten}");
-        assert!(rewritten.contains("后记 x 结束"), "got {rewritten}");
-        // Only the image the body still points at is reported for staging.
-        assert_eq!(referenced, vec![1]);
-    }
+/// A child's images are renumbered into the parent's image table, and a
+/// reference with no matching child image keeps only its alt text.
+#[test]
+fn renumber_embedded_image_refs_moves_refs_onto_the_parent_table() {
+    let image = |index: u32| crate::types::ExtractedImage {
+        image_index: index,
+        ..Default::default()
+    };
+    let images = vec![image(0), image(1)];
+    let input = "前言\n![流程图](image_1.png)\n后记 ![x](image_7.png) 结束";
+    let (rewritten, referenced) = renumber_embedded_image_refs(input, 4, &images);
+    assert!(rewritten.contains("![流程图](image_5.png)"), "got {rewritten}");
+    // Index 7 is not one of the child's images: the alt text stays, the
+    // reference (which would resolve to an unrelated picture) does not.
+    assert!(!rewritten.contains("image_7.png"), "got {rewritten}");
+    assert!(rewritten.contains("后记 x 结束"), "got {rewritten}");
+    // Only the image the body still points at is reported for staging.
+    assert_eq!(referenced, vec![1]);
+}
 
-    /// Alt text the CommonMark writer escaped (`\]`) must not end the parse:
-    /// the old `find(']')` stopped at the escape and the reference kept the
-    /// child's numbering in the parent's body.
-    #[test]
-    fn renumber_embedded_image_refs_parses_escaped_alt_text() {
-        let images = vec![crate::types::ExtractedImage {
-            image_index: 0,
-            ..Default::default()
-        }];
-        let (rewritten, referenced) = renumber_embedded_image_refs("![flow \\] chart](image_0.png)", 2, &images);
-        assert!(
-            rewritten.contains("![flow \\] chart](image_2.png)"),
-            "the escaped reference is renumbered, got {rewritten}"
-        );
-        assert_eq!(
-            referenced,
-            vec![0],
-            "the escaped reference counts as a staging candidate"
-        );
-    }
+/// Alt text the CommonMark writer escaped (`\]`) must not end the parse:
+/// the old `find(']')` stopped at the escape and the reference kept the
+/// child's numbering in the parent's body.
+#[test]
+fn renumber_embedded_image_refs_parses_escaped_alt_text() {
+    let images = vec![crate::types::ExtractedImage {
+        image_index: 0,
+        ..Default::default()
+    }];
+    let (rewritten, referenced) = renumber_embedded_image_refs("![flow \\] chart](image_0.png)", 2, &images);
+    assert!(
+        rewritten.contains("![flow \\] chart](image_2.png)"),
+        "the escaped reference is renumbered, got {rewritten}"
+    );
+    assert_eq!(
+        referenced,
+        vec![0],
+        "the escaped reference counts as a staging candidate"
+    );
+}
 
-    /// A fenced `image_N` reference is example text, not a file reference: it
-    /// keeps the child's numbering verbatim and stages nothing, while the
-    /// unfenced reference after the fence still renumbers and stages.
-    #[test]
-    fn renumber_embedded_image_refs_leaves_fenced_examples_alone() {
-        let image = |index: u32| crate::types::ExtractedImage {
-            image_index: index,
-            ..Default::default()
-        };
-        let images = vec![image(0), image(1)];
-        let input = "```text\n![示例](image_0.png)\n```\n![流程图](image_1.png)\n";
-        let (rewritten, referenced) = renumber_embedded_image_refs(input, 4, &images);
-        assert!(
-            rewritten.contains("```text\n![示例](image_0.png)\n```"),
-            "the fenced example stays verbatim, got {rewritten}"
-        );
-        assert!(
-            rewritten.contains("![流程图](image_5.png)"),
-            "the unfenced reference renumbers, got {rewritten}"
-        );
-        assert_eq!(
-            referenced,
-            vec![1],
-            "only the unfenced reference is a staging candidate"
-        );
-    }
+/// A fenced `image_N` reference is example text, not a file reference: it
+/// keeps the child's numbering verbatim and stages nothing, while the
+/// unfenced reference after the fence still renumbers and stages.
+#[test]
+fn renumber_embedded_image_refs_leaves_fenced_examples_alone() {
+    let image = |index: u32| crate::types::ExtractedImage {
+        image_index: index,
+        ..Default::default()
+    };
+    let images = vec![image(0), image(1)];
+    let input = "```text\n![示例](image_0.png)\n```\n![流程图](image_1.png)\n";
+    let (rewritten, referenced) = renumber_embedded_image_refs(input, 4, &images);
+    assert!(
+        rewritten.contains("```text\n![示例](image_0.png)\n```"),
+        "the fenced example stays verbatim, got {rewritten}"
+    );
+    assert!(
+        rewritten.contains("![流程图](image_5.png)"),
+        "the unfenced reference renumbers, got {rewritten}"
+    );
+    assert_eq!(
+        referenced,
+        vec![1],
+        "only the unfenced reference is a staging candidate"
+    );
+}
 
-    /// A candidate whose first `)` lands inside a later fence is not a real
-    /// reference: consuming it whole would swallow the fence's opener line,
-    /// so the scan degrades to literal bytes and the fence survives whole —
-    /// and a real reference after that fence still renumbers and stages.
-    #[test]
-    fn renumber_embedded_image_refs_does_not_swallow_a_fence_with_an_unclosed_opener() {
-        let images = vec![crate::types::ExtractedImage {
-            image_index: 0,
-            ..Default::default()
-        }];
-        let input = "![a](x\n```text\ny)\n```\n![flow](image_0.png)\n";
-        let (rewritten, referenced) = renumber_embedded_image_refs(input, 4, &images);
-        assert!(
-            rewritten.contains("```text\ny)\n```"),
-            "the fence survives whole, got {rewritten}"
-        );
-        assert!(
-            rewritten.contains("![flow](image_4.png)"),
-            "the later real reference still renumbers, got {rewritten}"
-        );
-        assert_eq!(referenced, vec![0]);
-    }
+/// A candidate whose first `)` lands inside a later fence is not a real
+/// reference: consuming it whole would swallow the fence's opener line,
+/// so the scan degrades to literal bytes and the fence survives whole —
+/// and a real reference after that fence still renumbers and stages.
+#[test]
+fn renumber_embedded_image_refs_does_not_swallow_a_fence_with_an_unclosed_opener() {
+    let images = vec![crate::types::ExtractedImage {
+        image_index: 0,
+        ..Default::default()
+    }];
+    let input = "![a](x\n```text\ny)\n```\n![flow](image_0.png)\n";
+    let (rewritten, referenced) = renumber_embedded_image_refs(input, 4, &images);
+    assert!(
+        rewritten.contains("```text\ny)\n```"),
+        "the fence survives whole, got {rewritten}"
+    );
+    assert!(
+        rewritten.contains("![flow](image_4.png)"),
+        "the later real reference still renumbers, got {rewritten}"
+    );
+    assert_eq!(referenced, vec![0]);
+}
 
-    /// A malformed opener whose `)` never comes must not swallow the next
-    /// well-formed reference: the closer search stops at the next `![`, the
-    /// malformed opener degrades to two literal bytes, and the later reference
-    /// is rescanned from its own start — its image stays a staging candidate.
-    #[test]
-    fn renumber_embedded_image_refs_recovers_at_the_next_opener() {
-        let images = vec![crate::types::ExtractedImage {
-            image_index: 0,
-            ..Default::default()
-        }];
-        let (rewritten, referenced) = renumber_embedded_image_refs("![a](unclosed ![c](image_0.png)", 3, &images);
-        assert!(
-            rewritten.contains("![c](image_3.png)"),
-            "the later reference must be renumbered, got {rewritten}"
-        );
-        assert_eq!(referenced, vec![0], "the later reference is staged");
-        // The malformed opener's own text stays verbatim (Malformed keeps two
-        // literal bytes); what must NOT survive is the inner reference in its
-        // un-renumbered form — that would mean the span was parsed as one
-        // reference and the image silently lost.
-        assert!(
-            !rewritten.contains("image_0.png"),
-            "the swallowed inner reference must not survive un-renumbered, got {rewritten}"
-        );
-    }
+/// A malformed opener whose `)` never comes must not swallow the next
+/// well-formed reference: the closer search stops at the next `![`, the
+/// malformed opener degrades to two literal bytes, and the later reference
+/// is rescanned from its own start — its image stays a staging candidate.
+#[test]
+fn renumber_embedded_image_refs_recovers_at_the_next_opener() {
+    let images = vec![crate::types::ExtractedImage {
+        image_index: 0,
+        ..Default::default()
+    }];
+    let (rewritten, referenced) = renumber_embedded_image_refs("![a](unclosed ![c](image_0.png)", 3, &images);
+    assert!(
+        rewritten.contains("![c](image_3.png)"),
+        "the later reference must be renumbered, got {rewritten}"
+    );
+    assert_eq!(referenced, vec![0], "the later reference is staged");
+    // The malformed opener's own text stays verbatim (Malformed keeps two
+    // literal bytes); what must NOT survive is the inner reference in its
+    // un-renumbered form — that would mean the span was parsed as one
+    // reference and the image silently lost.
+    assert!(
+        !rewritten.contains("image_0.png"),
+        "the swallowed inner reference must not survive un-renumbered, got {rewritten}"
+    );
+}
 
-    /// A child whose body is empty after renumbering (a reference that matches
-    /// no child image and has no alt text) must not stage its images either:
-    /// the parent would export picture files that nothing in the body refers
-    /// to. The base must also not advance past the unused slots.
-    #[test]
-    fn append_embedded_object_text_skips_orphan_images_of_empty_children() {
-        use crate::types::ExtractedDocument;
-        use crate::types::internal::InternalDocument;
+/// A child whose body is empty after renumbering (a reference that matches
+/// no child image and has no alt text) must not stage its images either:
+/// the parent would export picture files that nothing in the body refers
+/// to. The base must also not advance past the unused slots.
+#[test]
+fn append_embedded_object_text_skips_orphan_images_of_empty_children() {
+    use crate::types::ExtractedDocument;
+    use crate::types::internal::InternalDocument;
 
-        let mut child_result = ExtractedDocument::default();
-        child_result.content = "![](image_7.png)".to_string();
-        child_result.images = Some(vec![crate::types::ExtractedImage {
-            image_index: 0,
-            ..Default::default()
-        }]);
+    let mut child_result = ExtractedDocument::default();
+    child_result.content = "![](image_7.png)".to_string();
+    child_result.images = Some(vec![crate::types::ExtractedImage {
+        image_index: 0,
+        ..Default::default()
+    }]);
 
-        let mut doc = InternalDocument::default();
-        doc.children = Some(vec![ArchiveEntry {
-            path: "oleObject1.bin".to_string(),
-            mime_type: "application/octet-stream".to_string(),
-            result: Box::new(child_result),
-        }]);
+    let mut doc = InternalDocument::default();
+    doc.children = Some(vec![ArchiveEntry {
+        path: "oleObject1.bin".to_string(),
+        mime_type: "application/octet-stream".to_string(),
+        result: Box::new(child_result),
+    }]);
 
-        append_embedded_object_text(&mut doc);
-        assert!(
-            doc.images.is_empty(),
-            "orphan images must not be staged: {:?}",
-            doc.images
-        );
-        assert!(doc.elements.is_empty(), "an empty child adds no elements");
-    }
+    append_embedded_object_text(&mut doc);
+    assert!(
+        doc.images.is_empty(),
+        "orphan images must not be staged: {:?}",
+        doc.images
+    );
+    assert!(doc.elements.is_empty(), "an empty child adds no elements");
+}
 
-    /// Blank child payloads must not inject empty captions/raw blocks.
-    #[test]
-    fn append_embedded_object_text_skips_blank_children() {
-        use crate::types::ExtractedDocument;
-        use crate::types::internal::InternalDocument;
+/// Blank child payloads must not inject empty captions/raw blocks.
+#[test]
+fn append_embedded_object_text_skips_blank_children() {
+    use crate::types::ExtractedDocument;
+    use crate::types::internal::InternalDocument;
 
-        let mut doc = InternalDocument::default();
-        doc.children = Some(vec![ArchiveEntry {
-            path: "oleObject1.bin".to_string(),
-            mime_type: "application/octet-stream".to_string(),
-            result: Box::new(ExtractedDocument::default()),
-        }]);
+    let mut doc = InternalDocument::default();
+    doc.children = Some(vec![ArchiveEntry {
+        path: "oleObject1.bin".to_string(),
+        mime_type: "application/octet-stream".to_string(),
+        result: Box::new(ExtractedDocument::default()),
+    }]);
 
-        append_embedded_object_text(&mut doc);
-        assert!(doc.elements.is_empty(), "blank children must not add elements");
-    }
-
-    
-
+    append_embedded_object_text(&mut doc);
+    assert!(doc.elements.is_empty(), "blank children must not add elements");
+}
 
 /// Build a minimal ZIP in memory with one file at the given path and contents.
 fn make_zip_with_file(entry_path: &str, entry_data: &[u8]) -> Vec<u8> {

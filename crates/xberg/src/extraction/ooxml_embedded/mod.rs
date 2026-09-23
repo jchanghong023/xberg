@@ -534,8 +534,15 @@ async fn process_embedded_entry(
         None
     };
     let child = if let Some(ole_offset) = ole_offset {
-        extract_ole_entry(&data[ole_offset..], filename, embedded_capacity_cap, child_config, source_label, &mut warnings)
-            .await
+        extract_ole_entry(
+            &data[ole_offset..],
+            filename,
+            embedded_capacity_cap,
+            child_config,
+            source_label,
+            &mut warnings,
+        )
+        .await
     } else {
         extract_regular_entry(&data, filename, child_config, source_label, &mut warnings).await
     };

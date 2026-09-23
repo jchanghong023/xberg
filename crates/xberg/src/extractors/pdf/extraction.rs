@@ -134,7 +134,6 @@ fn pdf_images_requested(config: &ExtractionConfig) -> bool {
     config.needs_image_data() && !pdf_level_opt_out
 }
 
-
 /// Whether OCR is the ONLY reason image bytes were requested for this document at all (GH#1732).
 ///
 /// When true, a full-page image on a page that already has native text can skip its decode
