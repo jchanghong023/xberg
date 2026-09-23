@@ -13,9 +13,16 @@ use crate::core::config::DEFAULT_SCANNED_MIN_CONFIDENCE;
 /// over every page's raw spans. A caller holding per-page counts already gathered by the main
 /// text pass must never reach this function (issue #1744); tests reset and read it to prove
 /// that second read did not happen. ~keep
+///
+/// Per-thread rather than a process-global atomic: libtest runs one binary's tests on parallel
+/// threads, and a global counter let an unrelated test's extraction (a layered fixture reaching
+/// the #1744 fallback) increment between this test's reset and its read, failing it spuriously.
+/// Extraction under test stays on its own thread, so a real regression still counts. ~keep
 #[cfg(test)]
-pub(crate) static FABRICATED_PROVENANCE_SECOND_PASS_CALLS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
+thread_local! {
+    pub(crate) static FABRICATED_PROVENANCE_SECOND_PASS_CALLS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
 
 /// Below this raster coverage a page is text with a figure, never a scan.
 const IMAGE_COVERAGE_MIN: f32 = 0.80;
@@ -275,7 +282,7 @@ fn page_has_fabricated_text(doc: &PdfDocument, page_index: usize, min_ratio: f64
 /// meant to be unioned into the caller's scanned-page set.
 pub(crate) fn fabricated_provenance_page_indices(doc: &PdfDocument, min_ratio: f64, min_chars: usize) -> Vec<usize> {
     #[cfg(test)]
-    FABRICATED_PROVENANCE_SECOND_PASS_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    FABRICATED_PROVENANCE_SECOND_PASS_CALLS.with(|count| count.set(count.get() + 1));
 
     let Ok(page_count) = doc.page_count() else {
         return Vec::new();

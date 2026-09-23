@@ -5997,13 +5997,13 @@ mod tests {
             "fixture must fabricate at least one page for this test to mean anything"
         );
 
-        crate::pdf::scan_detect::FABRICATED_PROVENANCE_SECOND_PASS_CALLS.store(0, std::sync::atomic::Ordering::SeqCst);
+        crate::pdf::scan_detect::FABRICATED_PROVENANCE_SECOND_PASS_CALLS.with(|count| count.set(0));
 
         let mut doc = NativeDocument::open_bytes(&bytes).expect("corpus document must open a second time");
         let (_, _, _, metadata) = extract_text_and_metadata(&mut doc, None).expect("extraction must succeed");
 
         assert_eq!(
-            crate::pdf::scan_detect::FABRICATED_PROVENANCE_SECOND_PASS_CALLS.load(std::sync::atomic::Ordering::SeqCst),
+            crate::pdf::scan_detect::FABRICATED_PROVENANCE_SECOND_PASS_CALLS.with(std::cell::Cell::get),
             0,
             "extract_text_and_metadata must not read every page's text a second time for provenance (issue #1744)"
         );
