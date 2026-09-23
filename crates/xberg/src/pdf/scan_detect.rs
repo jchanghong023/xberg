@@ -9,15 +9,15 @@ use xberg_native_pdf::layout::TextSpan;
 #[cfg(test)]
 use crate::core::config::DEFAULT_SCANNED_MIN_CONFIDENCE;
 
-/// Counts calls to [`fabricated_provenance_page_indices`], the whole-document separate read
-/// over every page's raw spans. A caller holding per-page counts already gathered by the main
-/// text pass must never reach this function (issue #1744); tests reset and read it to prove
-/// that second read did not happen. ~keep
-///
-/// Per-thread rather than a process-global atomic: libtest runs one binary's tests on parallel
-/// threads, and a global counter let an unrelated test's extraction (a layered fixture reaching
-/// the #1744 fallback) increment between this test's reset and its read, failing it spuriously.
-/// Extraction under test stays on its own thread, so a real regression still counts. ~keep
+// Counts calls to `fabricated_provenance_page_indices`, the whole-document separate read
+// over every page's raw spans. A caller holding per-page counts already gathered by the main
+// text pass must never reach this function (issue #1744); tests reset and read it to prove
+// that second read did not happen. ~keep
+//
+// Per-thread rather than a process-global atomic: libtest runs one binary's tests on parallel
+// threads, and a global counter let an unrelated test's extraction (a layered fixture reaching
+// the #1744 fallback) increment between this test's reset and its read, failing it spuriously.
+// Extraction under test stays on its own thread, so a real regression still counts. ~keep
 #[cfg(test)]
 thread_local! {
     pub(crate) static FABRICATED_PROVENANCE_SECOND_PASS_CALLS: std::cell::Cell<usize> =
