@@ -330,6 +330,23 @@ pub(crate) fn rasterize_metafile_to_dynamic_image(
     }
 }
 
+/// One image queued for OCR: its index into `images`, the whole image (metafile
+/// rasterization runs inside the task and needs the bytes plus the declared format), the
+/// per-image `OcrConfig` clone (output format/acceleration/security limits applied), and the
+/// image-extraction knobs and security limits the rasterizer bounds its GDI surface with.
+#[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
+type PendingOcrTask = (
+    usize,
+    ExtractedImage,
+    crate::core::config::OcrConfig,
+    crate::core::config::ImageExtractionConfig,
+    crate::extractors::security::SecurityLimits,
+);
+
+/// The image index paired with its OCR outcome, as returned by a spawned task.
+#[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
+type OcrTaskResult = (usize, crate::Result<ExtractedDocument>);
+
 /// Process extracted images with OCR if configured.
 ///
 /// For each image, spawns an async OCR task using the backend from the registry
@@ -408,15 +425,53 @@ pub(crate) async fn process_images_with_ocr(
         });
         return Ok(images);
     }
+
+    let max_tasks = crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref());
+    let mut pending = build_pending_ocr_tasks(&images, ocr_config, config);
+
+    let mut join_set: tokio::task::JoinSet<OcrTaskResult> = tokio::task::JoinSet::new();
+    while join_set.len() < max_tasks {
+        let Some(task) = pending.pop_front() else {
+            break;
+        };
+        spawn_ocr_task(&mut join_set, task);
+    }
+
+    while let Some(join_result) = join_set.join_next().await {
+        let (idx, ocr_result) = join_result.map_err(|e| crate::XbergError::Ocr {
+            message: format!("OCR task panicked: {}", e),
+            source: None,
+        })?;
+
+        apply_ocr_result(&mut images, idx, ocr_result, ocr_config, warnings);
+
+        if let Some(task) = pending.pop_front() {
+            spawn_ocr_task(&mut join_set, task);
+        }
+    }
+
+    Ok(images)
+}
+
+/// Build one pending OCR task per image, applying the caller's output format, acceleration, and
+/// security limits onto a per-image `OcrConfig` clone.
+///
+/// GH#1554: `OcrConfig::security_limits` has no other way to reach a caller's configured
+/// limits - the `OcrBackend::process_image` trait method takes only `OcrConfig`, not
+/// `ExtractionConfig` - so it must be copied onto each per-image clone here, mirroring
+/// `acceleration`. `ExtractionConfig::security_limits` is the source of truth; a backend seeing
+/// `None` here must fall back to `SecurityLimits::default()`, never disable the check. ~keep
+#[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
+fn build_pending_ocr_tasks(
+    images: &[ExtractedImage],
+    ocr_config: &crate::core::config::OcrConfig,
+    config: &crate::core::config::ExtractionConfig,
+) -> std::collections::VecDeque<PendingOcrTask> {
     let output_format = config.output_format.clone();
     let acceleration = ocr_config.acceleration.clone();
-    // GH#1554: `OcrConfig::security_limits` has no other way to reach a caller's configured
-    // limits — the `OcrBackend::process_image` trait method takes only `OcrConfig`, not
-    // `ExtractionConfig` — so it must be copied onto each per-image clone here, mirroring
-    // `acceleration` immediately above. `ExtractionConfig::security_limits` is the source of
-    // truth; a backend seeing `None` here must fall back to `SecurityLimits::default()`,
-    // never disable the check. ~keep
     let security_limits = config.security_limits.clone();
+
+
     // Rasterization runs before any backend sees the image, so it must bound the GDI surface
     // itself; a caller that configured no `security_limits` gets the crate defaults rather
     // than an unbounded allocation. `OcrConfig::security_limits` keeps the `Option` above.
@@ -425,23 +480,9 @@ pub(crate) async fn process_images_with_ocr(
     // honour (`target_dpi`, `max_image_dimension`), so pull the section once for every task.
     let image_config = config.images.clone().unwrap_or_default();
 
-    use std::collections::VecDeque;
-    use tokio::task::JoinSet;
-
-    let max_tasks = crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref());
-
-    type OcrTaskResult = (usize, crate::Result<ExtractedDocument>);
-    type PendingOcrTask = (
-        usize,
-        ExtractedImage,
-        crate::core::config::OcrConfig,
-        crate::core::config::ImageExtractionConfig,
-        crate::extractors::security::SecurityLimits,
-    );
-    let mut join_set: JoinSet<OcrTaskResult> = JoinSet::new();
-    let mut pending: VecDeque<PendingOcrTask> = VecDeque::with_capacity(images.len());
-
+    let mut pending = std::collections::VecDeque::with_capacity(images.len());
     for (idx, image) in images.iter().cloned().enumerate() {
+
         let mut ocr_config_clone = ocr_config.clone();
         ocr_config_clone.output_format = Some(output_format.clone());
         ocr_config_clone.acceleration = acceleration.clone();
@@ -458,101 +499,100 @@ pub(crate) async fn process_images_with_ocr(
             raster_security_limits.clone(),
         ));
     }
+    pending
+}
 
-    let spawn_task = |join_set: &mut JoinSet<OcrTaskResult>, task: PendingOcrTask| {
-        join_set.spawn(async move {
-            let (idx, image, ocr_config_clone, image_config, security_limits) = task;
-            let ocr_result = async {
-                // EMF/WMF are vector formats no OCR backend can decode. Rasterize them to a
-                // PNG first, off the async executor (GDI work is CPU-bound and blocking).
-                // The declared format is also honoured because a caller may label the bytes
-                // `emf`/`wmf` while the header is subtly invalid; that mismatch must fail
-                // loudly instead of being fed to the backend as an opaque blob.
-                let detected = crate::extraction::image_format::detect_image_format(&image.data);
-                let is_metafile =
-                    matches!(detected.as_ref(), "emf" | "wmf") || matches!(image.format.as_ref(), "emf" | "wmf");
-                let prepared: bytes::Bytes = if is_metafile {
-                    tokio::task::spawn_blocking(move || {
-                        prepare_image_for_ocr(&image, &image_config, &security_limits)
-                            .map(|cow| bytes::Bytes::from(cow.into_owned()))
-                    })
-                    .await
-                    .map_err(|error| crate::XbergError::Ocr {
-                        message: format!("metafile rasterization task panicked: {}", error),
-                        source: None,
-                    })?
-                    .map_err(|error| crate::XbergError::Ocr {
-                        message: format!("metafile rasterization failed at {}: {}", error.stage, error.reason),
-                        source: None,
-                    })?
-                } else {
-                    image.data.clone()
-                };
+/// Spawn one OCR task onto `join_set`, resolving the backend from the registry at spawn time.
+///
+/// The task carries the whole image rather than bare bytes because EMF/WMF entries are
+/// rasterized here, off the async executor (GDI work is CPU-bound and blocking), before any
+/// backend sees them. The declared format is honoured alongside the detected one because a
+/// caller may label the bytes `emf`/`wmf` while the header is subtly invalid; that mismatch
+/// must fail loudly instead of being fed to the backend as an opaque blob.
+#[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
+fn spawn_ocr_task(join_set: &mut tokio::task::JoinSet<OcrTaskResult>, task: PendingOcrTask) {
+    join_set.spawn(async move {
+        let (idx, image, ocr_config_clone, image_config, security_limits) = task;
+        let ocr_result = async {
+            // EMF/WMF are vector formats no OCR backend can decode. Rasterize them to a
+            // PNG first, off the async executor (GDI work is CPU-bound and blocking).
+            // The declared format is also honoured because a caller may label the bytes
+            // `emf`/`wmf` while the header is subtly invalid; that mismatch must fail
+            // loudly instead of being fed to the backend as an opaque blob.
+            let detected = crate::extraction::image_format::detect_image_format(&image.data);
+            let is_metafile =
+                matches!(detected.as_ref(), "emf" | "wmf") || matches!(image.format.as_ref(), "emf" | "wmf");
+            let prepared: bytes::Bytes = if is_metafile {
+                tokio::task::spawn_blocking(move || {
+                    prepare_image_for_ocr(&image, &image_config, &security_limits)
+                        .map(|cow| bytes::Bytes::from(cow.into_owned()))
+                })
+                .await
+                .map_err(|error| crate::XbergError::Ocr {
+                    message: format!("metafile rasterization task panicked: {}", error),
+                    source: None,
+                })?
+                .map_err(|error| crate::XbergError::Ocr {
+                    message: format!("metafile rasterization failed at {}: {}", error.stage, error.reason),
+                    source: None,
+                })?
+            } else {
+                image.data.clone()
+            };
 
-                let backend = {
-                    let registry = crate::plugins::registry::get_ocr_backend_registry();
-                    let registry = registry.read();
-                    match registry.get(&ocr_config_clone.backend) {
-                        Ok(b) => b.clone(),
-                        Err(e) => {
-                            return Err(crate::XbergError::Ocr {
-                                message: format!("OCR backend '{}' not found: {}", ocr_config_clone.backend, e),
-                                source: None,
-                            });
-                        }
+            let backend = {
+                let registry = crate::plugins::registry::get_ocr_backend_registry();
+                let registry = registry.read();
+                match registry.get(&ocr_config_clone.backend) {
+                    Ok(b) => b.clone(),
+                    Err(e) => {
+                        return Err(crate::XbergError::Ocr {
+                            message: format!("OCR backend '{}' not found: {}", ocr_config_clone.backend, e),
+                            source: None,
+                        });
                     }
-                };
+                }
+            };
 
-                backend.process_image(&prepared, &ocr_config_clone).await
-            }
-            .await;
-            (idx, ocr_result)
-        });
-    };
-
-    while join_set.len() < max_tasks {
-        let Some(task) = pending.pop_front() else {
-            break;
-        };
-        spawn_task(&mut join_set, task);
-    }
-
-    while let Some(join_result) = join_set.join_next().await {
-        let (idx, ocr_result) = join_result.map_err(|e| crate::XbergError::Ocr {
-            message: format!("OCR task panicked: {}", e),
-            source: None,
-        })?;
-
-        match ocr_result {
-            Ok(extraction_result) => {
-                // Keep the backend's result whole. Rebuilding it field-by-field silently
-                // dropped everything the backend populated besides content/mime_type/
-                // ocr_elements — tables, metadata (OCR language, PSM, confidence),
-                // formulas, llm_usage (VLM cost accounting), detected_languages and
-                // processing_warnings. The PDF inline-image path already stores the
-                // backend result unmodified; mirror it here.
-                let mut ocr_document = extraction_result;
-                // Recursion guard: OCR output must never carry nested images, or an
-                // archive/recursive consumer would extract images out of OCR output.
-                ocr_document.images = None;
-                ocr_config.apply_public_element_policy(&mut ocr_document);
-                images[idx].ocr_result = Some(Box::new(ocr_document));
-            }
-            Err(e) => {
-                warnings.push(crate::types::ProcessingWarning {
-                    source: std::borrow::Cow::Borrowed("image_ocr"),
-                    message: std::borrow::Cow::Owned(format!("Image {} OCR failed: {}", idx, e)),
-                });
-                images[idx].ocr_result = None;
-            }
+            backend.process_image(&prepared, &ocr_config_clone).await
         }
+        .await;
+        (idx, ocr_result)
+    });
+}
 
-        if let Some(task) = pending.pop_front() {
-            spawn_task(&mut join_set, task);
+/// Apply one completed OCR task's result onto `images[idx]`, recording a warning on failure.
+#[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
+fn apply_ocr_result(
+    images: &mut [ExtractedImage],
+    idx: usize,
+    ocr_result: crate::Result<ExtractedDocument>,
+    ocr_config: &crate::core::config::OcrConfig,
+    warnings: &mut Vec<crate::types::ProcessingWarning>,
+) {
+    match ocr_result {
+        Ok(extraction_result) => {
+            // Keep the backend's result whole. Rebuilding it field-by-field silently
+            // dropped everything the backend populated besides content/mime_type/
+            // ocr_elements — tables, metadata (OCR language, PSM, confidence),
+            // formulas, llm_usage (VLM cost accounting), detected_languages and
+            // processing_warnings. The PDF inline-image path already stores the
+            // backend result unmodified; mirror it here. ~keep
+            let mut ocr_document = extraction_result;
+            // Recursion guard: OCR output must never carry nested images, or an
+            // archive/recursive consumer would extract images out of OCR output. ~keep
+            ocr_document.images = None;
+            ocr_config.apply_public_element_policy(&mut ocr_document);
+            images[idx].ocr_result = Some(Box::new(ocr_document));
+        }
+        Err(e) => {
+            warnings.push(crate::types::ProcessingWarning {
+                source: std::borrow::Cow::Borrowed("image_ocr"),
+                message: std::borrow::Cow::Owned(format!("Image {} OCR failed: {}", idx, e)),
+            });
+            images[idx].ocr_result = None;
         }
     }
-
-    Ok(images)
 }
 
 #[cfg(all(test, feature = "ocr", feature = "tokio-runtime"))]

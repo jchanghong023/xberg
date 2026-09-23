@@ -186,28 +186,7 @@ pub(crate) fn render_markdown(doc: &InternalDocument) -> String {
     let mut output = String::new();
     format_commonmark(root, &options, &mut output).expect("comrak formatting should not fail");
 
-    // Every pass below rewrites prose. They all run fence-aware: a fenced
-    // body is verbatim content (OCR text, embedded sub-documents), never a
-    // candidate for entity replacement, escape stripping or watermark removal.
-    if output.contains("<!--") {
-        let marker_re = doc
-            .page_marker_format
-            .as_deref()
-            .map(crate::core::config::page::marker_line_regex);
-        let mut tracker = FenceTracker::default();
-        output = output
-            .lines()
-            .filter(|line| {
-                tracker.fenced(line) || {
-                    let trimmed = line.trim();
-                    !trimmed.starts_with("<!--")
-                        || !trimmed.ends_with("-->")
-                        || marker_re.as_ref().is_some_and(|re| re.is_match(trimmed))
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-    }
+    output = filter_page_marker_comments(output, doc.page_marker_format.as_deref());
 
     if matches!(replace_html_entities(&output), Cow::Owned(_)) {
         output = apply_outside_fences(&output, |span| match replace_html_entities(span) {
@@ -216,7 +195,58 @@ pub(crate) fn render_markdown(doc: &InternalDocument) -> String {
         });
     }
 
-    if doc.escape_markdown {
+    output = unescape_markdown_output(output, doc.escape_markdown);
+
+    if matches!(collapse_excess_newlines(&output), Cow::Owned(_)) {
+        output = apply_outside_fences(&output, |span| collapse_excess_newlines(span).into_owned());
+    }
+
+    if !doc.include_watermarks {
+        output = apply_outside_fences(&output, |span| strip_arxiv_watermark_noise(span.to_string()));
+    }
+
+    output = append_annotations_section(output, doc.annotations.as_deref());
+
+    let trimmed_len = output.trim_end().len();
+    if trimmed_len == 0 {
+        return String::new();
+    }
+    output.truncate(trimmed_len);
+    output.push('\n');
+    tracing::debug!(output_length = output.len(), "markdown rendering complete");
+    output
+}
+
+/// Drop HTML comment lines from rendered output, except page-marker comments
+/// that match `page_marker_format` (when configured).
+///
+/// The pass is fence-aware: a fenced body is verbatim content (OCR text,
+/// embedded sub-documents), never a candidate for comment stripping, so a
+/// `<!-- ... -->` line inside a fence survives verbatim.
+fn filter_page_marker_comments(output: String, page_marker_format: Option<&str>) -> String {
+    if !output.contains("<!--") {
+        return output;
+    }
+
+    let marker_re = page_marker_format.map(crate::core::config::page::marker_line_regex);
+    let mut tracker = FenceTracker::default();
+    output
+        .lines()
+        .filter(|line| {
+            tracker.fenced(line) || {
+                let trimmed = line.trim();
+                !trimmed.starts_with("<!--")
+                    || !trimmed.ends_with("-->")
+                    || marker_re.as_ref().is_some_and(|re| re.is_match(trimmed))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Apply the `escape_markdown`-dependent unescape pass to rendered output.
+fn unescape_markdown_output(mut output: String, escape_markdown: bool) -> String {
+    if escape_markdown {
         const UNESCAPE_TARGETS: &[char] = &['_', '[', ']', '(', ')', '*', '='];
         if matches!(unescape_backslash_sequences(&output, UNESCAPE_TARGETS), Cow::Owned(_)) {
             output = apply_outside_fences(&output, |span| {
@@ -235,16 +265,12 @@ pub(crate) fn render_markdown(doc: &InternalDocument) -> String {
             });
         }
     }
+    output
+}
 
-    if matches!(collapse_excess_newlines(&output), Cow::Owned(_)) {
-        output = apply_outside_fences(&output, |span| collapse_excess_newlines(span).into_owned());
-    }
-
-    if !doc.include_watermarks {
-        output = apply_outside_fences(&output, |span| strip_arxiv_watermark_noise(span.to_string()));
-    }
-
-    if let Some(annotations) = doc.annotations.as_deref() {
+/// Append the `## Annotations` section to rendered output, when present.
+fn append_annotations_section(mut output: String, annotations: Option<&[PdfAnnotation]>) -> String {
+    if let Some(annotations) = annotations {
         let block = render_annotations_markdown(annotations);
         if !block.is_empty() {
             if !output.trim_end().is_empty() {
@@ -253,14 +279,6 @@ pub(crate) fn render_markdown(doc: &InternalDocument) -> String {
             output.push_str(&block);
         }
     }
-
-    let trimmed_len = output.trim_end().len();
-    if trimmed_len == 0 {
-        return String::new();
-    }
-    output.truncate(trimmed_len);
-    output.push('\n');
-    tracing::debug!(output_length = output.len(), "markdown rendering complete");
     output
 }
 

@@ -70,6 +70,14 @@ mod style;
 
 use anyhow::{Context, Result};
 use clap::{CommandFactory, Parser, Subcommand};
+#[cfg(any(
+    feature = "embeddings",
+    feature = "layout-detection",
+    feature = "paddle-ocr",
+    feature = "tree-sitter",
+    feature = "ner-onnx"
+))]
+use commands::cache::WarmOptions;
 #[cfg(feature = "embeddings")]
 use commands::embed_command;
 use commands::overrides::ExtractionOverrides;
@@ -984,7 +992,12 @@ fn run_cli() -> Result<()> {
             let allowed_hosts = resolve_mcp_allowed_hosts(&allowed_host, config_path.as_deref())?;
             let mut config = load_config(config_path, true)?;
             config.apply_env_overrides()?;
-            mcp_command(config, transport, host, port, allowed_hosts)?;
+            let http_options = commands::server::McpTransportOptions {
+                host,
+                port,
+                allowed_hosts,
+            };
+            mcp_command(config, transport, http_options)?;
         }
 
         Commands::Cache { command } => match command {
@@ -1026,9 +1039,7 @@ fn run_cli() -> Result<()> {
                 #[cfg(feature = "ner-onnx")]
                 all_ner_models,
             } => {
-                warm_command(
-                    cache_dir.clone(),
-                    format,
+                let options = WarmOptions {
                     #[cfg(feature = "embeddings")]
                     all_embeddings,
                     #[cfg(feature = "embeddings")]
@@ -1047,7 +1058,8 @@ fn run_cli() -> Result<()> {
                     ner_model,
                     #[cfg(feature = "ner-onnx")]
                     all_ner_models,
-                )?;
+                };
+                warm_command(cache_dir.clone(), format, options)?;
             }
         },
 
@@ -1109,7 +1121,14 @@ fn run_cli() -> Result<()> {
             } else {
                 text
             };
-            embed_command(texts, &preset, &provider, model, api_key, plugin, format)?;
+            let options = commands::embed::EmbedProviderOptions {
+                preset,
+                provider,
+                llm_model: model,
+                llm_api_key: api_key,
+                plugin_name: plugin,
+            };
+            embed_command(texts, options, format)?;
         }
 
         #[cfg(feature = "core-cli")]
