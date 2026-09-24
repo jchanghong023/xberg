@@ -439,13 +439,12 @@ async fn run_pipeline_impl(
         page_markers::inject_page_marker_elements(&mut doc, &format);
     }
 
+    // Calls `runs_ocr_on_embedded_images` rather than re-deriving it: `needs_image_data`
+    // (the READ gate a container consults before it reads an embedded image's bytes at all)
+    // is defined in terms of this same method, and the two being separately-written copies
+    // is exactly how GH#1662 happened. Do not inline the condition back. ~keep
     #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
-    // `disable_ocr` and `ocr.enabled = false` are hard switches: an explicit opt-out must
-    // never get image OCR, however `images.run_ocr_on_images` (on by default) is set. ~keep
-    let image_ocr_enabled =
-        config.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true) && !config.effective_disable_ocr();
-    #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
-    if image_ocr_enabled && !doc.images.is_empty() {
+    if config.runs_ocr_on_embedded_images() && !doc.images.is_empty() {
         let image_positions = image_ocr_positions(&doc);
         // Clone only selected images so skipped entries keep their positions and a
         // batch-level OCR failure cannot discard the original extracted images.

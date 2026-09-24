@@ -717,26 +717,24 @@ mod tests {
             initialize_processor_cache()
         });
         reached_receiver.recv().unwrap();
-        // `clear_post_processors` refuses while any extraction holds the registry —
-        // concurrent (non-serial) tests in this binary legitimately do, and the
-        // error message itself names retrying as the contract. The retry MUST
-        // happen while the initialize thread is still parked in the hook: the
-        // property under test is that the clear's `BUILTIN_REGISTRATION_REQUIRED`
-        // flag is visible to the initialize thread's registration check, so it
-        // re-registers the built-ins. Retrying after `join` instead makes the
-        // last successful clear the final writer — an emptied registry nobody
-        // repopulates — and the assertion then depends on an unrelated test's
-        // extraction racing to recover, which flakes under load. The hook parks
-        // the thread indefinitely, so a wider window cannot deadlock.
+        // `clear_post_processors` is refused whenever ACTIVE_PROCESSOR_SNAPSHOTS is non-zero,
+        // and that counter is process-global: ANY concurrent test in this binary holding an
+        // extraction lease refuses this clear, not just the parked initialize this test set up.
+        // `#[serial]` does not help, since it excludes only other `#[serial]` tests. Retrying is
+        // what the refusal itself instructs ("retry the lifecycle mutation after extraction
+        // completes"), so the test now follows the contract instead of assuming exclusivity --
+        // it was failing roughly one run in twenty. Only that specific refusal is retried; any
+        // other error still fails the test. ~keep
+        const REGISTRY_IN_USE: &str = "post-processor registry is in use by an active extraction; retry the lifecycle mutation after extraction completes";
         let mut clear_result = crate::plugins::clear_post_processors();
-        const CLEAR_ATTEMPTS: usize = 250;
-        const CLEAR_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
-        for _ in 0..CLEAR_ATTEMPTS {
-            if clear_result.is_ok() {
-                break;
+        for _ in 0..200 {
+            match &clear_result {
+                Err(crate::XbergError::Other(message)) if message == REGISTRY_IN_USE => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    clear_result = crate::plugins::clear_post_processors();
+                }
+                _ => break,
             }
-            std::thread::sleep(CLEAR_RETRY_DELAY);
-            clear_result = crate::plugins::clear_post_processors();
         }
         release_sender.send(()).unwrap();
         initialize_thread.join().unwrap().unwrap();

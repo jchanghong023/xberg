@@ -384,48 +384,25 @@ pub(crate) async fn process_images_with_ocr(
     config: &crate::core::config::ExtractionConfig,
     warnings: &mut Vec<crate::types::ProcessingWarning>,
 ) -> crate::Result<Vec<ExtractedImage>> {
-    if images.is_empty() {
+    // `runs_ocr_on_embedded_images` rather than `config.ocr.is_some()`: this early return
+    // was a third separately-written copy of the pipeline's gate, so `ocr_embedded_images:
+    // Some(true)` without an `ocr` block would have been accepted by the caller and then
+    // silently discarded here. Same predicate everywhere -- see GH#1662, GH#1752. ~keep
+    // (fork: the predicate keeps the fork defaults — embedded-image OCR on without an
+    // `ocr` block, falling back to the default backend config — and hard opt-outs
+    // `disable_ocr` / `ocr.enabled = false` still win inside it.)
+    if images.is_empty() || !config.runs_ocr_on_embedded_images() {
         return Ok(images);
     }
 
-    // A caller that disabled OCR (`disable_ocr` or `ocr.enabled = false`) must not get image
-    // OCR out of this shared helper just because it was handed images anyway: defend the hard
-    // switch here instead of trusting every call site's gate. ~keep
-    if config.effective_disable_ocr() {
+    // Opting in without an `ocr` block is an AUTOMATIC trigger: with nothing registered to
+    // run it, spawning a task per image would only produce one failure warning per image. ~keep
+    if config.ocr.is_none() && !crate::plugins::registry::automatic_ocr_backend_is_registered() {
         return Ok(images);
     }
 
-    // Image OCR is on by default (`ImageExtractionConfig::run_ocr_on_images`), so a caller
-    // who never configured an `ocr` section still gets their images OCR'd: fall back to the
-    // default backend rather than silently skipping every image. ~keep
-    let default_ocr_config;
-    let ocr_config = match config.ocr.as_ref() {
-        Some(cfg) => cfg,
-        None => {
-            default_ocr_config = crate::core::config::OcrConfig::default();
-            &default_ocr_config
-        }
-    };
-
-    // No usable backend must not become a per-image error storm: report once and return the
-    // images unprocessed so every image entry — and its placeholder in the output — survives.
-    crate::plugins::ensure_ocr_backends_initialized();
-    if ocr_config.pipeline.is_none()
-        && crate::plugins::registry::get_ocr_backend_registry()
-            .read()
-            .get(&ocr_config.backend)
-            .is_err()
-    {
-        warnings.push(crate::types::ProcessingWarning {
-            source: std::borrow::Cow::Borrowed("image_ocr"),
-            message: std::borrow::Cow::Owned(format!(
-                "OCR backend '{}' is not registered; images were extracted without OCR text",
-                ocr_config.backend
-            )),
-        });
-        return Ok(images);
-    }
-
+    let default_ocr_config = crate::core::config::OcrConfig::default();
+    let ocr_config = config.ocr.as_ref().unwrap_or(&default_ocr_config);
     let max_tasks = crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref());
     let mut pending = build_pending_ocr_tasks(&images, ocr_config, config);
 
