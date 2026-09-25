@@ -383,3 +383,7 @@ pub(crate) fn fabricated_provenance_page_indices_from_counts(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "scan_detect_type3_tests.rs"]
+mod type3_tests;
