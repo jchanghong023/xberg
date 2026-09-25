@@ -19,21 +19,11 @@ const ROTATED_PNG_ENCODE_BYTES_PER_PIXEL: u64 = 4;
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline", feature = "layout-detection"))]
 const ROTATED_PNG_ENCODE_FIXED_BYTES: u64 = 256 * 1024;
 
-/// One captured `xberg_native_pdf` `tracing::warn!` record: its message, plus the
-/// structured `error_code` field when the call site set one. GH#1794: the classifier
-/// needs `error_code` to tell a font-load diagnostic (e.g. `type3_font`) apart from an
-/// actual dropped-glyph warning (`glyph_dropped`) — the message text alone conflates
-/// them, since both are ordinary prose sentences with no shared substring to match on. ~keep
-struct CapturedEngineWarning {
-    message: String,
-    error_code: Option<String>,
-}
-
 thread_local! {
     /// Buffer for `xberg_native_pdf`'s `tracing::warn!` records emitted while a render
     /// call made by this thread is in flight. `None` when no render call is
     /// currently capturing (the default, and the state between calls).
-    static ENGINE_LOG_CAPTURE: RefCell<Option<Vec<CapturedEngineWarning>>> = const { RefCell::new(None) };
+    static ENGINE_LOG_CAPTURE: RefCell<Option<Vec<EngineWarning>>> = const { RefCell::new(None) };
     /// Deduped warnings drained from completed render calls on this thread,
     /// awaiting collection by [`take_xberg_native_pdf_render_warnings`].
     static ENGINE_PENDING_WARNINGS: RefCell<Vec<ProcessingWarning>> = const { RefCell::new(Vec::new()) };
@@ -119,7 +109,7 @@ impl EngineWarningCapture {
     }
 }
 
-/// Pulls the `message` and `error_code` fields out of a `tracing::Event`.
+/// Pulls the `message` field out of a `tracing::Event`.
 ///
 /// A `tracing` event's message is a *field* (named `"message"`), not
 /// something `Event` exposes as a plain string. `tracing::warn!("{}", x)` —
@@ -134,29 +124,31 @@ impl EngineWarningCapture {
 /// `MessageVisitor` already used for tracing-capture tests elsewhere in this
 /// crate (`tests/gpu_acceleration.rs`).
 ///
-/// `error_code` is always a `&'static str` field value at every current call
-/// site (a literal, or `Error::telemetry_code()`), so it only ever reaches
-/// `record_str` in practice; `record_debug` is still implemented for the same
-/// reason as `message` above — a future call site could format it differently. ~keep
+/// The `operation` field is captured beside the message: it names what the engine was
+/// doing, which is what decides how the warning is worded (GH#1794). ~keep
 #[derive(Default)]
-struct MessageVisitor {
+struct MessageVisitor(EngineWarning);
+
+/// One captured engine warning: its message and the engine's `operation` field, if any.
+#[derive(Debug, Default)]
+struct EngineWarning {
     message: String,
-    error_code: Option<String>,
+    operation: Option<String>,
 }
 
 impl tracing::field::Visit for MessageVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         match field.name() {
-            "message" => self.message = format!("{value:?}"),
-            "error_code" => self.error_code = Some(format!("{value:?}")),
+            "message" => self.0.message = format!("{value:?}"),
+            "operation" => self.0.operation = Some(format!("{value:?}")),
             _ => {}
         }
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
         match field.name() {
-            "message" => self.message = value.to_string(),
-            "error_code" => self.error_code = Some(value.to_string()),
+            "message" => self.0.message = value.to_string(),
+            "operation" => self.0.operation = Some(value.to_string()),
             _ => {}
         }
     }
@@ -194,10 +186,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for EngineWarningCaptu
         event.record(&mut visitor);
         ENGINE_LOG_CAPTURE.with(|cell| {
             if let Some(buffer) = cell.borrow_mut().as_mut() {
-                buffer.push(CapturedEngineWarning {
-                    message: visitor.message,
-                    error_code: visitor.error_code,
-                });
+                buffer.push(visitor.0);
             }
         });
     }
@@ -284,6 +273,13 @@ pub fn install_pdf_render_diagnostics() -> bool {
     ENGINE_CAPTURE_ACTIVE.load(Ordering::Acquire)
 }
 
+/// Engine `operation`s whose warning means glyph ink is missing from the render: a
+/// dropped glyph, a font that could not be found or loaded for rendering, and the CJK
+/// substitution face being unavailable. Every other engine warning (a Type 3 glyph-name
+/// fallback while loading a font, an embedded font replaced by a system font, a shading
+/// or mask skipped) keeps its own cause and is not reported as missing ink (GH#1794). ~keep
+const GLYPH_INK_LOSS_OPERATIONS: [&str; 4] = ["render_glyph", "resolve_font", "load_render_font", "load_cjk_fallback"];
+
 /// Turn one captured `xberg_native_pdf` log line into a `(page, message)`
 /// [`ProcessingWarning`], naming the page so a multi-page document does not
 /// read as "somewhere in this PDF, something happened".
@@ -323,33 +319,31 @@ fn image_render_failure_warning(page_index: usize, cause: &str) -> ProcessingWar
     )
 }
 
-/// Whether a captured engine warning is a font-*loading* diagnostic rather than a
-/// glyph the rasterizer actually failed to paint. GH#1794: the classifier used to
-/// assume every captured warning that was not [`indicates_unrenderable_image`] meant
-/// lost glyph ink, which misreported two warnings that drop nothing:
-///
-/// - The Type 3 glyph-name fallback (`fonts/font_dict.rs`), tagged
-///   `error_code = "type3_font"` — the font still loads and every glyph still paints,
-///   just via a name-based lookup instead of the usual code-based one.
-/// - GH#1795's "dictionary used where stream expected" warning (`object.rs`) — fired
-///   from a speculative `decode_stream_data` call on a `/Differences` encoding
-///   dictionary, nothing to do with painting. It carries no `error_code` field (the
-///   generic stream reader has no error-code convention), so it is matched by text.
-fn indicates_font_load_diagnostic(error_code: Option<&str>, cause: &str) -> bool {
-    matches!(error_code, Some("type3_font")) || cause.contains("dictionary used where stream expected")
-}
-
-/// A font-load diagnostic surfaced without the false "glyph ink is missing" claim.
-/// GH#1794: rendering was never affected by these causes, so the wording says so
-/// instead of describing content loss that did not happen.
-fn font_load_diagnostic_warning(page_index: usize, cause: &str) -> ProcessingWarning {
+fn render_notice_warning(page_index: usize, cause: &str) -> ProcessingWarning {
     warning(
         PDF_RENDER_WARNING_SOURCE,
         format!(
-            "Page {} loaded a font with a diagnostic that did not affect the rendered output: {cause}",
+            "Page {} rendering logged a warning and continued: {cause}",
             page_index + 1
         ),
     )
+}
+
+/// Word one captured engine warning by what it reports: a whole image left blank,
+/// glyph ink missing, or any other warning passed through with its own cause.
+fn classify_engine_warning(page_index: usize, captured: &EngineWarning) -> ProcessingWarning {
+    let cause = captured.message.as_str();
+    if indicates_unrenderable_image(cause) {
+        image_render_failure_warning(page_index, cause)
+    } else if captured
+        .operation
+        .as_deref()
+        .is_some_and(|operation| GLYPH_INK_LOSS_OPERATIONS.contains(&operation))
+    {
+        glyph_drop_warning(page_index, cause)
+    } else {
+        render_notice_warning(page_index, cause)
+    }
 }
 
 /// Render a page while capturing any `xberg_native_pdf` render-degradation warnings it
@@ -379,16 +373,8 @@ fn render_page_capturing_glyph_drops(
             // so it can never reach here, and the substring match was a trap for whoever next
             // wrote a genuinely actionable warning that happened to share the phrase. Every
             // captured cause is classified below instead of pre-filtered. ~keep
-            for captured_warning in captured.iter() {
-                let cause = captured_warning.message.as_str();
-                let processing_warning = if indicates_unrenderable_image(cause) {
-                    image_render_failure_warning(page_index, cause)
-                } else if indicates_font_load_diagnostic(captured_warning.error_code.as_deref(), cause) {
-                    font_load_diagnostic_warning(page_index, cause)
-                } else {
-                    glyph_drop_warning(page_index, cause)
-                };
-                push_warning_deduped(&mut pending, processing_warning);
+            for engine_warning in captured.iter() {
+                push_warning_deduped(&mut pending, classify_engine_warning(page_index, engine_warning));
             }
         });
     }
@@ -1596,6 +1582,95 @@ mod tests {
             1,
             "a captured WARN-level engine event must be reported even when its text incidentally \
              contains the retired Latin-1-fallback substring; got: {warnings:?}"
+        );
+    }
+
+    fn blank_render() -> std::result::Result<xberg_native_pdf::rendering::RenderedImage, xberg_native_pdf::Error> {
+        Ok(xberg_native_pdf::rendering::RenderedImage {
+            data: vec![0u8; 4],
+            width: 1,
+            height: 1,
+            format: xberg_native_pdf::rendering::ImageFormat::RawRgba8,
+        })
+    }
+
+    /// GH#1794: only an engine warning about a glyph the render could not paint is
+    /// reported as missing glyph ink. A font-load notice keeps its own cause.
+    #[test]
+    fn only_a_dropped_glyph_is_reported_as_missing_glyph_ink() {
+        assert!(
+            install_pdf_render_diagnostics(),
+            "no other component should own the tracing dispatcher in this test binary"
+        );
+        let _ = take_xberg_native_pdf_render_warnings();
+
+        let result = render_page_capturing_glyph_drops(0, || {
+            tracing::warn!(
+                target: "xberg_native_pdf::fonts",
+                operation = "load_font",
+                error_code = "type3_font",
+                "using Type 3 glyph-name fallback"
+            );
+            tracing::warn!(
+                target: "xberg_native_pdf::fonts",
+                operation = "render_glyph",
+                error_code = "glyph_dropped",
+                "glyph rendering omitted content"
+            );
+            blank_render()
+        });
+        assert!(result.is_ok(), "capturing a warning must not change the render outcome");
+
+        let warnings = take_xberg_native_pdf_render_warnings();
+        assert_eq!(warnings.len(), 2, "both warnings are reported; got: {warnings:?}");
+        let notice = warnings
+            .iter()
+            .find(|w| w.message.contains("using Type 3 glyph-name fallback"))
+            .expect("the font-load notice is reported with its cause");
+        assert!(
+            !notice.message.contains("glyph ink is missing"),
+            "a font-load notice drops no glyph, got: {}",
+            notice.message
+        );
+        assert!(notice.message.starts_with("Page 1 "), "got: {}", notice.message);
+        let dropped = warnings
+            .iter()
+            .find(|w| w.message.contains("glyph rendering omitted content"))
+            .expect("the dropped glyph is reported");
+        assert!(
+            dropped.message.contains("glyph ink is missing"),
+            "a dropped glyph is missing ink, got: {}",
+            dropped.message
+        );
+    }
+
+    /// The engine end to end: a page set in a Type 3 font logs the glyph-name fallback
+    /// while loading the font, and every glyph still renders, so no warning may say the
+    /// ink is missing.
+    #[test]
+    fn a_type3_font_page_reports_no_missing_glyph_ink() {
+        assert!(
+            install_pdf_render_diagnostics(),
+            "no other component should own the tracing dispatcher in this test binary"
+        );
+        let _ = take_xberg_native_pdf_render_warnings();
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pdf/regressions/type3/gh1782-2-readable-lines.pdf");
+        let pdf = std::fs::read(&path).expect("read the Type 3 fixture");
+        let png = render_pdf_page_to_png(&pdf, 0, Some(72), None).expect("the Type 3 page renders");
+        assert!(!png.is_empty());
+
+        let warnings = take_xberg_native_pdf_render_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("using Type 3 glyph-name fallback")),
+            "the fixture must log the Type 3 notice for this test to mean anything; got: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().all(|w| !w.message.contains("glyph ink is missing")),
+            "no glyph was dropped, so no warning may report missing ink; got: {warnings:?}"
         );
     }
 }
