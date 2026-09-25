@@ -3105,13 +3105,26 @@ fn assign_spans_to_intersection_grid(
         return None;
     };
 
-    let col_of = |x: f32| -> Option<usize> { (0..num_cols).find(|&c| (xs[c] - x).abs() <= SNAP_TOL) };
-    let row_of = |y: f32| -> Option<usize> { (0..num_rows).find(|&r| (ys[r] - y).abs() <= SNAP_TOL) };
+    let boundary_index = |value: f32, boundaries: &[f32]| {
+        boundaries
+            .iter()
+            .position(|&boundary| (boundary - value).abs() <= SNAP_TOL)
+    };
 
+    // A detected cell can cover several grid intervals when neighbouring cells
+    // introduce intermediate row or column boundaries. Mark its entire area;
+    // each span is still assigned to just one interval below. ~keep
     let mut grid_has_cell = vec![vec![false; num_cols]; num_rows];
-    for c in group_cells {
-        if let (Some(ci), Some(ri)) = (col_of(c.x1), row_of(c.y1)) {
-            grid_has_cell[ri][ci] = true;
+    for cell in group_cells {
+        if let (Some(left), Some(right), Some(bottom), Some(top)) = (
+            boundary_index(cell.x1, xs),
+            boundary_index(cell.x2, xs),
+            boundary_index(cell.y1, ys),
+            boundary_index(cell.y2, ys),
+        ) {
+            for row in &mut grid_has_cell[bottom..top] {
+                row[left..right].fill(true);
+            }
         }
     }
 
@@ -4621,6 +4634,85 @@ mod tests {
     use super::*;
     use crate::geometry::Rect;
     use crate::layout::text_block::{Color, FontWeight};
+
+    #[test]
+    fn rowspan_preserves_label_once_and_rejects_outside_text() {
+        let cells = [
+            IntersectionCell {
+                x1: 0.,
+                y1: 0.,
+                x2: 40.,
+                y2: 40.,
+            },
+            IntersectionCell {
+                x1: 40.,
+                y1: 0.,
+                x2: 80.,
+                y2: 20.,
+            },
+            IntersectionCell {
+                x1: 40.,
+                y1: 20.,
+                x2: 80.,
+                y2: 40.,
+            },
+        ];
+        let spans = [
+            create_test_span("Label", 5., 28., 20., 6.),
+            create_test_span("Outside", 5., 50., 20., 6.),
+        ];
+        let edges = [Edge {
+            coord: 40.,
+            start: 0.,
+            end: 40.,
+        }];
+        let (rows, _) =
+            assign_spans_to_intersection_grid(&cells, &[0., 40., 80.], &[0., 20., 40.], 2, &spans, &edges, true)
+                .unwrap();
+        let texts: Vec<_> = rows.iter().flat_map(|r| &r.cells).map(|c| c.text.as_str()).collect();
+        assert_eq!(texts.iter().filter(|&&t| t == "Label").count(), 1, "{texts:?}");
+        assert!(!texts.iter().any(|t| t.contains("Outside")));
+    }
+
+    #[test]
+    fn colspan_preserves_off_center_header_once() {
+        let cells = [
+            IntersectionCell {
+                x1: 0.,
+                y1: 20.,
+                x2: 80.,
+                y2: 40.,
+            },
+            IntersectionCell {
+                x1: 0.,
+                y1: 0.,
+                x2: 40.,
+                y2: 20.,
+            },
+            IntersectionCell {
+                x1: 40.,
+                y1: 0.,
+                x2: 80.,
+                y2: 20.,
+            },
+        ];
+        let spans = [create_test_span("Heading", 50., 28., 20., 6.)];
+        let edges = [Edge {
+            coord: 40.,
+            start: 0.,
+            end: 20.,
+        }];
+        let (rows, _) =
+            assign_spans_to_intersection_grid(&cells, &[0., 40., 80.], &[0., 20., 40.], 2, &spans, &edges, true)
+                .unwrap();
+        assert_eq!(
+            rows.iter()
+                .flat_map(|r| &r.cells)
+                .filter(|c| c.text == "Heading")
+                .count(),
+            1
+        );
+    }
 
     #[test]
     fn test_is_numeric_cell() {
