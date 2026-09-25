@@ -1971,12 +1971,16 @@ mod tests {
                     "ocr_embedded_images must default to None"
                 );
 
-                let pre_1752 =
-                    config.ocr.is_some() && config.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true);
+                // Fork: with the setting unset the answer stays `run_ocr_on_images` alone --
+                // embedded-image OCR is on by default (no `ocr` block required; the missing
+                // block falls back to the default backend config), not `ocr.is_some() && …`
+                // as upstream derives it.
+                let pre_1752 = config.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true);
                 assert_eq!(
                     config.runs_ocr_on_embedded_images(),
                     pre_1752,
-                    "with ocr_embedded_images unset the answer must stay `ocr.is_some() && run_ocr_on_images`, \
+                    "with ocr_embedded_images unset the answer must stay `run_ocr_on_images` \
+                     (fork: on by default without an `ocr` block), \
                      for ocr={:?} images={:?}",
                     config.ocr.is_some(),
                     config.images.as_ref().map(|i| i.run_ocr_on_images),
@@ -2004,9 +2008,15 @@ mod tests {
             "and the container must therefore still read the bytes (GH#1662)"
         );
 
+        // Fork: image extraction is on by default, so "nothing else is asking for the bytes"
+        // needs it turned off explicitly here -- the point under test is the OCR half alone.
         let off_with_block = ExtractionConfig {
             ocr: Some(OcrConfig::default()),
             ocr_embedded_images: Some(false),
+            images: Some(ImageExtractionConfig {
+                extract_images: false,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         assert!(
@@ -2039,10 +2049,16 @@ mod tests {
     /// `engine/extract_impl.rs`).
     #[test]
     fn disable_ocr_suppresses_embedded_image_ocr_even_when_opted_in() {
+        // Fork: image extraction is on by default; turn it off so the bytes in question are
+        // "only embedded-image OCR wanted" and the second assertion isolates the OCR half.
         let config = ExtractionConfig {
             ocr: None,
             ocr_embedded_images: Some(true),
             disable_ocr: true,
+            images: Some(ImageExtractionConfig {
+                extract_images: false,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         assert!(
@@ -2059,9 +2075,15 @@ mod tests {
     /// standalone image's bytes back just because the new opt-in turned embedded-image OCR on.
     #[test]
     fn ocr_embedded_images_does_not_widen_wants_own_bytes_in_result() {
+        // Fork: image extraction is on by default; turn it off so the narrower predicate's
+        // remaining conditions (captioning, qr_codes) are the only things under test.
         let config = ExtractionConfig {
             ocr: None,
             ocr_embedded_images: Some(true),
+            images: Some(ImageExtractionConfig {
+                extract_images: false,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         assert!(config.runs_ocr_on_embedded_images());
