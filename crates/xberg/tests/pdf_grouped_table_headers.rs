@@ -5,7 +5,7 @@ mod helpers;
 use helpers::extract_bytes_document_blocking;
 use xberg::{ExtractionConfig, PdfConfig};
 
-fn table_pdf(padding: Option<f32>, filled_rules: bool) -> Vec<u8> {
+fn table_pdf(padding: Option<f32>, filled_rules: bool, heading_offset: u32) -> Vec<u8> {
     let mut content = String::new();
     if let Some(padding) = padding {
         content.push_str("0.8 g ");
@@ -33,7 +33,8 @@ fn table_pdf(padding: Option<f32>, filled_rules: bool) -> Vec<u8> {
             format!("{x} 600 m {x} {top} l S ")
         });
     }
-    for (x, text) in [(58, "First group"), (198, "Second group"), (338, "Third group")] {
+    for (x, text) in [(58, "First"), (198, "Second"), (338, "Third")] {
+        let x = x + heading_offset;
         content.push_str(&format!("BT /F1 10 Tf {x} 669 Td ({text}) Tj ET "));
     }
     for y in [605, 625, 645] {
@@ -65,32 +66,40 @@ fn table_pdf(padding: Option<f32>, filled_rules: bool) -> Vec<u8> {
 
 #[test]
 fn grouped_headers_survive_with_and_without_inset_backgrounds() {
-    for padding in [None, Some(0.), Some(4.), Some(8.)] {
-        for filled_rules in [false, true] {
-            let config = ExtractionConfig {
-                disable_ocr: true,
-                use_cache: false,
-                enable_quality_processing: false,
-                pdf_options: Some(PdfConfig {
-                    extract_tables: true,
+    // The second position puts the heading in the right-hand grid slot of its
+    // spanning cell, exercising the text-retention dependency on #1804.
+    for heading_offset in [0, 85] {
+        for padding in [None, Some(0.), Some(4.), Some(8.)] {
+            for filled_rules in [false, true] {
+                let config = ExtractionConfig {
+                    disable_ocr: true,
+                    use_cache: false,
+                    enable_quality_processing: false,
+                    pdf_options: Some(PdfConfig {
+                        extract_tables: true,
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            };
-            let result =
-                extract_bytes_document_blocking(&table_pdf(padding, filled_rules), "application/pdf", &config).unwrap();
-            assert_eq!(
-                result.tables.len(),
-                1,
-                "padding={padding:?}, filled rules={filled_rules}: {:?}",
-                result.tables
-            );
-            let cells = &result.tables[0].cells;
-            assert_eq!(cells.len(), 4, "{cells:?}");
-            assert_eq!(cells[0], ["First group", "Second group", "Third group"], "{cells:?}");
-            for (row, y) in [645, 625, 605].into_iter().enumerate() {
-                let expected: Vec<_> = (0..6).map(|column| format!("R{y}C{column}")).collect();
-                assert_eq!(cells[row + 1], expected, "{cells:?}");
+                };
+                let result = extract_bytes_document_blocking(
+                    &table_pdf(padding, filled_rules, heading_offset),
+                    "application/pdf",
+                    &config,
+                )
+                .unwrap();
+                assert_eq!(
+                    result.tables.len(),
+                    1,
+                    "offset={heading_offset}, padding={padding:?}, filled rules={filled_rules}: {:?}",
+                    result.tables
+                );
+                let cells = &result.tables[0].cells;
+                assert_eq!(cells.len(), 4, "{cells:?}");
+                assert_eq!(cells[0], ["First", "Second", "Third"], "{cells:?}");
+                for (row, y) in [645, 625, 605].into_iter().enumerate() {
+                    let expected: Vec<_> = (0..6).map(|column| format!("R{y}C{column}")).collect();
+                    assert_eq!(cells[row + 1], expected, "{cells:?}");
+                }
             }
         }
     }

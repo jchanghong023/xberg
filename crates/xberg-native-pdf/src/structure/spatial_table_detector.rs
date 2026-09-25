@@ -4922,41 +4922,44 @@ mod tests {
     }
 
     #[test]
-    fn neighbouring_tables_with_gap_stay_separate() {
-        let cells = [
-            IntersectionCell {
-                x1: 0.,
-                y1: 0.,
-                x2: 40.,
-                y2: 20.,
-            },
-            IntersectionCell {
-                x1: 0.,
-                y1: 30.,
-                x2: 40.,
-                y2: 50.,
-            },
-        ];
-        assert_eq!(group_cells_into_tables(&cells).len(), 2);
-    }
-
-    #[test]
-    fn corner_touch_is_not_shared_edge() {
-        let cells = [
-            IntersectionCell {
-                x1: 0.,
-                y1: 0.,
-                x2: 40.,
-                y2: 20.,
-            },
-            IntersectionCell {
-                x1: 40.,
-                y1: 20.,
-                x2: 80.,
-                y2: 40.,
-            },
-        ];
-        assert_eq!(group_cells_into_tables(&cells).len(), 2);
+    fn unrelated_cells_stay_separate_after_header_attachment() {
+        // A full two-row body clears the attachment guards. Using isolated cells
+        // here would skip the new attachment logic and only test old grouping.
+        let body: Vec<_> = (0..2)
+            .flat_map(|row| {
+                (0..3).map(move |column| IntersectionCell {
+                    x1: column as f32 * 40.,
+                    y1: row as f32 * 20.,
+                    x2: (column + 1) as f32 * 40.,
+                    y2: (row + 1) as f32 * 20.,
+                })
+            })
+            .collect();
+        for (case, candidate) in [
+            (
+                "gap",
+                IntersectionCell {
+                    x1: 0.,
+                    y1: 50.,
+                    x2: 120.,
+                    y2: 70.,
+                },
+            ),
+            (
+                "corner",
+                IntersectionCell {
+                    x1: 120.,
+                    y1: 40.,
+                    x2: 160.,
+                    y2: 60.,
+                },
+            ),
+        ] {
+            let mut cells = body.clone();
+            cells.push(candidate);
+            let groups = attach_spanning_headers(&cells, group_cells_into_tables(&cells), 6);
+            assert_eq!(groups, vec![vec![0, 1, 2, 3, 4, 5], vec![6]], "{case}");
+        }
     }
 
     #[test]
