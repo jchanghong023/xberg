@@ -437,147 +437,148 @@ use-default-ignores = true
 preserve-patterns = ["SAFETY", "SPDX", "Copyright", "License", "licensed under", "namespace"]
 
 [workspace.poly.typos.extend-words]
-# word-split example "eigenv"+"alue" in a kerning comment ~keep
-alue = "alue"
-# PDF text-extraction test fixture ~keep
-beng = "beng"
+# "Tower"/"lower" substring in pdf/structure/lines.rs #1291 tests + CHANGELOG. ~keep
 # `msofbtBSE` / MSOFBT_BSE 0xF007 -- the Office Drawing "BLIP Store Entry" record the PPT
-# extractor walks to resolve a shape's `pib` to picture bytes. A spec identifier, not BASE. ~keep
-bse = "bse"
-# Dutch-language table-detection test fixture ~keep
-conversie = "conversie"
+# `trak` (tracking). ~keep
+# benchmark fixture id ft_ACN_2009_page_102_t0 in bench_matrix.rs. ~keep
+# Corpus fixture identifier preserves this source filename spelling. ~keep
 # Dutch-language hanging-indent heading fixture (GH#1634) ~keep
-innovaties = "innovaties"
-# German-language OCR plausibility test fixture (GH#1709) ~keep
-ende = "ende"
-sie = "sie"
-tages = "tages"
+# Dutch-language table-detection test fixture ~keep
 # Dutch-language two-column heading fixture (GH#1738) ~keep
-lage = "lage"
 # Dutch-language wrapped-heading fixture (GH#1740) ~keep
-temperatuur = "temperatuur"
+# extractor walks to resolve a shape's `pib` to picture bytes. A spec identifier, not BASE. ~keep
+# flate2 crate + PDF FlateDecode filter (THE ORIGINAL BUG: flate -> flat)
+# German-language OCR plausibility test fixture (GH#1709) ~keep
+# libwpd upstream enum WPD_PASSWORD_MISSMATCH_ERROR (inc/libwpd/WPDocument.h) — upstream's own spelling, cannot rename. ~keep
+# OpenType table names, not truncated English: `loca` (index-to-location),
 # PDF text-extraction test fixture ~keep
-liev = "liev"
-# These exact tokens are audited corpus/language terms, tokenizer or hyphenation fragments,
+# PDF text-extraction test fixture ~keep
 # standardized glyph/PDF names, and deliberately malformed regression inputs. They must remain
+# These exact tokens are audited corpus/language terms, tokenizer or hyphenation fragments,
+# Toronto Maple Leafs is the official team name used by the XLSX fixture. ~keep
 # verbatim for the tests and formats they represent; this is not a blanket typo suppression. ~keep
+# word-split example "eigenv"+"alue" in a kerning comment ~keep
+acn = "acn"
 addresss = "addresss"
+ake = "ake"
+algoritmos = "algoritmos"
 alikes = "alikes"
 als = "als"
+alue = "alue"
+arange = "arange"
 ative = "ative"
+Availabilty = "Availabilty"
+beng = "beng"
+bre = "bre"
+bse = "bse"
+caf = "caf"
 certi = "certi"
+charater = "charater"
+chlidren = "chlidren"
 cient = "cient"
+cliper = "cliper"
 compre = "compre"
 controler = "controler"
+conversie = "conversie"
+cursos = "cursos"
+delocate = "delocate"
 diffcult = "diffcult"
+docling = "docling"
 dokument = "dokument"
 ect = "ect"
 ede = "ede"
+edn = "edn"
+ein = "ein"
+ende = "ende"
 equivalen = "equivalen"
 evn = "evn"
+excepcional = "excepcional"
+execpt = "execpt"
+extention = "extention"
+faiure = "faiure"
 fied = "fied"
+fith = "fith"
+flate = "flate"
+formated = "formated"
 fpt = "fpt"
 fre = "fre"
 garanties = "garanties"
+headerr = "headerr"
 hel = "hel"
+helo = "helo"
+hocr = "hocr"
+hom = "hom"
 implemen = "implemen"
 indien = "indien"
 ine = "ine"
-# Toronto Maple Leafs is the official team name used by the XLSX fixture. ~keep
-Leafs = "Leafs"
-markdwon = "markdwon"
-multipl = "multipl"
-normale = "normale"
-paeth = "paeth"
-parms = "parms"
-proce = "proce"
-proces = "proces"
-rturned = "rturned"
-stap = "stap"
-teh = "teh"
-thic = "thic"
-versoin = "versoin"
-wel = "wel"
-# flate2 crate + PDF FlateDecode filter (THE ORIGINAL BUG: flate -> flat)
-# Corpus fixture identifier preserves this source filename spelling. ~keep
-Availabilty = "Availabilty"
-# OpenType table names, not truncated English: `loca` (index-to-location),
-# `trak` (tracking). ~keep
-loca = "loca"
-trak = "trak"
-flate = "flate"
-delocate = "delocate"
-thw = "thw"
-arange = "arange"
-mmaped = "mmaped"
-layrnorm = "layrnorm"
-seperator = "seperator"
-ser = "ser"
-ake = "ake"
-algoritmos = "algoritmos"
-kreuzberg = "kreuzberg"
-tesseract = "tesseract"
-onnx = "onnx"
-surrealdb = "surrealdb"
-tbe = "tbe"
-docling = "docling"
-markitdown = "markitdown"
-pymupdf = "pymupdf"
-openwebui = "openwebui"
-webui = "webui"
-rumdl = "rumdl"
-opf = "opf"
-# "Tower"/"lower" substring in pdf/structure/lines.rs #1291 tests + CHANGELOG. ~keep
-ower = "ower"
-hocr = "hocr"
-odf = "odf"
-multline = "multline"
-headerr = "headerr"
-pard = "pard"
-edn = "edn"
-siz = "siz"
 inh = "inh"
-bre = "bre"
-yor = "yor"
-extention = "extention"
-portait = "portait"
-fith = "fith"
-threed = "threed"
-chlidren = "chlidren"
-formated = "formated"
-specifing = "specifing"
-similarily = "similarily"
-execpt = "execpt"
-faiure = "faiure"
-substract = "substract"
-charater = "charater"
-cliper = "cliper"
-splitted = "splitted"
-unparseable = "unparseable"
-relatie = "relatie"
-traineddata = "traineddata"
-tha = "tha"
-ist = "ist"
+innovaties = "innovaties"
 internacional = "internacional"
-utiliza = "utiliza"
-caf = "caf"
-hom = "hom"
-ths = "ths"
+ist = "ist"
+kreuzberg = "kreuzberg"
+lage = "lage"
+layrnorm = "layrnorm"
+Leafs = "Leafs"
+legt = "legt"
+liev = "liev"
+loca = "loca"
+markdwon = "markdwon"
+markitdown = "markitdown"
 ment = "ment"
 mis = "mis"
-helo = "helo"
-ove = "ove"
-tre = "tre"
-thr = "thr"
-programa = "programa"
-cursos = "cursos"
-excepcional = "excepcional"
-ein = "ein"
-legt = "legt"
-# libwpd upstream enum WPD_PASSWORD_MISSMATCH_ERROR (inc/libwpd/WPDocument.h) — upstream's own spelling, cannot rename. ~keep
 missmatch = "missmatch"
-# benchmark fixture id ft_ACN_2009_page_102_t0 in bench_matrix.rs. ~keep
-acn = "acn"
+mmaped = "mmaped"
+multipl = "multipl"
+multline = "multline"
+normale = "normale"
+odf = "odf"
+onnx = "onnx"
+openwebui = "openwebui"
+opf = "opf"
+ove = "ove"
+ower = "ower"
+paeth = "paeth"
+pard = "pard"
+parms = "parms"
+portait = "portait"
+proce = "proce"
+proces = "proces"
+programa = "programa"
+pymupdf = "pymupdf"
+relatie = "relatie"
+rturned = "rturned"
+rumdl = "rumdl"
+seperator = "seperator"
+ser = "ser"
+sie = "sie"
+similarily = "similarily"
+siz = "siz"
+specifing = "specifing"
+splitted = "splitted"
+stap = "stap"
+substract = "substract"
+successivo = "successivo"
+surrealdb = "surrealdb"
+tages = "tages"
+tbe = "tbe"
+teh = "teh"
+temperatuur = "temperatuur"
+tesseract = "tesseract"
+tha = "tha"
+thic = "thic"
+thr = "thr"
+threed = "threed"
+ths = "ths"
+thw = "thw"
+traineddata = "traineddata"
+trak = "trak"
+tre = "tre"
+unparseable = "unparseable"
+utiliza = "utiliza"
+versoin = "versoin"
+webui = "webui"
+wel = "wel"
+yor = "yor"
 
 [workspace.poly.typos.extend-identifiers]
 PyMuPDF = "PyMuPDF"
@@ -626,7 +627,6 @@ traineddata = "traineddata"
 "crates/xberg-cli/src/main.rs" = ["file-too-long", "function-too-long", "type-too-long"]
 "crates/xberg-cli/tests/commands_test.rs" = ["file-too-long"]
 "crates/xberg-native-pdf/src/annotation_types.rs" = ["file-too-long"]
-"crates/xberg-native-pdf/src/annotations.rs" = ["function-too-long", "nesting-too-deep"]
 "crates/xberg-native-pdf/src/content/operators.rs" = ["file-too-long", "type-too-long"]
 "crates/xberg-native-pdf/src/content/parser.rs" = ["cyclomatic-complexity", "file-too-long", "function-too-long"]
 "crates/xberg-native-pdf/src/converters/text_post_processor.rs" = [
@@ -661,7 +661,7 @@ traineddata = "traineddata"
   "function-too-long",
   "nesting-too-deep",
 ]
-"crates/xberg-native-pdf/src/document/open.rs" = ["cyclomatic-complexity", "function-too-long"]
+"crates/xberg-native-pdf/src/document/open.rs" = ["file-too-long"]
 "crates/xberg-native-pdf/src/document/pages.rs" = [
   "cyclomatic-complexity",
   "file-too-long",
@@ -675,7 +675,6 @@ traineddata = "traineddata"
   "function-too-long",
   "nesting-too-deep",
 ]
-"crates/xberg-native-pdf/src/document/redaction.rs" = ["cyclomatic-complexity", "function-too-long"]
 "crates/xberg-native-pdf/src/document/span_postprocess.rs" = [
   "cyclomatic-complexity",
   "file-too-long",
@@ -721,7 +720,6 @@ traineddata = "traineddata"
   "function-too-long",
   "nesting-too-deep",
 ]
-"crates/xberg-native-pdf/src/extractors/text/tj_arrays.rs" = ["function-too-long", "nesting-too-deep"]
 "crates/xberg-native-pdf/src/extractors/text/xobjects.rs" = [
   "cyclomatic-complexity",
   "function-too-long",
@@ -750,8 +748,6 @@ traineddata = "traineddata"
   "file-too-long",
   "function-too-long",
 ]
-"crates/xberg-native-pdf/src/redaction/serialize.rs" = ["function-too-long"]
-"crates/xberg-native-pdf/src/redaction/text_engine.rs" = ["function-too-long", "nesting-too-deep"]
 "crates/xberg-native-pdf/src/rendering/mesh_shading.rs" = ["file-too-long", "function-too-long", "too-many-parameters"]
 "crates/xberg-native-pdf/src/rendering/page_renderer.rs" = [
   "cyclomatic-complexity",
@@ -797,11 +793,9 @@ traineddata = "traineddata"
 "crates/xberg-native-pdf/src/structure/table_extractor.rs" = ["file-too-long", "function-too-long", "nesting-too-deep"]
 "crates/xberg-native-pdf/src/structure/traversal.rs" = ["file-too-long", "function-too-long"]
 "crates/xberg-native-pdf/src/text/bidi.rs" = ["cyclomatic-complexity", "file-too-long"]
-"crates/xberg-native-pdf/src/text/kangxi.rs" = ["function-too-long"]
 "crates/xberg-native-pdf/src/text/word_boundary.rs" = ["file-too-long"]
 "crates/xberg-native-pdf/src/xfa/parser.rs" = ["cyclomatic-complexity", "function-too-long", "nesting-too-deep"]
 "crates/xberg-native-pdf/src/xref.rs" = ["cyclomatic-complexity", "file-too-long", "function-too-long"]
-"crates/xberg-native-pdf/src/xref_reconstruction.rs" = ["function-too-long", "nesting-too-deep"]
 "crates/xberg-native-pdf/tests/extraction_api_regression.rs" = ["file-too-long"]
 "crates/xberg-native-pdf/tests/test_46_round2_qa_pass.rs" = ["file-too-long"]
 "crates/xberg-native-pdf/tests/test_46_round3_qa_pass.rs" = ["file-too-long"]
@@ -871,13 +865,11 @@ traineddata = "traineddata"
   "function-too-long",
   "nesting-too-deep",
 ]
-"crates/xberg/src/extraction/image_kind.rs" = ["too-many-parameters"]
 "crates/xberg/src/extraction/ppt/mod.rs" = ["cyclomatic-complexity", "file-too-long", "function-too-long"]
 "crates/xberg/src/extraction/pptx/tests.rs" = ["file-too-long", "function-too-long"]
 "crates/xberg/src/extractors/archive.rs" = ["function-too-long", "too-many-parameters"]
 "crates/xberg/src/extractors/asciidoc.rs" = ["file-too-long"]
 "crates/xberg/src/extractors/bibtex.rs" = ["cyclomatic-complexity", "function-too-long", "nesting-too-deep"]
-"crates/xberg/src/extractors/citation.rs" = ["cyclomatic-complexity", "function-too-long"]
 "crates/xberg/src/extractors/csv.rs" = ["file-too-long", "function-too-long"]
 "crates/xberg/src/extractors/djot_format/extractor.rs" = [
   "cyclomatic-complexity",
@@ -910,9 +902,7 @@ traineddata = "traineddata"
   "function-too-long",
   "nesting-too-deep",
 ]
-"crates/xberg/src/extractors/frontmatter_utils.rs" = ["cyclomatic-complexity", "function-too-long"]
 "crates/xberg/src/extractors/html.rs" = ["file-too-long", "function-too-long", "nesting-too-deep"]
-"crates/xberg/src/extractors/hwp.rs" = ["function-too-long", "nesting-too-deep"]
 "crates/xberg/src/extractors/hwpx.rs" = [
   "cyclomatic-complexity",
   "file-too-long",
@@ -920,7 +910,6 @@ traineddata = "traineddata"
   "nesting-too-deep",
 ]
 "crates/xberg/src/extractors/image.rs" = ["file-too-long", "function-too-long", "nesting-too-deep"]
-"crates/xberg/src/extractors/iwork/mod.rs" = ["nesting-too-deep"]
 "crates/xberg/src/extractors/iwork/numbers.rs" = ["file-too-long"]
 "crates/xberg/src/extractors/jats/elements.rs" = ["cyclomatic-complexity", "function-too-long", "nesting-too-deep"]
 "crates/xberg/src/extractors/jats/mod.rs" = [
@@ -949,8 +938,6 @@ traineddata = "traineddata"
   "function-too-long",
   "nesting-too-deep",
 ]
-"crates/xberg/src/extractors/mdx.rs" = ["cyclomatic-complexity", "function-too-long"]
-"crates/xberg/src/extractors/mod.rs" = ["function-too-long"]
 "crates/xberg/src/extractors/myst.rs" = ["file-too-long", "too-many-parameters"]
 "crates/xberg/src/extractors/odp.rs" = [
   "cyclomatic-complexity",
@@ -1002,7 +989,6 @@ traineddata = "traineddata"
 "crates/xberg/src/extractors/pdf/ocr/tests.rs" = ["file-too-long", "function-too-long"]
 "crates/xberg/src/extractors/pdf/reading_order.rs" = ["file-too-long", "function-too-long", "too-many-parameters"]
 "crates/xberg/src/extractors/pdf/region_vlm.rs" = ["function-too-long"]
-"crates/xberg/src/extractors/ppt.rs" = ["function-too-long", "nesting-too-deep"]
 "crates/xberg/src/extractors/pptx.rs" = [
   "cyclomatic-complexity",
   "file-too-long",
@@ -1016,9 +1002,6 @@ traineddata = "traineddata"
   "function-too-long",
   "nesting-too-deep",
 ]
-"crates/xberg/src/extractors/rtf/formatting.rs" = ["cyclomatic-complexity", "function-too-long"]
-"crates/xberg/src/extractors/rtf/images.rs" = ["function-too-long", "nesting-too-deep"]
-"crates/xberg/src/extractors/rtf/metadata.rs" = ["cyclomatic-complexity", "function-too-long"]
 "crates/xberg/src/extractors/rtf/mod.rs" = ["cyclomatic-complexity", "function-too-long", "nesting-too-deep"]
 "crates/xberg/src/extractors/rtf/parser/formatting_extract.rs" = [
   "cyclomatic-complexity",
@@ -1125,14 +1108,12 @@ traineddata = "traineddata"
 ]
 "crates/xberg/src/rendering/djot.rs" = ["cyclomatic-complexity", "file-too-long", "function-too-long"]
 "crates/xberg/src/rendering/doctags.rs" = ["file-too-long", "function-too-long"]
-"crates/xberg/src/rendering/json.rs" = ["cyclomatic-complexity", "function-too-long"]
 "crates/xberg/src/rendering/plain.rs" = ["cyclomatic-complexity", "function-too-long", "nesting-too-deep"]
 "crates/xberg/src/reranking/mod.rs" = ["file-too-long", "function-too-long", "too-many-parameters"]
 "crates/xberg/src/sceptre_ocr/mod.rs" = ["file-too-long"]
 "crates/xberg/src/sparse_embeddings/mod.rs" = ["too-many-parameters"]
 "crates/xberg/src/table_core.rs" = ["file-too-long", "function-too-long"]
 "crates/xberg/src/text/redaction/engine.rs" = ["cyclomatic-complexity", "file-too-long", "function-too-long"]
-"crates/xberg/src/text/token_reduction/core/word_filtering.rs" = ["cyclomatic-complexity", "function-too-long"]
 "crates/xberg/src/transcription/decode.rs" = ["function-too-long"]
 "crates/xberg/src/transcription/engine.rs" = ["function-too-long"]
 "crates/xberg/src/types/document_structure.rs" = ["file-too-long", "function-too-long"]

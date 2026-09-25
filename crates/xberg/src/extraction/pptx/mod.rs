@@ -254,7 +254,15 @@ fn extract_slide_images<R: std::io::Read + std::io::Seek>(
         let bbox = position_to_bbox(pos);
 
         let (image_kind, kind_confidence) =
-            crate::extraction::image_kind::classify(data, format.as_ref(), width, height, None, None, false);
+            crate::extraction::image_kind::classify(crate::extraction::image_kind::ImageClassifyInput {
+                bytes: data,
+                format: format.as_ref(),
+                width,
+                height,
+                colorspace: None,
+                bits_per_component: None,
+                is_mask: false,
+            });
 
         // The slide's rels name the part this picture came from; the markdown builder
         // bakes that same target into the placeholder, which is how the placeholder is
