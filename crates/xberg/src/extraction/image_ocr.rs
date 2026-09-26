@@ -564,7 +564,8 @@ fn apply_ocr_result(
             // the unrepaired token right next to the repaired prose the standalone-image
             // route extracted.
             if ocr_config.numeric_repair {
-                crate::extractors::pdf::ocr::repair_extracted_document_numbers(&mut ocr_document);
+                let content_is_prose = crate::extractors::pdf::ocr::ocr_content_is_repairable_prose(ocr_config);
+                crate::extractors::pdf::ocr::repair_extracted_document_numbers(&mut ocr_document, content_is_prose);
             }
             images[idx].ocr_result = Some(Box::new(ocr_document));
         }

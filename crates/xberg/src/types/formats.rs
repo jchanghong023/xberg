@@ -432,6 +432,11 @@ pub struct ImagePreprocessingConfig {
     /// whole-page method recovers every fill color, and the per-band step itself can
     /// regress a row style it does not fully model (e.g. a mid-grey fill with white
     /// text), so it defaults to `false` rather than being enabled unconditionally.
+    ///
+    /// Has no effect when `binarization_method` is `"none"` or `"off"` **and** `contrast_enhance`
+    /// is `true`: that path re-reads the original image to apply background normalization and
+    /// sharpening, discarding the per-band result. A `WARN` is emitted when the option is
+    /// requested in that combination (GH#1837).
     pub normalize_shaded_rows: bool,
 }
 

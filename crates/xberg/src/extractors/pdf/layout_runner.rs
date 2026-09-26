@@ -305,33 +305,6 @@ async fn run_layout_for_pdf_pages_async(
         .map_err(|error| XbergError::Other(format!("layout runner task failed: {error}")))?;
         result.map(|attempt| (attempt, glyph_drop_warnings))
     }
-
-    #[cfg(not(feature = "tokio-runtime"))]
-    {
-        let execution_provider_overridden = crate::ort_discovery::execution_provider_override().is_some();
-        let acceleration_override = rtdetr_acceleration_override(layout_config, execution_provider_overridden);
-        let result = run_layout_with_auto_cpu_retry(
-            layout_config,
-            execution_provider_overridden,
-            acceleration_override,
-            |attempt_config| {
-                run_layout_for_pdf_pages_with_security_limits(
-                    content,
-                    attempt_config,
-                    thread_budget,
-                    gated_handling,
-                    budget.security_limits,
-                    budget.images_config,
-                )
-            },
-        )
-        .map(merge_render_warning);
-        // No `spawn_blocking` here, so this already runs on the caller's own
-        // thread; draining here keeps both branches return warnings the same
-        // way regardless of which one compiled in.
-        let glyph_drop_warnings = crate::pdf::render::take_xberg_native_pdf_render_warnings();
-        result.map(|attempt| (attempt, glyph_drop_warnings))
-    }
 }
 
 #[cfg(all(feature = "pdf", feature = "layout-detection"))]
@@ -479,11 +452,21 @@ fn render_layout_page(
     // 90/270-rotated page under `normalize_for_ocr == false` -- `effective_pdf_render_dpi`
     // only needs an aspect-insensitive area budget from `max_image_dimension`.
     let (media_width_pt, media_height_pt) = crate::pdf::render::get_page_dimensions_pt(doc, page_index);
-    let render_dpi = crate::image::dpi::effective_pdf_render_dpi(
-        budget.images_config,
-        f64::from(media_width_pt),
-        f64::from(media_height_pt),
-    );
+    // `normalize_for_ocr` marks this render as OCR input (see `GatedPageHandling`), so it
+    // must make the same scan-density render-DPI decision the non-layout OCR routes make via
+    // `crate::image::dpi::pdf_ocr_render_dpi` -- otherwise a scanned page renders at a
+    // different DPI depending on whether layout detection is on (#1828). The plain
+    // `effective_pdf_render_dpi` stays in place for the markdown-structure render, which is
+    // never OCR input and must not change. ~keep
+    let render_dpi = if normalize_for_ocr {
+        crate::image::dpi::pdf_ocr_render_dpi(doc, page_index, budget.images_config)
+    } else {
+        crate::image::dpi::effective_pdf_render_dpi(
+            budget.images_config,
+            f64::from(media_width_pt),
+            f64::from(media_height_pt),
+        )
+    };
     let rendered = crate::pdf::render::render_page_with_safeguards(doc, page_index, render_dpi.max(1) as u32).map_err(
         |error| {
             tracing::warn!(
@@ -1942,6 +1925,54 @@ mod tests {
             leaked_to_caller_thread.is_empty(),
             "glyph-drop warnings must come back through the spawn_blocking closure's return value, not leak into \
              (or vanish from) the caller thread's own thread-local buffer: {leaked_to_caller_thread:?}"
+        );
+    }
+
+    /// #1828: `render_layout_chunk`'s OCR-input render (`GatedPageHandling::RenderWithoutInference`,
+    /// i.e. `normalize_for_ocr`) must make the same scan-density render-DPI decision the
+    /// non-layout OCR routes make (`crate::image::dpi::pdf_ocr_render_dpi`), not the plain
+    /// `effective_pdf_render_dpi` the markdown-structure render (`SkipRender`) uses. A scan page
+    /// (one full-page 400x400px raster over a 100x100pt page, 288 dpi) renders its OCR input at
+    /// that density -- 400x400px, not the 150 dpi default's ~208x208px -- while the same page's
+    /// markdown-structure render is unaffected and still uses the 150 dpi default.
+    ///
+    /// Fails on unfixed code (plain `effective_pdf_render_dpi` for both handlings): the OCR
+    /// render comes back ~208x208, equal to the markdown-structure render, instead of 400x400.
+    #[test]
+    fn ocr_render_uses_scan_density_while_markdown_render_keeps_the_default() {
+        let scan_bytes = crate::pdf::render::build_full_page_raster_pdf((100.0, 100.0), (400, 400), 1.0, 0);
+        let doc = xberg_native_pdf::PdfDocument::from_bytes(scan_bytes).expect("fixture must open");
+        let page_rotations = vec![0u32];
+        let security_limits = crate::extractors::security::SecurityLimits::default();
+        let budget = RenderBudget {
+            security_limits: &security_limits,
+            images_config: None,
+        };
+
+        let ocr_pages = render_layout_chunk(
+            &doc,
+            &page_rotations,
+            0,
+            1,
+            None,
+            GatedPageHandling::RenderWithoutInference,
+            budget,
+        );
+        let ocr_image = ocr_pages[0].image.as_ref().expect("scan page must render");
+        assert_eq!(
+            (ocr_image.width(), ocr_image.height()),
+            (400, 400),
+            "OCR input for a scan page must render at the raster's own 288 dpi density, not the 150 dpi default"
+        );
+
+        let markdown_pages =
+            render_layout_chunk(&doc, &page_rotations, 0, 1, None, GatedPageHandling::SkipRender, budget);
+        let markdown_image = markdown_pages[0].image.as_ref().expect("scan page must render");
+        assert_eq!(
+            (markdown_image.width(), markdown_image.height()),
+            (209, 209),
+            "the markdown-structure render must be unaffected and keep the 150 dpi default \
+             (100pt * 150/72 rounds to 209px)"
         );
     }
 }

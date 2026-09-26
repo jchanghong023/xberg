@@ -268,3 +268,76 @@ fn numeric_repair_enabled_reads_the_ocr_config_flag() {
     };
     assert!(numeric_repair_enabled(&config));
 }
+
+/// GH#1836: the separator rule rewrites any bare 4-9 digit integer whose neighbours are not word
+/// characters, and an hOCR `bbox` is exactly that shape. Documents the corruption the
+/// `ocr_content_is_repairable_prose` guard exists to prevent, on the renderer's real output shape
+/// rather than on a contrived string -- at the default 300 dpi a Letter page is 2550x3300 px, so
+/// four-digit coordinates are the norm. Not a gate on desired behaviour: the repair is *correct*
+/// here in isolation, which is why the fix is to not run it on markup at all.
+#[test]
+fn the_separator_rule_would_rewrite_hocr_bbox_coordinates() {
+    assert_eq!(
+        repair_ocr_numeric_tokens("<span class='ocrx_word' title='bbox 1234 567 1456 612; x_wconf 96'>Total</span>")
+            .as_ref(),
+        "<span class='ocrx_word' title='bbox 1,234 567 1,456 612; x_wconf 96'>Total</span>",
+        "the three-digit coordinates must stay bare and the four-digit ones must be grouped, \
+         which is what makes this corrupting on real hOCR"
+    );
+}
+
+/// GH#1836: the same shape in Tesseract's TSV word table, where the delimiter is a tab.
+#[test]
+fn the_separator_rule_would_rewrite_tsv_coordinate_columns() {
+    assert_eq!(
+        repair_ocr_numeric_tokens("5\t1\t1\t1\t1\t1234\t2048\t96\t21\t96.5\tTotal").as_ref(),
+        "5\t1\t1\t1\t1\t1,234\t2,048\t96\t21\t96.5\tTotal"
+    );
+}
+
+/// GH#1836: a markup renderer must switch the repair off entirely, because on these routes the
+/// OCR "text" *is* the markup. An allowlist, so a renderer added later is excluded by default.
+#[test]
+fn only_prose_renderers_are_repairable() {
+    let with_format = |output_format: &str| crate::core::config::OcrConfig {
+        tesseract_config: Some(crate::types::TesseractConfig {
+            output_format: output_format.to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(ocr_content_is_repairable_prose(&with_format("text")));
+    assert!(ocr_content_is_repairable_prose(&with_format("markdown")));
+    assert!(!ocr_content_is_repairable_prose(&with_format("hocr")));
+    assert!(!ocr_content_is_repairable_prose(&with_format("tsv")));
+    // An unrecognized renderer defaults to "not prose" rather than being silently corrupted.
+    assert!(!ocr_content_is_repairable_prose(&with_format("alto")));
+    // No `tesseract_config` at all cannot have selected a markup renderer: the default is
+    // `"markdown"` (`types::formats::TesseractConfig::default`).
+    assert!(ocr_content_is_repairable_prose(
+        &crate::core::config::OcrConfig::default()
+    ));
+}
+
+/// GH#1836 regression gate: `numeric_repair = true` together with a markup renderer must read as
+/// disabled. Fails on unfixed code, where `numeric_repair_enabled` consulted only the flag.
+#[test]
+fn numeric_repair_enabled_is_false_for_a_markup_renderer() {
+    let with_format = |output_format: &str| crate::core::config::ExtractionConfig {
+        ocr: Some(crate::core::config::OcrConfig {
+            numeric_repair: true,
+            tesseract_config: Some(crate::types::TesseractConfig {
+                output_format: output_format.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(!numeric_repair_enabled(&with_format("hocr")));
+    assert!(!numeric_repair_enabled(&with_format("tsv")));
+    // The control: the same flag on a prose renderer is still honoured, so this is not just
+    // turning the feature off.
+    assert!(numeric_repair_enabled(&with_format("markdown")));
+    assert!(numeric_repair_enabled(&with_format("text")));
+}

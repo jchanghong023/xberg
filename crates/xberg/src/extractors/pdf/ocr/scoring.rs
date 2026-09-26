@@ -870,8 +870,8 @@ pub(crate) fn repair_ocr_numeric_tokens(text: &str) -> std::borrow::Cow<'_, str>
 /// `extractors::image::apply_numeric_repair_to_standalone_image_ocr`, which does the same for
 /// the standalone-image route's already-destructured fields.
 #[cfg(feature = "ocr")]
-pub(crate) fn repair_extracted_document_numbers(doc: &mut crate::types::ExtractedDocument) {
-    if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(&doc.content) {
+pub(crate) fn repair_extracted_document_numbers(doc: &mut crate::types::ExtractedDocument, content_is_prose: bool) {
+    if content_is_prose && let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(&doc.content) {
         doc.content = repaired;
     }
     if let Some(internal_doc) = doc.ocr_internal_document.as_mut() {
@@ -899,6 +899,26 @@ pub(crate) fn repair_extracted_document_numbers(doc: &mut crate::types::Extracte
         }
     }
 }
+
+/// Whether an OCR run configured this way returns prose that [`repair_ocr_numeric_tokens`] may
+/// be applied to, rather than markup it would corrupt.
+///
+/// `TesseractConfig::output_format` selects the renderer inside the backend (`ocr::processor::
+/// execution`'s `raw_content` match): `"hocr"` returns hOCR HTML and `"tsv"` returns Tesseract's
+/// tab-separated word table. Both carry pixel coordinates as bare space- or tab-delimited
+/// integers, which is exactly the shape the separator rule re-punctuates -- `bbox 1234 567`
+/// becomes `bbox 1,234 567`, and at the default 300 dpi a Letter page is 2550x3300 px, so
+/// four-digit coordinates are the norm rather than an edge case (GH#1836). An allowlist, not a
+/// denylist, so a renderer added later defaults to "not repairable" instead of being silently
+/// corrupted. `None` is repairable because `TesseractConfig::default` renders `"markdown"`. ~keep
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+pub(crate) fn ocr_content_is_repairable_prose(ocr_config: &crate::core::config::OcrConfig) -> bool {
+    match ocr_config.tesseract_config.as_ref() {
+        Some(tesseract_config) => matches!(tesseract_config.output_format.as_str(), "text" | "markdown"),
+        None => true,
+    }
+}
+
 /// The backend-native-scale confidence floor a page's confidence must clear, or `false` if
 /// this backend's confidence cannot be used as a calibrated diagnostic at all.
 ///

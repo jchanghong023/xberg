@@ -144,6 +144,35 @@ pub(crate) fn effective_pdf_render_dpi(
     dimension_constrained.clamp(images_config.min_dpi, images_config.max_dpi)
 }
 
+/// The DPI to render `page_idx` of `doc` at for OCR.
+///
+/// Shared by every PDF OCR render route -- the whole-document/`force_ocr_pages` route
+/// (`extractors::pdf::ocr::rendering`) and the layout-detection route
+/// (`extractors::pdf::layout_runner`), which renders its own OCR input independently of
+/// them. Before this was shared, only the non-layout routes made the scan-density decision
+/// below, so a scanned page's OCR render DPI depended on whether layout detection was on
+/// (#1828, follow-up to #1786).
+///
+/// A caller's `images_config` decides as before (#1577). Without one, a page that is a single
+/// full-page raster renders at that raster's own density, bounded by
+/// [`SCAN_PAGE_MAX_RENDER_DPI`], instead of the [`DEFAULT_PDF_RENDER_DPI`] default: a 196 dpi
+/// scan rendered at 150 and then upscaled to 300 by the OCR preprocessor lost table values
+/// that OCR of the same page as an image read (#1786). Every other page keeps the default.
+#[cfg(feature = "pdf")]
+pub(crate) fn pdf_ocr_render_dpi(
+    doc: &xberg_native_pdf::PdfDocument,
+    page_idx: usize,
+    images_config: Option<&crate::core::config::ImageExtractionConfig>,
+) -> i32 {
+    if images_config.is_none()
+        && let Some(density) = crate::pdf::scan_detect::full_page_raster_density(doc, page_idx)
+    {
+        return scan_page_render_dpi(density);
+    }
+    let (page_width_pt, page_height_pt) = crate::pdf::render::get_page_dimensions_pt(doc, page_idx);
+    effective_pdf_render_dpi(images_config, f64::from(page_width_pt), f64::from(page_height_pt))
+}
+
 /// Calculate optimal DPI with min/max constraints
 #[cfg(test)]
 pub(crate) fn calculate_optimal_dpi(

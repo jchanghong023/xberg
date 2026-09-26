@@ -23,6 +23,15 @@ pub(crate) fn should_invert_for_polarity(mean_gray: f64, light_fraction: f64, fo
         || (mean_gray < DARK_BACKGROUND_MEAN_THRESHOLD && light_fraction >= MIN_LIGHT_PIXEL_FRACTION_FOR_INVERT)
 }
 
+/// Whether `normalize_shaded_rows` was asked for but cannot act.
+///
+/// ~keep A named predicate rather than an inline condition so the reporting path can be asserted
+/// without a real raster, and so the two facts it depends on -- the config combination and the
+/// `drop(gray)` in [`preprocess_pix`]'s non-binarized contrast arm -- stay visibly coupled.
+pub(crate) fn shaded_row_normalization_is_inert(config: &ImagePreprocessingConfig, binarization_enabled: bool) -> bool {
+    config.normalize_shaded_rows && !binarization_enabled && config.contrast_enhance
+}
+
 pub(crate) fn preprocess_pix(pix: Pix, config: &ImagePreprocessingConfig) -> Result<Pix, OcrError> {
     crate::core::config_validation::validate_image_preprocessing_config(config).map_err(|error| {
         if let crate::XbergError::Validation { message, .. } = error {
@@ -32,6 +41,7 @@ pub(crate) fn preprocess_pix(pix: Pix, config: &ImagePreprocessingConfig) -> Res
         }
     })?;
     let binarization_method = config.binarization_method.to_ascii_lowercase();
+    let binarization_enabled = !matches!(binarization_method.as_str(), "none" | "off");
 
     let gray = pix
         .to_grayscale()
@@ -39,6 +49,17 @@ pub(crate) fn preprocess_pix(pix: Pix, config: &ImagePreprocessingConfig) -> Res
     // ~keep normalize_shaded_rows only touches `gray`; the `contrast_enhance` path with
     // binarization disabled below reconverts from the original `pix` and does not see it
     // (GH#1785 scope: the fix targets the binarized path, which is the config default).
+    // GH#1837: that combination made the option silently inert, so say so rather than letting a
+    // caller believe their request took effect. The work stays skipped -- running it would change
+    // the output of a config combination nothing has measured.
+    if shaded_row_normalization_is_inert(config, binarization_enabled) {
+        tracing::warn!(
+            binarization_method = %config.binarization_method,
+            "normalize_shaded_rows was requested but has no effect: with binarization disabled and \
+             contrast_enhance on, the non-binarized contrast path re-reads the original image and \
+             discards the per-band normalization"
+        );
+    }
     let gray = if config.normalize_shaded_rows {
         apply_optional(gray, "normalize shaded rows", normalize_shaded_rows)
     } else {
@@ -52,7 +73,6 @@ pub(crate) fn preprocess_pix(pix: Pix, config: &ImagePreprocessingConfig) -> Res
         None => config.invert_colors,
     };
 
-    let binarization_enabled = !matches!(binarization_method.as_str(), "none" | "off");
     let mut processed = if binarization_enabled && should_invert {
         gray.invert().map_err(preprocessing_error("invert colors"))?
     } else if binarization_enabled {
@@ -413,5 +433,98 @@ mod tests {
             !messages.iter().any(|message| message.contains("falling back to Otsu")),
             "a large-enough image must not trigger the small-image fallback warning: {messages:?}"
         );
+    }
+
+    /// GH#1837: `normalize_shaded_rows` is silently inert when binarization is off and
+    /// `contrast_enhance` is on -- `preprocess_pix`'s non-binarized contrast arm drops the
+    /// normalized grayscale and reconverts from the original `pix`. The option must say so rather
+    /// than letting a caller believe it took effect.
+    #[test]
+    fn should_warn_when_normalize_shaded_rows_cannot_act_on_the_non_binarized_contrast_path() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        let config = ImagePreprocessingConfig {
+            deskew: false,
+            binarization_method: "none".to_string(),
+            contrast_enhance: true,
+            normalize_shaded_rows: true,
+            ..Default::default()
+        };
+        let pix = Pix::from_raw_rgb(&vec![200u8; 64 * 64 * 3], 64, 64).unwrap();
+
+        let result = tracing::subscriber::with_default(subscriber, || preprocess_pix(pix, &config));
+
+        assert!(
+            result.is_ok(),
+            "the inert combination must still produce a usable image"
+        );
+        let messages = warn_messages(&capture);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("normalize_shaded_rows") && message.contains("no effect")),
+            "expected a WARN naming the inert normalize_shaded_rows request, got: {messages:?}"
+        );
+    }
+
+    /// Negative control for the test above, so a WARN emitted unconditionally would be caught: the
+    /// same option on the default (Otsu) path does act, and must stay quiet.
+    #[test]
+    fn should_not_warn_when_normalize_shaded_rows_runs_on_the_binarized_path() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        let config = ImagePreprocessingConfig {
+            deskew: false,
+            normalize_shaded_rows: true,
+            ..Default::default()
+        };
+        let pix = Pix::from_raw_rgb(&vec![200u8; 64 * 64 * 3], 64, 64).unwrap();
+
+        let result = tracing::subscriber::with_default(subscriber, || preprocess_pix(pix, &config));
+
+        assert!(result.is_ok());
+        let messages = warn_messages(&capture);
+        assert!(
+            !messages.iter().any(|message| message.contains("normalize_shaded_rows")),
+            "the binarized path does apply the option and must not report it as inert: {messages:?}"
+        );
+    }
+
+    /// The predicate the WARN is driven by, across the four combinations that matter. Asserted
+    /// directly so the reporting condition is pinned independently of whether a given raster
+    /// happens to route through the arm in question.
+    #[test]
+    fn shaded_row_normalization_is_inert_only_without_binarization_and_with_contrast_enhance() {
+        let inert = ImagePreprocessingConfig {
+            binarization_method: "none".to_string(),
+            contrast_enhance: true,
+            normalize_shaded_rows: true,
+            ..Default::default()
+        };
+        assert!(shaded_row_normalization_is_inert(&inert, false));
+        // Binarized: the normalized grayscale survives into `processed`.
+        assert!(!shaded_row_normalization_is_inert(&inert, true));
+        // No contrast enhancement: the `should_invert`/passthrough arms keep `gray`.
+        assert!(!shaded_row_normalization_is_inert(
+            &ImagePreprocessingConfig {
+                contrast_enhance: false,
+                ..inert.clone()
+            },
+            false
+        ));
+        // Never requested at all: nothing to report.
+        assert!(!shaded_row_normalization_is_inert(
+            &ImagePreprocessingConfig {
+                normalize_shaded_rows: false,
+                ..inert
+            },
+            false
+        ));
     }
 }

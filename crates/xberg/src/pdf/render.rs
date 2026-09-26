@@ -415,6 +415,69 @@ pub fn take_xberg_native_pdf_render_warnings() -> Vec<ProcessingWarning> {
     ENGINE_PENDING_WARNINGS.with(|pending| std::mem::take(&mut *pending.borrow_mut()))
 }
 
+/// Deposit warnings drained on another thread into *this* thread's pending buffer, so a later
+/// [`take_xberg_native_pdf_render_warnings`] here returns them.
+///
+/// [`ENGINE_PENDING_WARNINGS`] is thread-local, so a render performed on a worker thread fills
+/// that worker's buffer and the extracting thread's drain never sees it. The layout route
+/// already handles this by draining inside its own `spawn_blocking` closure and threading the
+/// result back (#353); the rayon-parallel `force_ocr` and `force_ocr_pages` render paths had no
+/// equivalent, so on a multi-core host every page of a multi-page document lost its render
+/// warnings -- missing glyph ink, a blank image, a fallback font -- while a single-page document
+/// kept them, because rayon runs an unsplit batch on the calling thread (#1847).
+///
+/// Deduped on arrival, matching the per-thread drain's own behaviour: the same engine
+/// diagnostic raised on several pages is one warning to the caller. ~keep
+/// Render `page_indices` across the rayon pool, keeping each page's render warnings.
+///
+/// The per-page drain has to happen on the worker that rendered, because
+/// [`ENGINE_PENDING_WARNINGS`] is thread-local; the collected set is then deposited into the
+/// calling thread's buffer, where the extractor's own drain finds it. Lives here rather than at
+/// the two call sites so the thread-affinity rule is stated once, next to the buffer it is about
+/// (xberg-io/xberg#1847). ~keep
+#[cfg(all(
+    feature = "pdf",
+    any(feature = "ocr", feature = "ocr-pipeline"),
+    feature = "tokio-runtime",
+    not(target_arch = "wasm32")
+))]
+pub(crate) fn par_render_pages_collecting_warnings<T: Send>(
+    page_indices: Vec<usize>,
+    render: impl Fn(usize) -> crate::Result<T> + Sync + Send,
+) -> crate::Result<Vec<T>> {
+    use rayon::prelude::*;
+
+    let collected: std::sync::Mutex<Vec<ProcessingWarning>> = std::sync::Mutex::default();
+    let rendered: crate::Result<Vec<T>> = page_indices
+        .into_par_iter()
+        .map(|page_index| {
+            let page = render(page_index);
+            let warnings = take_xberg_native_pdf_render_warnings();
+            if !warnings.is_empty()
+                && let Ok(mut collected) = collected.lock()
+            {
+                collected.extend(warnings);
+            }
+            page
+        })
+        .collect();
+    absorb_render_warnings(collected.into_inner().unwrap_or_default());
+    rendered
+}
+
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(crate) fn absorb_render_warnings(warnings: Vec<ProcessingWarning>) {
+    if warnings.is_empty() {
+        return;
+    }
+    ENGINE_PENDING_WARNINGS.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        for warning in warnings {
+            crate::core::diagnostics::push_warning_deduped(&mut pending, warning);
+        }
+    });
+}
+
 /// Reasonable max pixel dimension (on either axis) for a rendered page before we
 /// force a lower DPI. This prevents Pixmap allocation failures or OOM for
 /// extremely wide/tall technical diagrams, CAD exports, etc. while still
@@ -1037,7 +1100,13 @@ pub(crate) fn build_minimal_pdf_with_mediabox(w: f32, h: f32) -> Vec<u8> {
 /// of about 25 glyphs each. `coverage = 1.0` is a scan: the raster's density is
 /// `image width / (page width / 72)` dots per inch. With few text lines an inset raster is a
 /// scan with a stamp; with many it is a figure on a text page.
-#[cfg(all(test, feature = "pdf"))]
+// GH#1835: every caller of this fixture builder lives behind the OCR or layout-detection
+// feature sets, so `all(test, pdf)` left it unused on a `pdf`-only test build. ~keep
+#[cfg(all(
+    test,
+    feature = "pdf",
+    any(feature = "ocr", feature = "ocr-pipeline", feature = "layout-detection")
+))]
 pub(crate) fn build_full_page_raster_pdf(
     page_pt: (f32, f32),
     image_px: (u32, u32),

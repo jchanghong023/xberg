@@ -130,15 +130,15 @@ fn type3_font_load_warning_is_not_reported_as_missing_glyph_ink() {
     );
     let warning = &warnings[0];
     assert_eq!(warning.source, "pdf-render");
-    // (fork) The upstream test asserts the older "did not affect the rendered output"
-    // wording, which no production code emits any more (upstream 2f610626b5 reclassified
-    // font-load notices without updating this string). The live template is
-    // `render_notice_warning`: the notice passes the engine's cause through as a
-    // "logged a warning and continued" diagnostic — the property under test is that a
-    // font-load notice is *not* worded as glyph/content loss.
+    // The classifier that shipped decides by the engine event's structured `operation` field
+    // against `GLYPH_INK_LOSS_OPERATIONS`, and matches no message text at all. A Type 3
+    // glyph-name fallback reports `operation = "load_font"`, which is not in that list, so it
+    // takes the neutral notice wording rather than either ink-loss phrasing. What this test
+    // exists to pin is that it is NOT described as content loss (asserted above) and that the
+    // engine's own cause text survives (asserted below) -- not one particular sentence. ~keep
     assert!(
-        warning.message.contains("logged a warning and continued"),
-        "warning must describe a font-load diagnostic, not content loss; got: {}",
+        warning.message.contains("rendering logged a warning and continued"),
+        "warning must read as a neutral render notice, not a content-loss claim; got: {}",
         warning.message
     );
     assert!(

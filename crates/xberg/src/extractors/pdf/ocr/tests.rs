@@ -7117,6 +7117,42 @@ Name: ___
         );
     }
 
+    /// #1828: `whole_page_raster_for_ocr_page` is the one place that decides whether a page is
+    /// a scan for the whole-image PSM hint, called from both the non-layout OCR routes (which
+    /// pass an open `lazy_pdf_render_state`) and the layout-detection route (which does not,
+    /// since it hands in pre-rendered `images` -- see the `let` in `extract_with_ocr_for_page`).
+    /// Before this fix, the second branch was hardcoded `false`, so a scanned page's PSM
+    /// depended on whether layout detection was on. Pins the two branches at parity: given the
+    /// exact same PDF bytes, the `lazy_pdf_render_state`-backed answer (mirroring the
+    /// non-layout routes) and the `content`-only, no-render-state answer (mirroring the
+    /// layout-detection route) must agree, for both a scan page and an ordinary vector page.
+    ///
+    /// Fails on unfixed code: the `None` branch returns `false` unconditionally, so the scan
+    /// assertion fails with `left: false, right: true`.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn whole_page_raster_for_ocr_page_agrees_with_and_without_a_render_state() {
+        let scan_bytes = crate::pdf::render::build_full_page_raster_pdf((100.0, 100.0), (400, 400), 1.0, 0);
+        let vector_bytes = crate::pdf::render::build_minimal_pdf_with_mediabox(100.0, 100.0);
+
+        for (bytes, expected, label) in [(&scan_bytes, true, "scan page"), (&vector_bytes, false, "vector page")] {
+            let (render_state_doc, page_count, rotations) = open_pdf_for_full_ocr(bytes).expect("fixture must open");
+            let with_render_state = Some((render_state_doc, page_count, rotations));
+            let via_render_state = whole_page_raster_for_ocr_page(with_render_state.as_ref(), &mut None, None, 0);
+            assert_eq!(
+                via_render_state, expected,
+                "{label}: the render-state branch (mirrors the non-layout OCR routes) disagrees with the fixture"
+            );
+
+            let mut fallback_pdf_state: Option<Option<xberg_native_pdf::PdfDocument>> = None;
+            let via_fallback = whole_page_raster_for_ocr_page(None, &mut fallback_pdf_state, Some(bytes), 0);
+            assert_eq!(
+                via_fallback, via_render_state,
+                "{label}: the layout-detection route's answer must match the non-layout route's"
+            );
+        }
+    }
+
     /// The caller's own `psm` always wins, and a page that is not a scan keeps the engine default
     /// (no `tesseract_config` materialised at all).
     #[cfg(feature = "pdf")]

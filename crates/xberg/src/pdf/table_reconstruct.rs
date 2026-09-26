@@ -775,12 +775,29 @@ fn post_process_table_inner(
     let mut col = 0;
     while col < processed[0].len() {
         let header_text = processed[0][col].trim().to_string();
-        let data_empty = processed[1..]
+        let data_row_count = processed.len() - 1;
+        let empty_count = processed[1..]
             .iter()
-            .all(|row| row.get(col).is_none_or(|cell| cell.trim().is_empty()));
+            .filter(|row| row.get(col).is_none_or(|cell| cell.trim().is_empty()))
+            .count();
+        let data_empty = empty_count == data_row_count;
+        // ~keep A header-less column this sparse is what the `column_sparsity` gate below
+        // rejects the whole table on, so fold it into its neighbour instead of losing the table
+        // (see `fold_sparse_headerless_column`). Guarded on an empty header for the same reason
+        // that gate is: a column with its own label is a legitimately sparse column, not noise.
+        let sparse_and_headerless = !data_empty
+            && header_text.is_empty()
+            && processed[0].len() > 2
+            && if layout_guided {
+                empty_count * 20 > data_row_count * 19
+            } else {
+                column_is_sparse_for_ocr(empty_count, data_row_count)
+            };
 
         if data_empty {
             merge_header_only_column(&mut processed, col, header_text, column_positions.as_deref_mut());
+        } else if sparse_and_headerless {
+            fold_sparse_headerless_column(&mut processed, col, column_positions.as_deref_mut());
         } else {
             col += 1;
         }
@@ -2759,6 +2776,46 @@ fn looks_like_declaration_head(head: &str) -> bool {
         .filter(|token| token.chars().any(|character| character.is_alphabetic()))
         .count();
     identifiers >= 2
+}
+
+/// Fold a header-less, overwhelmingly-empty column into its neighbour, carrying every cell's
+/// text rather than dropping it.
+///
+/// The sibling [`merge_header_only_column`] already removes a column whose data cells are
+/// *entirely* empty. A column that is merely almost empty had no such path and instead reached
+/// the `column_sparsity` gate, which rejects the **whole table** over it. On a scanned page that
+/// is a routine outcome: a misread shaded row contributes two or three stray glyphs (`_`, `a`,
+/// `(DEFICIT)`) at x-positions that mint a phantom column, and three stray cells out of
+/// twenty-two rows were enough to discard an otherwise well-formed 23x7 grid entirely
+/// (xberg-io/xberg#1797, xberg-io/xberg#1832).
+///
+/// This is a rescue path, never a behaviour change for a table that already passes: the caller
+/// only reaches it for a column the sparsity gate is about to reject on, and a table containing
+/// such a column returns `None` today. Folding left (right, at column 0) preserves the text --
+/// which is also usually where it belongs, since a phantom column is carved out of its
+/// neighbour's content in the first place. ~keep
+fn fold_sparse_headerless_column(table: &mut [Vec<String>], col: usize, column_positions: Option<&mut Vec<u32>>) {
+    if table.is_empty() || table[0].len() < 2 {
+        return;
+    }
+    let target = if col > 0 { col - 1 } else { 1 };
+    for row in table.iter_mut() {
+        let Some(moved) = row.get(col).map(|cell| cell.trim().to_string()) else {
+            continue;
+        };
+        if !moved.is_empty()
+            && let Some(destination) = row.get_mut(target)
+        {
+            if !destination.trim().is_empty() {
+                destination.push(' ');
+            }
+            destination.push_str(&moved);
+        }
+        if col < row.len() {
+            row.remove(col);
+        }
+    }
+    drop_column_position(column_positions, col);
 }
 
 fn merge_header_only_column(
