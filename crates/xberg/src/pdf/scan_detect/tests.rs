@@ -804,4 +804,3 @@ fn full_page_raster_density_reads_the_scan_density_and_ignores_figures() {
         "a page without images has no raster density"
     );
 }
-

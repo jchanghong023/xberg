@@ -5202,8 +5202,7 @@ mod tests {
             x2: 40.,
             y2: 0.,
         }];
-        let result =
-            assign_spans_to_intersection_grid(&cells, &[0., 40., 80.], &[0., 20., 40.], 2, &[], &[], true);
+        let result = assign_spans_to_intersection_grid(&cells, &[0., 40., 80.], &[0., 20., 40.], 2, &[], &[], true);
         assert!(result.is_some(), "malformed cell geometry must not panic");
     }
 
