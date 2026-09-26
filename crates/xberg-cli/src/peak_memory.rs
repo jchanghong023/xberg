@@ -82,7 +82,10 @@ pub fn peak_memory_bytes() -> Option<u64> {
 
     // `PROCESS_MEMORY_COUNTERS` is a C plain-old-data struct; zero-initializing it is
     // always valid, and the call's return code is checked before the values are trusted.
+    // `cb` must carry the structure size per its contract (some Windows versions
+    // validate the field, not only the `cb` parameter).
     let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+    counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
     let process = unsafe { GetCurrentProcess() };
     let ok = unsafe {
         GetProcessMemoryInfo(

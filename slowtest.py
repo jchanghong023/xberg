@@ -11,7 +11,8 @@
 
 解压目录固定放在仓库 target/ 下（不再用系统 %TEMP%）：跑成功即删除（报告副本已存
 target/slowtest-report-*.md），失败保留供检查。历史行为是每次运行都在 %TEMP% 留下
-0.6~0.9 GB 且永不清除（2026-09-20 实测积压 6 个目录 ≈ 4.4 GB）。要无条件保留：
+0.6~0.9 GB 且永不清除（2026-09-20 实测积压 6 个目录 ≈ 4.4 GB）。要无条件保留：加
+--keep-tmp。
 
 用法:
     python slowtest.py [--skip-package] [--src DIR] [--timeout SECS] [--keep-tmp]

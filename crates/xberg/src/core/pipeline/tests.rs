@@ -2771,6 +2771,26 @@ mod document_counts {
         );
     }
 
+    /// A word character glued onto the extension (`image_1.pnga`) is a different token,
+    /// not a reference to the renamed file, and must be left verbatim.
+    #[test]
+    fn rewrite_content_image_extensions_requires_a_token_boundary_after_the_extension() {
+        let mut content = String::from("见 image_1.pnga 与 image_1.png 结尾\n");
+        super::rewrite_content_image_extensions(&mut content, &[(1, "png".to_string(), "webp".to_string())]);
+        assert!(
+            content.contains("image_1.pnga"),
+            "a glued-on word character means a different token; got: {content}"
+        );
+        assert!(
+            content.contains("image_1.webp"),
+            "the genuine reference still follows the rename; got: {content}"
+        );
+        assert!(
+            !content.contains("webpa"),
+            "no half-rewritten token may appear; got: {content}"
+        );
+    }
+
     /// The PPTX content path bakes a picture's placeholder into the code block around it. Left
     /// there, the reference is inside a fence, where no markdown reader fetches or draws it.
     #[test]

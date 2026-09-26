@@ -776,7 +776,12 @@ fn rebuild_text_from_fragmented_spans(spans: &[xberg_native_pdf::layout::TextSpa
 // matching, smaller note below the reference before changing an existing join.
 // Inspect only nearby spans and keep one definition per number, so dense pages
 // do not turn this into an all-pairs scan.
-fn numeric_notes(spans: &[xberg_native_pdf::layout::TextSpan]) -> HashMap<&str, &xberg_native_pdf::layout::TextSpan> {
+// (fork) `pub(super)` so the hierarchy (structured) assembly path can apply the
+// same numeric-footnote guard before welding a superscript digit onto its base
+// span (see `rejoin_inline_scripts`).
+pub(super) fn numeric_notes(
+    spans: &[xberg_native_pdf::layout::TextSpan],
+) -> HashMap<&str, &xberg_native_pdf::layout::TextSpan> {
     let mut notes: HashMap<&str, &xberg_native_pdf::layout::TextSpan> = HashMap::new();
     for (index, marker) in spans.iter().enumerate() {
         let number = marker.text.trim();
@@ -820,7 +825,7 @@ fn numeric_notes(spans: &[xberg_native_pdf::layout::TextSpan]) -> HashMap<&str, 
     notes
 }
 
-fn needs_numeric_script_boundary(
+pub(super) fn needs_numeric_script_boundary(
     base: &xberg_native_pdf::layout::TextSpan,
     script: &xberg_native_pdf::layout::TextSpan,
     notes: &HashMap<&str, &xberg_native_pdf::layout::TextSpan>,

@@ -317,11 +317,19 @@ def _release_ci_gate():
     if repo is None:
         return UNVERIFIED, "无法从 origin remote 解析 fork 仓库（gh 调用必须显式 -R，见 _fork_repo）"
     rc, out = _git(["status", "--porcelain"])
+    if rc != 0:
+        return UNVERIFIED, "git status 失败，无法确认工作区干净"
     if out.strip():
         return FAIL, "工作区不干净（远程 CI 测的不是本地改动），先提交并推送"
     rc, branch = _git(["rev-parse", "--abbrev-ref", "HEAD"])
+    if rc != 0:
+        return UNVERIFIED, "git 解析当前分支失败，无法定位 origin 跟踪分支"
     rc, head = _git(["rev-parse", "HEAD"])
+    if rc != 0:
+        return UNVERIFIED, "git 解析 HEAD 失败"
     rc, origin = _git(["rev-parse", f"origin/{branch.strip()}"])
+    if rc != 0:
+        return UNVERIFIED, f"git 解析 origin/{branch.strip()} 失败（远程跟踪引用不存在？），推送守卫无法核验"
     if head.strip() != origin.strip():
         return FAIL, f"HEAD 未推送到 origin/{branch.strip()}，远程测不到当前提交"
     if subprocess.run(["gh", "auth", "status"], capture_output=True).returncode != 0:

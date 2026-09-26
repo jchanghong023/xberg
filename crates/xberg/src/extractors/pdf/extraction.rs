@@ -752,8 +752,13 @@ pub(crate) fn extract_all_from_native_document(
             "native structure: extracted segments for heading detection"
         );
 
-        let inject_placeholders = pdf_image_output_requested(config)
-            && config.images.as_ref().map(|c| c.inject_placeholders).unwrap_or(false);
+        // (fork) An absent `images` section means "use the defaults", and the
+        // default injects placeholders — the same rule the OCR path and the
+        // flat fallback path already apply (`unwrap_or(true)` there). Reading
+        // absence as an opt-out here made the default-config structured path
+        // skip positional placeholders and fall back to document-end appends.
+        let inject_placeholders =
+            pdf_image_output_requested(config) && config.images.as_ref().map(|c| c.inject_placeholders).unwrap_or(true);
 
         match crate::pdf::structure::extract_document_structure_from_segments(
             all_page_segments,

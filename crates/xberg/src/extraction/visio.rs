@@ -721,7 +721,11 @@ fn decode_visio_text(data: &[u8], utf16: bool, ansi_encoding: &'static encoding_
         String::from_utf16_lossy(&units)
     } else {
         let (decoded, _, _) = ansi_encoding.decode(data);
-        decoded.trim_end_matches('\0').to_string()
+        // Match the UTF-16 branch: the text is NUL-terminated, so cut at the
+        // first NUL — padding after the terminator must not leak U+0000 control
+        // characters into the Markdown output.
+        let end = decoded.find('\0').unwrap_or(decoded.len());
+        decoded[..end].to_string()
     }
 }
 

@@ -289,9 +289,12 @@ struct EngineSlot {
 
 impl Drop for EngineSlot {
     fn drop(&mut self) {
-        if let Ok(mut free) = self.free.lock() {
-            free.push_back(self.id);
-        }
+        // Same poison policy as `acquire`: the queue stays consistent, so recover
+        // the guard instead of leaking the slot.
+        self.free
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(self.id);
     }
 }
 
@@ -319,7 +322,15 @@ impl EngineSlots {
                 message: "PaddleOCR engine slot pool closed".to_string(),
                 plugin_name: "paddle-ocr".to_string(),
             })?;
-        let id = self.free.lock().ok().and_then(|mut free| free.pop_front()).unwrap_or(0);
+        // A poisoned lock only means a caller panicked while holding it; the slot
+        // queue itself is still consistent, so recover the guard instead of
+        // funneling every concurrent request onto slot 0.
+        let id = self
+            .free
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .pop_front()
+            .unwrap_or(0);
         Ok(EngineSlot {
             id,
             free: Arc::clone(&self.free),

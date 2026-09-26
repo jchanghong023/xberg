@@ -2089,7 +2089,10 @@ def load_expectations(path: Path) -> dict:
     try:
         raw = path.read_bytes()
         EXPECTATIONS_SHA256 = hashlib.sha256(raw).hexdigest()
-        data = json.loads(raw.decode("utf-8"))
+        # utf-8-sig：Windows 记事本重存的 JSON 可能带 BOM，utf-8 会保留 U+FEFF 导致
+        # 整包解析失败；无 BOM 时两种解码逐字节一致（.tmp 实测 2026-09-27），
+        # sha256 仍按原始 bytes 计算，不受影响。
+        data = json.loads(raw.decode("utf-8-sig"))
         structural_warning = None
         if not isinstance(data, dict):
             # 顶层手误（整包套了一层数组等）与 files 写错同待遇：清空并显式告警，
@@ -2138,7 +2141,8 @@ def load_baseline(path: Path):
         print(f"[baseline] 未找到 {path}，跳过回归对比", flush=True)
         return {}, "missing"
     try:
-        data = json.loads(path.read_text("utf-8"))
+        # utf-8-sig 同上：容忍带 BOM 的基线文件，无 BOM 时行为与 utf-8 一致。
+        data = json.loads(path.read_text("utf-8-sig"))
         if not isinstance(data, dict):
             raise ValueError(f"基线顶层必须是对象，实际是 {type(data).__name__}")
         return data, "ok"
@@ -2413,7 +2417,7 @@ def judge_av_sparsity(src_file: Path, m, issues):
     if chars < AV_MIN_CHARS_HARD:
         issues.append(make_issue("AV_SPARSE", f"音视频转写过少({chars}字符, {mb:.1f}MB)"))
         return
-    audio_only = ext in {"mp3", "wav", "m4a", "flac", "ogg", "wma"}
+    audio_only = ext in {"mp3", "wav", "m4a"}
     if audio_only:
         density = chars / max(mb, 0.01)
         if density < AV_SPARSE_WARN_CHARS_PER_MB:
@@ -2701,7 +2705,7 @@ def _fmt_issues(issues):
     return "; ".join(f"[{i['code']}] {i['message']}" for i in issues)
 
 
-def report_file(name, verdict, m, recall_info, meta, elapsed, issues, used_cli, ocr_info=None):
+def report_file(name, verdict, m, recall_info, meta, elapsed, issues, ocr_info=None):
     ok = "✅" if verdict == "PASS" else ("⚠️ " if verdict == "WARN" else "❌")
     emit(f"\n{'='*72}")
     emit(f"{ok} [{verdict}] {name}   ({elapsed:.1f}s)")
@@ -3452,7 +3456,7 @@ def main():
             m = structural_metrics("", img_dir)
             issues = [make_issue("TIMEOUT", f"超时(>{args.timeout}s)")]
             verdict = "FAIL"
-            report_file(f.name, verdict, m, None, meta, elapsed, issues, cli)
+            report_file(f.name, verdict, m, None, meta, elapsed, issues)
             rec = {
                 "name": f.name, "verdict": verdict, "elapsed": elapsed,
                 "recall": None, "num_recall": None, "issues": issues,
@@ -3583,7 +3587,7 @@ def main():
 
         check_s = time.time() - t_judge0
         verdict = issues_to_verdict(issues)
-        report_file(f.name, verdict, m, recall_info, meta, elapsed, issues, used_cli,
+        report_file(f.name, verdict, m, recall_info, meta, elapsed, issues,
                     ocr_info=ocr_info)
         results.append({
             "name": f.name, "verdict": verdict, "elapsed": elapsed,

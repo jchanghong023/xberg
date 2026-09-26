@@ -1317,11 +1317,18 @@ fn rewrite_image_refs_on_unfenced_text(content: &str, format_renames: &[(u32, St
         // field — the same number the CLI names the written file by — so the digits are the
         // lookup key the rename was recorded under. The vector position can differ from the
         // field when staging dropped unreferenced images, so it must not be the key.
+        // A word character glued onto the extension (`image_1.pnga`) is a different token,
+        // not a reference to the renamed file, so the extension must end at a token boundary.
         let replacement = if digit_len > 0 {
             let index = after_prefix[..digit_len].parse::<u32>().ok();
             index.and_then(|index| {
                 format_renames.iter().find(|(renamed, old_format, _)| {
-                    *renamed == index && after_digits.starts_with(&format!(".{old_format}"))
+                    *renamed == index
+                        && after_digits.starts_with(&format!(".{old_format}"))
+                        && after_digits
+                            .as_bytes()
+                            .get(old_format.len() + 1)
+                            .is_none_or(|byte| !byte.is_ascii_alphanumeric())
                 })
             })
         } else {

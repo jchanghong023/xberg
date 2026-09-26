@@ -15,6 +15,9 @@ use super::NativeDocument;
 // coordinates, so it needs the strict page-axis predicate, not the
 // rotation-agnostic writing-mode one.
 use super::span_geometry::is_horizontal_ltr;
+// (fork) The structured path reuses the flat path's numeric-footnote guards so a
+// superscript footnote digit is kept out of its base span (see `rejoin_inline_scripts`).
+use super::text::{needs_numeric_script_boundary, numeric_notes};
 use crate::pdf::error::Result;
 use crate::pdf::hierarchy::SegmentData;
 
@@ -268,8 +271,17 @@ fn apply_xy_cut_if_column_aware(
 }
 
 fn rejoin_inline_scripts(spans: Vec<xberg_native_pdf::layout::TextSpan>) -> Vec<xberg_native_pdf::layout::TextSpan> {
+    // (fork) Numeric-footnote guard, mirroring the flat assembly path
+    // (`rebuild_text_from_fragmented_spans` in `text.rs`, upstream #1773/#1792):
+    // a small superscript digit that matches a page-bottom note entry must not be
+    // welded onto the trailing number of its base span ("comma 3" + superscript
+    // "5" would read "comma 35"). Keep it as its own span and prefix a boundary
+    // space; word-level assembly treats an explicitly drawn boundary space as
+    // authoritative (#1566) and emits "comma 3 5", matching the flat path.
+    let numeric_note_index = numeric_notes(&spans);
     let mut by_base: HashMap<usize, Vec<ScriptAttachment>> = HashMap::new();
     let mut attached = vec![false; spans.len()];
+    let mut note_separated = vec![false; spans.len()];
     for script_index in 0..spans.len() {
         if by_base.contains_key(&script_index) {
             continue;
@@ -277,6 +289,15 @@ fn rejoin_inline_scripts(spans: Vec<xberg_native_pdf::layout::TextSpan>) -> Vec<
         let Some((base_index, insertion_index)) = find_inline_script_base(&spans, &attached, script_index) else {
             continue;
         };
+        if needs_numeric_script_boundary(
+            &spans[base_index],
+            &spans[script_index],
+            &numeric_note_index,
+            spans.get(script_index + 1),
+        ) {
+            note_separated[script_index] = true;
+            continue;
+        }
         attached[script_index] = true;
         by_base.entry(base_index).or_default().push(ScriptAttachment {
             script_index,
@@ -284,13 +305,21 @@ fn rejoin_inline_scripts(spans: Vec<xberg_native_pdf::layout::TextSpan>) -> Vec<
         });
     }
 
-    if by_base.is_empty() {
+    if by_base.is_empty() && !note_separated.contains(&true) {
         return spans;
     }
 
     let mut repaired = Vec::with_capacity(spans.len());
     for (index, span) in spans.iter().enumerate() {
         if attached[index] {
+            continue;
+        }
+        if note_separated[index] {
+            let mut separated = span.clone();
+            if !separated.text.starts_with(char::is_whitespace) {
+                separated.text.insert(0, ' ');
+            }
+            repaired.push(separated);
             continue;
         }
         match by_base.remove(&index) {
@@ -1439,6 +1468,54 @@ mod tests {
 
         assert_eq!(texts, ["A/cm2", ")"]);
         assert_eq!(repaired[0].font_size, 10.0);
+    }
+
+    /// (fork) A superscript footnote digit with a matching page-bottom note entry
+    /// must stay out of its base span even when the geometry alone would attach
+    /// it as an inline suffix — otherwise "clause 3" + superscript "5" welds into
+    /// "clause 35" on the structured (Markdown-default) path. The separated span
+    /// keeps its own (smaller) font size and carries a leading boundary space so
+    /// word-level assembly emits "clause 3 5" exactly like the flat text path.
+    #[test]
+    fn numeric_footnote_script_stays_separate_with_boundary_space() {
+        let base = positioned_span("A total of 3", 100.0, 700.0, 70.0, 12.0, vec![]);
+        let script = positioned_span("5", 170.5, 700.0, 4.0, 8.0, vec![]);
+        let following = positioned_span(" closes the paragraph.", 175.0, 700.0, 60.0, 12.0, vec![]);
+        let note_marker = positioned_span("5", 50.0, 100.0, 4.0, 6.0, vec![]);
+        let note_body = positioned_span(" A supporting note.", 55.0, 100.0, 90.0, 8.0, vec![]);
+
+        let repaired = super::rejoin_inline_scripts(vec![base, script, following, note_marker, note_body]);
+        let texts: Vec<_> = repaired.iter().map(|span| span.text.as_str()).collect();
+
+        assert_eq!(
+            texts,
+            [
+                "A total of 3",
+                " 5",
+                " closes the paragraph.",
+                "5",
+                " A supporting note."
+            ]
+        );
+        assert_eq!(
+            repaired[1].font_size, 8.0,
+            "the separated digit must keep its superscript font size"
+        );
+    }
+
+    /// (fork) Without a matching note entry the same superscript digit still
+    /// attaches as an inline suffix (an exponent or reference with no footnote
+    /// body keeps the historic join), pinning the guard to the note-matched case.
+    #[test]
+    fn numeric_script_without_matching_note_still_attaches() {
+        let base = positioned_span("A total of 3", 100.0, 700.0, 70.0, 12.0, vec![]);
+        let script = positioned_span("5", 170.5, 700.0, 4.0, 8.0, vec![]);
+        let following = positioned_span(" closes the paragraph.", 175.0, 700.0, 60.0, 12.0, vec![]);
+
+        let repaired = super::rejoin_inline_scripts(vec![base, script, following]);
+        let texts: Vec<_> = repaired.iter().map(|span| span.text.as_str()).collect();
+
+        assert_eq!(texts, ["A total of 35", " closes the paragraph."]);
     }
 
     #[test]

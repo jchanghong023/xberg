@@ -50,6 +50,27 @@ pub(super) fn batch_image_dir(base: &Path, result_index: usize) -> PathBuf {
 ///
 /// Lines inside a code fence are literal text — a listing that documents the very references
 /// rewritten here — and are passed through verbatim.
+/// Rewrite one fence-free line: engine-produced references (`image_<digits>.<ext>`)
+/// gain the directory prefix. A word character glued after `image_` means the link
+/// target merely starts with those bytes (e.g. a document link to `image_gallery.md`)
+/// and is not an extracted-image reference, so it keeps its target verbatim.
+fn prefix_engine_image_refs(line: &str, replacement: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(offset) = rest.find("](image_") {
+        let tail = &rest[offset + "](image_".len()..];
+        out.push_str(&rest[..offset]);
+        if tail.chars().next().is_some_and(|character| character.is_ascii_digit()) {
+            out.push_str(replacement);
+        } else {
+            out.push_str("](image_");
+        }
+        rest = tail;
+    }
+    out.push_str(rest);
+    out
+}
+
 pub(super) fn prefix_image_refs(content: &str, dir: &Path) -> String {
     let normalized = dir.to_string_lossy().replace('\\', "/");
     let mut encoded = String::with_capacity(normalized.len());
@@ -93,7 +114,7 @@ pub(super) fn prefix_image_refs(content: &str, dir: &Path) -> String {
         if fence.fenced(body) {
             out.push_str(line);
         } else {
-            out.push_str(&body.replace("](image_", &prefix));
+            out.push_str(&prefix_engine_image_refs(body, &prefix));
             // The replacement sees the line's own characters only; a CRLF ending keeps its `\r`.
             if had_cr {
                 out.push('\r');
@@ -179,11 +200,21 @@ mod tests {
     }
 
     /// A directory name containing `#` survives CommonMark destination parsing, but the
-    /// rendered URL would cut the destination at it (fragment start) and the image stops
+    /// rendered URL would cut the destination at it (fragment start), so the image stops
     /// loading — so `#` is percent-encoded like the other reserved characters.
     #[test]
     fn prefix_image_refs_encodes_hash_in_directory() {
         let prefixed = prefix_image_refs("![](image_0.png)\n", Path::new("a#b"));
         assert_eq!(prefixed, "![](a%23b/image_0.png)\n");
+    }
+
+    /// Only engine-produced references (`image_<digits>`) are prefixed. A document link
+    /// whose target merely starts with those bytes (`[附录](image_gallery.md)`) is not an
+    /// extracted-image reference and must keep its target verbatim.
+    #[test]
+    fn prefix_image_refs_leaves_non_engine_link_targets_alone() {
+        let content = "![](image_0.png)\n\n[附录](image_gallery.md)\n";
+        let prefixed = prefix_image_refs(content, Path::new("out"));
+        assert_eq!(prefixed, "![](out/image_0.png)\n\n[附录](image_gallery.md)\n");
     }
 }

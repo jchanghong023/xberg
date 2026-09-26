@@ -49,14 +49,12 @@ fn build_pdf_with_content(content: &str) -> Vec<u8> {
     pdf
 }
 
-/// (fork) IGNORED on this fork: through the public `extract` entry the fork's native-text
-/// layer emits "comma 35" for this synthetic page while the same glue/assemble code (verified
-/// byte-identical against upstream) feeds the CLI path "comma 3 5" — the divergence lives in
-/// which span-assembly branch the fork's config reaches, not in any function upstream's
-/// #1773 fix touched. Upstream's CI has not validated this test either (its recent ci-rust
-/// runs were cancelled before completion). Follow up with a real debugging session; the
-/// fork's own E2E acceptance (fulltest.py) covers PDF numeric fidelity on real documents.
-#[ignore = "fork: native fast-path glues the superscript digit; see comment"]
+/// (fork) Un-ignored: the structured (hierarchy) assembly path now applies the same
+/// numeric-footnote guard the flat path has had since upstream #1773/#1792
+/// (`needs_numeric_script_boundary` in `pdf/native/text.rs`, reused by
+/// `rejoin_inline_scripts` in `pdf/native/hierarchy.rs`), so on the fork's
+/// Markdown-default config the superscript digit stays a separate word instead of
+/// welding into "comma 35".
 #[test]
 fn numeric_footnote_survives_public_extraction() {
     let pdf = build_pdf_with_content(

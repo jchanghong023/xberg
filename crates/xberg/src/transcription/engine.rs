@@ -6,10 +6,14 @@
 //!
 //! # Thread safety
 //!
-//! `WhisperEngine` is `Send + Sync` — the `ort::Session::run()` API takes
-//! `&mut self` as an API-level constraint but its implementation delegates to
-//! `run_inner(&self)`, which is thread-safe per the ONNX Runtime documentation.
-//! We use the same `&self`-cast pattern established in `reranking/engine.rs`.
+//! `WhisperEngine` is `Send + Sync`. ort's `Session::run` takes `&mut self`
+//! because concurrent runs on a single session are NOT safe — ort 2.0.0-rc.13
+//! documents that versions allowing concurrent inference "often saw crashes and
+//! memory corruption" (ONNX Runtime EP allocators / statistics trackers are not
+//! thread safe) — so each of the three sessions lives behind a `Mutex`. The
+//! fork's parallel chunk workers keep mel-spectrogram and frontend work
+//! concurrent while per-session inference is serialized; different sessions
+//! (encoder vs decoder vs decoder_with_past) can still run at the same time.
 //!
 //! # Architecture
 //!
@@ -297,19 +301,18 @@ fn build_session(path: &std::path::Path) -> Result<Session, TranscriptionError> 
 /// Call [`WhisperEngine::transcribe`] to produce a transcript from PCM audio.
 #[cfg_attr(alef, alef(skip))]
 pub struct WhisperEngine {
-    encoder: Session,
-    decoder: Session,
-    decoder_with_past: Session,
+    // (fork) `Mutex` per session: ort's `Session::run` requires `&mut self`
+    // because concurrent inference on one session is unsafe (see module docs).
+    // The parallel chunk workers in `transcribe_segments` share `&self`, so the
+    // raw-pointer `&self`-cast pattern used elsewhere is not sound here.
+    encoder: std::sync::Mutex<Session>,
+    decoder: std::sync::Mutex<Session>,
+    decoder_with_past: std::sync::Mutex<Session>,
     tokenizer: Tokenizer,
     special_tokens: SpecialTokens,
     mel_frontend: BatchLogMelSpectrogram,
     n_mels: u32,
 }
-
-#[allow(unsafe_code)]
-unsafe impl Send for WhisperEngine {}
-#[allow(unsafe_code)]
-unsafe impl Sync for WhisperEngine {}
 
 impl WhisperEngine {
     /// Load a Whisper engine from the given model paths.
@@ -375,9 +378,9 @@ impl WhisperEngine {
         .map_err(|e| TranscriptionError::MelSpec(e.to_string()))?;
 
         Ok(Self {
-            encoder,
-            decoder,
-            decoder_with_past,
+            encoder: std::sync::Mutex::new(encoder),
+            decoder: std::sync::Mutex::new(decoder),
+            decoder_with_past: std::sync::Mutex::new(decoder_with_past),
             tokenizer,
             special_tokens,
             mel_frontend,
@@ -688,18 +691,16 @@ impl WhisperEngine {
 
         let mel_value: Value = Value::from_array(mel_nd)?.into();
 
-        #[allow(unsafe_code)]
-        let outputs = unsafe {
-            let ptr = &self.encoder as *const Session as *mut Session;
-            (*ptr).run(ort::inputs!["input_features" => mel_value])
-        }?;
-
-        let encoder_output_name = self
-            .encoder
+        // (fork) lock: `Session::run` needs `&mut self`; a poisoned lock does not
+        // corrupt the session (ort errors return `Err`, they do not panic), so the
+        // guard is recovered instead of propagating the poison.
+        let mut encoder = self.encoder.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let encoder_output_name = encoder
             .outputs()
             .first()
             .map(|o| o.name().to_string())
             .unwrap_or_else(|| "last_hidden_state".to_string());
+        let outputs = encoder.run(ort::inputs!["input_features" => mel_value])?;
 
         let hidden: Value = outputs
             .into_iter()
@@ -717,20 +718,31 @@ impl WhisperEngine {
     fn greedy_decode(&self, prompt: Vec<i64>, encoder_hidden_states: &Value) -> Result<Vec<u32>, TranscriptionError> {
         let eot = self.special_tokens.end_of_text;
 
-        let dec_input_names: Vec<String> = self.decoder.inputs().iter().map(|i| i.name().to_string()).collect();
-        let dec_output_names: Vec<String> = self.decoder.outputs().iter().map(|o| o.name().to_string()).collect();
-        let dwp_input_names: Vec<String> = self
-            .decoder_with_past
-            .inputs()
-            .iter()
-            .map(|i| i.name().to_string())
-            .collect();
-        let dwp_output_names: Vec<String> = self
-            .decoder_with_past
-            .outputs()
-            .iter()
-            .map(|o| o.name().to_string())
-            .collect();
+        // (fork) per-session `Mutex` (see module docs); metadata is read under
+        // short-lived locks and never two sessions at once.
+        let (dec_input_names, dec_output_names) = {
+            let decoder = self.decoder.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let dec_input_names: Vec<String> = decoder.inputs().iter().map(|i| i.name().to_string()).collect();
+            let dec_output_names: Vec<String> = decoder.outputs().iter().map(|o| o.name().to_string()).collect();
+            (dec_input_names, dec_output_names)
+        };
+        let (dwp_input_names, dwp_output_names) = {
+            let decoder_with_past = self
+                .decoder_with_past
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let dwp_input_names: Vec<String> = decoder_with_past
+                .inputs()
+                .iter()
+                .map(|i| i.name().to_string())
+                .collect();
+            let dwp_output_names: Vec<String> = decoder_with_past
+                .outputs()
+                .iter()
+                .map(|o| o.name().to_string())
+                .collect();
+            (dwp_input_names, dwp_output_names)
+        };
 
         tracing::debug!(?dec_input_names, ?dec_output_names, "Decoder I/O names");
         tracing::debug!(?dwp_input_names, ?dwp_output_names, "Decoder-with-past I/O names");
@@ -765,44 +777,44 @@ impl WhisperEngine {
             &enc_hs_input_name => enc_hs_clone,
         ];
 
-        #[allow(unsafe_code)]
-        let step0_outputs: ort::session::SessionOutputs = unsafe {
-            let ptr = &self.decoder as *const Session as *mut Session;
-            (*ptr).run(step0_inputs)
-        }?;
+        let (mut generated, mut encoder_kvs, mut decoder_kvs) = {
+            let mut decoder = self.decoder.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let step0_outputs: ort::session::SessionOutputs = decoder.run(step0_inputs)?;
 
-        let first_token = {
-            let logits_val = step0_outputs
-                .iter()
-                .find(|(name, _)| *name == logits_output_name)
-                .map(|(_, v)| v)
-                .ok_or(TranscriptionError::NoOutput)?;
-            greedy_argmax_last(&logits_val)?
-        };
+            let first_token = {
+                let logits_val = step0_outputs
+                    .iter()
+                    .find(|(name, _)| *name == logits_output_name)
+                    .map(|(_, v)| v)
+                    .ok_or(TranscriptionError::NoOutput)?;
+                greedy_argmax_last(&logits_val)?
+            };
 
-        if first_token == eot {
-            return Ok(Vec::new());
-        }
-        let mut generated: Vec<u32> = vec![first_token];
-
-        let step0_non_logits: Vec<(String, Value)> = step0_outputs
-            .into_iter()
-            .filter(|(name, _)| *name != logits_output_name)
-            .map(|(name, val)| {
-                let input_name = name.replacen("present", "past_key_values", 1);
-                (input_name, val)
-            })
-            .collect();
-
-        let mut encoder_kvs: Vec<(String, Value)> = Vec::new();
-        let mut decoder_kvs: Vec<(String, Value)> = Vec::new();
-        for (name, val) in step0_non_logits {
-            if name.contains(".encoder.") {
-                encoder_kvs.push((name, val));
-            } else {
-                decoder_kvs.push((name, val));
+            if first_token == eot {
+                return Ok(Vec::new());
             }
-        }
+
+            let step0_non_logits: Vec<(String, Value)> = step0_outputs
+                .into_iter()
+                .filter(|(name, _)| *name != logits_output_name)
+                .map(|(name, val)| {
+                    let input_name = name.replacen("present", "past_key_values", 1);
+                    (input_name, val)
+                })
+                .collect();
+
+            let mut encoder_kvs: Vec<(String, Value)> = Vec::new();
+            let mut decoder_kvs: Vec<(String, Value)> = Vec::new();
+            for (name, val) in step0_non_logits {
+                if name.contains(".encoder.") {
+                    encoder_kvs.push((name, val));
+                } else {
+                    decoder_kvs.push((name, val));
+                }
+            }
+
+            (vec![first_token], encoder_kvs, decoder_kvs)
+        };
 
         let dwp_wants_enc_hs = dwp_input_names.iter().any(|n| n.contains("encoder_hidden_states"));
 
@@ -840,46 +852,48 @@ impl WhisperEngine {
                 dwp_inputs.push((kv_name.as_str().into(), kv_clone.into()));
             }
 
-            #[allow(unsafe_code)]
-            let step_outputs: ort::session::SessionOutputs = unsafe {
-                let ptr = &self.decoder_with_past as *const Session as *mut Session;
-                (*ptr).run(dwp_inputs)
-            }?;
+            let next_token;
+            let mut new_decoder_kvs: Vec<(String, Value)> = Vec::new();
+            let mut new_encoder_kvs: Vec<(String, Value)> = Vec::new();
+            {
+                let mut decoder_with_past = self
+                    .decoder_with_past
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let step_outputs: ort::session::SessionOutputs = decoder_with_past.run(dwp_inputs)?;
 
-            let next_token = {
                 let logits_val = step_outputs
                     .iter()
                     .find(|(name, _)| *name == dwp_logits_output_name)
                     .map(|(_, v)| v)
                     .ok_or(TranscriptionError::NoOutput)?;
-                greedy_argmax_last(&logits_val)?
-            };
+                next_token = greedy_argmax_last(&logits_val)?;
 
-            if next_token == eot {
-                break;
+                if next_token == eot {
+                    break;
+                }
+
+                // Split the with-past outputs exactly like step 0 splits the step-0
+                // outputs, so the loop never pushes the same input name twice (the
+                // cross-attention caches appear under both `decoder_kvs` and
+                // `encoder_kvs` otherwise) and never re-clones the constant encoder
+                // caches on every step. Note this is hygiene, not the fix for the
+                // long-generation abort: the cap below is what prevents that, and
+                // bisecting showed the split alone leaves the Reshape error in place.
+                for (name, val) in step_outputs {
+                    if name == dwp_logits_output_name {
+                        continue;
+                    }
+                    let input_name = name.replacen("present", "past_key_values", 1);
+                    if input_name.contains(".encoder.") {
+                        new_encoder_kvs.push((input_name, val));
+                    } else {
+                        new_decoder_kvs.push((input_name, val));
+                    }
+                }
             }
+
             generated.push(next_token);
-
-            // Split the with-past outputs exactly like step 0 splits the step-0
-            // outputs, so the loop never pushes the same input name twice (the
-            // cross-attention caches appear under both `decoder_kvs` and
-            // `encoder_kvs` otherwise) and never re-clones the constant encoder
-            // caches on every step. Note this is hygiene, not the fix for the
-            // long-generation abort: the cap below is what prevents that, and
-            // bisecting showed the split alone leaves the Reshape error in place.
-            let mut new_decoder_kvs: Vec<(String, Value)> = Vec::new();
-            let mut new_encoder_kvs: Vec<(String, Value)> = Vec::new();
-            for (name, val) in step_outputs {
-                if name == dwp_logits_output_name {
-                    continue;
-                }
-                let input_name = name.replacen("present", "past_key_values", 1);
-                if input_name.contains(".encoder.") {
-                    new_encoder_kvs.push((input_name, val));
-                } else {
-                    new_decoder_kvs.push((input_name, val));
-                }
-            }
 
             if !new_decoder_kvs.is_empty() {
                 decoder_kvs = new_decoder_kvs;
