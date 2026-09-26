@@ -1599,12 +1599,25 @@ pub(super) async fn extract_with_ocr_for_page(
     // (see `OcrPageNoiseVerdict`). Populated exactly when a warning above is pushed. ~keep
     let mut recognition_noise_verdicts: Vec<OcrPageNoiseVerdict> = Vec::new();
 
+    // #1812: `take_or_create_tatr` can block on a `std::sync::Condvar` (pool exhaustion, or a
+    // competing default-acceleration model load) and, on a cache miss, performs synchronous
+    // model-file I/O and ONNX Runtime session construction. None of that may run on a tokio
+    // worker thread -- two concurrent layout-enabled extractions on a small worker pool could
+    // starve every worker with nothing left to poll the task that would return a lease. Route
+    // through `spawn_blocking`, mirroring the boundary already used for the RT-DETR layout
+    // engine in `layout_runner::run_layout_for_pdf_pages_async`. ~keep
     #[cfg(feature = "layout-detection")]
     let mut tatr_model = if layout_detections.is_some() {
-        crate::layout::take_or_create_tatr(
-            config.resolved_layout_acceleration(),
-            crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref()),
-        )
+        let tatr_acceleration = config.resolved_layout_acceleration().cloned();
+        let tatr_thread_budget = crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref());
+        tokio::task::spawn_blocking(move || {
+            crate::layout::take_or_create_tatr(tatr_acceleration.as_ref(), tatr_thread_budget)
+        })
+        .await
+        .map_err(|e| crate::XbergError::Plugin {
+            message: format!("TATR model checkout panicked: {}", e),
+            plugin_name: "layout".to_string(),
+        })?
     } else {
         None
     };
@@ -2150,8 +2163,8 @@ pub(super) async fn extract_with_ocr_for_page(
                     ocr_render_height,
                 );
 
-                let recognized_tables = match (render_scaled_detection.as_ref(), tatr_model.as_mut()) {
-                    (Some(scaled_det), Some(model)) => {
+                let recognized_tables =
+                    if let (Some(scaled_det), true) = (render_scaled_detection, tatr_model.is_some()) {
                         let rgb = if let Some(ref slice) = batch_slice {
                             let default_security_limits = crate::extractors::security::SecurityLimits::default();
                             let security_limits = config.security_limits.as_ref().unwrap_or(&default_security_limits);
@@ -2172,15 +2185,31 @@ pub(super) async fn extract_with_ocr_for_page(
                                 source: None,
                             })?
                         };
-                        crate::ocr::layout_assembly::recognize_page_tables_with_fallback(
-                            &rgb,
-                            scaled_det,
-                            &render_ocr_elements,
-                            model,
-                        )
-                    }
-                    _ => crate::ocr::layout_assembly::RecognizedTablesOutcome::default(),
-                };
+                        let mut model = tatr_model.take().expect("checked tatr_model.is_some() above");
+                        // #1812: TATR inference is synchronous ONNX Runtime CPU work with no await
+                        // points; running it inline would occupy a tokio worker thread for the
+                        // call's full duration on every table-bearing page. Route through
+                        // `spawn_blocking` and hand the lease back through the join so the next
+                        // page reuses it instead of it sitting checked out on a parked task. ~keep
+                        let (model, outcome) = tokio::task::spawn_blocking(move || {
+                            let outcome = crate::ocr::layout_assembly::recognize_page_tables_with_fallback(
+                                &rgb,
+                                &scaled_det,
+                                &render_ocr_elements,
+                                &mut model,
+                            );
+                            (model, outcome)
+                        })
+                        .await
+                        .map_err(|e| crate::XbergError::Plugin {
+                            message: format!("TATR table recognition panicked: {}", e),
+                            plugin_name: "layout".to_string(),
+                        })?;
+                        tatr_model = Some(model);
+                        outcome
+                    } else {
+                        crate::ocr::layout_assembly::RecognizedTablesOutcome::default()
+                    };
 
                 for rt in &recognized_tables.tables {
                     if !rt.markdown.is_empty() {
