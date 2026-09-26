@@ -622,29 +622,29 @@ fn scanned_page_indices_clamps_an_out_of_range_threshold() {
 }
 
 // =========================================================================
-// GH#1782 — a page mixing a few readable lines with a Type 3 font that has no ToUnicode
+// GH#1782 -- a page mixing a few readable lines with a Type 3 font that has no ToUnicode
 // and procedural (non-AGL) /Differences glyph names. Fixtures are the reporter's
 // `repro-type3-with-{2,6}-readable-lines.pdf`, pinned unmodified, verified against issue.
 //
-// What this session's `best_mapping_provenance`/`resolve_base_encoding_map` fixes
-// achieve, verified below: every span painted by the Type 3 font now carries
-// `MappingProvenance::Fallback` (previously `EncodingName`, telling every consumer,
-// including this file's fabricated-ratio gate, that the text was safely mappable).
+// `best_mapping_provenance`/`resolve_base_encoding_map` give every span the Type 3 font
+// paints `MappingProvenance::Fallback` instead of `EncodingName`, which is what lets the
+// fabricated gate see the font at all.
 //
-// What it does NOT achieve on these exact two fixtures, measured: their Type 3 text is a
-// small share of the page (19.7% / 7.6% of non-whitespace chars, see
-// `gh1782_ratio_based_routing_does_not_yet_flag_these_fixtures`), so the ratio stays under
-// the 0.5 default and the page correctly stays native, matching the issue's own
-// description of a short Type 3 fragment under a longer readable body as intentional.
-// This is NOT a "decodes to nothing, invisible to the ratio" gap: `char::from_u32`'s
-// raw-codepoint catch-all (fonts/unicode_decode.rs:139-143, shared by every font) still
-// fills the span's text, so a Fallback-provenance glyph counts fully into
-// `fabricated_char_counts`' numerator, in direct proportion to how much of the page the
-// font paints. A page shaped like the real-world document (Type 3 dominant, short header)
-// measures 83.3% and IS flagged (`gh1782_majority_share_page_is_flagged_fabricated`), so
-// the reported 106/143-page residual (median 98% share) is expected to clear this ratio
-// under this fix already, without a separate glyph-count signal. The real, non-shareable
-// document could not be re-run to confirm the exact count. ~keep
+// An earlier version of this comment claimed the ratio then measured those fixtures at
+// 19.7% / 7.6% and that a short Type 3 fragment therefore correctly stayed native. That
+// was wrong, and wrong in a specific way worth recording: both numbers were artefacts of
+// the very gap they were used to rule out. `fabricated_char_counts` counts DECODED
+// characters, and the raw-code fallback in `extractors/text/advance.rs` drops any glyph
+// whose code is not printable (`if ch >= '\x20' || ...`). The reporter's subset font uses
+// procedure codes 1..31, so 113 of its 144 painted glyphs entered neither the numerator
+// nor the denominator -- 31/(31+126) is exactly 19.75% and 31/(31+378) exactly 7.58%.
+// The ratio was measuring its own blind spot.
+//
+// The fix is in the measurement, not the threshold: extraction now retains one `?` per
+// painted glyph on an unmapped Type 3 font, and provably-blank `d0`/`d1`-only CharProcs
+// map to a space so pure spacing is not counted as painted text. Exact counts are pinned
+// in `scan_detect_type3_tests.rs` ((130, 256) routes, (130, 508) does not) rather than as
+// a ratio, per the `measurement-discipline` rule. ~keep
 // =========================================================================
 
 fn type3_fixture(name: &str) -> PdfDocument {
@@ -691,32 +691,6 @@ fn gh1782_type3_spans_carry_fallback_provenance() {
     );
     for span in &helvetica_spans {
         assert_eq!(span.provenance, Some(MappingProvenance::EncodingName));
-    }
-}
-
-/// Characterizes the measured, NOT-shipped gap documented above: at
-/// default thresholds, the page-level fabricated ratio does not clear
-/// `min_provenance_fallback_ratio` (0.5) for either fixture, so neither
-/// page is flagged. This pins the honest current behavior rather than
-/// asserting the (unfixed) desired one — a routing fix needs a glyph-
-/// count-based signal, not this ratio, per the comment above.
-#[test]
-fn gh1782_ratio_based_routing_does_not_yet_flag_these_fixtures() {
-    let thresholds = crate::core::config::OcrQualityThresholds::default();
-    for name in ["gh1782-2-readable-lines.pdf", "gh1782-6-readable-lines.pdf"] {
-        let doc = type3_fixture(name);
-        let fabricated = fabricated_provenance_page_indices(
-            &doc,
-            thresholds.min_provenance_fallback_ratio,
-            thresholds.min_total_non_whitespace,
-        );
-        assert_eq!(
-            fabricated,
-            Vec::<usize>::new(),
-            "{name}: measured NO-SHIP — the decoded-character-count ratio does not clear \
-             the default 0.5 threshold for this fixture; see the module comment above for \
-             why and what a real fix needs"
-        );
     }
 }
 
