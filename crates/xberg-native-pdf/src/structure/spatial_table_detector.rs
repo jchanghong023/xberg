@@ -3242,8 +3242,15 @@ fn assign_spans_to_intersection_grid(
             boundary_index(cell.y1, ys),
             boundary_index(cell.y2, ys),
         ) {
-            for row in &mut grid_has_cell[bottom..top] {
-                row[left..right].fill(true);
+            // `boundary_index` proves each boundary exists in `xs`/`ys`, not that the
+            // pair is ordered: two boundaries within SNAP_TOL of each other can snap to
+            // indices in either order. `arr[bottom..top]` panics unconditionally on
+            // bottom > top, so require ordering here and skip malformed geometry instead
+            // of aborting the whole extraction. ~keep
+            if bottom < top && left < right {
+                for row in &mut grid_has_cell[bottom..top] {
+                    row[left..right].fill(true);
+                }
             }
         }
     }
@@ -5171,6 +5178,21 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn grid_has_cell_skips_cell_with_reversed_boundaries() {
+        // y1/y2 are reversed relative to `ys`, so boundary_index resolves bottom > top;
+        // this must be skipped rather than panic on `grid_has_cell[bottom..top]`.
+        let cells = [IntersectionCell {
+            x1: 0.,
+            y1: 40.,
+            x2: 40.,
+            y2: 0.,
+        }];
+        let result =
+            assign_spans_to_intersection_grid(&cells, &[0., 40., 80.], &[0., 20., 40.], 2, &[], &[], true);
+        assert!(result.is_some(), "malformed cell geometry must not panic");
     }
 
     #[test]
