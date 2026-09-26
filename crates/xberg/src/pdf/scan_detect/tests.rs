@@ -742,6 +742,7 @@ fn gh1782_majority_share_page_is_flagged_fabricated() {
 /// #1786: a page that is one full-page raster reports that raster's own density (400 px
 /// over 100 pt is 288 dpi); the same raster covering a quarter of the page is a figure and
 /// reports none; a page without images reports none.
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline", feature = "layout-detection"))]
 #[test]
 fn full_page_raster_density_reads_the_scan_density_and_ignores_figures() {
     let scan = PdfDocument::from_bytes(crate::pdf::render::build_full_page_raster_pdf(

@@ -177,11 +177,17 @@ fn image_coverage(doc: &PdfDocument, page_index: usize) -> Option<f32> {
 }
 
 /// Below this raster coverage a page is never a scan for OCR, whatever its text layer holds.
+// GH#1835: the OCR scan-density policy below is consumed by `extractors::pdf::ocr::rendering`
+// (`any(ocr, ocr-pipeline)`) and by `image::dpi::pdf_ocr_render_dpi`, whose module is gated
+// `any(ocr-pipeline, layout-detection)`. Gating these on `pdf` alone, as the whole file is,
+// left them with no caller on a `pdf`-only build and broke `-D warnings` there. ~keep
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline", feature = "layout-detection"))]
 const OCR_SCAN_COVERAGE_MIN: f32 = 0.25;
 
 /// A scan's own text layer is furniture: a page number, a running header, a stamp. A page
 /// with more glyphs than this beside a raster is a text page with a figure. A nine-word
 /// stamp is about sixty glyphs; a page of prose is thousands.
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline", feature = "layout-detection"))]
 const OCR_SCAN_MAX_GLYPHS: usize = 400;
 
 /// The density, in dots per inch, of a page that is a scan: one raster with at most a stamp
@@ -195,6 +201,7 @@ const OCR_SCAN_MAX_GLYPHS: usize = 400;
 /// painted into, so a 1650 x 2160 px image painted over a Letter page reports about 196 dpi
 /// whatever the page's render resolution is (#1786). The glyph count comes from the same
 /// content-stream classification scan detection uses; no pixel data is decoded.
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline", feature = "layout-detection"))]
 pub(crate) fn full_page_raster_density(doc: &PdfDocument, page_index: usize) -> Option<f64> {
     let (coverage, density) = page_raster_geometry(doc, page_index)?;
     // GH#1786 review: this is the whole-page threshold (0.80), NOT `IMAGE_COVERAGE_MIN` (0.15),

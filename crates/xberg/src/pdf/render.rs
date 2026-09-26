@@ -1037,7 +1037,9 @@ pub(crate) fn build_minimal_pdf_with_mediabox(w: f32, h: f32) -> Vec<u8> {
 /// of about 25 glyphs each. `coverage = 1.0` is a scan: the raster's density is
 /// `image width / (page width / 72)` dots per inch. With few text lines an inset raster is a
 /// scan with a stamp; with many it is a figure on a text page.
-#[cfg(all(test, feature = "pdf"))]
+// GH#1835: every caller of this fixture builder lives behind the OCR or layout-detection
+// feature sets, so `all(test, pdf)` left it unused on a `pdf`-only test build. ~keep
+#[cfg(all(test, feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline", feature = "layout-detection")))]
 pub(crate) fn build_full_page_raster_pdf(
     page_pt: (f32, f32),
     image_px: (u32, u32),
