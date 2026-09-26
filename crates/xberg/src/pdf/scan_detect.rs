@@ -187,7 +187,7 @@ const OCR_SCAN_MAX_GLYPHS: usize = 400;
 /// The density, in dots per inch, of a page that is a scan: one raster with at most a stamp
 /// of native text beside it.
 ///
-/// A page whose rasters cover at least [`IMAGE_COVERAGE_MIN`] of it is a scan whatever its
+/// A page whose rasters cover at least [`IMAGE_COVERAGE_FULL`] of it is a scan whatever its
 /// text layer. A scanned sheet is often painted inset, with margins around it, so a page whose
 /// raster covers at least [`OCR_SCAN_COVERAGE_MIN`] is a scan too when its text layer has no
 /// more than [`OCR_SCAN_MAX_GLYPHS`] glyphs. `None` otherwise, and for a page with no image.
@@ -197,7 +197,12 @@ const OCR_SCAN_MAX_GLYPHS: usize = 400;
 /// content-stream classification scan detection uses; no pixel data is decoded.
 pub(crate) fn full_page_raster_density(doc: &PdfDocument, page_index: usize) -> Option<f64> {
     let (coverage, density) = page_raster_geometry(doc, page_index)?;
-    if coverage >= IMAGE_COVERAGE_MIN {
+    // GH#1786 review: this is the whole-page threshold (0.80), NOT `IMAGE_COVERAGE_MIN` (0.15),
+    // which is only the floor below which scoring is skipped for cost. Gating here on the floor
+    // returned every page with 15% raster as a scan and made the glyph check below unreachable,
+    // since reaching it then required `coverage < 0.15`, under which `OCR_SCAN_COVERAGE_MIN`
+    // always rejects. ~keep
+    if coverage >= IMAGE_COVERAGE_FULL {
         return density;
     }
     if coverage < OCR_SCAN_COVERAGE_MIN {
