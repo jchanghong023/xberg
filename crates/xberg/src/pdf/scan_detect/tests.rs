@@ -739,718 +739,695 @@ fn gh1782_majority_share_page_is_flagged_fabricated() {
     );
 }
 
-    /// #1786: a page that is one full-page raster reports that raster's own density (400 px
-    /// over 100 pt is 288 dpi); the same raster covering a quarter of the page is a figure and
-    /// reports none; a page without images reports none.
-    #[test]
-    fn full_page_raster_density_reads_the_scan_density_and_ignores_figures() {
-        let scan = PdfDocument::from_bytes(crate::pdf::render::build_full_page_raster_pdf(
-            (100.0, 100.0),
-            (400, 400),
-            1.0,
-            0,
-        ))
-        .unwrap();
-        let density = full_page_raster_density(&scan, 0).expect("a full-page raster has a density");
-        assert!(
-            (density - 288.0).abs() < 0.5,
-            "400 px over 100 pt is 288 dpi, got {density}"
-        );
+/// #1786: a page that is one full-page raster reports that raster's own density (400 px
+/// over 100 pt is 288 dpi); the same raster covering a quarter of the page is a figure and
+/// reports none; a page without images reports none.
+#[test]
+fn full_page_raster_density_reads_the_scan_density_and_ignores_figures() {
+    let scan = PdfDocument::from_bytes(crate::pdf::render::build_full_page_raster_pdf(
+        (100.0, 100.0),
+        (400, 400),
+        1.0,
+        0,
+    ))
+    .unwrap();
+    let density = full_page_raster_density(&scan, 0).expect("a full-page raster has a density");
+    assert!(
+        (density - 288.0).abs() < 0.5,
+        "400 px over 100 pt is 288 dpi, got {density}"
+    );
 
-        let inset = PdfDocument::from_bytes(crate::pdf::render::build_full_page_raster_pdf(
-            (100.0, 100.0),
-            (400, 400),
-            0.64,
-            1,
-        ))
-        .unwrap();
-        let density = full_page_raster_density(&inset, 0).expect("an inset scan with a stamp has a density");
-        assert!(
-            (density - 360.0).abs() < 0.5,
-            "400 px painted over 80 pt is 360 dpi, got {density}"
-        );
+    let inset = PdfDocument::from_bytes(crate::pdf::render::build_full_page_raster_pdf(
+        (100.0, 100.0),
+        (400, 400),
+        0.64,
+        1,
+    ))
+    .unwrap();
+    let density = full_page_raster_density(&inset, 0).expect("an inset scan with a stamp has a density");
+    assert!(
+        (density - 360.0).abs() < 0.5,
+        "400 px painted over 80 pt is 360 dpi, got {density}"
+    );
 
-        let figure = PdfDocument::from_bytes(crate::pdf::render::build_full_page_raster_pdf(
-            (100.0, 100.0),
-            (400, 400),
-            0.64,
-            20,
-        ))
-        .unwrap();
-        assert_eq!(
-            full_page_raster_density(&figure, 0),
-            None,
-            "the same raster beside twenty lines of text is a figure on a text page"
-        );
+    let figure = PdfDocument::from_bytes(crate::pdf::render::build_full_page_raster_pdf(
+        (100.0, 100.0),
+        (400, 400),
+        0.64,
+        20,
+    ))
+    .unwrap();
+    assert_eq!(
+        full_page_raster_density(&figure, 0),
+        None,
+        "the same raster beside twenty lines of text is a figure on a text page"
+    );
 
-        let small = PdfDocument::from_bytes(crate::pdf::render::build_full_page_raster_pdf(
-            (100.0, 100.0),
-            (400, 400),
-            0.16,
-            0,
-        ))
-        .unwrap();
-        assert_eq!(
-            full_page_raster_density(&small, 0),
-            None,
-            "a raster under a quarter of the page is never a scan"
-        );
+    let small = PdfDocument::from_bytes(crate::pdf::render::build_full_page_raster_pdf(
+        (100.0, 100.0),
+        (400, 400),
+        0.16,
+        0,
+    ))
+    .unwrap();
+    assert_eq!(
+        full_page_raster_density(&small, 0),
+        None,
+        "a raster under a quarter of the page is never a scan"
+    );
 
-        let blank = PdfDocument::from_bytes(crate::pdf::render::build_minimal_pdf_with_mediabox(100.0, 100.0)).unwrap();
-        assert_eq!(
-            full_page_raster_density(&blank, 0),
-            None,
-            "a page without images has no raster density"
-        );
-    }
+    let blank = PdfDocument::from_bytes(crate::pdf::render::build_minimal_pdf_with_mediabox(100.0, 100.0)).unwrap();
+    assert_eq!(
+        full_page_raster_density(&blank, 0),
+        None,
+        "a page without images has no raster density"
+    );
+}
 
-    /// Both page passes go through [`map_pages`], so the order guarantee is pinned on it
-    /// directly. A pass that only counted pages would still be green on a shuffled result,
-    /// and every caller indexes its result by page number.
-    #[test]
-    fn map_pages_returns_one_entry_per_page_in_page_order() {
-        let page_count = 1024;
-        let squares = map_pages(page_count, |page_index| page_index * page_index);
-        assert_eq!(
-            squares,
-            (0..page_count)
-                .map(|page_index| page_index * page_index)
-                .collect::<Vec<_>>(),
-            "map_pages must return one entry per page, in page order"
-        );
-    }
+/// Both page passes go through [`map_pages`], so the order guarantee is pinned on it
+/// directly. A pass that only counted pages would still be green on a shuffled result,
+/// and every caller indexes its result by page number.
+#[test]
+fn map_pages_returns_one_entry_per_page_in_page_order() {
+    let page_count = 1024;
+    let squares = map_pages(page_count, |page_index| page_index * page_index);
+    assert_eq!(
+        squares,
+        (0..page_count)
+            .map(|page_index| page_index * page_index)
+            .collect::<Vec<_>>(),
+        "map_pages must return one entry per page, in page order"
+    );
+}
 
-    /// The pass must reach more than one thread. Asserted against a pool this test builds
-    /// rather than the machine's core count, so it means the same thing on a one-core runner
-    /// as on the 32-core box the issue was measured on, and against the closure's own record
-    /// rather than wall clock, which flakes under load.
-    ///
-    /// Each page holds its thread for [`DISPATCH_PAGE_HOLD`]: with no work per page, one
-    /// worker drains the whole range before the others wake on a loaded runner (22 of 60
-    /// runs under a 12-core load), and the pass then looks sequential. ~keep
-    #[cfg(not(target_arch = "wasm32"))]
-    #[test]
-    fn map_pages_dispatches_pages_across_the_pool() {
-        use std::collections::HashSet;
-        use std::sync::Mutex;
+/// The pass must reach more than one thread. Asserted against a pool this test builds
+/// rather than the machine's core count, so it means the same thing on a one-core runner
+/// as on the 32-core box the issue was measured on, and against the closure's own record
+/// rather than wall clock, which flakes under load.
+///
+/// Each page holds its thread for [`DISPATCH_PAGE_HOLD`]: with no work per page, one
+/// worker drains the whole range before the others wake on a loaded runner (22 of 60
+/// runs under a 12-core load), and the pass then looks sequential. ~keep
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn map_pages_dispatches_pages_across_the_pool() {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
 
-        const DISPATCH_PAGE_COUNT: usize = 512;
-        const DISPATCH_POOL_THREADS: usize = 8;
-        const DISPATCH_PAGE_HOLD: std::time::Duration = std::time::Duration::from_micros(200);
+    const DISPATCH_PAGE_COUNT: usize = 512;
+    const DISPATCH_POOL_THREADS: usize = 8;
+    const DISPATCH_PAGE_HOLD: std::time::Duration = std::time::Duration::from_micros(200);
 
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(DISPATCH_POOL_THREADS)
-            .build()
-            .expect("the test's own pool must build");
-        let threads: Mutex<HashSet<std::thread::ThreadId>> = Mutex::new(HashSet::new());
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(DISPATCH_POOL_THREADS)
+        .build()
+        .expect("the test's own pool must build");
+    let threads: Mutex<HashSet<std::thread::ThreadId>> = Mutex::new(HashSet::new());
 
-        let pages = pool.install(|| {
-            map_pages(DISPATCH_PAGE_COUNT, |page_index| {
-                threads
-                    .lock()
-                    .expect("thread record must not be poisoned")
-                    .insert(std::thread::current().id());
-                std::thread::sleep(DISPATCH_PAGE_HOLD);
-                page_index
-            })
-        });
+    let pages = pool.install(|| {
+        map_pages(DISPATCH_PAGE_COUNT, |page_index| {
+            threads
+                .lock()
+                .expect("thread record must not be poisoned")
+                .insert(std::thread::current().id());
+            std::thread::sleep(DISPATCH_PAGE_HOLD);
+            page_index
+        })
+    });
 
-        assert_eq!(pages, (0..DISPATCH_PAGE_COUNT).collect::<Vec<_>>());
-        let distinct = threads.lock().expect("thread record must not be poisoned").len();
-        assert!(
-            distinct > 1,
-            "map_pages ran every page on {distinct} thread(s): the pass did not dispatch across the pool"
-        );
-    }
+    assert_eq!(pages, (0..DISPATCH_PAGE_COUNT).collect::<Vec<_>>());
+    let distinct = threads.lock().expect("thread record must not be poisoned").len();
+    assert!(
+        distinct > 1,
+        "map_pages ran every page on {distinct} thread(s): the pass did not dispatch across the pool"
+    );
+}
 
-    /// The wiring, on a real document: both passes must agree with a page-by-page run, entry
-    /// for entry. This is what says `detect` and `fabricated_provenance_page_indices` read the
-    /// pages they claim to and report them in page order, which the seam test above cannot
-    /// say on its own.
-    ///
-    /// The fixture is chosen so that a reordering is visible: its pages do not all score the
-    /// same, and some but not all of them carry a fabricated mapping (15 of 18). On a
-    /// born-digital fixture every page scores `0.0` and no page is fabricated, so the two
-    /// comparisons below would pass on any permutation. Both properties are asserted on the
-    /// sequential run so the fixture cannot drift into that shape unnoticed.
-    ///
-    /// The parallel pass runs on its own freshly opened handle. A handle the sequential pass
-    /// has already walked has every font and page object cached, so a concurrent read
-    /// through it never races a cold load, which is the shape #1737 exists to make
-    /// order-independent. ~keep
-    ///
-    /// This test calls `fabricated_provenance_page_indices`, which increments
-    /// `FABRICATED_PROVENANCE_SECOND_PASS_CALLS` -- now thread-local, so it no longer shares
-    /// state with `provenance_is_not_read_a_second_time_for_a_document_with_no_excluded_layers`
-    /// (`pdf/native/text.rs`) or any other test's thread. `#[serial]` is kept regardless, since
-    /// nothing about the counter change makes concurrent PDF-handle work here cheaper. ~keep
-    #[test]
-    #[serial_test::serial]
-    fn both_page_passes_match_a_page_by_page_run() {
-        let thresholds = crate::core::config::OcrQualityThresholds::default();
-        let min_ratio = thresholds.min_provenance_fallback_ratio;
-        let min_chars = thresholds.min_total_non_whitespace;
+/// The wiring, on a real document: both passes must agree with a page-by-page run, entry
+/// for entry. This is what says `detect` and `fabricated_provenance_page_indices` read the
+/// pages they claim to and report them in page order, which the seam test above cannot
+/// say on its own.
+///
+/// The fixture is chosen so that a reordering is visible: its pages do not all score the
+/// same, and some but not all of them carry a fabricated mapping (15 of 18). On a
+/// born-digital fixture every page scores `0.0` and no page is fabricated, so the two
+/// comparisons below would pass on any permutation. Both properties are asserted on the
+/// sequential run so the fixture cannot drift into that shape unnoticed.
+///
+/// The parallel pass runs on its own freshly opened handle. A handle the sequential pass
+/// has already walked has every font and page object cached, so a concurrent read
+/// through it never races a cold load, which is the shape #1737 exists to make
+/// order-independent. ~keep
+///
+/// This test calls `fabricated_provenance_page_indices`, which increments
+/// `FABRICATED_PROVENANCE_SECOND_PASS_CALLS` -- now thread-local, so it no longer shares
+/// state with `provenance_is_not_read_a_second_time_for_a_document_with_no_excluded_layers`
+/// (`pdf/native/text.rs`) or any other test's thread. `#[serial]` is kept regardless, since
+/// nothing about the counter change makes concurrent PDF-handle work here cheaper. ~keep
+#[test]
+#[serial_test::serial]
+fn both_page_passes_match_a_page_by_page_run() {
+    let thresholds = crate::core::config::OcrQualityThresholds::default();
+    let min_ratio = thresholds.min_provenance_fallback_ratio;
+    let min_chars = thresholds.min_total_non_whitespace;
 
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_documents/pdf/non_ascii_text.pdf");
-        let sequential_doc = PdfDocument::open(&path).expect("corpus document must open");
-        let page_count = sequential_doc
-            .page_count()
-            .expect("corpus document must report a page count");
-        assert!(
-            page_count > 1,
-            "a single-page fixture cannot detect a reordering; got {page_count} page(s)"
-        );
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_documents/pdf/non_ascii_text.pdf");
+    let sequential_doc = PdfDocument::open(&path).expect("corpus document must open");
+    let page_count = sequential_doc
+        .page_count()
+        .expect("corpus document must report a page count");
+    assert!(
+        page_count > 1,
+        "a single-page fixture cannot detect a reordering; got {page_count} page(s)"
+    );
 
-        let sequential_scores: Vec<f32> = (0..page_count)
-            .map(|page_index| {
-                page_signals(&sequential_doc, page_index)
-                    .as_ref()
-                    .map_or(0.0, score_page)
-            })
-            .collect();
-        let sequential_fabricated: Vec<usize> = (0..page_count)
-            .filter(|&page_index| page_has_fabricated_text(&sequential_doc, page_index, min_ratio, min_chars))
-            .collect();
-        assert!(
-            sequential_scores.iter().any(|&score| score != sequential_scores[0]),
-            "fixture must score its pages differently for a reordering to be visible; got {sequential_scores:?}"
-        );
-        assert!(
-            !sequential_fabricated.is_empty() && sequential_fabricated.len() < page_count,
-            "fixture must fabricate some but not all pages for a reordering to be visible; \
+    let sequential_scores: Vec<f32> = (0..page_count)
+        .map(|page_index| {
+            page_signals(&sequential_doc, page_index)
+                .as_ref()
+                .map_or(0.0, score_page)
+        })
+        .collect();
+    let sequential_fabricated: Vec<usize> = (0..page_count)
+        .filter(|&page_index| page_has_fabricated_text(&sequential_doc, page_index, min_ratio, min_chars))
+        .collect();
+    assert!(
+        sequential_scores.iter().any(|&score| score != sequential_scores[0]),
+        "fixture must score its pages differently for a reordering to be visible; got {sequential_scores:?}"
+    );
+    assert!(
+        !sequential_fabricated.is_empty() && sequential_fabricated.len() < page_count,
+        "fixture must fabricate some but not all pages for a reordering to be visible; \
              got {sequential_fabricated:?} of {page_count}"
-        );
+    );
 
-        let parallel_doc = PdfDocument::open(&path).expect("corpus document must open a second time");
-        let detection = detect(&parallel_doc).expect("detection must run on the corpus document");
-        assert_eq!(
-            detection.page_confidence, sequential_scores,
-            "scan confidences must match a page-by-page run, page for page"
-        );
-        assert_eq!(
-            fabricated_provenance_page_indices(&parallel_doc, min_ratio, min_chars),
-            sequential_fabricated,
-            "fabricated-mapping pages must match a page-by-page run, in ascending page order"
-        );
+    let parallel_doc = PdfDocument::open(&path).expect("corpus document must open a second time");
+    let detection = detect(&parallel_doc).expect("detection must run on the corpus document");
+    assert_eq!(
+        detection.page_confidence, sequential_scores,
+        "scan confidences must match a page-by-page run, page for page"
+    );
+    assert_eq!(
+        fabricated_provenance_page_indices(&parallel_doc, min_ratio, min_chars),
+        sequential_fabricated,
+        "fabricated-mapping pages must match a page-by-page run, in ascending page order"
+    );
+}
+
+/// Positive control for the probe that
+/// `provenance_is_not_read_a_second_time_for_a_document_with_no_excluded_layers`
+/// (`pdf/native/text.rs`) relies on. That test asserts the counter is **zero** -- the
+/// second whole-document read did not happen. A zero it can never leave proves nothing:
+/// a counter no call site reaches on the asserting thread and a genuinely skipped second
+/// pass render identically. Making the counter thread-local removed the flake but also
+/// removed cross-thread visibility, so the wiring needs its own witness. ~keep
+#[test]
+#[serial_test::serial]
+fn the_second_pass_counter_observes_a_call_on_its_own_thread() {
+    let thresholds = crate::core::config::OcrQualityThresholds::default();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_documents/pdf/non_ascii_text.pdf");
+    let doc = PdfDocument::open(&path).expect("corpus document must open");
+
+    FABRICATED_PROVENANCE_SECOND_PASS_CALLS.with(|counter| counter.store(0, std::sync::atomic::Ordering::SeqCst));
+    let _ = fabricated_provenance_page_indices(
+        &doc,
+        thresholds.min_provenance_fallback_ratio,
+        thresholds.min_total_non_whitespace,
+    );
+
+    assert_eq!(
+        FABRICATED_PROVENANCE_SECOND_PASS_CALLS.with(|counter| counter.load(std::sync::atomic::Ordering::SeqCst)),
+        1,
+        "the counter must observe a call made on this thread, or the sibling test's zero is vacuous"
+    );
+}
+
+/// Scores are sums of `f32` weights, so `0.50 + 0.35 + 0.10` lands a few ULPs
+/// off `0.95`. Compare within tolerance rather than rounding the score.
+#[track_caller]
+fn assert_score(actual: f32, expected: f32) {
+    assert!(
+        (actual - expected).abs() < 1e-5,
+        "expected score {expected}, got {actual}"
+    );
+}
+
+/// A scan: full-page raster, no text layer at all.
+fn bare_scan() -> PageScanSignals {
+    PageScanSignals {
+        image_coverage: 1.0,
+        invisible_text_ratio: 0.0,
+        glyph_count: 0,
+        codec: ImageCodecClass::Dct,
+        producer_prior: ProducerPrior::Unknown,
     }
+}
 
-    /// Positive control for the probe that
-    /// `provenance_is_not_read_a_second_time_for_a_document_with_no_excluded_layers`
-    /// (`pdf/native/text.rs`) relies on. That test asserts the counter is **zero** -- the
-    /// second whole-document read did not happen. A zero it can never leave proves nothing:
-    /// a counter no call site reaches on the asserting thread and a genuinely skipped second
-    /// pass render identically. Making the counter thread-local removed the flake but also
-    /// removed cross-thread visibility, so the wiring needs its own witness. ~keep
-    #[test]
-    #[serial_test::serial]
-    fn the_second_pass_counter_observes_a_call_on_its_own_thread() {
-        let thresholds = crate::core::config::OcrQualityThresholds::default();
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_documents/pdf/non_ascii_text.pdf");
-        let doc = PdfDocument::open(&path).expect("corpus document must open");
+#[test]
+fn sub_threshold_image_coverage_scores_zero() {
+    let signals = PageScanSignals {
+        image_coverage: 0.79,
+        ..bare_scan()
+    };
+    assert_score(score_page(&signals), 0.0);
+}
 
-        FABRICATED_PROVENANCE_SECOND_PASS_CALLS.with(|counter| counter.store(0, std::sync::atomic::Ordering::SeqCst));
-        let _ = fabricated_provenance_page_indices(
-            &doc,
-            thresholds.min_provenance_fallback_ratio,
-            thresholds.min_total_non_whitespace,
-        );
+#[test]
+fn a_text_page_with_a_figure_is_not_a_scan() {
+    let signals = PageScanSignals {
+        image_coverage: 0.30,
+        invisible_text_ratio: 0.0,
+        glyph_count: 2000,
+        codec: ImageCodecClass::Dct,
+        producer_prior: ProducerPrior::Unknown,
+    };
+    assert_score(score_page(&signals), 0.0);
+}
 
-        assert_eq!(
-            FABRICATED_PROVENANCE_SECOND_PASS_CALLS.with(|counter| counter.load(std::sync::atomic::Ordering::SeqCst)),
-            1,
-            "the counter must observe a call made on this thread, or the sibling test's zero is vacuous"
-        );
-    }
+/// The born-digital slide with a full-bleed background image: its text is
+/// *visible*, so it must stay below any usable threshold.
+#[test]
+fn full_bleed_slide_with_visible_text_scores_below_default_threshold() {
+    let signals = PageScanSignals {
+        image_coverage: 1.0,
+        invisible_text_ratio: 0.0,
+        glyph_count: 133,
+        codec: ImageCodecClass::Dct,
+        producer_prior: ProducerPrior::Unknown,
+    };
+    assert_score(score_page(&signals), SCORE_FULL_PAGE_RASTER);
+    assert!(f64::from(score_page(&signals)) < DEFAULT_SCANNED_MIN_CONFIDENCE);
+}
 
-    /// Scores are sums of `f32` weights, so `0.50 + 0.35 + 0.10` lands a few ULPs
-    /// off `0.95`. Compare within tolerance rather than rounding the score.
-    #[track_caller]
-    fn assert_score(actual: f32, expected: f32) {
-        assert!(
-            (actual - expected).abs() < 1e-5,
-            "expected score {expected}, got {actual}"
-        );
-    }
+/// The reporter's case: full-page raster under an invisible OCR sidecar.
+#[test]
+fn hidden_sidecar_over_a_raster_is_detected() {
+    let signals = PageScanSignals {
+        image_coverage: 1.0,
+        invisible_text_ratio: 1.0,
+        glyph_count: 217,
+        codec: ImageCodecClass::Other,
+        producer_prior: ProducerPrior::Unknown,
+    };
+    assert_score(score_page(&signals), 0.85);
+    assert!(f64::from(score_page(&signals)) >= DEFAULT_SCANNED_MIN_CONFIDENCE);
+}
 
-    /// A scan: full-page raster, no text layer at all.
-    fn bare_scan() -> PageScanSignals {
-        PageScanSignals {
-            image_coverage: 1.0,
-            invisible_text_ratio: 0.0,
-            glyph_count: 0,
-            codec: ImageCodecClass::Dct,
-            producer_prior: ProducerPrior::Unknown,
-        }
-    }
+#[test]
+fn scan_with_no_text_layer_is_detected() {
+    assert_score(score_page(&bare_scan()), 0.85);
+}
 
-    #[test]
-    fn sub_threshold_image_coverage_scores_zero() {
-        let signals = PageScanSignals {
-            image_coverage: 0.79,
-            ..bare_scan()
-        };
-        assert_score(score_page(&signals), 0.0);
-    }
+#[test]
+fn bilevel_codec_and_scanner_producer_raise_confidence() {
+    let signals = PageScanSignals {
+        codec: ImageCodecClass::Ccitt,
+        producer_prior: ProducerPrior::Scanner,
+        ..bare_scan()
+    };
+    assert_score(score_page(&signals), 1.0);
+}
 
-    #[test]
-    fn a_text_page_with_a_figure_is_not_a_scan() {
-        let signals = PageScanSignals {
-            image_coverage: 0.30,
-            invisible_text_ratio: 0.0,
-            glyph_count: 2000,
-            codec: ImageCodecClass::Dct,
-            producer_prior: ProducerPrior::Unknown,
-        };
-        assert_score(score_page(&signals), 0.0);
-    }
+#[test]
+fn jbig2_counts_as_a_bilevel_codec() {
+    let signals = PageScanSignals {
+        codec: ImageCodecClass::Jbig2,
+        ..bare_scan()
+    };
+    assert_score(score_page(&signals), 0.95);
+}
 
-    /// The born-digital slide with a full-bleed background image: its text is
-    /// *visible*, so it must stay below any usable threshold.
-    #[test]
-    fn full_bleed_slide_with_visible_text_scores_below_default_threshold() {
-        let signals = PageScanSignals {
-            image_coverage: 1.0,
-            invisible_text_ratio: 0.0,
-            glyph_count: 133,
-            codec: ImageCodecClass::Dct,
-            producer_prior: ProducerPrior::Unknown,
-        };
-        assert_score(score_page(&signals), SCORE_FULL_PAGE_RASTER);
-        assert!(f64::from(score_page(&signals)) < DEFAULT_SCANNED_MIN_CONFIDENCE);
-    }
+/// A sidecar of *any* quality reads identically here. kreuzberg detects that
+/// a sidecar came from a scanner, never whether its text is accurate.
+#[test]
+fn sidecar_quality_does_not_affect_the_score() {
+    let good = PageScanSignals {
+        invisible_text_ratio: 1.0,
+        glyph_count: 212,
+        ..bare_scan()
+    };
+    let bad = PageScanSignals {
+        invisible_text_ratio: 1.0,
+        glyph_count: 217,
+        ..bare_scan()
+    };
+    assert_score(score_page(&good), score_page(&bad));
+}
 
-    /// The reporter's case: full-page raster under an invisible OCR sidecar.
-    #[test]
-    fn hidden_sidecar_over_a_raster_is_detected() {
-        let signals = PageScanSignals {
-            image_coverage: 1.0,
-            invisible_text_ratio: 1.0,
-            glyph_count: 217,
-            codec: ImageCodecClass::Other,
-            producer_prior: ProducerPrior::Unknown,
-        };
-        assert_score(score_page(&signals), 0.85);
-        assert!(f64::from(score_page(&signals)) >= DEFAULT_SCANNED_MIN_CONFIDENCE);
-    }
+#[test]
+fn score_never_leaves_the_unit_interval() {
+    let maxed = PageScanSignals {
+        image_coverage: 1.0,
+        invisible_text_ratio: 1.0,
+        glyph_count: 0,
+        codec: ImageCodecClass::Ccitt,
+        producer_prior: ProducerPrior::Scanner,
+    };
+    let score = score_page(&maxed);
+    assert!((0.0..=1.0).contains(&score), "score {score} escaped [0,1]");
+}
 
-    #[test]
-    fn scan_with_no_text_layer_is_detected() {
-        assert_score(score_page(&bare_scan()), 0.85);
-    }
-
-    #[test]
-    fn bilevel_codec_and_scanner_producer_raise_confidence() {
-        let signals = PageScanSignals {
-            codec: ImageCodecClass::Ccitt,
-            producer_prior: ProducerPrior::Scanner,
-            ..bare_scan()
-        };
-        assert_score(score_page(&signals), 1.0);
-    }
-
-    #[test]
-    fn jbig2_counts_as_a_bilevel_codec() {
-        let signals = PageScanSignals {
-            codec: ImageCodecClass::Jbig2,
-            ..bare_scan()
-        };
-        assert_score(score_page(&signals), 0.95);
-    }
-
-    /// A sidecar of *any* quality reads identically here. kreuzberg detects that
-    /// a sidecar came from a scanner, never whether its text is accurate.
-    #[test]
-    fn sidecar_quality_does_not_affect_the_score() {
-        let good = PageScanSignals {
-            invisible_text_ratio: 1.0,
-            glyph_count: 212,
-            ..bare_scan()
-        };
-        let bad = PageScanSignals {
-            invisible_text_ratio: 1.0,
-            glyph_count: 217,
-            ..bare_scan()
-        };
-        assert_score(score_page(&good), score_page(&bad));
-    }
-
-    #[test]
-    fn score_never_leaves_the_unit_interval() {
-        let maxed = PageScanSignals {
-            image_coverage: 1.0,
-            invisible_text_ratio: 1.0,
-            glyph_count: 0,
-            codec: ImageCodecClass::Ccitt,
-            producer_prior: ProducerPrior::Scanner,
-        };
-        let score = score_page(&maxed);
-        assert!((0.0..=1.0).contains(&score), "score {score} escaped [0,1]");
-    }
-
-    /// Every distinct score `score_page` can return, over the whole signal matrix.
-    ///
-    /// The score is a sum of four independent weights, so the reachable set is small and
-    /// fixed, and the gap between `0.65` and `0.85` is what gives
-    /// [`DEFAULT_SCANNED_MIN_CONFIDENCE`] its meaning: any threshold in `(0.65, 0.85]`
-    /// selects exactly the same pages as `0.70` does, so moving it within that interval is
-    /// a no-op dressed as a behaviour change. Pinned so that stays visible to whoever
-    /// proposes the move. ~keep
-    /// Every `(codec, producer_prior)` score for one `(image_coverage, glyph_count,
-    /// invisible_text_ratio)` combination, for [`score_page_reaches_exactly_the_documented_set_of_scores`].
-    fn scores_over_codec_and_producer(image_coverage: f32, glyph_count: usize, invisible_text_ratio: f32) -> Vec<f32> {
-        let codecs = [
-            ImageCodecClass::Dct,
-            ImageCodecClass::Other,
-            ImageCodecClass::Ccitt,
-            ImageCodecClass::Jbig2,
-        ];
-        let producers = [ProducerPrior::Unknown, ProducerPrior::Authoring, ProducerPrior::Scanner];
-        codecs
-            .into_iter()
-            .flat_map(|codec| {
-                producers.into_iter().map(move |producer_prior| {
-                    score_page(&PageScanSignals {
-                        image_coverage,
-                        invisible_text_ratio,
-                        glyph_count,
-                        codec,
-                        producer_prior,
-                    })
+/// Every distinct score `score_page` can return, over the whole signal matrix.
+///
+/// The score is a sum of four independent weights, so the reachable set is small and
+/// fixed, and the gap between `0.65` and `0.85` is what gives
+/// [`DEFAULT_SCANNED_MIN_CONFIDENCE`] its meaning: any threshold in `(0.65, 0.85]`
+/// selects exactly the same pages as `0.70` does, so moving it within that interval is
+/// a no-op dressed as a behaviour change. Pinned so that stays visible to whoever
+/// proposes the move. ~keep
+/// Every `(codec, producer_prior)` score for one `(image_coverage, glyph_count,
+/// invisible_text_ratio)` combination, for [`score_page_reaches_exactly_the_documented_set_of_scores`].
+fn scores_over_codec_and_producer(image_coverage: f32, glyph_count: usize, invisible_text_ratio: f32) -> Vec<f32> {
+    let codecs = [
+        ImageCodecClass::Dct,
+        ImageCodecClass::Other,
+        ImageCodecClass::Ccitt,
+        ImageCodecClass::Jbig2,
+    ];
+    let producers = [ProducerPrior::Unknown, ProducerPrior::Authoring, ProducerPrior::Scanner];
+    codecs
+        .into_iter()
+        .flat_map(|codec| {
+            producers.into_iter().map(move |producer_prior| {
+                score_page(&PageScanSignals {
+                    image_coverage,
+                    invisible_text_ratio,
+                    glyph_count,
+                    codec,
+                    producer_prior,
                 })
             })
-            .collect()
-    }
+        })
+        .collect()
+}
 
-    #[test]
-    fn score_page_reaches_exactly_the_documented_set_of_scores() {
-        let mut reachable: Vec<f32> = Vec::new();
-        for image_coverage in [0.0, IMAGE_COVERAGE_MIN - 0.01, IMAGE_COVERAGE_MIN, 1.0] {
-            for (glyph_count, invisible_text_ratio) in [(0, 0.0), (250, 0.0), (250, INVISIBLE_TEXT_MIN), (250, 1.0)] {
-                for score in scores_over_codec_and_producer(image_coverage, glyph_count, invisible_text_ratio) {
-                    if !reachable.iter().any(|seen| (seen - score).abs() < 1e-5) {
-                        reachable.push(score);
-                    }
+#[test]
+fn score_page_reaches_exactly_the_documented_set_of_scores() {
+    let mut reachable: Vec<f32> = Vec::new();
+    for image_coverage in [0.0, IMAGE_COVERAGE_MIN - 0.01, IMAGE_COVERAGE_MIN, 1.0] {
+        for (glyph_count, invisible_text_ratio) in [(0, 0.0), (250, 0.0), (250, INVISIBLE_TEXT_MIN), (250, 1.0)] {
+            for score in scores_over_codec_and_producer(image_coverage, glyph_count, invisible_text_ratio) {
+                if !reachable.iter().any(|seen| (seen - score).abs() < 1e-5) {
+                    reachable.push(score);
                 }
             }
         }
-        reachable.sort_by(|left, right| left.partial_cmp(right).expect("scores are finite"));
-
-        let expected = [0.0, 0.50, 0.55, 0.60, 0.65, 0.85, 0.90, 0.95, 1.00];
-        assert_eq!(
-            reachable.len(),
-            expected.len(),
-            "reachable score set changed: got {reachable:?}, expected {expected:?}"
-        );
-        for (actual, expected) in reachable.iter().zip(expected) {
-            assert_score(*actual, expected);
-        }
     }
+    reachable.sort_by(|left, right| left.partial_cmp(right).expect("scores are finite"));
 
-    /// `0.65` -- the ceiling a full-page raster with a visible text layer is said to hit --
-    /// needs a bilevel codec *and* a scanner producer *and* visible text simultaneously.
-    ///
-    /// Drop any one of the three and the page scores at most `0.60`. That conjunction is
-    /// why the value is unreached in practice: a CCITT/JBIG2 page written by scanner
-    /// software does not also carry *visible* native glyphs -- if it carries a text layer at
-    /// all it is an invisible OCR sidecar, which takes [`SCORE_NO_VISIBLE_TEXT`] and lands
-    /// at `0.85` or above instead. Measured over the 12,526-page PDF corpus, no page scored
-    /// `0.55`, `0.60` or `0.65`; all 30 pages of the full-page-raster-with-visible-text
-    /// class scored exactly [`SCORE_FULL_PAGE_RASTER`] (issue #1752). ~keep
-    #[test]
-    fn a_score_of_0_65_requires_bilevel_codec_and_scanner_producer_and_visible_text_at_once() {
-        let all_three = PageScanSignals {
-            image_coverage: 1.0,
-            invisible_text_ratio: 0.0,
-            glyph_count: 250,
-            codec: ImageCodecClass::Ccitt,
-            producer_prior: ProducerPrior::Scanner,
-        };
-        assert_score(score_page(&all_three), 0.65);
+    let expected = [0.0, 0.50, 0.55, 0.60, 0.65, 0.85, 0.90, 0.95, 1.00];
+    assert_eq!(
+        reachable.len(),
+        expected.len(),
+        "reachable score set changed: got {reachable:?}, expected {expected:?}"
+    );
+    for (actual, expected) in reachable.iter().zip(expected) {
+        assert_score(*actual, expected);
+    }
+}
 
-        assert_score(
+/// `0.65` -- the ceiling a full-page raster with a visible text layer is said to hit --
+/// needs a bilevel codec *and* a scanner producer *and* visible text simultaneously.
+///
+/// Drop any one of the three and the page scores at most `0.60`. That conjunction is
+/// why the value is unreached in practice: a CCITT/JBIG2 page written by scanner
+/// software does not also carry *visible* native glyphs -- if it carries a text layer at
+/// all it is an invisible OCR sidecar, which takes [`SCORE_NO_VISIBLE_TEXT`] and lands
+/// at `0.85` or above instead. Measured over the 12,526-page PDF corpus, no page scored
+/// `0.55`, `0.60` or `0.65`; all 30 pages of the full-page-raster-with-visible-text
+/// class scored exactly [`SCORE_FULL_PAGE_RASTER`] (issue #1752). ~keep
+#[test]
+fn a_score_of_0_65_requires_bilevel_codec_and_scanner_producer_and_visible_text_at_once() {
+    let all_three = PageScanSignals {
+        image_coverage: 1.0,
+        invisible_text_ratio: 0.0,
+        glyph_count: 250,
+        codec: ImageCodecClass::Ccitt,
+        producer_prior: ProducerPrior::Scanner,
+    };
+    assert_score(score_page(&all_three), 0.65);
+
+    assert_score(
+        score_page(&PageScanSignals {
+            codec: ImageCodecClass::Dct,
+            ..all_three
+        }),
+        0.55,
+    );
+    assert_score(
+        score_page(&PageScanSignals {
+            producer_prior: ProducerPrior::Authoring,
+            ..all_three
+        }),
+        0.60,
+    );
+    // Hiding the text layer takes the larger `SCORE_NO_VISIBLE_TEXT` instead, which is
+    // why the sidecar case never sits in the 0.50..=0.65 band at all. ~keep
+    assert_score(
+        score_page(&PageScanSignals {
+            invisible_text_ratio: 1.0,
+            ..all_three
+        }),
+        1.0,
+    );
+}
+
+/// The shape the corpus actually produces: a born-digital page whose figure covers the
+/// sheet, carrying a small but *visible* text layer -- a caption, a heading, a running
+/// footer. Every such page scores [`SCORE_FULL_PAGE_RASTER`] regardless of how little
+/// text it carries, because nothing in the matrix reads "few visible glyphs".
+///
+/// The three smallest in the corpus were a 4-glyph section heading over two screenshots,
+/// a 27-glyph figure caption, and a 47-glyph newspaper footer over a full-page
+/// advertisement; the counts run from there to 2698 with no gap to cut at (issue #1752).
+/// ~keep
+#[test]
+fn a_full_bleed_page_scores_the_same_however_little_visible_text_it_carries() {
+    let scores: Vec<f32> = [4, 27, 47, 133, 687, 2698]
+        .into_iter()
+        .map(|glyph_count| {
             score_page(&PageScanSignals {
+                image_coverage: 1.0,
+                invisible_text_ratio: 0.0,
+                glyph_count,
                 codec: ImageCodecClass::Dct,
-                ..all_three
-            }),
-            0.55,
-        );
-        assert_score(
-            score_page(&PageScanSignals {
                 producer_prior: ProducerPrior::Authoring,
-                ..all_three
-            }),
-            0.60,
-        );
-        // Hiding the text layer takes the larger `SCORE_NO_VISIBLE_TEXT` instead, which is
-        // why the sidecar case never sits in the 0.50..=0.65 band at all. ~keep
-        assert_score(
-            score_page(&PageScanSignals {
-                invisible_text_ratio: 1.0,
-                ..all_three
-            }),
-            1.0,
-        );
-    }
-
-    /// The shape the corpus actually produces: a born-digital page whose figure covers the
-    /// sheet, carrying a small but *visible* text layer -- a caption, a heading, a running
-    /// footer. Every such page scores [`SCORE_FULL_PAGE_RASTER`] regardless of how little
-    /// text it carries, because nothing in the matrix reads "few visible glyphs".
-    ///
-    /// The three smallest in the corpus were a 4-glyph section heading over two screenshots,
-    /// a 27-glyph figure caption, and a 47-glyph newspaper footer over a full-page
-    /// advertisement; the counts run from there to 2698 with no gap to cut at (issue #1752).
-    /// ~keep
-    #[test]
-    fn a_full_bleed_page_scores_the_same_however_little_visible_text_it_carries() {
-        let scores: Vec<f32> = [4, 27, 47, 133, 687, 2698]
-            .into_iter()
-            .map(|glyph_count| {
-                score_page(&PageScanSignals {
-                    image_coverage: 1.0,
-                    invisible_text_ratio: 0.0,
-                    glyph_count,
-                    codec: ImageCodecClass::Dct,
-                    producer_prior: ProducerPrior::Authoring,
-                })
             })
-            .collect();
+        })
+        .collect();
 
-        for score in &scores {
-            assert_score(*score, SCORE_FULL_PAGE_RASTER);
-            assert!(
-                f64::from(*score) < DEFAULT_SCANNED_MIN_CONFIDENCE,
-                "a full-bleed page scored {score}, at or above the default threshold"
-            );
-        }
-    }
-
-    #[test]
-    fn scanned_page_indices_selects_only_pages_at_or_above_the_threshold() {
-        let detection = ScanDetection {
-            confidence: 0.9,
-            page_confidence: vec![0.0, 0.5, 0.85, 0.9],
-        };
-        assert_eq!(detection.scanned_page_indices(0.7), vec![2, 3]);
-        assert_eq!(detection.scanned_page_indices(0.85), vec![2, 3]);
-        assert_eq!(detection.scanned_page_indices(0.95), Vec::<usize>::new());
-    }
-
-    /// The doc-comment on `DEFAULT_SCANNED_MIN_CONFIDENCE` claims a slide is only
-    /// OCR'd at a threshold of 0.50 or lower. Pin that boundary.
-    #[test]
-    fn a_full_bleed_slide_is_selected_only_at_a_threshold_of_0_50_or_lower() {
-        let slide = ScanDetection {
-            confidence: SCORE_FULL_PAGE_RASTER,
-            page_confidence: vec![SCORE_FULL_PAGE_RASTER],
-        };
-        assert_eq!(slide.scanned_page_indices(0.50), vec![0]);
-        assert_eq!(slide.scanned_page_indices(0.51), Vec::<usize>::new());
-        assert_eq!(
-            slide.scanned_page_indices(DEFAULT_SCANNED_MIN_CONFIDENCE as f32),
-            Vec::<usize>::new()
-        );
-    }
-
-    /// Build a span with the given text and provenance for the fabricated-fraction tests.
-    fn provenance_span(text: &str, provenance: Option<MappingProvenance>) -> TextSpan {
-        TextSpan {
-            text: text.to_string(),
-            provenance,
-            ..TextSpan::default()
-        }
-    }
-
-    #[test]
-    fn all_fallback_page_counts_every_char_as_fabricated() {
-        let spans = vec![provenance_span("garbled", Some(MappingProvenance::Fallback))];
-        let (fabricated, total) = fabricated_char_counts(&spans);
-        assert_eq!(fabricated, 7);
-        assert_eq!(total, 7);
-    }
-
-    #[test]
-    fn all_to_unicode_page_never_counts_as_fabricated() {
-        let spans = vec![provenance_span("legible text", Some(MappingProvenance::ToUnicode))];
-        let (fabricated, total) = fabricated_char_counts(&spans);
-        assert_eq!(fabricated, 0);
-        assert_eq!(total, 11);
-    }
-
-    #[test]
-    fn all_none_provenance_page_never_counts_as_fabricated() {
-        let spans = vec![provenance_span("unknown provenance", None)];
-        let (fabricated, total) = fabricated_char_counts(&spans);
-        assert_eq!(fabricated, 0);
-        assert_eq!(total, 17);
-    }
-
-    #[test]
-    fn mixed_provenance_sums_only_fallback_spans() {
-        let spans = vec![
-            provenance_span("good", Some(MappingProvenance::ToUnicode)),
-            provenance_span("bad", Some(MappingProvenance::Fallback)),
-            provenance_span("also good", Some(MappingProvenance::EncodingName)),
-        ];
-        let (fabricated, total) = fabricated_char_counts(&spans);
-        assert_eq!(fabricated, 3);
-        assert_eq!(total, 4 + 3 + 8);
-    }
-
-    /// Boundary behavior of the ratio check itself (mirrors `page_has_fabricated_text`'s
-    /// `(fabricated / total) >= min_ratio` comparison without requiring a `PdfDocument`).
-    #[test]
-    fn ratio_at_threshold_triggers_but_just_below_does_not() {
-        let spans = vec![
-            provenance_span("aaaa", Some(MappingProvenance::Fallback)),
-            provenance_span("aaaa", Some(MappingProvenance::ToUnicode)),
-        ];
-        let (fabricated, total) = fabricated_char_counts(&spans);
-        let ratio = fabricated as f64 / total as f64;
-        assert!((ratio - 0.5).abs() < f64::EPSILON);
-        assert!(ratio >= 0.5, "exactly-at-threshold ratio must trigger");
-        assert!(ratio < 0.500001, "sanity: ratio is exactly one half");
-    }
-
-    #[test]
-    fn empty_spans_have_zero_total_and_never_trigger() {
-        let (fabricated, total) = fabricated_char_counts(&[]);
-        assert_eq!(fabricated, 0);
-        assert_eq!(total, 0);
-    }
-
-    #[test]
-    fn scanned_page_indices_clamps_an_out_of_range_threshold() {
-        let detection = ScanDetection {
-            confidence: 0.5,
-            page_confidence: vec![0.0, 0.5],
-        };
-        // Negative thresholds clamp to 0.0, which still selects every page. ~keep
-        assert_eq!(detection.scanned_page_indices(-1.0), vec![0, 1]);
-        // Thresholds above 1.0 clamp to 1.0 and select nothing below it. ~keep
-        assert_eq!(detection.scanned_page_indices(2.0), Vec::<usize>::new());
-    }
-
-    // =========================================================================
-    // GH#1782 — a page mixing a few readable lines with a Type 3 font that has
-    // no ToUnicode and procedural (non-AGL) /Differences glyph names. Fixtures
-    // are the reporter's `repro-type3-with-{2,6}-readable-lines.pdf` (sha256
-    // `580aa659c982190b2e4439e67b835c7049dbf88ad1c1f68fca74a9e63f046fd9` and
-    // `dff0a78726f6c1f308b3519bfa5c85e656079a53254825e818cd300a4d37d620`,
-    // verified against the values quoted in the issue), pinned unmodified.
-    //
-    // What this session's `best_mapping_provenance`/`resolve_base_encoding_map`
-    // fixes achieve, verified below: every span painted by the Type 3 font now
-    // carries `MappingProvenance::Fallback` (previously `EncodingName`, which
-    // told every consumer — including this file's own fabricated-ratio gate —
-    // that the text was safely mappable). That is a real, tested improvement.
-    //
-    // What it does NOT achieve on these exact fixtures, measured and NOT
-    // shipped: `fabricated_char_counts` (above) counts *decoded Unicode
-    // characters*, not glyphs painted. A glyph whose code has no mapping now
-    // correctly decodes to nothing (previously it fabricated a plausible-
-    // looking StandardEncoding punctuation character or bare control code) —
-    // but "nothing" contributes zero to both the fabricated numerator and the
-    // total denominator, so a page can be entirely built from unmapped glyphs
-    // and still measure a LOW fabricated ratio, because there is barely any
-    // decoded text of any kind to count. Root cause: font_dict.rs's
-    // `char_to_unicode` correctly returns `None` for these codes, but
-    // `extractors/text/{advance.rs,mod.rs,clustering.rs}` all then call
-    // `fallback_char_to_unicode` (fonts/unicode_decode.rs:130), whose final
-    // `char::from_u32(char_code)` catch-all (unicode_decode.rs:139-143)
-    // reinterprets the raw, meaningless Type 3 procedure code as if it were
-    // itself a Unicode codepoint — the true source of the "symbol characters"
-    // GH#1780/#1782 describe. That reinterpretation is shared by every font,
-    // not Type 3-specific, and fixing it is a separate, larger change than
-    // this session's scope: flipping `extraction_method` for these fixtures
-    // needs a page-fabrication signal built on GLYPH COUNT attributed to a
-    // Fallback-provenance font, not decoded character count, since the
-    // decoded count is structurally blind to glyphs that (correctly, now)
-    // decode to nothing. NO-SHIP for the ratio-based routing flip; the
-    // provenance/encoding correctness fixes below stand on their own. ~keep
-    // =========================================================================
-
-    fn type3_fixture(name: &str) -> PdfDocument {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("tests/fixtures/pdf/regressions/type3")
-            .join(name);
-        PdfDocument::open(&path).unwrap_or_else(|e| panic!("open fixture {name}: {e}"))
-    }
-
-    /// The achieved half of the fix: every span the Type 3 font paints is
-    /// now `MappingProvenance::Fallback`, not `EncodingName`. Before this
-    /// session's `best_mapping_provenance` fix, EVERY span from this font
-    /// (readable or not) read `EncodingName`, telling every consumer the
-    /// text was safely mappable when it was not.
-    #[test]
-    fn gh1782_type3_spans_carry_fallback_provenance() {
-        let doc = type3_fixture("gh1782-2-readable-lines.pdf");
-        let page_text = doc
-            .extract_page_text_with_options(0, ReadingOrder::ColumnAware)
-            .expect("extract GH#1782 fixture page text");
-
-        let type3_spans: Vec<_> = page_text.spans.iter().filter(|s| s.font_name != "Helvetica").collect();
+    for score in &scores {
+        assert_score(*score, SCORE_FULL_PAGE_RASTER);
         assert!(
-            !type3_spans.is_empty(),
-            "fixture must contain at least one Type 3 span to test its provenance"
+            f64::from(*score) < DEFAULT_SCANNED_MIN_CONFIDENCE,
+            "a full-bleed page scored {score}, at or above the default threshold"
         );
-        for span in &type3_spans {
-            assert_eq!(
-                span.provenance,
-                Some(MappingProvenance::Fallback),
-                "Type 3 span {:?} must carry Fallback provenance (no ToUnicode, procedural \
-                 /Differences glyph names) — got {:?}",
-                span.text,
-                span.provenance
-            );
-        }
+    }
+}
 
-        // The 2 readable Helvetica header lines are unaffected: still EncodingName.
-        let helvetica_spans: Vec<_> = page_text.spans.iter().filter(|s| s.font_name == "Helvetica").collect();
+#[test]
+fn scanned_page_indices_selects_only_pages_at_or_above_the_threshold() {
+    let detection = ScanDetection {
+        confidence: 0.9,
+        page_confidence: vec![0.0, 0.5, 0.85, 0.9],
+    };
+    assert_eq!(detection.scanned_page_indices(0.7), vec![2, 3]);
+    assert_eq!(detection.scanned_page_indices(0.85), vec![2, 3]);
+    assert_eq!(detection.scanned_page_indices(0.95), Vec::<usize>::new());
+}
+
+/// The doc-comment on `DEFAULT_SCANNED_MIN_CONFIDENCE` claims a slide is only
+/// OCR'd at a threshold of 0.50 or lower. Pin that boundary.
+#[test]
+fn a_full_bleed_slide_is_selected_only_at_a_threshold_of_0_50_or_lower() {
+    let slide = ScanDetection {
+        confidence: SCORE_FULL_PAGE_RASTER,
+        page_confidence: vec![SCORE_FULL_PAGE_RASTER],
+    };
+    assert_eq!(slide.scanned_page_indices(0.50), vec![0]);
+    assert_eq!(slide.scanned_page_indices(0.51), Vec::<usize>::new());
+    assert_eq!(
+        slide.scanned_page_indices(DEFAULT_SCANNED_MIN_CONFIDENCE as f32),
+        Vec::<usize>::new()
+    );
+}
+
+/// Build a span with the given text and provenance for the fabricated-fraction tests.
+fn provenance_span(text: &str, provenance: Option<MappingProvenance>) -> TextSpan {
+    TextSpan {
+        text: text.to_string(),
+        provenance,
+        ..TextSpan::default()
+    }
+}
+
+#[test]
+fn all_fallback_page_counts_every_char_as_fabricated() {
+    let spans = vec![provenance_span("garbled", Some(MappingProvenance::Fallback))];
+    let (fabricated, total) = fabricated_char_counts(&spans);
+    assert_eq!(fabricated, 7);
+    assert_eq!(total, 7);
+}
+
+#[test]
+fn all_to_unicode_page_never_counts_as_fabricated() {
+    let spans = vec![provenance_span("legible text", Some(MappingProvenance::ToUnicode))];
+    let (fabricated, total) = fabricated_char_counts(&spans);
+    assert_eq!(fabricated, 0);
+    assert_eq!(total, 11);
+}
+
+#[test]
+fn all_none_provenance_page_never_counts_as_fabricated() {
+    let spans = vec![provenance_span("unknown provenance", None)];
+    let (fabricated, total) = fabricated_char_counts(&spans);
+    assert_eq!(fabricated, 0);
+    assert_eq!(total, 17);
+}
+
+#[test]
+fn mixed_provenance_sums_only_fallback_spans() {
+    let spans = vec![
+        provenance_span("good", Some(MappingProvenance::ToUnicode)),
+        provenance_span("bad", Some(MappingProvenance::Fallback)),
+        provenance_span("also good", Some(MappingProvenance::EncodingName)),
+    ];
+    let (fabricated, total) = fabricated_char_counts(&spans);
+    assert_eq!(fabricated, 3);
+    assert_eq!(total, 4 + 3 + 8);
+}
+
+/// Boundary behavior of the ratio check itself (mirrors `page_has_fabricated_text`'s
+/// `(fabricated / total) >= min_ratio` comparison without requiring a `PdfDocument`).
+#[test]
+fn ratio_at_threshold_triggers_but_just_below_does_not() {
+    let spans = vec![
+        provenance_span("aaaa", Some(MappingProvenance::Fallback)),
+        provenance_span("aaaa", Some(MappingProvenance::ToUnicode)),
+    ];
+    let (fabricated, total) = fabricated_char_counts(&spans);
+    let ratio = fabricated as f64 / total as f64;
+    assert!((ratio - 0.5).abs() < f64::EPSILON);
+    assert!(ratio >= 0.5, "exactly-at-threshold ratio must trigger");
+    assert!(ratio < 0.500001, "sanity: ratio is exactly one half");
+}
+
+#[test]
+fn empty_spans_have_zero_total_and_never_trigger() {
+    let (fabricated, total) = fabricated_char_counts(&[]);
+    assert_eq!(fabricated, 0);
+    assert_eq!(total, 0);
+}
+
+#[test]
+fn scanned_page_indices_clamps_an_out_of_range_threshold() {
+    let detection = ScanDetection {
+        confidence: 0.5,
+        page_confidence: vec![0.0, 0.5],
+    };
+    // Negative thresholds clamp to 0.0, which still selects every page. ~keep
+    assert_eq!(detection.scanned_page_indices(-1.0), vec![0, 1]);
+    // Thresholds above 1.0 clamp to 1.0 and select nothing below it. ~keep
+    assert_eq!(detection.scanned_page_indices(2.0), Vec::<usize>::new());
+}
+
+// =========================================================================
+// GH#1782 — a page mixing a few readable lines with a Type 3 font that has
+// no ToUnicode and procedural (non-AGL) /Differences glyph names. Fixtures
+// are the reporter's `repro-type3-with-{2,6}-readable-lines.pdf` (sha256
+// `580aa659c982190b2e4439e67b835c7049dbf88ad1c1f68fca74a9e63f046fd9` and
+// `dff0a78726f6c1f308b3519bfa5c85e656079a53254825e818cd300a4d37d620`,
+// verified against the values quoted in the issue), pinned unmodified.
+//
+// What this session's `best_mapping_provenance`/`resolve_base_encoding_map`
+// fixes achieve, verified below: every span painted by the Type 3 font now
+// carries `MappingProvenance::Fallback` (previously `EncodingName`, which
+// told every consumer — including this file's own fabricated-ratio gate —
+// that the text was safely mappable). That is a real, tested improvement.
+//
+// What it does NOT achieve on these exact fixtures, measured and NOT
+// shipped: `fabricated_char_counts` (above) counts *decoded Unicode
+// characters*, not glyphs painted. A glyph whose code has no mapping now
+// correctly decodes to nothing (previously it fabricated a plausible-
+// looking StandardEncoding punctuation character or bare control code) —
+// but "nothing" contributes zero to both the fabricated numerator and the
+// total denominator, so a page can be entirely built from unmapped glyphs
+// and still measure a LOW fabricated ratio, because there is barely any
+// decoded text of any kind to count. Root cause: font_dict.rs's
+// `char_to_unicode` correctly returns `None` for these codes, but
+// `extractors/text/{advance.rs,mod.rs,clustering.rs}` all then call
+// `fallback_char_to_unicode` (fonts/unicode_decode.rs:130), whose final
+// `char::from_u32(char_code)` catch-all (unicode_decode.rs:139-143)
+// reinterprets the raw, meaningless Type 3 procedure code as if it were
+// itself a Unicode codepoint — the true source of the "symbol characters"
+// GH#1780/#1782 describe. That reinterpretation is shared by every font,
+// not Type 3-specific, and fixing it is a separate, larger change than
+// this session's scope: flipping `extraction_method` for these fixtures
+// needs a page-fabrication signal built on GLYPH COUNT attributed to a
+// Fallback-provenance font, not decoded character count, since the
+// decoded count is structurally blind to glyphs that (correctly, now)
+// decode to nothing. NO-SHIP for the ratio-based routing flip; the
+// provenance/encoding correctness fixes below stand on their own. ~keep
+// =========================================================================
+
+fn type3_fixture(name: &str) -> PdfDocument {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/pdf/regressions/type3")
+        .join(name);
+    PdfDocument::open(&path).unwrap_or_else(|e| panic!("open fixture {name}: {e}"))
+}
+
+/// The achieved half of the fix: every span the Type 3 font paints is
+/// now `MappingProvenance::Fallback`, not `EncodingName`. Before this
+/// session's `best_mapping_provenance` fix, EVERY span from this font
+/// (readable or not) read `EncodingName`, telling every consumer the
+/// text was safely mappable when it was not.
+#[test]
+fn gh1782_type3_spans_carry_fallback_provenance() {
+    let doc = type3_fixture("gh1782-2-readable-lines.pdf");
+    let page_text = doc
+        .extract_page_text_with_options(0, ReadingOrder::ColumnAware)
+        .expect("extract GH#1782 fixture page text");
+
+    let type3_spans: Vec<_> = page_text.spans.iter().filter(|s| s.font_name != "Helvetica").collect();
+    assert!(
+        !type3_spans.is_empty(),
+        "fixture must contain at least one Type 3 span to test its provenance"
+    );
+    for span in &type3_spans {
         assert_eq!(
-            helvetica_spans.len(),
-            2,
-            "fixture declares exactly 2 readable header lines"
+            span.provenance,
+            Some(MappingProvenance::Fallback),
+            "Type 3 span {:?} must carry Fallback provenance (no ToUnicode, procedural \
+                 /Differences glyph names) — got {:?}",
+            span.text,
+            span.provenance
         );
-        for span in &helvetica_spans {
-            assert_eq!(span.provenance, Some(MappingProvenance::EncodingName));
-        }
     }
 
-    /// Characterizes the measured, NOT-shipped gap documented above: at
-    /// default thresholds, the page-level fabricated ratio does not clear
-    /// `min_provenance_fallback_ratio` (0.5) for either fixture, so neither
-    /// page is flagged. This pins the honest current behavior rather than
-    /// asserting the (unfixed) desired one — a routing fix needs a glyph-
-    /// count-based signal, not this ratio, per the comment above.
-    #[test]
-    fn gh1782_ratio_based_routing_does_not_yet_flag_these_fixtures() {
-        let thresholds = crate::core::config::OcrQualityThresholds::default();
-        for name in ["gh1782-2-readable-lines.pdf", "gh1782-6-readable-lines.pdf"] {
-            let doc = type3_fixture(name);
-            let fabricated = fabricated_provenance_page_indices(
-                &doc,
-                thresholds.min_provenance_fallback_ratio,
-                thresholds.min_total_non_whitespace,
-            );
-            assert_eq!(
-                fabricated,
-                Vec::<usize>::new(),
-                "{name}: measured NO-SHIP — the decoded-character-count ratio does not clear \
-                 the default 0.5 threshold for this fixture; see the module comment above for \
-                 why and what a real fix needs"
-            );
-        }
+    // The 2 readable Helvetica header lines are unaffected: still EncodingName.
+    let helvetica_spans: Vec<_> = page_text.spans.iter().filter(|s| s.font_name == "Helvetica").collect();
+    assert_eq!(
+        helvetica_spans.len(),
+        2,
+        "fixture declares exactly 2 readable header lines"
+    );
+    for span in &helvetica_spans {
+        assert_eq!(span.provenance, Some(MappingProvenance::EncodingName));
     }
+}
 
-    /// Negative control (task requirement): a page whose text is entirely
-    /// ordinary, mappable Type 1 text — no Type 3 font at all — must NOT be
-    /// flagged fabricated. This is the regression the GH#1782 fix could
-    /// easily introduce (over-flagging any page that merely mixes fonts).
-    #[test]
-    fn mappable_text_only_page_is_not_flagged_fabricated() {
-        let doc = type3_fixture("control-decorative-background.pdf");
-        let thresholds = crate::core::config::OcrQualityThresholds::default();
+/// Characterizes the measured, NOT-shipped gap documented above: at
+/// default thresholds, the page-level fabricated ratio does not clear
+/// `min_provenance_fallback_ratio` (0.5) for either fixture, so neither
+/// page is flagged. This pins the honest current behavior rather than
+/// asserting the (unfixed) desired one — a routing fix needs a glyph-
+/// count-based signal, not this ratio, per the comment above.
+#[test]
+fn gh1782_ratio_based_routing_does_not_yet_flag_these_fixtures() {
+    let thresholds = crate::core::config::OcrQualityThresholds::default();
+    for name in ["gh1782-2-readable-lines.pdf", "gh1782-6-readable-lines.pdf"] {
+        let doc = type3_fixture(name);
         let fabricated = fabricated_provenance_page_indices(
             &doc,
             thresholds.min_provenance_fallback_ratio,
@@ -1459,8 +1436,31 @@ fn gh1782_majority_share_page_is_flagged_fabricated() {
         assert_eq!(
             fabricated,
             Vec::<usize>::new(),
-            "a page of plain Type 1 text with no Type 3 font must never be flagged \
-             fabricated — false positives here would route ordinary native-text \
-             documents to OCR needlessly"
+            "{name}: measured NO-SHIP — the decoded-character-count ratio does not clear \
+                 the default 0.5 threshold for this fixture; see the module comment above for \
+                 why and what a real fix needs"
         );
     }
+}
+
+/// Negative control (task requirement): a page whose text is entirely
+/// ordinary, mappable Type 1 text — no Type 3 font at all — must NOT be
+/// flagged fabricated. This is the regression the GH#1782 fix could
+/// easily introduce (over-flagging any page that merely mixes fonts).
+#[test]
+fn mappable_text_only_page_is_not_flagged_fabricated() {
+    let doc = type3_fixture("control-decorative-background.pdf");
+    let thresholds = crate::core::config::OcrQualityThresholds::default();
+    let fabricated = fabricated_provenance_page_indices(
+        &doc,
+        thresholds.min_provenance_fallback_ratio,
+        thresholds.min_total_non_whitespace,
+    );
+    assert_eq!(
+        fabricated,
+        Vec::<usize>::new(),
+        "a page of plain Type 1 text with no Type 3 font must never be flagged \
+             fabricated — false positives here would route ordinary native-text \
+             documents to OCR needlessly"
+    );
+}
