@@ -1,18 +1,20 @@
 # AGENTS.md
 
-## 项目概况与权威文档
+## 项目概况与权威体系
 
-- 本仓库由 AI Agent 开发与维护：后续 agent 按本文件执行开发、验证与文档同步，质量由自动化验收（`fulltest.py` / `slowtest.py` 的质量报告）保证，不依赖用户人工读代码或人工回归。
-- **两份权威文档，职责分开**：`AGENTS.md`（本文件）＝开发规则与操作手册；`fork.md`（仓库根）＝需求权威，记录本 fork 相对上游必须长期保留的功能、默认行为与验收条件。具体需求、功能规划、需求变化只写 `fork.md`，不写进本文件。
-- **文档联动**：需求或用户可见行为变化 → 必须同步 `fork.md`（不得只改代码）；仅实现方式变化（需求不变）→ 不制造需求变更，也不得为了让文档符合现状而改写需求、把缺陷合理化；入口 / 命令 / 开发规则变化 → 同步本文件；同步上游后 → 按 `fork.md` 逐项核对仍有效的本地需求，而不只是看有没有 Git 冲突。
+- 本仓库由 AI Agent 开发与维护，质量必须由自动化验证保证，不能依赖用户人工读代码或人工回归。
+- 本文件只维护开发规则、实现入口、命令与操作约束。固定需求目录为 [docs/requirements/](docs/requirements/README.md)，其中按功能边界维护一至多份权威需求文档；具体需求、规划和需求变化只写在该目录。根目录 `fork.md` 仅为兼容已有引用的迁移链接，不是权威副本。
+- 需求或预期用户可见行为变化时，必须检查并同步对应需求文档；已有合适文档则更新，新独立功能域才新增。每条需求只有一个权威维护位置，跨域使用引用。目录或权威体系缺失时先补齐，再修改实现。
+- 仅实现方式变化且需求不变时，不制造需求变更，不得改写需求来合理化缺陷；入口、命令或开发规则变化时同步本文件。保留已有有效规则、需求、规划和用户改动。
 
-## 仓库性质
+## 仓库性质与上游同步
 
-- 本仓库是 fork：origin = `https://github.com/jchanghong023/xberg.git`（个人仓库），上游 = `https://github.com/xberg-io/xberg.git`（remote 名 `upstream`）。同步上游用普通 `git merge upstream/main`（历史上即如此）。
-- **fork 定制清单在 `fork.md`（仓库根，入库）**：记录本仓库相对上游的全部功能差异，是判断「这段代码是不是 fork 特有」的唯一索引。改动 fork 定制能力时必须同步更新 `fork.md`（保持精简）。
-- **合并上游的冲突策略**：解决冲突时对照 `fork.md`——冲突文件命中 fork 改动面的，保住 fork 行为；冲突过大难以逐行合并时，**先接受上游版本**，再按 `fork.md` 逐项判断哪些 fork 定制需要在上游新代码上重新实现，重做完由用户决定何时跑 fulltest 验证。
-- **仅支持 Windows**：个人代码和包只在 Windows 11 上使用。本地编译与 GitHub 流水线（见 `.github/workflows/build-windows-cli.yml`）都只针对 Windows，不要为其他平台做适配或测试。
-- **AGENTS.md 跟踪入库（fork 特有约定）**：上游的 `.gitignore` 故意忽略 `AGENTS.md`，本 fork 已删除该忽略条目以保留本文件；merge 上游时若把这条忽略规则带了回来，必须再次移除，保住本文件的入库状态。
+- 本仓库是持续同步上游的 fork：origin = `https://github.com/jchanghong023/xberg.git`；upstream = `https://github.com/xberg-io/xberg.git`，跟踪 `upstream/main`。通常使用 `git merge upstream/main`；共同基线用 `git merge-base HEAD upstream/main` 核对。本地引用不代表已核验远程最新状态。
+- 本地差异的唯一需求索引是 [需求目录](docs/requirements/README.md)。同步后必须逐项核对仍有效的本地需求，不能只检查 Git 冲突；不把上游未同步的变化、格式化或纯重构当作本地需求。
+- 仅在已获授权的同步任务中操作：先保全本地改动和差异需求，优先可靠合并。相关冲突难以可靠解决时，可基于该冲突部分的上游当前实现，按需求目录重新实现仍有效的本地行为；不得覆盖唯一需求依据、丢弃无关本地改动或重置整个仓库。重建后须通过相应 UT/E2E 才能宣称同步完成；运行时机仍由用户决定，未获测试授权时报告“合并/实现已实施，待验证”。
+- 开发与验证仅针对 Windows 11，不为其他平台适配或测试；产品边界见需求目录。
+- `AGENTS.md` 必须跟踪入库；上游忽略它的 `.gitignore` 条目若被带回，须移除。保留本地产物忽略项（`.tmp/`、打包输出、转换 scratch、`.zcode/`、`**/logs/` 等），不提交临时产物。
+- 上游生态资产不主动维护，合并时保留；新增格式时同步 README、templates、packages、plugin 等格式表/计数及 WMV/ASF 等能力说明，按最新事实重算，不能沿用旧计数。`.ai-rulez/` 与 plugin 的生成 bundle 使用项目固定版本 ai-rulez 重新生成，不手工制造不同步副本。
 
 ## 硬性约束（必须遵守）
 
@@ -21,48 +23,61 @@
 - **agent 可主动跑的类型检查（唯一编译例外）**：改完 Rust 代码后允许（并建议）跑
   `cargo check -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api`
   ——分钟级、只做类型/借用检查、不产出二进制不跑测试，用于把编译错误挡在交付前（fork 推送到 main 无任何自动编译 CI：上游 `ci-rust.yaml` 的 job 都有 `github.repository == 'xberg-io/xberg'` 守卫，在本 fork 全部 skip）。其余编译类命令仍需用户点名。
-- **fastcheck（agent 可自主跑的快速门，≤60 秒）**：`python testgate.py fastcheck`——三级测试门中唯一无需授权的层级（内容见「三级测试门」一节）：测试脚本语法自检、`fulltest.py --selftest`、打包/CI 关键 PS1 解析、两个干净 crate 的 `cargo fmt --check`；60 秒墙钟硬超时，超时杀进程树判失败、绝不报成功。它只是快速反馈，不代表完整验证；`cargo check` 例外（分钟级）不属于它，仍按上条单独跑。
+- **fastcheck（agent 可自主跑，≤60 秒）**：`python testgate.py fastcheck`；三个 crate 的 fmt、脚本语法、PS1 解析和判定器自测，内容见下方操作表。超时杀进程树并判失败。仅快速反馈，不代表完整验证；分钟级 `cargo check` 按上条单独授权。
 - **交付 Rust 改动时必须报告验证状态**：跑了 `cargo check` 就报结果；没跑就必须显式标注「未编译验证」并列出静态审查覆盖点（读过哪些调用方、检查过哪些类型/feature 门控），由用户决定何时编译。禁止在未验证时暗示"已修复"。
 - **验收资产修改必须显式披露**：修改 `fulltest.py` 的判定逻辑/阈值/问题码、`_expectations.json` 的任何键、或重设基线时，必须在回复中**单独列出改动点并给出实测依据**（哪个文件哪次实测值支持这次调整），不允许夹在引擎改动里静默带过。fulltest 报告与基线已记录金标准 sha256 与代码 commit，资产被动过是可对账的。
 - **报告闭环（声称修复前必须核对）**：用户跑完 fulltest 后，后续 agent 会话在声称任何修复生效前，必须先读 `D:\测试转markdown转换效果\测试文档_md_fulltest\_quality-report.json`，逐码核对「与基线对比」的新增/已修复/恶化与自己的声明一致；不一致不得声称已修复，只能报告"已实施、待用户验证"。
 - **临时脚本 / 临时目录 / 临时文件只准放 `./.tmp`**：仓库内的一次性脚本、临时目录、临时文件一律建在仓库根目录的 `.tmp\`（不存在先 `mkdir -p .tmp`），不得散落在仓库根、`scratch*` 或其他任何目录——根目录只保留仓库资产，避免 `git status` 噪音和误提交；`.tmp/` 已在 `.gitignore` 中（不入库）。验证完自行清理临时产物。
-- **`fulltest.py`（仓库根目录）只在用户明确要求时才运行**。它是文档转换效果的集成测试：遍历 `D:\测试转markdown转换效果\测试文档`，逐文件调用本地编译的 CLI 转成 Markdown，打印五层质量评估（结构启发式、用 pymupdf/python-docx/python-pptx/openpyxl 对源文件算文本召回率、xberg 元数据警告、深检与逐文件金标准断言、对抗语料失败路径），结果输出到 `D:\测试转markdown转换效果\测试文档_md_fulltest`。运行它只需本地编译出 exe（不需要打包），默认遇 FAIL 立即终止，`--keep-going` 跑完；音视频转写超时默认 1800s。音视频也只用本地编译版：预检会用 max_bytes=1 快速探测 transcription feature，缺 feature 直接报错退出并提示 `cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api`，**不回退打包版**。
-- **`slowtest.py`（仓库根目录）同样只在用户明确要求时才运行**。慢速全量验证，测**打包版 CLI**：① 跑 `scripts/publish/cli/package-cli-windows.ps1` 打完整 zip；② 解压到临时目录，对解压出的 xberg.exe 跑 fulltest.py（`--keep-going` 全量测完，`--pkg-dir` 指向解压目录）；③ 输出转码质量报告（报告副本存 `target/slowtest-report-<时间戳>.md`）。包含完整 release 编译与打包，耗时可能 30 分钟以上；`--skip-package` 可复用已有 zip。**用户根据该报告决定是否发布版本。**
+- **`fulltest.py` 仅在明确要求时运行**：本地开发版转换验收，不需要打包。默认跳过音视频，`--deep` 才包含；不得回退打包版。命令、语料和报告路径见下方操作说明。
+- **`slowtest.py` 同样仅在明确要求时运行**：完整打包后对解压版运行 `fulltest.py --keep-going --deep`。用户根据报告决定是否发布；运行该脚本本身不授权远程发布。
 
 ## 测试要求（对 agent 的硬性要求）
 
 - **功能性开发和功能性修改必须有自动化验证**：UT 验证局部逻辑（源码内 `#[cfg(test)]` 与 crate 的 `tests/`）；E2E 验证从真实公开入口到可观察结果的完整链路——本 fork 的 E2E 就是 `fulltest.py`（真实 `xberg.exe extract` → 落盘 Markdown/图片 + 逐文件金标准断言 + 对抗语料失败路径）与 `slowtest.py`（打包版跑同一套）。跨模块交互按需增加集成测试。
-- **编译、`cargo check`、clippy、局部模拟都不能替代 E2E**：它们只证明类型或局部逻辑，不证明转换质量；桩和模拟可以补充测试，但绕过的真实边界（真实文件、真实 OCR / 转写模型、真实 CLI 入口）必须说明，不能当作端到端结论。
+- **UT、编译、`cargo check`、clippy、局部模拟都不能替代 E2E**：它们只证明类型或局部逻辑，不证明转换质量；桩和模拟可以补充测试，但绕过的真实边界（真实文件、真实 OCR / 转写模型、真实 CLI 入口）必须说明，不能当作端到端结论。
 - **测试要对需求与验收条件负责**：覆盖核心成功路径与相关关键失败路径（失败路径＝`_adversarial/` 那套语义：损坏 / 截断 / 空输入必须优雅失败），不得只复述实现或只断言"没 panic"。
 - **验证状态必须如实区分**：已实现 / 验证通过 / 验证失败 / 未验证（写明未验证范围与原因）。环境、依赖或权限不足时说明未验证部分，不能用"已修复"描述未验证的改动（与「硬性约束」的交付要求一致）。
 - **Windows 上可用的 UT 入口**（均属编译类命令，只在用户点名时运行）：`cargo test -p xberg`、`cargo test -p xberg-cli`，或 `task test:quick`（= `cargo test --locked --lib --workspace --exclude xberg-php --exclude xberg-node --exclude xberg-wasm`，只跑 lib 单测）。`task test` / `task test:ci` 在 `.task/languages/rust.yml` 里只声明了 linux / darwin 平台，在 Windows 上不执行。
 - **test_documents 语料二进制不进 git**：`test_documents` 子模块只含源码与 `corpus.lock.json`（693 个对象的 sha256/大小清单），.pdf/.docx/.pst 等二进制须先从公开 bucket 拉取到工作树（约 618 MB，一次性）：`cd test_documents && python scripts/fetch_corpus.py`（已正确文件只做哈希校验；语料路径被子模块 .gitignore 忽略，不会弄脏父仓）。缺语料时 cargo test 会出现大量 "fixture not found" 失败；testgate fulltest 门的 `test-documents-corpus` 阶段会先做存在性预检并给出该修复命令。
-- **现状与缺口（如实记录）**：本 fork 没有自动跑 Rust 测试的 CI（上游 `ci-rust.yaml` 等编译 / 测试 workflow 被仓库守卫 skip，无守卫的 `ci-lint` 只跑治理 / 文档 / 脚本类检查，不编译 Rust、不跑 Rust 测试）；fork 新增模块多数自带 UT（`extraction/visio.rs`、`rendering/ocr_layout.rs`、`extraction/markdown_utils.rs`、`extraction/excel/images.rs`、`crates/xberg-windows-metafile`），但部分模块（如 `transcription/wmf.rs`）没有 UT，只有 fulltest 的 E2E 覆盖；上游 `e2e/` + `fixtures/` 的语言绑定 e2e 在本 fork 不运行、不作为验收依据。2026-09-19 首次授权运行 testgate fulltest 门并修到全绿（含此前从未在 Windows 验证过的全部 lib/集成测试；发现并修复的缺陷见当次提交）。
+- **现状与缺口（如实记录）**：本 fork 没有自动跑 Rust 测试的 CI（上游 `ci-rust.yaml` 等编译 / 测试 workflow 被仓库守卫 skip，无守卫的 `ci-lint` 只跑治理 / 文档 / 脚本类检查，不编译 Rust、不跑 Rust 测试）；fork 新增模块多数自带 UT（`extraction/visio.rs`、`rendering/ocr_layout.rs`、`extraction/markdown_utils.rs`、`extraction/excel/images.rs`、`crates/xberg-windows-metafile`），但部分模块（如 `transcription/wmf.rs`）没有 UT，只有 fulltest 的 E2E 覆盖；上游 `e2e/` + `fixtures/` 的语言绑定 e2e 在本 fork 不运行、不作为验收依据。
+- 复用已有有效测试，不为每处修改机械新增用例；纯文档等非功能变更按实际影响验证，不运行无关完整测试。
+- 当前转换脚本只覆盖真实 CLI 抽取，不能据此声称 HTTP 服务、性能日志或每条解码回退路径完成 E2E；覆盖盲区及未满足需求见 [DELIVERY.md](docs/requirements/DELIVERY.md) 和对应需求文档。修改相关能力时补齐必要验证，未经授权不执行费时测试。
+- fork 行为改变上游测试前提时，依据需求调整前提/断言并保留有效覆盖，不删除测试来掩盖失败；与 fork 差异无关的上游测试语义保留。
 
-## 三级测试门（`testgate.py`，fork 特有）
+## 三级测试门操作
 
-三级入口统一在仓库根 `testgate.py`，层级语义固定（fastcheck=AI 自主快速反馈；fulltest=当前平台完整本地验证；slowtest=再叠加打包与远程阶段）。三者与验收脚本的称呼区分见末条。
+所有命令默认在仓库根目录、Windows PowerShell 执行，需要对应 Python/Rust/PowerShell 工具及依赖。以下入口经源码核对；本次文档更新未运行这些命令，列出入口不代表当前环境已通过。
 
-- **fastcheck ＝ `python testgate.py fastcheck`**：agent 可自主执行，无需授权，60 秒墙钟硬超时。内容：`fulltest.py`/`slowtest.py`/`testgate.py` 语法自检 → `fulltest.py --selftest`（判定器自测）→ `package-cli-windows.ps1`/`offline-smoke.ps1`/`verify-windows-dll-closure.ps1` 的 PS1 解析 → 三 crate 的 `cargo fmt --check`（2026-09-19 经用户授权执行 `cargo fmt -p xberg` 清掉 155 文件量级既有漂移后，xberg crate 纳入 fastcheck）。fastcheck 通过≠完整验证。
-- **fulltest 门 ＝ `python testgate.py fulltest`**：当前平台（Windows）完整本地验证，**仅限用户对本次运行明确授权**。阶段独立汇报、任一 FAIL 即门失败：三 crate `cargo fmt --check` → `cargo build -p xberg-cli`（fork feature 集）→ `python fulltest.py --keep-going`（依赖 build 成功）→ `test-documents-corpus` 存在性预检（缺语料给出 fetch 命令，见「测试要求」）→ `cargo test`（`-p xberg --features formats-no-heic,analysis,ocr,paddle-ocr,transcription,layout-detection,api`（lib 测试集**保留** layout-detection，见下条）、`-p xberg-cli --no-default-features --features <fork 集>`、`-p xberg-windows-metafile`；test 阶段以 `CARGO_BUILD_JOBS=8` 限编译并行度，防 jobs=28 耗尽页面文件 os error 1455，覆盖语义不变）→ `cargo clippy`（同三目标，`-D warnings`）。2026-09-19 首次授权运行即修到全绿（此前 fmt-xberg 155 文件漂移、clippy 既有告警等已一并清理，见当次提交）。
-- **slowtest 门 ＝ `python testgate.py slowtest`**：最高级验证，**仅限用户对本次运行明确授权**。先跑完整 fulltest 门（失败即止，后续阶段记 SKIPPED_PRIOR_FAIL，不在已知失败状态上打包/发布），再跑 `python slowtest.py`（完整打包 + 打包版 fulltest.py；解压目录固定在仓库 `target/slowtest-tmp/`，**成功即删**并只保留 `target/slowtest-report-<时间戳>.md|.json` 副本，失败或加 `--keep-tmp` 才保留供检查——旧行为是每轮在系统 `%TEMP%` 留 0.6~0.9 GB 且永不清）。远程阶段：`build-windows-cli.yml` 会创建带时间戳 tag 的**公开 GitHub Release**（真实发布副作用），因此**只有用户明确授权发布目标并显式加 `--with-release-ci`** 才触发并轮询到最终结论（要求工作区干净且 HEAD 已推到 origin）；默认该阶段记 SKIPPED_NOT_AUTHORIZED，此时只能宣称「本地部分通过」，不得说完整 slowtest 已通过。WSL/跨平台：SKIPPED_NOT_APPLICABLE（本 fork 仅支持 Windows，见「仓库性质」）。该 workflow 只调打包脚本、不回调 testgate，无远程递归。
-- **称呼区分（消歧规则）**：用户点名「fulltest.py / slowtest.py」（带 .py）＝只跑那两个脚本本身，既有语义与验收地位不变；点名「fulltest / slowtest 门」「完整本地验证」「testgate xxx」＝跑对应的门。口语「跑 fulltest」按既有习惯默认指 fulltest.py 脚本。
+| 入口 | 授权与操作 |
+| --- | --- |
+| `python testgate.py fastcheck` | agent 可自主执行，60 秒总预算：三 Python 脚本语法、`fulltest.py --selftest`、打包/offline-smoke/DLL 闭包 PS1 解析、xberg/xberg-cli/xberg-windows-metafile 三 crate `cargo fmt --check`。 |
+| `python testgate.py fulltest` | 每次须用户明确授权。三 crate fmt → fork feature 集 build-cli → `fulltest.py --keep-going` → 语料存在性 → 三 crate test → 三 crate clippy `-D warnings`。阶段依赖与独立结果以 `FULLTEST_STAGES` 为准；任一失败即门失败。 |
+| `python testgate.py slowtest` | 每次须用户明确授权。先完整 fulltest 门；本地失败则后续跳过，成功再运行 slowtest.py。远程阶段默认未授权，仅能报告本地部分。 |
 
-## fulltest.py 的作用（本仓库的验收标准）
+- xberg 的 test/clippy 用 `FEATURES_LIB = formats-no-heic,analysis,ocr,paddle-ocr,transcription,layout-detection,api`，保留上游 layout 专属测试与配置校验；CLI 用标准 fork 集且 `--no-default-features`。测试 feature 集不等于出厂能力。test 阶段 `CARGO_BUILD_JOBS=8`，防止 Windows 页面文件耗尽（os error 1455），不缩减覆盖。
+- 远程发布有真实公开副作用：只有用户明确授权发布目标并显式加 `--with-release-ci` 才能触发；要求工作区干净、HEAD 已推到 origin。workflow 为 `.github/workflows/build-windows-cli.yml`，需轮询最终结果。不得将未授权跳过的远程阶段描述为通过，不执行 WSL/跨平台验证。
+- 消歧：点名 `fulltest.py` / `slowtest.py`＝仅脚本；点名“fulltest / slowtest 门”“完整本地验证”“testgate xxx”＝对应门；口语“跑 fulltest”默认指 fulltest.py。
+- 门的跳过状态、超时和质量报告语义见 [DELIVERY.md](docs/requirements/DELIVERY.md)，不得把门退出成功等同于转换质量全绿。
 
-- **它就是验收标准本身**：`fulltest.py` 产出的 `_quality-report.md` / `_quality-report.json` 即转换质量判定——**报告里的红项（FAIL/WARN）＝当前待修清单，主队列 11 个文件全部 PASS 且 `_adversarial` 失败路径全 PASS（"全绿"）＝达标**。转换器改动一律以「红项减少 / 无新增码 / 无恶化」评估，不靠人工逐文档复核。
-- **检查分五层**（每层独立出码）：① 进程/结构（退出码、空结果、乱码与标记泄漏、围栏与表格列、落盘图片合法性）；② 源文对齐（去页眉后 bigram 召回、数字与标识召回、正文体量比、分页覆盖）；③ 交叉核对（源页数/媒体清单 vs 引擎 counts vs 落盘 vs MD 引用、音视频转写量）；④ 深检（Markdown 语义噪声、内嵌对象与子文档保真、PPTX 标题与备注、xlsx 图形文本、PDF 书签与表格数、OCR 通道、逐文件金标准断言）；⑤ 失败路径（对抗语料 `_adversarial/`：损坏/截断/空文件必须优雅失败——非零退出+诊断 或 干净转换，panic/静默失败/吐垃圾都判红，码 `ADV_*`）。
-- **仓外数据文件（不入 Git）**：
-  - `D:\测试转markdown转换效果\_expectations.json`：逐文件金标准。键有 `required_tokens` / `forbidden_patterns` / `order` / `min_*`、`max_*` 指标 / `require_chinese_ocr` / `require_nested_bullets` / `toc_heading_min_recall` 等（合法键集见 fulltest 的 `KNOWN_FILE_KEYS`）；顶层 `run.ocr_config` 是 OCR 覆盖配置（默认空＝不覆盖 CLI 的 OCR 设置），**本 fork 已不使用 layout/table 模型**（2026-09-21 需求变更：feature 集与打包脚本都移除了 `layout-detection`，RT-DETR/TATR 不再随包）——因此 `run` 段**不要**再加 `layout_config`（该 feature 未编译，CLI 收到 `layout` 字段会直接报错）；图片的版面信息由 `rendering/ocr_layout.rs` 的 ```text 网格围栏承载。改判定的阈值仍按实测校准，见各文件 `_note_*`。**加载期自检**：拼错的键、含控制字符/编译失败/匹配空串的 pattern、过短 token 都会打「配置告警」（进报告）——键拼错＝检查静默不生效，2026-09-14 曾实证 `forbidden_patterns` 写 `\b`（JSON 退格转义）导致回归守卫失效。
-  - `D:\测试转markdown转换效果\_quality-baseline.json`：回归基线，`--save-baseline` 生成；报告 `## 与基线对比` 输出「新增/已修复/恶化」——新增/修复比问题码集合，**恶化比同码出现次数**（如 `DUP_SPAM` 2→5 算恶化，只比集合会吞掉质量劣化）。未加载金标准的运行里，依赖金标准的码（`GOLDEN_*`、OCR 期望码、阈值类）会从对比两侧剔除，避免出现假的"已修复"；金标准 sha256 与基线不一致时会显式提示（阈值类对比仅供参考）。基线还记录生成时的 git commit / 阈值 / argv，报告可对上「哪次代码跑出来的」。
-- **常用命令**：`python fulltest.py --keep-going` 跑完不停；`--save-baseline [--force]` 更新基线；`--selftest` 只跑判定器自测（合成样例+随机等价对照，不需要 CLI/语料，改判定函数后必跑）；`--no-expectations` / `--expectations <path>` 为降级跑法（请同时用 `--out` 指向独立目录，别覆盖标准报告）；`--strict` 把 WARN 也算失败。
-- **`--save-baseline` 有护栏**：存在 FAIL 判定文件、本轮提前终止（半截结果）或金标准未加载时拒绝保存（把坏状态存成回归基准会静默遮蔽真回归）；确认红项可接受后加 `--force` 重设。
-- **改完检查判定/阈值后必须 `--save-baseline` 重设基线**：用的还是旧判定的话，修正掉的假阳会继续显示成"已修复"，污染转换改进的读数。
-- **改脚本时的约定**：阈值问题先调常量或期望值，不删检查；新增「是否出码依赖金标准」的检查必须把码名登记进 `fulltest.py` 的 `EXP_GATED_CODES`；新增问题码要同时加进 `ISSUE_META` 并给严重度；**改判定核心函数（`_golden_token_hit` / `save_markdown` / `_validate_expectations` / `compare_baseline` / `baseline_block_reason` / `classify_adversarial_failure` / `finalize_adversarial_success`）必须同步加/改 `run_selftest` 用例并跑 `python fulltest.py --selftest`**（该命令属脚本级自检，agent 可主动运行）；改 expectations 合法键集时同步 `KNOWN_FILE_KEYS`。
-- **已知不自动判定的形态（盲区 backlog，修相关模块时评估能否补检查）**：T1 同一内容二次 OCR 输出的重复（两遍乱码不同，8-gram 无交集 → `DUP_CONTENT` 不报，仅当围栏块与正文/其他围栏块高度相似才报）；T2 源图被截图浮层遮挡/裁掉的像素（如被上传按钮盖住的 `()`）；T3 中文词内部被插空（与 `IDENT_FRAGMENTED` 的拉丁标识符判据不同，误报率高）；T4 图表题注顺序颠倒（缺稳定锚点）；T5 归属错位类（内嵌对象文本堆在文末、不插回所属页）；T6 行内 `| --- |` 形式的"表格被压成一行正文"（长度阈值够不着）。这些在报告里不会出现，需要人工或后续新增检查。
-- **对抗语料（失败路径层）**：`D:\测试转markdown转换效果\测试文档\_adversarial\`（empty.pdf / truncated.pdf / corrupt.docx，可按需扩充；子目录不进主队列，主队列跑完后追加）。判定语义：非零退出且 stderr 有诊断＝优雅失败 PASS；panic/backtrace＝`ADV_PANIC`；非零退出无输出＝`ADV_SILENT_FAIL`；"成功"但输出垃圾＝`ADV_GARBAGE_OK`；"成功"且空/过短＝`ADV_EMPTY_OK`（WARN）。对抗文件的优雅失败**不需要**金标准条目。
-- **阈值来源与校准**：`_expectations.json` 里的 `min_fenced_cjk` 等取自 chi_sim 实测值的一半（OCR 退化回英文输出仍判红）；`min_tables`/`min_headings` 以源文档事实为准（如 tessent 取文档自带 `Table N-M.` 题注 54 个的量级，而不是 `find_tables` 的 468 个——后者约 350 个是页眉框）。改阈值前先按 `_note_*` 注释确认推导依据。
-- `slowtest.py` 只是把同一份 `fulltest.py` 换成打包版 CLI 再跑一遍（参数不变），新检查对打包版自动生效。
+## 转换验收资产与维护操作
+
+质量判据、报告字段、金标准校验、失败路径与盲区统一见 [DELIVERY.md](docs/requirements/DELIVERY.md)。维护时使用以下实际入口，不降低该文档的验收标准。
+
+| 对象 | 位置与用途 |
+| --- | --- |
+| 标准语料 | `D:\测试转markdown转换效果\测试文档`；`_adversarial/` 子目录不进主队列，主队列后追加。现有失败样例为 empty.pdf、truncated.pdf、corrupt.docx。 |
+| 标准报告 | `D:\测试转markdown转换效果\测试文档_md_fulltest\_quality-report.md` / `.json`。 |
+| 逐文件金标准 | `D:\测试转markdown转换效果\_expectations.json`，仓外不入 Git；合法键以 `KNOWN_FILE_KEYS` 为准。 |
+| 回归基线 | `D:\测试转markdown转换效果\_quality-baseline.json`，仓外不入 Git。 |
+| 打包版报告副本 | `target/slowtest-report-<时间戳>.md` / `.json`。 |
+
+- 本地验收命令：`python fulltest.py` 默认遇 FAIL 即止；`--keep-going` 跑完；`--deep` 包含音视频，音视频默认超时 1800 秒；`--strict` 将 WARN 也算作失败。只需开发版 exe，不需打包；`--cli` 可明确本地 exe。
+- `python fulltest.py --selftest` 仅为判定器自测，无需 CLI/语料，agent 可主动运行。`--no-expectations` / `--expectations <path>` 为降级或替代金标准跑法，须配 `--out` 独立目录，不覆盖标准报告，也不放宽运行授权。
+- 改判定或阈值后必须在获准运行验收时用 `--save-baseline` 重设基线，避免假阳修正被计作引擎修复；尚未完成时明确记录待重设。已有 FAIL、提前终止或缺金标准会被护栏拒绝，只有用户确认红项可接受后才加 `--force`。运行验收本身不等于授权接受红项。
+- 阈值先调常量/期望，不删除检查。新问题码加入 `ISSUE_META` 并给严重度；依赖金标准的码同时加入 `EXP_GATED_CODES`；合法键变化同步 `KNOWN_FILE_KEYS`。
+- 修改 `_golden_token_hit` / `save_markdown` / `_validate_expectations` / `compare_baseline` / `baseline_block_reason` / `classify_adversarial_failure` / `finalize_adversarial_success` 时，同步新增/调整 `run_selftest` 并运行 `python fulltest.py --selftest`。
+- 改阈值前按金标准 `_note_*` 核对推导依据：`min_fenced_cjk` 等基于 chi_sim 实测；tessent 表格量级取源文 `Table N-M.` 题注 54 个，而非含页眉框的 `find_tables` 468 个。无实测依据不调整；验收资产变更的单独披露要求见硬性约束。
+- 标准构建不支持 layout 配置，不给 `run` 注入 `layout_config`；模型/输出要求见 OCR 与 DELIVERY 文档。不要把检查器盲区转为要求用户日常人工回归。
 
 ## 架构与目录组织
 
@@ -92,13 +107,56 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 
 ### 顶层目录
 
-- `fork.md`——fork 相对上游的定制清单（见「仓库性质」）；`fulltest.py` / `slowtest.py`——fork 验收标准（见下节）；`testgate.py`——三级测试门入口（见「三级测试门」）。
+- `docs/requirements/`——按功能域维护的 fork 差异需求（从 README 索引定位）；`fulltest.py` / `slowtest.py`——fork 验收标准（见上方操作说明）；`testgate.py`——三级测试门入口（见「三级测试门」）。
 - `scripts/`——`publish/cli/package-cli-windows.ps1`（打包唯一入口，也是 fork feature 集的来源之一）、`publish/cli/offline-smoke.ps1`、`ci/`（PE/DLL 闭包校验）。
 - `.github/workflows/build-windows-cli.yml`——fork 自有的 Windows 打包 CI，仅手动 `workflow_dispatch` 触发。上游编译/测试类 workflow（ci-rust、ci-e2e 等）带仓库守卫在本 fork 全 skip；push 命中路径会自动跑的只有无守卫的 ci-lint / ci-docs / ci-scripts（其余无守卫 workflow 是 workflow_dispatch / release / issue-PR 事件触发，不随 push 跑）。
 - `docs-site/`（Astro + Starlight 文档）、`e2e/` + `fixtures/`、`.ai-rulez/`（ai-rulez 管理的 AI 规则/技能，改规则后需用固定版本的 ai-rulez 重新生成 bundle）。**`e2e/` 与 `fixtures/` 是上游的语言绑定 e2e 资产**（csharp/dart/go/...），本 fork 的验收不走它们（走 fulltest.py），日常不要为它们做适配；merge 上游带进来的改动原样保留即可。
-- `packages/` / `integrations/` / `plugin/` / `charts/` / `templates/`——上游生态资产（语言包、第三方集成、Claude 插件、Helm chart、README 生成模板），fork 不主动维护，merge 时原样保留（引擎新增格式时的计数同步除外，见 `fork.md` 末节）。
+- `packages/` / `integrations/` / `plugin/` / `charts/` / `templates/`——上游生态资产（语言包、第三方集成、Claude 插件、Helm chart、README 生成模板），fork 不主动维护，merge 时原样保留（引擎新增格式时的计数同步除外，见本文件「仓库性质与上游同步」）。
+- CLI 运行入口：`target\debug\xberg.exe extract <输入>`、`batch`；HTTP 入口 `target\debug\xberg.exe serve`，路由在 `crates/xberg/src/api/router.rs`（如 `/extract`、`/health`）。调用参数先按源码/对应二进制帮助核对，运行服务或转换仍应属于用户任务范围。
+- OOXML 内嵌对象入口目前为 `extraction/ooxml_embedded/mod.rs`；测试可能外移到同名目录的 `tests.rs`，查找时同时检查 inline tests 与外置测试模块。
+- workspace member 变化时检查上游 `docker/` 与 `.dockerignore` 的构建上下文，保留 `xberg-windows-metafile` 的对应登记；这属于同步已有资产，不扩展本 fork 的支持平台。
 
-## 编译 / 打包 / 测试（仅在用户明确要求时执行）
+## 构建、打包与调试入口
+
+除已列明的 `cargo check` 与 fastcheck 例外外，编译、测试、clippy、打包均仅在用户明确点名时执行。以下命令在仓库根执行，工具链按仓库配置，保持 feature/profile/target 稳定。
+
+### 开发构建
+
+```powershell
+cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api
+```
+
+产物 `target\debug\xberg.exe`。标准能力的权威定义在 [DELIVERY.md](docs/requirements/DELIVERY.md)；命令是操作入口。不要使用不带 feature 限定的 `cargo build -p xberg-cli`（default 较重），也不要启用 `all`。`cargo check` 使用上面相同参数，仅将 build 换为 check。
+
+### 可选性能构建
+
+```powershell
+cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api,perf-tracing
+```
+
+- 性能日志契约见 [PERFORMANCE.md](docs/requirements/PERFORMANCE.md)，实现入口为 `crates/xberg-cli/src/perf.rs`。标准集不改；仅为获准的性能验证按需启用。
+- `xberg/perf-tracing` 是 marker；CLI feature 引入 `tracing-appender` 并转发该 marker。`WorkerGuard` 必须由 `run_cli` 持有至退出，不能写成 `let _ =`。
+- 标准 CLI 已经由 `core-cli → xberg/cli → services → otel` 启用 OTel，perf 不能用 `not(feature = "otel")` 守卫。普通函数用 feature cfg_attr；`extract_bytes`/`run_pipeline` 与已有 instrument 嵌套；`format_extract` 同调用点使用互斥分支且 perf 优先。分析耗时按需求文档的 busy/idle 口径。
+
+### 打包与发布前验证
+
+```powershell
+pwsh -NoProfile -File scripts/publish/cli/package-cli-windows.ps1
+```
+
+- 需要 PowerShell ≥7.4；本地 Jobs 默认 min(30, 逻辑核数)，CI 默认 6，可用 `-Jobs N` 覆盖。CI 调用同一脚本，不能另建不同打包路径。
+- 输出 `xberg-cli-x86_64-pc-windows-msvc/` 和同名 zip。模型组成、离线正负 smoke 和 DLL 验收要求见 DELIVERY.md；实现入口为 `$Features`、`$RequiredModels`、`$TranscriptionFiles`，Paddle 清单从 `xberg.exe cache manifest` 取大小/sha256，Whisper 使用固定清单；模型正则必须恰好匹配一条。
+- `target/package-models-<target>` 是跨次复用缓存，不随临时清理删除。包内执行时 `HF_HUB_CACHE` 指向 `<包>/models`，PATH 前置包目录；不要用会追加 `/hub` 的 `HF_HOME` 代替。fulltest.py 已处理这两项。
+- `python slowtest.py` 执行打包及打包版 E2E，`--skip-package` 可复用已有 zip，`--keep-tmp` 保留解压目录；脚本固定使用 `target/slowtest-tmp/`，成功即清理，否则保留。该脚本管理的目录按其固定入口处理，agent 自建一次性文件仍必须放 `.tmp/`。
+- Rust UT、`task test:quick`、`cargo clippy` 及 task runner 的其他编译入口仍须明确授权。`Taskfile.yml` / `.task/languages/rust.yml` 是入口依据，Windows 上不使用只声明 linux/darwin 的 `task test` / `task test:ci`。
+
+### 已知构建问题与证据边界
+
+- 历史 Windows 冷测试生成大量 PDB：2026-09-20 记录 debug=1 时约 88 GB PDB + 38 GB exe，debug=0 仍约 27 GB PDB；profile 变更不会自动清旧产物。这是保留缓存和减少 debug 信息的依据，不是本次磁盘读数。
+- dev/test 共用 `target/debug/`；`cargo clean --profile test` 历史 dry-run 会连 dev 缓存一起清，禁止当定点清理使用。删除旧 release 或模型缓存会导致下次重新构建/下载，先核对所属 profile/target、恢复方式及授权，遵循下方缓存纪律。
+- 遇 os error 32 文件锁，先核实是否有其他 cargo/rustc 或安全软件占用；历史同命令重试曾恢复，不能据此假定当前原因或主动修改安全软件排除项。测试 os error 1455 先检查既定的 test jobs=8。
+- `cargo check` 不执行 clippy lint，不能报告 lint 已通过。旧门禁/发布记录可从 Git 历史追溯，不作为当前工作树通过证据。
+- 修改能力前按需求目录核对，注意 CLI wire format 与内容渲染格式不同；JSON 图片输出、配置替换和未编译字段的边界见 FORK.md。
 
 ### 构建与缓存纪律（Rust 构建优化规则，用户强制，2026-09-20）
 
@@ -109,91 +167,9 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 1. **必须用 incremental 编译，禁止无理由 `cargo clean`**：`incremental = true` 在 `.cargo/config.toml`（alef 生成，DO NOT EDIT）。要清东西必须能说出「它属于哪个废弃 profile/feature/target」。
 2. **优先保留当前有效 target 缓存，避免冷编译**：删除前先确认产物是否还是当前 profile/feature 的（`target/debug/deps` 里的 rlib/rmeta、`target/debug/build`、`target/debug/incremental` 是热缓存，默认不动）。
 3. **dev 构建减少 debug/PDB，优先 `debug = 0`**：`Cargo.toml` 的 `[profile.dev] debug = 0`，`[profile.test] debug = 0`（test 显式钉死，防继承回潮）。要符号按次开：`CARGO_PROFILE_DEV_DEBUG=1` / `CARGO_PROFILE_TEST_DEBUG=1`。
-4. **保持 toolchain / features / RUSTFLAGS / target / profile 稳定**：fork feature 集固定为上表那 7 个（不含 layout-detection）（改能力必须同步本文件与打包脚本 `$Features`）；不要临时加 `RUSTFLAGS` 或切换 `--target` 三元组（会另生成一整套 `target/<triple>/` 缓存）。
+4. **保持 toolchain / features / RUSTFLAGS / target / profile 稳定**：标准 fork feature 集见上方编译命令（能力要求在 DELIVERY.md）；改能力须先更新需求，再同步本文件、testgate.py 和打包脚本 `$Features`；不要临时加 `RUSTFLAGS` 或切换 `--target` 三元组（会另生成一整套 `target/<triple>/` 缓存）。
 5. **Windows 链接优先 LLD**：`.cargo/config.toml [target.x86_64-pc-windows-msvc] linker = "rust-lld"`（本机 + 交叉目标都走这份配置；回退就删该段）。
 6. **开发阶段禁止 LTO 等昂贵 release 优化**：日常验证/编译一律 dev profile，不要用 `--release` 跑 fulltest。
 7. **LTO / strip / codegen-units / opt-level=3 只用于最终打包**：只在 `[profile.release]`（当前 `lto = false`、`codegen-units = 256`、`opt-level = 3`、`strip = true`），服务对象是 `package-cli-windows.ps1` 与 slowtest。
 8. **磁盘不足按下述优先级删（先废弃、后缓存）**：① 废弃 profile 的产物——`target/debug/**/*.pdb`（PDB 是纯调试副产物，删了不影响增量构建正确性；注意本仓库 dev 与 test 共用 `target/debug/`，`cargo clean --profile test` 实测等于 `cargo clean`，禁用）；② 不再使用的 `target/<triple>/`（旧 feature 集或旧三元组）；③ 旧 release 产物；**最后**才考虑 dev 热缓存。`cargo clean` 无参数＝清空一切，视为最后手段。
 9. **定位慢点用 `cargo build --timings`**（产物在 `target/cargo-timings/`）：先看慢 crate / `build.rs` / proc-macro / 最终链接，再决定是否调 `-Jobs`、拆 target 或换 profile，不要凭感觉加并行度。
-
-配套实测（2026-09-20，见「已知坑」第 1 条）：`debug = 1` 下一次冷 `cargo test` 写 88 GB `.pdb` + 38 GB 测试 exe；`debug = 0` 后同一批 ~200 个测试目标仍会写 ~27 GB PDB（MSVC 链接器即便 `debuginfo = 0` 也生成公共符号表，无法归零），单份从 ~410 MB 降到 ~125–150 MB，链接时间同步下降。
-
-**门禁实测（2026-09-20，用户授权连跑三级）**：`fastcheck` PASS 4.2s → `fulltest` 门 PASS 2789s（12 阶段全绿：build-cli 74s、e2e 258s、test-xberg 2226s、test-xberg-cli 159s、clippy ×3 共 67s）→ `slowtest` 门 PASS（`slowtest.py` 615s：打包 zip 361.7 MiB + PE 闭包/正负 smoke 全过 + 打包版 fulltest 验收 FAIL=0 WARN=7、与基线比 新增 2/已修复 0/恶化 0；远程发布阶段未授权记 SKIPPED_NOT_AUTHORIZED，WSL 记 SKIPPED_NOT_APPLICABLE）。滑动窗口内的一次失败值得记住：首轮 `fulltest` 门在 `build-cli` 阶段报 `failed to write ...librustfft-*.rmeta: 另一个程序正在使用此文件 (os error 32)`，同一条命令重跑即过——当时无第二个 cargo、无孤立 rustc，本机实时防护是 腾讯电脑管家（Defender 服务已停），建议把 `E:\xberg\target` 加入其排除项以消除这类随机文件锁。整套跑完 `target/debug` 从 58.9 GB 涨回 157.5 GB（含新旧两代产物），E: 可用空间 179 → 76 GB。
-
-**门禁实测（2026-09-22，用户授权 slowtest + 发布）**：首轮 slowtest 门在 clippy 阶段才失败——9-22 新增的 whisper 并行装配代码此前只跑过 `cargo check`（不执行 clippy lint），被 `clippy::question_mark` 拦下（修复 commit `00efbacf88`）；门禁行为正确：本地未全绿时 slowtest.py 与 release-ci 记 SKIPPED_PRIOR_FAIL、不触发发布。修复后重跑全绿：fulltest 门 PASS 2373s（test-xberg 2005s、clippy ×3 全过）→ `slowtest.py` PASS 179s（zip 实测 191.9 MB，打包版验收 FAIL=0 WARN=7、与基线比 新增 2/已修复 1/恶化 0，与 9-22 发布前两轮本地验证一致）→ release-ci PASS 1976s → 公开 Release `v2026.9.22-0714-run39.1`（构建自 `00efbacf88`，资产 193.2 MB）。教训：**改 Rust 代码后只跑 `cargo check` 不挡 clippy lint**，涉新代码的大改动交付前值得主动跑一次 clippy（需用户点名）。
-
-编译和打包是两条独立路径。**跑 fulltest.py 只需要编译，不需要打包**——编译出 exe 直接 `python fulltest.py` 就能测。**唯一例外**：`cargo check -p xberg-cli`（fork feature 集，见「硬性约束」）属类型检查，agent 改完 Rust 代码可主动跑，不算"费时操作"。
-
-### 编译（供开发与 fulltest.py 使用）
-
-本 fork 只需要「文件 → Markdown」+ OCR + 音视频转写 + HTTP 服务（`xberg serve`），**不要** `all` / heic / pdfium / embedding / NER / MCP。
-
-- **标准调试构建（推荐，fulltest 用这个）**：
-
-  ```bat
-  cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api
-  ```
-
-  产物：`target\debug\xberg.exe`。
-
-  | feature | 覆盖 |
-  |---|---|
-  | `core-cli` | CLI 入口 |
-| `api` | `xberg serve`——HTTP API 服务（axum 纯 Rust 栈，不新增 DLL）；本地编译与打包都必须带 |
-  | `formats-no-heic` | docx / pptx / xlsx / pdf 等（无 libheif） |
-  | `analysis` | 转换管线 |
-  | `ocr` | 图片 → 文字（Tesseract，后备） |
-  | `paddle-ocr` | 图片 → 文字（PaddleOCR pp-ocrv6 **tiny**，默认 OCR 后端）；模型随包分发 |
-  | `transcription` | 音视频 → 文字（Whisper + ORT） |
-
-- **不要** `cargo build -p xberg-cli`（default 带 embeddings/candle 等，比上述集重）。
-- **不要** `--features all`（在标准集之上额外拉 mcp/heic/pdfium/ner/summarization 等，且 heic 在 Windows 常编不过）。
-- 音视频与本地编译版：fulltest.py 对所有文件（含音视频）只用 `--cli` 指定的本地 CLI，无任何打包回退；缺 transcription feature 时预检即失败并提示重编。
-
-### 性能打点构建（可选 perf-tracing feature，fork 特有）
-
-- **是什么**：编译期开关的性能耗时打点体系（2026-09-21 新建）。`xberg` crate 的 `perf-tracing` 是纯 marker feature（不新增依赖），给关键阶段加 `target="perf"` 的 tracing span；`xberg-cli` 的 `perf-tracing` ＝ `dep:tracing-appender` + 转发 `xberg/perf-tracing`，把 span 落到独立性能日志（`crates/xberg-cli/src/perf.rs`：按天滚动 `logs/perf.log.<日期>`，默认目录相对 CWD，`XBERG_PERF_LOG_DIR` 可覆盖；`**/logs/` 已 gitignore）。耗时字段来自 `FmtSpan::CLOSE` 的 `time.busy`/`time.idle`。
-- **span 契约（只增不改）**：target 固定 `"perf"`；既有 span 名 `extract_command` / `batch_command` / `engine_extract` / `engine_extract_batch` / `extract_file` / `extract_bytes` / `format_extract` / `pipeline` / `image_ocr` / `whisper_model_load` / `whisper_transcribe` / `render_output` / `paddle_engine_init` / `paddle_ocr_infer`，动态信息（路径、MIME、元素数等）只作为字段记录。**otel 在本 fork 所有标准构建里都是开着的**（`core-cli → xberg/cli → services → otel`），所以 perf span 不得用 `not(feature = "otel")` 守卫（那会全部静默失效，2026-09-22 实证过）：普通函数直接 `#[cfg_attr(feature = "perf-tracing", …)]`；`extract_bytes`/`run_pipeline` 这类自带 otel instrument 的函数两者叠加为嵌套 span（tracing 支持重复 instrument）；`format_extract` 与 otel stage span 同一调用点的两处用三分支 cfg 互斥、**perf 优先**（perf 开 → otel stage span 让位）。
-- **读数口径**：`time.busy` = span 处于 enter 状态的时间；spawn_blocking/子任务里的工作不会计入父 span 的 busy（表现为父 span 的 idle），这是 2026-09-22 给 `paddle_ocr_infer`/`whisper_*` 补 span 的原因——分析时必须看「最深处的 busy」，不要拿父 span busy 当总耗时。
-- **标准构建零影响**：出厂 feature 集不含 `perf-tracing`，标准构建/fulltest/slowtest/打包脚本 `$Features` 都不变（性能构建不随包）。默认构建不得出现新增依赖与新增告警。
-- **性能构建（改打点代码后验证用，属编译类命令，仅在用户点名时执行）**：
-
-  ```bat
-  cargo build -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api,perf-tracing
-  ```
-
-  运行任一 `xberg extract` / `batch` 即在 CWD 下生成 `logs/perf.log.<日期>`；`WorkerGuard` 由 `run_cli` 持有至进程退出（flush 保证），不要改成 `let _ =`。
-
-### 打完整包（发布用，含模型与 DLL）
-
-- 一条命令：`pwsh -NoProfile -File scripts/publish/cli/package-cli-windows.ps1`。需 PowerShell ≥ 7.4（`Start-Process -Environment` 等依赖，脚本头 `#Requires -Version 7.4` 已声明）。本地默认并行度 min(30, 逻辑核数)，可用 `-Jobs N` 覆盖；CI（`.github/workflows/build-windows-cli.yml`）调用的是同一脚本，是打包的唯一入口。
-- 产物：`xberg-cli-x86_64-pc-windows-msvc\` 目录（xberg.exe + onnxruntime/CRT DLL + Whisper tiny 模型）并压成同名 zip。
-- **feature 集与开发编译一致**：`formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api`（`--no-default-features`），打包版 exe 含 `xberg serve` HTTP API。**不含** heic、pdfium、candle、mcp、embedding、NER。因此包内**不**附带 pdfium.dll。
-- **模型随包分发（离线可用）**：Whisper tiny（`$TranscriptionFiles` 固定校验和）+ **PaddleOCR pp-ocrv6 tiny ≈13 MiB**（det/rec/dict/textline-cls 四条正则，经 `xberg.exe cache manifest` 取二进制里的 sha256/大小后 stage 到 `models/` 的 HF 缓存布局）。**layout 模型（RT-DETR 169.1 MB + TATR 30.2 MB）已随需求变更移除**：feature 集不编 `layout-detection`，`$RequiredModels` 里那两条正则也删了——不要加回来（加了也解析不到，且打包门禁会因为 OCR 断言通过而掩盖它）。`$RequiredModels` 非空会**启用**离线空缓存探测（`scripts/publish/cli/offline-smoke.ps1 -ExpectEmptyCacheFailure`）：该探测用带 `ocr` 配置的抽取跑，空缓存下必须报出 HF 离线缺模型诊断（不保证进程一定失败，所以断言的是诊断而非退出码）。清单里另有 SLANeXT/SLANet_plus/table_classifier/pp_doclayout_v3，本构建不用，**不要**加进 `$RequiredModels`（每条正则必须命中且仅命中 1 条）。
-- 包体实测（2026-09-22，无 layout 模型，paddle tiny + whisper tiny）：本地打包 zip **191.9 MB**（同一 commit 的远程 CI 产物 193.2 MB）；此前含 layout 模型时为 361.7 MiB（RT-DETR 169.1 MB + TATR 30.2 MB 已移除）。`target/package-models-<target>` 缓存跨次复用（删掉要重下）。
-- 打包前有门禁：干净 PATH 的 `--version` 探测、MSVC CRT 部署、PE 导入闭包校验（`scripts/ci/verify-windows-dll-closure.ps1`）、离线 smoke（`offline-smoke.ps1`：带 `ocr` 配置的抽取必须成功，且 stderr 出现 `PaddleOCR engine initialized successfully` 而无离线缺模型诊断——2026-09-21 起 layout 断言换成 OCR 断言，因为本构建不再编 layout；`$RequiredModels` 非空时再跑一次空缓存探测，stderr 必须报出 HF 离线缺模型诊断）。
-- 用打包版跑音视频时：`HF_HUB_CACHE` 指向包目录下 `models`（hf-hub 的缓存根；`HF_HOME` 会被它解析成 `$HF_HOME/hub`，指不到包内模型），`PATH` 前置包目录（fulltest.py 已自动处理）。
-
-### 测试入口与发布流程
-
-- **默认快速验证**：`python fulltest.py`——用本地编译的二进制快速验证（只需编译，无需打包），质量报告打印到终端并写入 `<输出目录>/_quality-report.md`。
-  - **耗时打点（2026-09-22 新增）**：逐文件记录转换耗时（`elapsed_s`）与 Python 侧检查耗时（`check_time_s`，其中源文基准段单列 `source_time_s`），报告新增「## 耗时分布」段（转换/检查/对抗/框架开销 + 最慢 Top10），JSON 报告新增 `timing` 块。
-  - **`--deep` 门（2026-09-22 新增）**：最重的测试段（音视频转写，基线实测占转换合计近半）默认不进 fulltest 队列，`--deep` 才包含；**slowtest.py 固定携带 `--deep`**，打包版验收不丢覆盖。改 fulltest/slowtest 判定语义前先想清楚这一层的分工。
-- **发布前慢速验证**：`python slowtest.py`——① 跑完整打包生成 zip；② 解压到 `target/slowtest-tmp/`，对打包版 CLI 全量跑端到端文档转换 + 音频/视频转写测试（`--keep-going --deep`，自动包含 fulltest 默认跳过的音视频段）；③ 输出转码质量报告（报告副本 `target/slowtest-report-<时间戳>.md|.json`），成功后解压目录自动删除（`--keep-tmp` 保留）。**是否发布版本，以该报告为准。**
-
-### 其他验证（同样仅在明确要求时执行）
-
-- Rust 测试：`cargo test -p xberg` / `-p xberg-cli`（Windows 可用的 `task` 入口见「测试要求」）；lint：`cargo clippy`；task runner 为 `Taskfile.yml`（`task build`、`task lint:check` 等；`task test` / `task test:ci` 只声明了 linux/darwin 平台）。
-- 这些命令与 `cargo build` 同类，属于「严禁私自跑费时操作」的范围：只在用户明确点名时执行；跑完按「硬性约束」如实报告验证状态。
-
-## 已知坑
-
-- **测试/构建产物体量（2026-09-20 实测，决定磁盘与速度）**：`crates/xberg` 有 ~200 个集成测试目标，每个都静态链接整个 xberg lib。
-  - `Cargo.toml` 的 `[profile.dev] debug = 0` 与 `[profile.test] debug = 0` 就是为此：`debug = 1` 时每个测试二进制各写一份 ~410 MB PDB，实测一次冷 `cargo test` 在 `target/debug/deps` 留下 **88 GB `.pdb`（198 个文件 >300 MB）+ 38 GB 测试 exe**，`E:` 总共 240 GB，直接顶到只剩几十 GB；改 `debug = 0` 后（2026-09-20 复测）同一批 ~200 个测试目标仍写 **533 个 PDB / ~27 GB**（单份 ~125–150 MB）——**MSVC 链接器即使 `debuginfo = 0` 也会写公共符号表，PDB 压不到 0**，剩下的是行号/类型信息的减少。要栈符号时按次开：`CARGO_PROFILE_TEST_DEBUG=1 cargo test -p xberg --test <name>`、`CARGO_PROFILE_DEV_DEBUG=1 cargo build ...`。
-  - profile 一变，cargo 的指纹目录也变，**旧 PDB 不会被自动回收**（它们只增不减）。清理按「Rust 构建优化规则」第 8 条的优先级：先删 `target/debug/**/*.pdb`（纯调试副产物，删掉不影响增量构建与测试正确性），最后才动 dev 热缓存。**不要用 `cargo clean --profile test`**：本仓库 dev 与 test 共用 `target/debug/`，2026-09-20 实测它的 dry-run 报「89361 files, 137.9 GiB」——等于 `cargo clean`，会把 dev 热缓存一并清掉（违反规则 1/2）。
-  - `target/x86_64-pc-windows-msvc/`（release 产物）与 `target/package-models-x86_64-pc-windows-msvc/`（打包模型缓存，~200 MiB）属于第 8 条的②③档：删了下次打包要全量重下模型 + 全量 release 重编（30 分钟量级，且卡在联网阶段，2026-09-20 就撞上过：`target/package-cpu-*.csv` 只剩 ORT 一行标记就中断）。真要删，先确认缓存在别处有备份或接受这次冷编。
-- CLI `--format json` 模式**不落盘图片**（只有 text/toon 模式调用 `write_extracted_images`）；JSON 里图片是内联字节数组（`result.images[].data`），需要自己解码写出。
-- `--config-json` 只做顶层字段替换后整体反序列化 + 校验（`crates/xberg/src/core/config/merge.rs`），feature 未编译的字段会直接报错。
-- heic 默认关闭（Windows 无 libheif 构建路径），本 fork **不要**开 `heic`；pdfium 后端同样不要（`pdf-pdfium-surface` 仅编 wrapper，还要另供 libpdfium）。
-- 编译/打包统一用 fork feature 集 `formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api`；需要改能力时先改 AGENTS.md 与 `scripts/publish/cli/package-cli-windows.ps1` 的 `$Features`，两边保持一致。默认 OCR 后端是 **PaddleOCR pp-ocrv6 tiny**（`PaddleOcrConfig::new` 的 `model_tier`）；Tesseract 仍编进二进制作后备，需要时用 `--ocr-backend tesseract` 或 `ocr.backend` 覆盖。
-- **本 fork 不编译 layout-detection（2026-09-21 需求变更）**：RT-DETR（版面）+ TATR（表格结构）不再编入、不再随包、也不再被验收注入——图片输入只走 OCR，行位置由 `rendering/ocr_layout.rs` 的 ```text 网格围栏保留（放不下整行时回退平文本，绝不静默丢行）。给 CLI 传 `layout` 字段会直接报错（feature 未编译），所以 `_expectations.json` 的 `run` 段不要加 `layout_config`；`测试识别.png` 的表格数断言已按此撤销（见该文件 `_note_no_tables` 与 `run._note_layout_removed`）。
