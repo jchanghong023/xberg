@@ -7097,10 +7097,15 @@ Name: ___
     /// #1786: a page that is one full-page raster gets the whole-image segmentation mode the
     /// standalone image route applies (sparse text, PSM 11; wasm32 uses 6, so this runs off
     /// wasm32 only), when the caller set none.
+    ///
+    /// (fork) The fork's default backend is `paddle-ocr` (upstream defaults to `tesseract`),
+    /// and the hint only applies the PSM to a Tesseract run, so the backend is pinned here to
+    /// keep testing the PSM branch itself instead of the fork's default-backend choice.
     #[cfg(all(feature = "pdf", not(target_arch = "wasm32")))]
     #[test]
     fn should_apply_the_whole_image_psm_to_a_scan_page_when_the_caller_set_none() {
-        let config = crate::core::config::ocr::OcrConfig::default();
+        let mut config = crate::core::config::ocr::OcrConfig::default();
+        config.backend = "tesseract".to_string();
 
         let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, true);
 
