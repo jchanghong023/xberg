@@ -84,7 +84,7 @@ impl PathContent {
 
     /// Create a path from operations.
     pub fn from_operations(operations: Vec<PathOperation>) -> Self {
-        let bbox = Self::compute_bbox(&operations);
+        let bbox = path_operations_bbox(&operations);
         Self {
             bbox,
             operations,
@@ -317,8 +317,21 @@ impl PathContent {
     /// and list bullets don't qualify; it must be under 2 pt across, twice
     /// the heaviest common ruling weight (typical PDF rules are 0.5–1 pt)
     /// while safely below any filled cell; and a box must stay under
-    /// 1000 pt per side, which exceeds a US-Letter page (612×792), so only
-    /// full-page frames and margin decorations are excluded.
+    /// 1000 pt per side so absurdly large shapes (chart backgrounds, full
+    /// artboards) don't seed a cluster on their own.
+    ///
+    /// GH#1656: `1000 pt` does **not** exclude an ordinary page — A4
+    /// (595×842) and US-Letter (612×792) both pass this bound, so a
+    /// full-page background rectangle (common Office-to-PDF output) is
+    /// accepted here as a table primitive and can cluster with every
+    /// other primitive on the page. This function has no access to the
+    /// page's MediaBox (`PathContent` carries no page dimensions), so it
+    /// cannot make that call itself. Page-relative filtering of such
+    /// furniture happens one level up, in `PdfDocument::extract_tables_with_config`
+    /// and `PdfDocument::extract_page_tables` (`document/tables.rs`), which use
+    /// [`PathContent::is_page_frame_rectangle`](Self::is_page_frame_rectangle)
+    /// against the real MediaBox before primitives reach the clusterer in
+    /// `spatial_table_detector.rs`. ~keep
     pub fn is_table_primitive(&self) -> bool {
         let rendered = self.rendered_bbox();
 
@@ -344,6 +357,54 @@ impl PathContent {
         }
 
         false
+    }
+
+    /// True when this path is a rectangle covering at least this fraction of
+    /// the MediaBox in *both* dimensions. 0.9 leaves generous margin for a
+    /// page background that stops just short of the trim box while still
+    /// rejecting anything smaller than page furniture — a genuine table
+    /// spanning most of a page's text column is still well under 90% of the
+    /// full MediaBox once margins are accounted for. GH#1656. ~keep
+    pub const PAGE_FRAME_COVERAGE_THRESHOLD: f32 = 0.9;
+
+    /// True when this path is a rectangle spanning at least
+    /// [`PAGE_FRAME_COVERAGE_THRESHOLD`](Self::PAGE_FRAME_COVERAGE_THRESHOLD)
+    /// of `media_box` in both width and height — page furniture (a
+    /// full-bleed background fill, a decorative frame) rather than a table
+    /// primitive. GH#1656: `is_table_primitive`'s `< 1000 pt` bound admits
+    /// ordinary page-sized rectangles (A4, Letter), which then seed a
+    /// whole-page false-positive cluster; this predicate is how callers with
+    /// access to the page's MediaBox (`PathContent` itself carries none) can
+    /// exclude that furniture before it reaches the clusterer.
+    ///
+    /// `media_box` is `(llx, lly, urx, ury)` as returned by
+    /// `PdfDocument::get_page_media_box`. Requiring *both* dimensions to
+    /// clear the threshold is deliberate: a full-page-width footer rule
+    /// (wide, but a fraction of a point tall) must not be classified as page
+    /// furniture and dropped — it is a legitimate table/ruling primitive.
+    /// A degenerate `media_box` (zero or negative area, non-finite) can't
+    /// establish "most of the page", so this returns `false` — callers
+    /// should treat a failed MediaBox lookup as "leave every primitive
+    /// alone", not as license to filter on garbage. ~keep
+    pub fn is_page_frame_rectangle(&self, media_box: (f32, f32, f32, f32)) -> bool {
+        if !self.is_rectangle() {
+            return false;
+        }
+
+        let (llx, lly, urx, ury) = media_box;
+        let page_width = (urx - llx).abs();
+        let page_height = (ury - lly).abs();
+        if !page_width.is_finite() || !page_height.is_finite() || page_width <= 0.0 || page_height <= 0.0 {
+            return false;
+        }
+
+        let w = self.bbox.width.abs();
+        let h = self.bbox.height.abs();
+        if !w.is_finite() || !h.is_finite() {
+            return false;
+        }
+
+        w >= page_width * Self::PAGE_FRAME_COVERAGE_THRESHOLD && h >= page_height * Self::PAGE_FRAME_COVERAGE_THRESHOLD
     }
 
     /// Create a line path from (x1, y1) to (x2, y2).
@@ -545,45 +606,68 @@ impl PathContent {
         flush_subpath(&mut current, &mut subpaths);
         subpaths
     }
+}
 
-    /// Compute bounding box from path operations.
-    fn compute_bbox(operations: &[PathOperation]) -> Rect {
-        let mut min_x = f32::MAX;
-        let mut min_y = f32::MAX;
-        let mut max_x = f32::MIN;
-        let mut max_y = f32::MIN;
+/// True when `operations[index]` is a `MoveTo` that begins a subpath no
+/// segment follows. Such a subpath paints nothing (§8.5.2: path construction
+/// operators place no marks; a lone point has "no vestige"), so it must not
+/// extend the bounding box. GH#1759: a footer band followed by a stray
+/// `0 842 m` otherwise reports a page-sized box, which unions every rule on
+/// the page into one cluster. ~keep
+fn is_degenerate_move_to(operations: &[PathOperation], index: usize) -> bool {
+    !matches!(
+        operations.get(index + 1),
+        Some(PathOperation::LineTo(..) | PathOperation::CurveTo(..) | PathOperation::ClosePath)
+    )
+}
 
-        for op in operations {
-            match op {
-                PathOperation::MoveTo(x, y) | PathOperation::LineTo(x, y) => {
-                    min_x = min_x.min(*x);
-                    min_y = min_y.min(*y);
-                    max_x = max_x.max(*x);
-                    max_y = max_y.max(*y);
-                }
-                PathOperation::CurveTo(x1, y1, x2, y2, x3, y3) => {
-                    for (x, y) in [(*x1, *y1), (*x2, *y2), (*x3, *y3)] {
-                        min_x = min_x.min(x);
-                        min_y = min_y.min(y);
-                        max_x = max_x.max(x);
-                        max_y = max_y.max(y);
-                    }
-                }
-                PathOperation::Rectangle(x, y, w, h) => {
-                    min_x = min_x.min(*x);
-                    min_y = min_y.min(*y);
-                    max_x = max_x.max(*x + *w);
-                    max_y = max_y.max(*y + *h);
-                }
-                PathOperation::ClosePath => {}
+/// Compute the bounding box of a sequence of path operations.
+///
+/// Shared by [`PathContent::from_operations`] and
+/// `PathExtractor::finalize_path`, which must agree exactly: the two were
+/// independent, byte-identical copies, so GH#1759 had to be fixed twice.
+pub(crate) fn path_operations_bbox(operations: &[PathOperation]) -> Rect {
+    let mut min_x = f32::MAX;
+    let mut min_y = f32::MAX;
+    let mut max_x = f32::MIN;
+    let mut max_y = f32::MIN;
+
+    for (index, op) in operations.iter().enumerate() {
+        match op {
+            PathOperation::MoveTo(..) if is_degenerate_move_to(operations, index) => {}
+            PathOperation::MoveTo(x, y) | PathOperation::LineTo(x, y) => {
+                min_x = min_x.min(*x);
+                min_y = min_y.min(*y);
+                max_x = max_x.max(*x);
+                max_y = max_y.max(*y);
             }
+            PathOperation::CurveTo(x1, y1, x2, y2, x3, y3) => {
+                for (x, y) in [(*x1, *y1), (*x2, *y2), (*x3, *y3)] {
+                    min_x = min_x.min(x);
+                    min_y = min_y.min(y);
+                    max_x = max_x.max(x);
+                    max_y = max_y.max(y);
+                }
+            }
+            PathOperation::Rectangle(x, y, w, h) => {
+                // `PathExtractor::rectangle` stores the CTM-transformed
+                // delta, so a flipping CTM (negative `a`/`d`) or a
+                // negative-extent `re` yields a negative `w`/`h`. Order the
+                // corners here — `Rect::new` normalises a whole rect, but is
+                // handed pre-reduced min/extent values below. ~keep
+                min_x = min_x.min(x.min(*x + *w));
+                min_y = min_y.min(y.min(*y + *h));
+                max_x = max_x.max(x.max(*x + *w));
+                max_y = max_y.max(y.max(*y + *h));
+            }
+            PathOperation::ClosePath => {}
         }
+    }
 
-        if min_x == f32::MAX {
-            Rect::new(0.0, 0.0, 0.0, 0.0)
-        } else {
-            Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
-        }
+    if min_x == f32::MAX {
+        Rect::new(0.0, 0.0, 0.0, 0.0)
+    } else {
+        Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
     }
 }
 
@@ -771,6 +855,130 @@ mod tests {
         assert_eq!(path.bbox.y, 30.0);
         assert_eq!(path.bbox.width, 100.0);
         assert_eq!(path.bbox.height, 50.0);
+    }
+
+    #[test]
+    fn is_page_frame_rectangle_excludes_a4_and_letter_page_backgrounds() {
+        // GH#1656: a full-page background rect must be recognized as page
+        // furniture against both an A4 and a US-Letter MediaBox. ~keep
+        let a4_media_box = (0.0, 0.0, 595.28, 842.0);
+        let a4_frame = PathContent::rect(0.0, 0.0, 595.28, 842.0);
+        assert!(a4_frame.is_page_frame_rectangle(a4_media_box));
+
+        let letter_media_box = (0.0, 0.0, 612.0, 792.0);
+        let letter_frame = PathContent::rect(0.0, 0.0, 612.0, 792.0);
+        assert!(letter_frame.is_page_frame_rectangle(letter_media_box));
+    }
+
+    #[test]
+    fn is_page_frame_rectangle_admits_a_genuine_table_cell_sized_box() {
+        // A table cell box is nowhere near 90% of the page in either
+        // dimension and must not be treated as furniture. ~keep
+        let media_box = (0.0, 0.0, 595.28, 842.0);
+        let cell = PathContent::rect(45.36, 472.70, 138.24, 34.02);
+        assert!(!cell.is_page_frame_rectangle(media_box));
+    }
+
+    #[test]
+    fn is_page_frame_rectangle_rejects_degenerate_media_box() {
+        // A missing/zero/non-finite MediaBox must not be treated as
+        // license to filter — leave the primitive alone instead. ~keep
+        let page_sized = PathContent::rect(0.0, 0.0, 595.28, 842.0);
+        assert!(!page_sized.is_page_frame_rectangle((0.0, 0.0, 0.0, 0.0)));
+        assert!(!page_sized.is_page_frame_rectangle((0.0, 0.0, f32::NAN, 842.0)));
+        assert!(!page_sized.is_page_frame_rectangle((0.0, 0.0, f32::INFINITY, 842.0)));
+    }
+
+    #[test]
+    fn is_page_frame_rectangle_ignores_non_rectangle_paths() {
+        // A full-page-width line is not a rectangle at all and must never
+        // be classified as page-frame furniture, regardless of extent. ~keep
+        let media_box = (0.0, 0.0, 595.28, 842.0);
+        let full_width_line = PathContent::line(0.0, 48.30, 595.28, 48.30);
+        assert!(!full_width_line.is_page_frame_rectangle(media_box));
+    }
+
+    #[test]
+    fn footer_rule_full_page_width_stays_a_table_primitive() {
+        // Proves the page-frame filter does not over-filter: a thin
+        // horizontal rule spanning the full page width is real ruling, not
+        // furniture, because only ONE dimension (width) reaches page scale
+        // — is_page_frame_rectangle requires both. GH#1656. ~keep
+        let footer_rule = PathContent::line(0.0, 48.30, 595.28, 48.30);
+        assert!(footer_rule.is_table_primitive());
+        assert!(!footer_rule.is_page_frame_rectangle((0.0, 0.0, 595.28, 842.0)));
+    }
+
+    #[test]
+    fn trailing_move_to_does_not_extend_the_bounding_box_to_the_page() {
+        // GH#1759 carrier: `0 42.63 595.28 -28.35 re  0 842 m  f*`. The
+        // lone trailing `m` starts a subpath no segment follows, so it
+        // paints nothing and must not stretch the box to the page. ~keep
+        let path = PathContent::from_operations(vec![
+            PathOperation::Rectangle(0.0, 14.28, 595.28, 28.35),
+            PathOperation::MoveTo(0.0, 842.0),
+        ]);
+
+        assert!(
+            (path.bbox.y - 14.28).abs() < 1e-3,
+            "expected the footer band's own y (14.28), got {}",
+            path.bbox.y
+        );
+        assert!(
+            (path.bbox.height - 28.35).abs() < 1e-3,
+            "expected the footer band's own height (28.35), got {}",
+            path.bbox.height
+        );
+        assert!((path.bbox.x - 0.0).abs() < 1e-3, "got x {}", path.bbox.x);
+        assert!((path.bbox.width - 595.28).abs() < 1e-3, "got width {}", path.bbox.width);
+    }
+
+    #[test]
+    fn negative_extent_rectangle_is_normalised_when_mixed_with_a_segment() {
+        // `PathExtractor::rectangle` stores the CTM-transformed delta, so a
+        // flipping CTM or a negative-extent `re` yields a negative stored
+        // width/height. Mixed with another operation the box is built from
+        // min/max across operations, so the rectangle's own corners must be
+        // ordered first. GH#1759. ~keep
+        let path = PathContent::from_operations(vec![
+            PathOperation::Rectangle(100.0, 200.0, -40.0, -30.0),
+            PathOperation::LineTo(80.0, 180.0),
+        ]);
+
+        assert_eq!(path.bbox.x, 60.0, "expected the normalised left edge");
+        assert_eq!(path.bbox.y, 170.0, "expected the normalised bottom edge");
+        assert_eq!(path.bbox.width, 40.0, "expected the normalised width");
+        assert_eq!(path.bbox.height, 30.0, "expected the normalised height");
+    }
+
+    #[test]
+    fn move_to_followed_by_a_segment_still_contributes_both_points() {
+        // Control for GH#1759: a `MoveTo` that begins a real subpath is
+        // painted and must keep contributing its point. ~keep
+        let lined = PathContent::from_operations(vec![
+            PathOperation::MoveTo(10.0, 20.0),
+            PathOperation::LineTo(110.0, 120.0),
+        ]);
+        assert_eq!(lined.bbox.x, 10.0);
+        assert_eq!(lined.bbox.y, 20.0);
+        assert_eq!(lined.bbox.width, 100.0);
+        assert_eq!(lined.bbox.height, 100.0);
+
+        let curved = PathContent::from_operations(vec![
+            PathOperation::MoveTo(10.0, 20.0),
+            PathOperation::CurveTo(30.0, 40.0, 50.0, 60.0, 70.0, 80.0),
+        ]);
+        assert_eq!(curved.bbox.x, 10.0);
+        assert_eq!(curved.bbox.y, 20.0);
+
+        let closed = PathContent::from_operations(vec![
+            PathOperation::MoveTo(10.0, 20.0),
+            PathOperation::LineTo(110.0, 20.0),
+            PathOperation::MoveTo(10.0, 200.0),
+            PathOperation::ClosePath,
+        ]);
+        assert_eq!(closed.bbox.y, 20.0);
+        assert_eq!(closed.bbox.height, 180.0);
     }
 
     /// Ground-truth cubic Bézier evaluation, used to validate flattening.

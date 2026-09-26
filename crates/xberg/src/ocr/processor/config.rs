@@ -7,7 +7,7 @@ use crate::ocr::error::OcrError;
 use crate::ocr::types::TesseractConfig;
 use xberg_tesseract::TesseractAPI;
 
-const TESSERACT_RESULT_SCHEMA_VERSION: u8 = 10;
+const TESSERACT_RESULT_SCHEMA_VERSION: u8 = 11;
 
 /// Compute a deterministic hash of the OCR configuration.
 ///
@@ -17,15 +17,59 @@ const TESSERACT_RESULT_SCHEMA_VERSION: u8 = 10;
 /// # Arguments
 ///
 /// * `config` - Configuration to hash
+/// * `resolved_tessdata_path` - The tessdata directory OCR will actually run against, as
+///   returned by [`super::validation::resolve_tessdata_path`]. Hashing the resolved directory
+///   rather than only `config.tessdata_path` (the optional override) is required: without it,
+///   two calls that resolve to different directories through `TESSDATA_PREFIX` or another
+///   fallback in the search chain — with no explicit `OcrConfig.tessdata_path` set — hash
+///   identically and share a cache entry even though a different tessdata model produced the
+///   cached text (#1787).
 ///
 /// # Returns
 ///
 /// Hexadecimal string representation of the configuration hash
-pub(super) fn hash_config(config: &TesseractConfig) -> String {
-    hash_config_for_schema(config, TESSERACT_RESULT_SCHEMA_VERSION)
+pub(super) fn hash_config(config: &TesseractConfig, resolved_tessdata_path: &str) -> String {
+    hash_config_for_schema(config, resolved_tessdata_path, TESSERACT_RESULT_SCHEMA_VERSION)
 }
 
-fn hash_config_for_schema(config: &TesseractConfig, result_schema_version: u8) -> String {
+/// Fold the caller's `security_limits` into an OCR cache key.
+///
+/// These bound the image decode inside `perform_ocr`, which runs only on a cache MISS -- so
+/// without them in the key, a request carrying a strict limit is served the result of an earlier
+/// permissive request and the limit never applies. That is both a silent policy bypass and the
+/// cause of a flaky `issue_1651_ocr_security_limits`: which of its sibling tests populated the
+/// entry first decided whether the limit was enforced. ~keep
+fn hash_security_limits(hasher: &mut blake3::Hasher, limits: Option<&crate::extractors::security::SecurityLimits>) {
+    let Some(limits) = limits else {
+        hasher.update(&[0]);
+        return;
+    };
+    hasher.update(&[1]);
+    for value in [
+        limits.max_archive_size,
+        limits.max_compression_ratio,
+        limits.max_files_in_archive,
+        limits.max_nesting_depth,
+        limits.max_entity_length,
+        limits.max_content_size,
+        limits.max_iterations,
+        limits.max_xml_depth,
+        limits.max_table_cells,
+    ] {
+        hasher.update(&value.to_le_bytes());
+    }
+    match limits.max_pages {
+        Some(pages) => {
+            hasher.update(&[1]);
+            hasher.update(&pages.to_le_bytes());
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
+}
+
+fn hash_config_for_schema(config: &TesseractConfig, resolved_tessdata_path: &str, result_schema_version: u8) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&[result_schema_version]);
     hash_bytes(&mut hasher, config.language.as_bytes());
@@ -43,6 +87,12 @@ fn hash_config_for_schema(config: &TesseractConfig, result_schema_version: u8) -
                 preprocessing.denoise as u8,
                 preprocessing.contrast_enhance as u8,
                 preprocessing.invert_colors as u8,
+                // GH#1785 added this and it rewrites `gray` before binarization, so it changes
+                // the raster OCR reads. Omitting it here would serve an un-normalized result to
+                // a caller that asked for normalization -- the same defect as #687's
+                // `hocr_font_info`, and it would make the feature silently inert whenever an
+                // entry already existed. ~keep
+                preprocessing.normalize_shaded_rows as u8,
             ]);
             hash_bytes(&mut hasher, preprocessing.binarization_method.as_bytes());
         }
@@ -68,6 +118,8 @@ fn hash_config_for_schema(config: &TesseractConfig, result_schema_version: u8) -
         hash_bytes(&mut hasher, value.as_bytes());
     }
 
+    hash_security_limits(&mut hasher, config.security_limits.as_ref());
+
     hasher.update(&[config.auto_rotate as u8]);
     // `source_dpi` selects the scale factor the DPI-normalization step resizes by, so two calls
     // with byte-identical images but different source resolutions produce different rasters,
@@ -82,21 +134,37 @@ fn hash_config_for_schema(config: &TesseractConfig, result_schema_version: u8) -
             hasher.update(&[0]);
         }
     }
-    match config.tessdata_path.as_ref() {
-        Some(path) => {
-            hasher.update(&[1]);
-            hash_bytes(&mut hasher, path.as_os_str().as_encoded_bytes());
-        }
-        None => {
-            hasher.update(&[0]);
-        }
-    }
+    // The resolved tessdata directory, not merely the optional override (#1787). Two configs
+    // that leave `tessdata_path` unset can still resolve to different directories through
+    // `TESSDATA_PREFIX`/cache/system fallbacks, and must not collide.
+    hash_bytes(&mut hasher, resolved_tessdata_path.as_bytes());
     // `page_number` is stamped onto every returned element, table, and `OcrElement` (see
     // `perform_ocr`), so two calls with byte-identical images but different declared page
     // numbers produce different output for an unchanged image hash. Omitting it here would
     // serve one page's result for another exactly the way `source_dpi` and `hocr_font_info`
     // did in #687.
     hasher.update(&config.page_number.to_le_bytes());
+
+    // `security_limits` gates the decode itself: `load_image_for_ocr` refuses an image whose
+    // live bytes exceed `max_content_size`. Two calls with byte-identical images but different
+    // limits therefore do not have the same result — without this, whichever call ran first
+    // decided the outcome for the rest, and a limit that should have refused the decode was
+    // served a cached success instead. That is exactly how GH#1651's own regression tests went
+    // order-dependent (they share this cache inside one test process) and how a stale
+    // on-disk entry could keep a lowered limit from ever running. Serialized as a whole rather
+    // than field-by-field so a limit added to `SecurityLimits` later moves the key without a
+    // second edit here; the object holds only integers, so the encoding is deterministic. ~keep
+    match config.security_limits.as_ref() {
+        Some(limits) => {
+            hasher.update(&[1]);
+            if let Ok(json) = serde_json::to_vec(limits) {
+                hash_bytes(&mut hasher, &json);
+            }
+        }
+        None => {
+            hasher.update(&[0]);
+        }
+    }
 
     let hash = hasher.finalize();
     hex::encode(&hash.as_bytes()[..16])
@@ -187,6 +255,8 @@ fn tesseract_variable_set(config: &TesseractConfig) -> Vec<(&'static str, String
 mod tests {
     use super::*;
 
+    const TEST_TESSDATA_PATH: &str = "/test/tessdata/eng";
+
     fn create_test_config() -> TesseractConfig {
         TesseractConfig {
             output_format: "text".to_string(),
@@ -200,8 +270,8 @@ mod tests {
     fn test_hash_config_deterministic() {
         let config = create_test_config();
 
-        let hash1 = hash_config(&config);
-        let hash2 = hash_config(&config);
+        let hash1 = hash_config(&config, TEST_TESSDATA_PATH);
+        let hash2 = hash_config(&config, TEST_TESSDATA_PATH);
 
         assert_eq!(hash1, hash2);
         assert_eq!(hash1.len(), 32);
@@ -227,13 +297,13 @@ mod tests {
         };
 
         assert_ne!(
-            hash_config(&unknown),
-            hash_config(&at_150),
+            hash_config(&unknown, TEST_TESSDATA_PATH),
+            hash_config(&at_150, TEST_TESSDATA_PATH),
             "a known source DPI must not collide with the unknown/72-assumption case"
         );
         assert_ne!(
-            hash_config(&at_150),
-            hash_config(&at_300),
+            hash_config(&at_150, TEST_TESSDATA_PATH),
+            hash_config(&at_300, TEST_TESSDATA_PATH),
             "two different known source DPIs must not collide"
         );
     }
@@ -254,9 +324,123 @@ mod tests {
         };
 
         assert_ne!(
-            hash_config(&page_one),
-            hash_config(&page_two),
+            hash_config(&page_one, TEST_TESSDATA_PATH),
+            hash_config(&page_two, TEST_TESSDATA_PATH),
             "two different declared page numbers must not collide"
+        );
+    }
+
+    /// `security_limits` gates the decode itself (`load_image_for_ocr` refuses an image whose
+    /// live bytes exceed `max_content_size`), so two calls with byte-identical images but
+    /// different limits must not share a cache entry — otherwise the first call's result is
+    /// served for the second and the limit never runs. The GH#1651 regression tests share this
+    /// cache inside one test process, which is what made them order-dependent before this.
+    #[test]
+    fn should_distinguish_cache_keys_by_security_limits() {
+        let unset = create_test_config();
+        let constraining = TesseractConfig {
+            security_limits: Some(crate::extractors::security::SecurityLimits {
+                max_content_size: 5_000,
+                ..Default::default()
+            }),
+            ..create_test_config()
+        };
+        let raised = TesseractConfig {
+            security_limits: Some(crate::extractors::security::SecurityLimits {
+                max_content_size: 5 * 1024 * 1024 * 1024,
+                ..Default::default()
+            }),
+            ..create_test_config()
+        };
+
+        assert_ne!(
+            hash_config(&unset, TEST_TESSDATA_PATH),
+            hash_config(&constraining, TEST_TESSDATA_PATH),
+            "an unset limit must not collide with a constraining one"
+        );
+        assert_ne!(
+            hash_config(&constraining, TEST_TESSDATA_PATH),
+            hash_config(&raised, TEST_TESSDATA_PATH),
+            "a constraining limit must not collide with a raised one"
+        );
+    }
+
+    /// #1787 part 2: the cache key must depend on the tessdata directory OCR actually runs
+    /// against, not only the optional `TesseractConfig.tessdata_path` override. Two calls with
+    /// byte-identical `TesseractConfig` but resolved against different tessdata directories
+    /// (e.g. one via `TESSDATA_PREFIX=fast`, one via `TESSDATA_PREFIX=best`) must not share a
+    /// cache entry, or the second model's request is silently served the first model's text.
+    ///
+    /// Fails on unfixed code: `hash_config` takes a single argument, so this does not compile.
+    #[test]
+    fn should_distinguish_cache_keys_by_resolved_tessdata_directory() {
+        let config = create_test_config();
+
+        assert_ne!(
+            hash_config(&config, "/tessdata/fast"),
+            hash_config(&config, "/tessdata/best"),
+            "two different resolved tessdata directories must not collide, \
+             or a comparison across models silently reads the first model's cached text"
+        );
+    }
+
+    /// Negative control for the fix above: the resolved-directory hashing must not become so
+    /// specific that two calls resolving to the SAME directory stop sharing a cache entry. An
+    /// over-eager fix (e.g. hashing a directory listing, an inode, or a timestamp instead of the
+    /// resolved path string) would make this fail while the positive test above still passes.
+    #[test]
+    fn same_resolved_tessdata_directory_still_shares_a_cache_key() {
+        let config = create_test_config();
+
+        assert_eq!(
+            hash_config(&config, "/tessdata/fast"),
+            hash_config(&config, "/tessdata/fast"),
+            "two calls resolving to the same tessdata directory must still hit the same cache entry"
+        );
+    }
+
+    /// GH#1785 added `normalize_shaded_rows`, which rewrites the grayscale raster before
+    /// binarization and so changes the text OCR returns. It was not in the cache key, which made
+    /// the whole feature silently inert whenever an entry for the same image already existed:
+    /// turning it on served the un-normalized result back.
+    #[test]
+    fn should_distinguish_cache_keys_by_normalize_shaded_rows() {
+        let mut off = create_test_config();
+        off.preprocessing = Some(crate::types::ImagePreprocessingConfig {
+            normalize_shaded_rows: false,
+            ..Default::default()
+        });
+        let mut on = off.clone();
+        on.preprocessing = Some(crate::types::ImagePreprocessingConfig {
+            normalize_shaded_rows: true,
+            ..Default::default()
+        });
+
+        assert_ne!(
+            hash_config(&off, TEST_TESSDATA_PATH),
+            hash_config(&on, TEST_TESSDATA_PATH),
+            "normalize_shaded_rows changes the raster OCR reads, so it must change the cache key"
+        );
+    }
+
+    /// Negative control for the two tests above: the added fields must not be hashed so loosely
+    /// that two identical configurations stop sharing an entry, which would disable the cache.
+    #[test]
+    fn identical_limits_and_preprocessing_still_share_a_cache_key() {
+        let mut config = create_test_config();
+        config.security_limits = Some(crate::extractors::security::SecurityLimits {
+            max_content_size: 4096,
+            ..Default::default()
+        });
+        config.preprocessing = Some(crate::types::ImagePreprocessingConfig {
+            normalize_shaded_rows: true,
+            ..Default::default()
+        });
+
+        assert_eq!(
+            hash_config(&config, TEST_TESSDATA_PATH),
+            hash_config(&config.clone(), TEST_TESSDATA_PATH),
+            "two identical configurations must still hit the same cache entry"
         );
     }
 
@@ -265,13 +449,16 @@ mod tests {
         let config = create_test_config();
 
         assert_eq!(
-            TESSERACT_RESULT_SCHEMA_VERSION, 10,
-            "the corrected retained-confidence matcher must invalidate schema-v9 cache entries"
+            TESSERACT_RESULT_SCHEMA_VERSION, 11,
+            "folding the resolved tessdata directory into the key (#1787) must invalidate schema-v10 cache entries"
         );
-        assert_ne!(hash_config_for_schema(&config, 1), hash_config_for_schema(&config, 2));
         assert_ne!(
-            hash_config(&config),
-            hash_config_for_schema(&config, TESSERACT_RESULT_SCHEMA_VERSION - 1)
+            hash_config_for_schema(&config, TEST_TESSDATA_PATH, 1),
+            hash_config_for_schema(&config, TEST_TESSDATA_PATH, 2)
+        );
+        assert_ne!(
+            hash_config(&config, TEST_TESSDATA_PATH),
+            hash_config_for_schema(&config, TEST_TESSDATA_PATH, TESSERACT_RESULT_SCHEMA_VERSION - 1)
         );
     }
 
@@ -283,8 +470,8 @@ mod tests {
         let mut config2 = create_test_config();
         config2.language = "fra".to_string();
 
-        let hash1 = hash_config(&config1);
-        let hash2 = hash_config(&config2);
+        let hash1 = hash_config(&config1, TEST_TESSDATA_PATH);
+        let hash2 = hash_config(&config2, TEST_TESSDATA_PATH);
 
         assert_ne!(hash1, hash2);
     }
@@ -297,8 +484,8 @@ mod tests {
         let mut config2 = create_test_config();
         config2.psm = 6;
 
-        let hash1 = hash_config(&config1);
-        let hash2 = hash_config(&config2);
+        let hash1 = hash_config(&config1, TEST_TESSDATA_PATH);
+        let hash2 = hash_config(&config2, TEST_TESSDATA_PATH);
 
         assert_ne!(hash1, hash2);
     }
@@ -311,8 +498,8 @@ mod tests {
         let mut config2 = create_test_config();
         config2.output_format = "markdown".to_string();
 
-        let hash1 = hash_config(&config1);
-        let hash2 = hash_config(&config2);
+        let hash1 = hash_config(&config1, TEST_TESSDATA_PATH);
+        let hash2 = hash_config(&config2, TEST_TESSDATA_PATH);
 
         assert_ne!(hash1, hash2);
     }
@@ -325,8 +512,8 @@ mod tests {
         let mut config2 = create_test_config();
         config2.enable_table_detection = true;
 
-        let hash1 = hash_config(&config1);
-        let hash2 = hash_config(&config2);
+        let hash1 = hash_config(&config1, TEST_TESSDATA_PATH);
+        let hash2 = hash_config(&config2, TEST_TESSDATA_PATH);
 
         assert_ne!(hash1, hash2);
     }
@@ -339,8 +526,8 @@ mod tests {
         let mut config2 = create_test_config();
         config2.tessedit_char_whitelist = "0123456789".to_string();
 
-        let hash1 = hash_config(&config1);
-        let hash2 = hash_config(&config2);
+        let hash1 = hash_config(&config1, TEST_TESSDATA_PATH);
+        let hash2 = hash_config(&config2, TEST_TESSDATA_PATH);
 
         assert_ne!(hash1, hash2);
     }
@@ -351,7 +538,10 @@ mod tests {
         let mut config2 = create_test_config();
         config2.tessedit_char_blacklist = "abc".to_string();
 
-        assert_ne!(hash_config(&config1), hash_config(&config2));
+        assert_ne!(
+            hash_config(&config1, TEST_TESSDATA_PATH),
+            hash_config(&config2, TEST_TESSDATA_PATH)
+        );
     }
 
     #[test]
@@ -363,7 +553,10 @@ mod tests {
         config2.tessedit_char_whitelist = "a".to_string();
         config2.tessedit_char_blacklist = "bc".to_string();
 
-        assert_ne!(hash_config(&config1), hash_config(&config2));
+        assert_ne!(
+            hash_config(&config1, TEST_TESSDATA_PATH),
+            hash_config(&config2, TEST_TESSDATA_PATH)
+        );
     }
 
     /// Regression test for the OCR structure defect: without `hocr_font_info`
@@ -372,9 +565,11 @@ mod tests {
     /// read a real per-block font size and every heading/body paragraph collapses
     /// to the same fallback value.
     ///
-    /// Uses a real (non-mocked) `TesseractAPI`, matching the pattern in
-    /// `crate::ocr::tesseract_backend`'s own `query_available_languages` test:
-    /// `init("", "eng")` resolves tessdata the same way production code does.
+    /// Uses a real (non-mocked) `TesseractAPI`. `init("", "eng")` relies on Tesseract's
+    /// own compiled-in default tessdata location rather than the crate's resolver
+    /// (`resolve_tessdata_path`, which real jobs and `query_available_languages` both
+    /// use), so it gracefully skips instead of asserting when that default has no
+    /// "eng" data in this environment.
     ///
     /// Before the fix, `apply_tesseract_variables` never called
     /// `set_variable("hocr_font_info", ...)`, so this reads back Tesseract's own
@@ -396,6 +591,55 @@ mod tests {
             api.get_bool_variable("hocr_font_info").ok(),
             Some(true),
             "hocr_font_info must be enabled so hOCR word spans carry x_fsize/x_font"
+        );
+    }
+
+    /// GH#1784: `thresholding_method` was documented as "use adaptive thresholding" while
+    /// being a `bool`, and Tesseract's `thresholding_method` engine variable is an
+    /// `INT_MEMBER` parsed with `stream >> intval` — the literal strings `"true"`/`"false"`
+    /// xberg used to send never parsed as an integer, so the engine variable stayed at
+    /// Tesseract's own default (Otsu, `0`) no matter what the caller configured.
+    ///
+    /// Uses a real (non-mocked) `TesseractAPI`, with no `init()` call: `thresholding_method`
+    /// is an `INT_MEMBER` populated by the `TessBaseAPI` constructor itself (see
+    /// `get_variable_accessors_return_the_stored_value` in `xberg-tesseract/src/api.rs`), so
+    /// reading it back needs no tessdata and cannot be skipped by environment.
+    ///
+    /// Fails on the pre-fix code (where this field is a `bool` sent via `.to_string()` as the
+    /// literal `"true"`): the engine variable then reads back `Some(0)`, not `Some(1)`,
+    /// proving the value never reached Tesseract as a usable integer — not merely that our
+    /// own struct field held the caller's choice.
+    #[test]
+    fn should_reach_tesseract_as_an_integer_leptonica_otsu_value_not_the_literal_string_true() {
+        let api = xberg_tesseract::TesseractAPI::new().expect("create engine");
+
+        let mut config = create_test_config();
+        config.thresholding_method = 1;
+        apply_tesseract_variables(&api, &config).expect("apply_tesseract_variables should succeed");
+
+        assert_eq!(
+            api.get_int_variable("thresholding_method").ok(),
+            Some(1),
+            "thresholding_method: 1 must select Tesseract's LeptonicaOtsu method as an integer \
+             the engine actually parses"
+        );
+    }
+
+    /// Negative control for GH#1784: when nothing is configured, the effective Tesseract
+    /// method must remain Otsu (`0`) — the regression risk of the fix is a default that
+    /// silently changes for every caller who never touched this field.
+    #[test]
+    fn should_default_to_otsu_when_thresholding_method_is_unconfigured() {
+        let api = xberg_tesseract::TesseractAPI::new().expect("create engine");
+
+        let config = create_test_config();
+        apply_tesseract_variables(&api, &config).expect("apply_tesseract_variables should succeed");
+
+        assert_eq!(
+            api.get_int_variable("thresholding_method").ok(),
+            Some(0),
+            "an unconfigured thresholding_method must leave Tesseract at Otsu (0), unchanged \
+             from before this fix"
         );
     }
 
@@ -446,10 +690,43 @@ mod tests {
     #[test]
     fn every_applied_tesseract_variable_moves_the_cache_key() {
         let baseline = create_test_config();
-        let baseline_hash = hash_config(&baseline);
+        let baseline_hash = hash_config(&baseline, TEST_TESSDATA_PATH);
 
-        #[allow(clippy::type_complexity)]
-        let flips: Vec<(&str, Box<dyn Fn(&mut TesseractConfig)>)> = vec![
+        let flips = cache_key_flip_cases();
+
+        for (name, flip) in &flips {
+            let mut mutated = baseline.clone();
+            flip(&mut mutated);
+            assert_ne!(
+                hash_config(&mutated, TEST_TESSDATA_PATH),
+                baseline_hash,
+                "changing the config field behind the `{name}` engine variable must change the \
+                 OCR cache key, or a run with a different value is served the previous result"
+            );
+        }
+
+        let names: Vec<&str> = tesseract_variable_set(&baseline)
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        for (name, _) in &flips {
+            assert!(
+                names.contains(name),
+                "`{name}` is hashed but no longer applied to the engine, so the two have drifted"
+            );
+        }
+        assert!(
+            names.contains(&"hocr_font_info"),
+            "hocr_font_info must stay in the shared variable set: it is applied unconditionally, \
+             so the set is the only thing that can carry it into the cache key (#687)"
+        );
+    }
+
+    /// One `(engine variable name, config-field mutation)` pair per config field that backs
+    /// a variable `apply_tesseract_variables` sets on the engine.
+    #[allow(clippy::type_complexity)]
+    fn cache_key_flip_cases() -> Vec<(&'static str, Box<dyn Fn(&mut TesseractConfig)>)> {
+        vec![
             (
                 "classify_use_pre_adapted_templates",
                 Box::new(|c: &mut TesseractConfig| {
@@ -496,36 +773,9 @@ mod tests {
             ),
             (
                 "thresholding_method",
-                Box::new(|c: &mut TesseractConfig| c.thresholding_method = !c.thresholding_method),
+                Box::new(|c: &mut TesseractConfig| c.thresholding_method = (c.thresholding_method + 1) % 3),
             ),
-        ];
-
-        for (name, flip) in &flips {
-            let mut mutated = baseline.clone();
-            flip(&mut mutated);
-            assert_ne!(
-                hash_config(&mutated),
-                baseline_hash,
-                "changing the config field behind the `{name}` engine variable must change the \
-                 OCR cache key, or a run with a different value is served the previous result"
-            );
-        }
-
-        let names: Vec<&str> = tesseract_variable_set(&baseline)
-            .iter()
-            .map(|(name, _)| *name)
-            .collect();
-        for (name, _) in &flips {
-            assert!(
-                names.contains(name),
-                "`{name}` is hashed but no longer applied to the engine, so the two have drifted"
-            );
-        }
-        assert!(
-            names.contains(&"hocr_font_info"),
-            "hocr_font_info must stay in the shared variable set: it is applied unconditionally, \
-             so the set is the only thing that can carry it into the cache key (#687)"
-        );
+        ]
     }
 
     /// `tesseract_variable_set` must be deterministic and sorted by name, so the

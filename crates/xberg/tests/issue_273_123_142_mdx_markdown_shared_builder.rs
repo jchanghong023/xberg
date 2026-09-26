@@ -108,9 +108,12 @@ async fn issue_123_mdx_uses_full_markdown_options_gfm_alert() {
         "alert body text missing: {}",
         result.content
     );
+    // fork 默认 Markdown 渲染：admonition 元素由 comrak_bridge 重建为标准 GFM alert
+    // (`> [!WARNING]`)。标记以 alert 块形态输出是保真而非解析层泄漏——若 ENABLE_GFM
+    // 回归、标记落进正文，fork 的 `!` 转义会产出 `[\!WARNING]`，与本断言区分（fork.md）。
     assert!(
-        !result.content.contains("[!WARNING]"),
-        "GFM alert marker should be consumed, not leaked verbatim: {}",
+        result.content.contains("> [!WARNING]"),
+        "GFM alert marker should be consumed and re-rendered as a proper alert block: {}",
         result.content
     );
 }

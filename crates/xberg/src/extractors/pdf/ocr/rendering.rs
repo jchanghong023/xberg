@@ -18,6 +18,7 @@ pub(crate) fn render_selected_pages_for_ocr(
         &page_rotations,
         &valid_indices,
         &crate::extractors::security::SecurityLimits::default(),
+        None,
     )
 }
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
@@ -49,6 +50,75 @@ pub(super) fn page_dimensions_pt(doc: &xberg_native_pdf::PdfDocument, page_index
         .map(|(llx, lly, urx, ury)| ((urx - llx).abs(), (ury - lly).abs()))
         .unwrap_or((612.0, 792.0))
 }
+/// Per-page `/Rotate` values and MediaBox dimensions (points) for a document whose page
+/// rasters were rendered by someone else and handed to OCR pre-rendered — in practice the
+/// layout-detection pass, which always has the original PDF bytes alongside its rasters.
+///
+/// One open serves both hints `ocr_config_with_page_rotation_hint` takes: the rotation and the
+/// `source_dpi` the raster width implies (#1753). An unreadable document yields the same
+/// hint-free result the route had before, not an error: neither hint is load-bearing. ~keep
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) struct PreRenderedPageGeometry {
+    /// One `/Rotate` value per page, zero-filled for a document that would not open.
+    pub(super) rotations: Vec<u32>,
+    /// One `(width, height)` MediaBox pair in points per page, empty for a document that
+    /// would not open. Callers index it with `get`, so the empty case needs no separate
+    /// branch. ~keep
+    pub(super) dimensions_pt: Vec<(f32, f32)>,
+}
+
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn pre_rendered_page_geometry(content: &[u8], page_count: usize) -> PreRenderedPageGeometry {
+    match xberg_native_pdf::PdfDocument::from_bytes(content.to_vec()) {
+        Ok(doc) => PreRenderedPageGeometry {
+            rotations: crate::pdf::render::get_page_rotations(&doc, page_count),
+            dimensions_pt: (0..page_count).map(|page| page_dimensions_pt(&doc, page)).collect(),
+        },
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "failed to open PDF to read pre-rendered page geometry; continuing without rotation or DPI hints"
+            );
+            PreRenderedPageGeometry {
+                rotations: vec![0; page_count],
+                dimensions_pt: Vec::new(),
+            }
+        }
+    }
+}
+
+/// Derive the [`super::pipeline::ocr_config_with_page_rotation_hint`] `source_dpi` value for a
+/// page raster this route did not render itself.
+///
+/// Both axes must agree on the implied resolution before the hint is trusted. A raster that is
+/// not a whole-page, MediaBox-oriented render of this page — a display-oriented render of a
+/// 90/270-rotated page, or a crop — disagrees on a non-square page and gets no hint at all,
+/// which leaves it on the preprocessor's 72-DPI assumption rather than a confidently wrong
+/// number. ~keep
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn pre_rendered_page_source_dpi(
+    page_dimensions_pt: (f32, f32),
+    rendered_width_px: u32,
+    rendered_height_px: u32,
+) -> Option<f64> {
+    /// Largest relative disagreement between the two axes' implied DPI still attributable to a
+    /// renderer rounding each axis independently to a whole pixel.
+    const AXIS_DPI_AGREEMENT_TOLERANCE: f64 = 0.02;
+
+    let (width_pt, height_pt) = page_dimensions_pt;
+    let width_dpi = crate::pdf::render::rendered_page_dpi(rendered_width_px, width_pt)?;
+    let height_dpi = crate::pdf::render::rendered_page_dpi(rendered_height_px, height_pt)?;
+    if (width_dpi - height_dpi).abs() > width_dpi * AXIS_DPI_AGREEMENT_TOLERANCE {
+        tracing::debug!(
+            width_dpi,
+            height_dpi,
+            "pre-rendered page raster axes disagree on resolution; leaving source_dpi unknown"
+        );
+        return None;
+    }
+    Some(width_dpi)
+}
+
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
 pub(super) fn open_pdf_for_full_ocr(content: &[u8]) -> crate::Result<(xberg_native_pdf::PdfDocument, usize, Vec<u32>)> {
     let doc = xberg_native_pdf::PdfDocument::from_bytes(content.to_vec()).map_err(|e| crate::XbergError::Parsing {
@@ -144,6 +214,30 @@ pub(super) fn validate_png_encode_batch_peak<'a>(
         security_limits,
     )
 }
+/// Charge every page in `images` against `security_limits.max_content_size` on its own,
+/// never as a running total.
+///
+/// `max_content_size` bounds what a single page may cost to render and encode; summing a
+/// whole batch against it makes that per-image ceiling a function of the batch width
+/// instead, so a wide batch is refused whole and every page in it is silently dropped. Three
+/// call sites each grew their own copy of this per-page loop over
+/// [`validate_png_encode_batch_peak`] (#1665, #1731, #1748): this is the one place left, so
+/// a fourth route cannot reintroduce the sum by calling the batch-peak function directly with
+/// a whole slice again. Each call is still independently `false` (sequential) accounting:
+/// this validates what one page costs in isolation, not what the caller's own batch
+/// concurrency adds on top -- callers whose encode step runs pages in parallel already bound
+/// that width separately (by memory, by the thread budget), and this only ever guards the
+/// per-page ceiling `max_content_size` actually documents. ~keep
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn validate_png_encode_pages_individually<'a>(
+    images: impl IntoIterator<Item = &'a image::DynamicImage>,
+    security_limits: &crate::extractors::security::SecurityLimits,
+) -> crate::Result<()> {
+    for image in images {
+        validate_png_encode_batch_peak(std::iter::once(image), false, security_limits)?;
+    }
+    Ok(())
+}
 
 #[cfg(all(test, any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
 mod png_encode_peak_tests {
@@ -167,7 +261,213 @@ mod png_encode_peak_tests {
 
         assert!(matches!(error, crate::XbergError::Validation { .. }));
     }
+
+    /// #1748: a batch wider than any single page's own allowance must still validate every
+    /// page, because [`validate_png_encode_pages_individually`] charges each one on its own
+    /// rather than summing the batch. Eight 10x10 pages charged in one
+    /// `validate_png_encode_batch_peak` call (the bug this helper replaces) peak at
+    /// 2,400 source bytes + 300 conversion bytes + 2,100,352 output bytes = 2,103,052,
+    /// which trips the 526,000 limit below and rejects every page in the batch; charged one
+    /// at a time each page peaks at 300 + 300 + 262,544 = 263,144, comfortably under it. The
+    /// three production call sites (`extract_mixed_ocr_native`'s raster-capture and
+    /// single-backend paths, `extract_with_ocr_for_page`'s pre-rendered-images path) all
+    /// delegate to this one helper now, so a fourth call site written against
+    /// `validate_png_encode_batch_peak` directly is the only way to reintroduce the sum.
+    #[test]
+    fn validate_pages_individually_accepts_a_batch_wider_than_one_page_allows() {
+        const PAGE_COUNT: usize = 8;
+        let images: Vec<image::DynamicImage> = (0..PAGE_COUNT)
+            .map(|_| image::DynamicImage::ImageRgb8(image::RgbImage::new(10, 10)))
+            .collect();
+        let limits = crate::extractors::security::SecurityLimits {
+            max_content_size: 526_000,
+            ..Default::default()
+        };
+
+        // A literal batch-wide sum would trip here (peaks at 2,103,052 bytes, see above).
+        validate_png_encode_pages_individually(images.iter(), &limits).expect(
+            "each page must be charged against max_content_size on its own; a batch summed \
+             wholesale would reject every page here, not just the ones that are actually too big",
+        );
+    }
+
+    /// #1748: the per-page allowance must not grow just because the batch happens to be
+    /// wide. A single page over the limit still fails even inside an otherwise-small batch,
+    /// which a whole-batch-average accounting could mask.
+    #[test]
+    fn validate_pages_individually_still_rejects_one_oversized_page() {
+        let images = [
+            image::DynamicImage::ImageRgb8(image::RgbImage::new(10, 10)),
+            image::DynamicImage::ImageRgb8(image::RgbImage::new(1000, 1000)),
+        ];
+        let limits = crate::extractors::security::SecurityLimits {
+            max_content_size: 526_000,
+            ..Default::default()
+        };
+
+        let error = validate_png_encode_pages_individually(images.iter(), &limits)
+            .expect_err("the oversized second page must still be rejected on its own");
+        assert!(matches!(error, crate::XbergError::Validation { .. }));
+    }
 }
+/// #1577: `render_full_pdf_ocr_batch` / `render_selected_pages_from_document` must render at
+/// the DPI `ImageExtractionConfig` requests, not the historical literal 150.
+#[cfg(all(test, any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+mod render_dpi_tests {
+    use super::*;
+
+    /// Without an `ImageExtractionConfig`, a Letter page renders at the unchanged historical
+    /// default of 150 DPI: 8.5in * 150 = 1275px wide.
+    #[test]
+    fn render_full_pdf_ocr_batch_defaults_to_150_dpi_without_images_config() {
+        let pdf = crate::pdf::render::build_minimal_pdf_with_mediabox(612.0, 792.0);
+        let (doc, _page_count, page_rotations) = open_pdf_for_full_ocr(&pdf).unwrap();
+
+        let batch = render_full_pdf_ocr_batch(
+            &doc,
+            &page_rotations,
+            0..1,
+            &crate::extractors::security::SecurityLimits::default(),
+            None,
+        )
+        .expect("blank Letter page must render");
+
+        assert_eq!(batch.len(), 1);
+        let (_, _, width, height) = &batch[0];
+        assert_eq!(*width, 1275, "8.5in at 150 DPI is 1275px wide");
+        assert_eq!(*height, 1650, "11in at 150 DPI is 1650px tall");
+    }
+
+    /// #1786: a page that is one full-page raster (a scan) renders at the raster's own density,
+    /// not at the 150 default that downsamples it before the OCR preprocessor upscales it again.
+    /// A 400 px raster painted over a 100 pt page is 288 dpi, so the page renders 400 px wide.
+    #[test]
+    fn render_full_pdf_ocr_batch_renders_a_full_page_raster_at_its_own_density() {
+        let pdf = crate::pdf::render::build_full_page_raster_pdf((100.0, 100.0), (400, 400), 1.0, 0);
+        let (doc, _page_count, page_rotations) = open_pdf_for_full_ocr(&pdf).unwrap();
+
+        let batch = render_full_pdf_ocr_batch(
+            &doc,
+            &page_rotations,
+            0..1,
+            &crate::extractors::security::SecurityLimits::default(),
+            None,
+        )
+        .expect("a full-page raster must render");
+
+        let (_, _, width, height) = &batch[0];
+        assert_eq!(
+            *width, 400,
+            "a 288 dpi scan of a 100 pt page renders 400 px wide, not 208"
+        );
+        assert_eq!(*height, 400);
+    }
+
+    /// The control for the test above: the same raster covering a quarter of a page that
+    /// carries 20 lines of native text is a figure on a text page, and the page keeps the 150
+    /// dpi default (100 pt at 150 dpi is 208.3 px, which the renderer rounds up to 209).
+    #[test]
+    fn render_full_pdf_ocr_batch_keeps_the_default_dpi_for_a_page_with_a_figure() {
+        let pdf = crate::pdf::render::build_full_page_raster_pdf((100.0, 100.0), (400, 400), 0.25, 20);
+        let (doc, _page_count, page_rotations) = open_pdf_for_full_ocr(&pdf).unwrap();
+
+        let batch = render_full_pdf_ocr_batch(
+            &doc,
+            &page_rotations,
+            0..1,
+            &crate::extractors::security::SecurityLimits::default(),
+            None,
+        )
+        .expect("a figure page must render");
+
+        let (_, _, width, _) = &batch[0];
+        assert_eq!(
+            *width, 209,
+            "a figure covering a quarter of the page must not change the render dpi"
+        );
+    }
+
+    /// The ceiling holds on a real page size: a Letter page carrying a 600 dpi scan renders at
+    /// `SCAN_PAGE_MAX_RENDER_DPI` (2550 x 3300 px) and stays inside the default security limits
+    /// through the raster normalization step, which is the claim the ceiling's comment makes.
+    #[test]
+    fn render_full_pdf_ocr_batch_caps_a_letter_scan_at_the_ceiling_within_default_limits() {
+        let pdf = crate::pdf::render::build_full_page_raster_pdf((612.0, 792.0), (5100, 6600), 1.0, 0);
+        let (doc, _page_count, page_rotations) = open_pdf_for_full_ocr(&pdf).unwrap();
+
+        let batch = render_full_pdf_ocr_batch(
+            &doc,
+            &page_rotations,
+            0..1,
+            &crate::extractors::security::SecurityLimits::default(),
+            None,
+        )
+        .expect("a Letter scan at the ceiling must render inside the default limits");
+
+        let (_, _, width, height) = &batch[0];
+        assert_eq!((*width, *height), (2550, 3300), "8.5 x 11 in at the 300 dpi ceiling");
+    }
+
+    /// #1577 still holds on a scan: a configured `target_dpi` decides, not the raster's density.
+    #[test]
+    fn render_full_pdf_ocr_batch_lets_a_configured_dpi_win_over_the_raster_density() {
+        let pdf = crate::pdf::render::build_full_page_raster_pdf((100.0, 100.0), (400, 400), 1.0, 0);
+        let (doc, _page_count, page_rotations) = open_pdf_for_full_ocr(&pdf).unwrap();
+        let images_config = crate::core::config::ImageExtractionConfig {
+            target_dpi: 72,
+            auto_adjust_dpi: false,
+            min_dpi: 72,
+            max_dpi: 600,
+            ..Default::default()
+        };
+
+        let batch = render_full_pdf_ocr_batch(
+            &doc,
+            &page_rotations,
+            0..1,
+            &crate::extractors::security::SecurityLimits::default(),
+            Some(&images_config),
+        )
+        .expect("a full-page raster must render");
+
+        let (_, _, width, _) = &batch[0];
+        assert_eq!(
+            *width, 100,
+            "100 pt at the configured 72 dpi is 100 px, whatever the raster's density"
+        );
+    }
+
+    /// The exact #1577 repro: `target_dpi=600` on the `ImageExtractionConfig` must actually
+    /// change the rendered pixel dimensions, not be silently ignored. Before the fix, this
+    /// page rendered identically regardless of `images_config`.
+    #[test]
+    fn render_full_pdf_ocr_batch_honours_configured_target_dpi() {
+        let pdf = crate::pdf::render::build_minimal_pdf_with_mediabox(612.0, 792.0);
+        let (doc, _page_count, page_rotations) = open_pdf_for_full_ocr(&pdf).unwrap();
+        let images_config = crate::core::config::ImageExtractionConfig {
+            target_dpi: 600,
+            auto_adjust_dpi: false,
+            min_dpi: 72,
+            max_dpi: 600,
+            ..Default::default()
+        };
+
+        let batch = render_full_pdf_ocr_batch(
+            &doc,
+            &page_rotations,
+            0..1,
+            &crate::extractors::security::SecurityLimits::default(),
+            Some(&images_config),
+        )
+        .expect("blank Letter page must render");
+
+        assert_eq!(batch.len(), 1);
+        let (_, _, width, height) = &batch[0];
+        assert_eq!(*width, 5100, "8.5in at 600 DPI is 5100px wide");
+        assert_eq!(*height, 6600, "11in at 600 DPI is 6600px tall");
+    }
+}
+
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
 pub(super) fn clone_rgb_for_png_encode(
     image: &image::DynamicImage,
@@ -449,32 +749,105 @@ pub(super) fn fallback_render_document<'a>(
     })
     .as_ref()
 }
+/// Whether `page_idx` is a scan (one full-page raster), for the whole-image Tesseract PSM
+/// hint (`ocr_config_with_page_rotation_hint`'s `whole_page_raster` argument).
+///
+/// `lazy_pdf_render_state` answers this directly when it is open (the non-layout OCR routes,
+/// which render pages themselves). The layout-detection route hands in pre-rendered `images`
+/// instead, so `lazy_pdf_render_state` is never opened there (see its `let` in
+/// `extract_with_ocr_for_page`) -- without a fallback, that route always got `false` here,
+/// silently keeping a scanned page's PSM at the engine default when layout detection was on,
+/// even though the very same page under `force_ocr` alone got the whole-image PSM (#1828).
+/// Falls back to the same lazily-opened, memoized handle the XObject recovery fallback uses
+/// just below in `extract_with_ocr_for_page`, for the same reason: nothing here needs anything
+/// `lazy_pdf_render_state` is indexed for beyond the page's own raster geometry. ~keep
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn whole_page_raster_for_ocr_page(
+    lazy_pdf_render_state: Option<&(xberg_native_pdf::PdfDocument, usize, Vec<u32>)>,
+    fallback_pdf_state: &mut Option<Option<xberg_native_pdf::PdfDocument>>,
+    content: Option<&[u8]>,
+    page_idx: usize,
+) -> bool {
+    match lazy_pdf_render_state {
+        Some((doc, _, _)) => crate::pdf::scan_detect::full_page_raster_density(doc, page_idx).is_some(),
+        None => fallback_render_document(fallback_pdf_state, content)
+            .is_some_and(|doc| crate::pdf::scan_detect::full_page_raster_density(doc, page_idx).is_some()),
+    }
+}
+/// The DPI to render `page_idx` at for OCR.
+///
+/// Thin wrapper over [`crate::image::dpi::pdf_ocr_render_dpi`], which also backs the
+/// layout-detection route's OCR render (`extractors::pdf::layout_runner`) so both routes make
+/// the same scan-density decision (#1828). See that function's doc comment for the decision
+/// itself.
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn ocr_page_render_dpi(
+    doc: &xberg_native_pdf::PdfDocument,
+    page_idx: usize,
+    images_config: Option<&crate::core::config::ImageExtractionConfig>,
+) -> i32 {
+    crate::image::dpi::pdf_ocr_render_dpi(doc, page_idx, images_config)
+}
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+fn render_one_full_pdf_ocr_page(
+    doc: &xberg_native_pdf::PdfDocument,
+    page_rotations: &[u32],
+    page_idx: usize,
+    security_limits: &crate::extractors::security::SecurityLimits,
+    images_config: Option<&crate::core::config::ImageExtractionConfig>,
+) -> crate::Result<EncodedPage> {
+    #[cfg(test)]
+    record_render_thread();
+    // GH#1786 + GH#1796: the scan-density choice lives in `ocr_page_render_dpi`, and it is made
+    // per page HERE rather than in the batch loop above, so the parallel render keeps it. Doing
+    // it in the caller would have serialized the batch again. ~keep
+    let render_dpi = ocr_page_render_dpi(doc, page_idx, images_config);
+    let rendered =
+        crate::pdf::render::render_page_with_safeguards(doc, page_idx, render_dpi.max(1) as u32).map_err(|e| {
+            crate::XbergError::Parsing {
+                message: format!("Failed to render page {} for OCR: {:?}", page_idx, e),
+                source: None,
+            }
+        })?;
+    let rotation = page_rotations.get(page_idx).copied().unwrap_or(0);
+    let (data, width, height) = crate::pdf::render::normalize_rendered_page_for_ocr_with_security_limits(
+        rendered.data,
+        rendered.width,
+        rendered.height,
+        rotation,
+        security_limits,
+    )?;
+    Ok((page_idx, std::sync::Arc::new(data), width, height))
+}
+/// Render every page in `page_range` for the `force_ocr` (whole-document) route, in parallel
+/// across the configured thread budget -- the same mechanism
+/// `render_selected_pages_from_document` uses for the sibling `force_ocr_pages` route (#1666).
+/// Before this fix, `force_ocr` rendered each batch with a plain sequential loop regardless of
+/// `concurrency.max_threads`, leaving rasterization a floor no thread count could lower on this
+/// route even after #1666 fixed the sibling (#1796). `.par_iter().map(...).collect()` preserves
+/// `page_range`'s order, matching the previous sequential loop's output order exactly. ~keep
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
 pub(super) fn render_full_pdf_ocr_batch(
     doc: &xberg_native_pdf::PdfDocument,
     page_rotations: &[u32],
     page_range: std::ops::Range<usize>,
     security_limits: &crate::extractors::security::SecurityLimits,
+    images_config: Option<&crate::core::config::ImageExtractionConfig>,
 ) -> crate::Result<Vec<EncodedPage>> {
-    let mut encoded = Vec::with_capacity(page_range.len());
-    for page_idx in page_range {
-        let rendered = crate::pdf::render::render_page_with_safeguards(doc, page_idx, 150).map_err(|e| {
-            crate::XbergError::Parsing {
-                message: format!("Failed to render page {} for OCR: {:?}", page_idx, e),
-                source: None,
-            }
-        })?;
-        let rotation = page_rotations.get(page_idx).copied().unwrap_or(0);
-        let (data, width, height) = crate::pdf::render::normalize_rendered_page_for_ocr_with_security_limits(
-            rendered.data,
-            rendered.width,
-            rendered.height,
-            rotation,
-            security_limits,
-        )?;
-        encoded.push((page_idx, std::sync::Arc::new(data), width, height));
+    // rayon's work-stealing pool needs OS threads; wasm32 has none, so this falls back to a
+    // sequential iterator there, matching `render_selected_pages_from_document`. ~keep
+    #[cfg(all(feature = "tokio-runtime", not(target_arch = "wasm32")))]
+    {
+        crate::pdf::render::par_render_pages_collecting_warnings(page_range.collect(), |page_idx| {
+            render_one_full_pdf_ocr_page(doc, page_rotations, page_idx, security_limits, images_config)
+        })
     }
-    Ok(encoded)
+    #[cfg(any(not(feature = "tokio-runtime"), target_arch = "wasm32"))]
+    {
+        page_range
+            .map(|page_idx| render_one_full_pdf_ocr_page(doc, page_rotations, page_idx, security_limits, images_config))
+            .collect()
+    }
 }
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
 pub(super) fn valid_page_indices(page_indices: &[usize], page_count: usize) -> Vec<usize> {
@@ -497,37 +870,112 @@ pub(super) fn valid_page_indices(page_indices: &[usize], page_count: usize) -> V
         })
         .collect()
 }
+/// Render one page: the per-page body `render_selected_pages_from_document` runs, either in
+/// parallel across the thread pool or sequentially on `wasm32` (which has no OS threads for
+/// rayon's work-stealing pool to use).
+///
+/// #1690/#1747: `RENDER_CALL_THREAD_NAMES` below is test-only instrumentation (compiled
+/// under `cfg(test)` plus the gates of its only users, so it never reaches a release build
+/// and is never dead under a feature leg that lacks those users) that lets a test observe
+/// which OS threads actually executed page renders -- the mechanism a regression here
+/// breaks -- rather than inferring parallelism from wall-clock duration, which flakes under
+/// shared-box load. Records thread NAMES rather than raw `ThreadId`s: the set is
+/// process-global, so a guard must be able to tell its own pool's threads apart from any
+/// other test's, e.g. via a caller-chosen name prefix -- otherwise a concurrently running
+/// extraction can inflate the set and let a sequential regression here read as parallel
+/// (the same defect class `pdf::native::images::PAGE_CALL_THREAD_NAMES` fixed against
+/// #1732, and `core/config/concurrency.rs` against #215). See
+/// `parallel_render_dispatches_across_more_than_one_thread` in `ocr/tests.rs`. ~keep
+#[cfg(all(test, any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) static RENDER_CALL_THREAD_NAMES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::OnceLock::new();
+#[cfg(all(test, feature = "ocr", feature = "pdf"))]
+pub(super) fn clear_render_call_thread_ids() {
+    RENDER_CALL_THREAD_NAMES
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap()
+        .clear();
+}
+#[cfg(all(test, any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+fn record_render_thread() {
+    let current = std::thread::current();
+    let name = current.name().unwrap_or("<unnamed>").to_owned();
+    RENDER_CALL_THREAD_NAMES
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+        .lock()
+        .unwrap()
+        .insert(name);
+}
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+fn render_one_selected_page(
+    doc: &xberg_native_pdf::PdfDocument,
+    page_rotations: &[u32],
+    idx: usize,
+    security_limits: &crate::extractors::security::SecurityLimits,
+    images_config: Option<&crate::core::config::ImageExtractionConfig>,
+) -> crate::Result<(usize, image::DynamicImage)> {
+    #[cfg(test)]
+    record_render_thread();
+    let render_dpi = ocr_page_render_dpi(doc, idx, images_config);
+    let rendered =
+        crate::pdf::render::render_page_with_safeguards(doc, idx, render_dpi.max(1) as u32).map_err(|e| {
+            crate::XbergError::Parsing {
+                message: format!("Failed to render PDF page {}: {}", idx + 1, e),
+                source: None,
+            }
+        })?;
+    let rotation = page_rotations.get(idx).copied().unwrap_or(0);
+    let (data, _, _) = crate::pdf::render::normalize_rendered_page_for_ocr_with_security_limits(
+        rendered.data,
+        rendered.width,
+        rendered.height,
+        rotation,
+        security_limits,
+    )?;
+    let img = crate::extraction::image_decode::decode_standard_image_with_security_limits(&data, security_limits)
+        .map_err(|e| crate::XbergError::Parsing {
+            message: format!("Failed to decode rendered page {}: {}", idx + 1, e),
+            source: None,
+        })?;
+    Ok((idx, img))
+}
+
+/// Render every page in `page_indices`, in parallel across the configured thread budget.
+///
+/// PDF page rasterization (the pixels-from-vectors work inside `render_page_with_safeguards`)
+/// is CPU-bound and, per page, independent of every other page: `xberg_native_pdf::PdfDocument`
+/// is documented `Send + Sync` for exactly this reason (its own doc comment: "warm cache hits
+/// stay fully parallel"). Rendering used to run in a plain sequential loop regardless of the
+/// thread budget, while the sibling PNG-encode step a few lines away in `pipeline.rs` already
+/// used `.par_iter()` -- so widening `concurrency.max_threads` only ever widened the OCR
+/// recognition and encode stages, leaving rasterization as a floor no thread count could lower
+/// (issue #1666). `.par_iter().map(...).collect()` preserves `page_indices`' order, matching
+/// the previous sequential loop's output order exactly.
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
 pub(super) fn render_selected_pages_from_document(
     doc: &xberg_native_pdf::PdfDocument,
     page_rotations: &[u32],
     page_indices: &[usize],
     security_limits: &crate::extractors::security::SecurityLimits,
+    images_config: Option<&crate::core::config::ImageExtractionConfig>,
 ) -> crate::Result<Vec<(usize, image::DynamicImage)>> {
-    let mut images = Vec::with_capacity(page_indices.len());
-    for &idx in page_indices {
-        let rendered =
-            crate::pdf::render::render_page_with_safeguards(doc, idx, 150).map_err(|e| crate::XbergError::Parsing {
-                message: format!("Failed to render PDF page {}: {}", idx + 1, e),
-                source: None,
-            })?;
-        let rotation = page_rotations.get(idx).copied().unwrap_or(0);
-        let (data, _, _) = crate::pdf::render::normalize_rendered_page_for_ocr_with_security_limits(
-            rendered.data,
-            rendered.width,
-            rendered.height,
-            rotation,
-            security_limits,
-        )?;
-        let img = crate::extraction::image_decode::decode_standard_image_with_security_limits(&data, security_limits)
-            .map_err(|e| crate::XbergError::Parsing {
-            message: format!("Failed to decode rendered page {}: {}", idx + 1, e),
-            source: None,
-        })?;
-        images.push((idx, img));
+    // rayon's work-stealing pool needs OS threads; wasm32 has none, so this falls back to a
+    // sequential iterator there, matching the same gate used for the PNG-encode parallel path
+    // in `pipeline.rs`. ~keep
+    #[cfg(all(feature = "tokio-runtime", not(target_arch = "wasm32")))]
+    {
+        crate::pdf::render::par_render_pages_collecting_warnings(page_indices.to_vec(), |idx| {
+            render_one_selected_page(doc, page_rotations, idx, security_limits, images_config)
+        })
     }
-
-    Ok(images)
+    #[cfg(any(not(feature = "tokio-runtime"), target_arch = "wasm32"))]
+    {
+        page_indices
+            .iter()
+            .map(|&idx| render_one_selected_page(doc, page_rotations, idx, security_limits, images_config))
+            .collect()
+    }
 }
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
 pub(super) fn share_rendered_page_images(

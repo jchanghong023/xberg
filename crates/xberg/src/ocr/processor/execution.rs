@@ -9,6 +9,10 @@ use super::validation::{
     resolve_all_installed_languages, resolve_tessdata_path, strip_control_characters, validate_language_and_traineddata,
 };
 use crate::core::config::ExtractionConfig;
+/// GH#1630/GH#1621: the explicit-hint-then-embedded-PNG-density-then-`None` precedence is
+/// defined once and shared with `extractors::image::normalize_image_bytes_for_ocr`.
+use crate::extraction::image::resolve_known_source_dpi;
+use crate::extractors::security::SecurityLimits;
 use crate::image::normalize_image_dpi_owned;
 use crate::ocr::cache::OcrCache;
 use crate::ocr::conversion::{TsvRow, iterator_word_to_element, tsv_row_to_element};
@@ -21,7 +25,7 @@ use crate::ocr::preprocessing::preprocess_pix;
 use crate::ocr::preprocessing::should_invert_for_polarity;
 #[cfg(feature = "pdf")]
 use crate::ocr::table::post_process_table;
-use crate::ocr::table::{extract_words_from_tsv, reconstruct_table, table_to_markdown};
+use crate::ocr::table::{extract_words_from_tsv, reconstruct_table_with_columns, table_to_markdown};
 #[cfg(test)]
 use crate::ocr::types::BatchItemResult;
 use crate::ocr::types::TesseractConfig;
@@ -48,7 +52,10 @@ fn doc_orientation_detector() -> &'static crate::doc_orientation::DocOrientation
     &DETECTOR
 }
 
-use crate::table_core::{MIN_TABLE_CANDIDATE_WORDS, cluster_words_into_table_regions};
+use crate::table_core::{
+    HocrWord, MIN_TABLE_CANDIDATE_WORDS, cluster_words_into_table_regions, detect_rows, drop_leading_caption_row,
+    median_word_height, merge_disjoint_numeric_columns,
+};
 use crate::types::OcrElement;
 
 #[cfg(auto_rotate)]
@@ -199,6 +206,288 @@ where
         .unwrap_or(0.0);
 
     tracing::debug!(stage, timestamp = format!("{timestamp:.3}"), "{}", details());
+}
+
+/// Word-count shortfall a markdown table rebuild is allowed relative to the content it would
+/// replace before the rebuild is rejected as content loss (GH#1599). Zero: table syntax (`|`,
+/// `---`) itself adds whitespace-separated tokens, so a rebuild that faithfully reformats
+/// existing prose into a table is never word-count-negative -- only a rebuild that actually
+/// dropped page content comes in under the original count.
+const TABLE_REBUILD_MIN_WORD_RETENTION: usize = 0;
+
+/// Whether a markdown table rebuild should replace `original_content`.
+///
+/// `build_content_with_inline_tables` reconstructs page content from a crude y-position
+/// clustering heuristic that is far less robust than the hOCR-derived content it replaces.
+/// Non-emptiness alone (the previous guard) cannot distinguish a legitimate rebuild from one
+/// that silently dropped most of the page -- see GH#1599, where OCR markdown output lost a
+/// large amount of content that plain output retained. Comparing absolute word counts catches
+/// that: a rebuild is adopted only when it does not lose material.
+fn should_adopt_table_rebuild(original_content: &str, rebuilt_content: &str) -> bool {
+    let original_word_count = original_content.split_whitespace().count();
+    let rebuilt_word_count = rebuilt_content.split_whitespace().count();
+    rebuilt_word_count + TABLE_REBUILD_MIN_WORD_RETENTION >= original_word_count
+}
+
+const MIN_QUANTITY_COLUMN_SUPPORT: usize = 2;
+const MAX_RETRY_QUANTITY_DIGITS: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuantityRetryRegion {
+    row: usize,
+    column: usize,
+    left: u32,
+    top: u32,
+    width: u32,
+    height: u32,
+    word_left: u32,
+    word_top: u32,
+    word_width: u32,
+    word_height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct QuantityRetryColumn {
+    index: usize,
+    left: u32,
+    right: u32,
+    median_height: u32,
+    word_width: u32,
+    cell_left: u32,
+    cell_right: u32,
+}
+
+fn nearest_position_index(positions: &[u32], value: u32) -> Option<usize> {
+    if positions.is_empty() {
+        return None;
+    }
+    match positions.binary_search(&value) {
+        Ok(index) => Some(index),
+        Err(0) => Some(0),
+        Err(index) if index == positions.len() => Some(index - 1),
+        Err(index) => {
+            let left = index - 1;
+            Some(if positions[left].abs_diff(value) <= positions[index].abs_diff(value) {
+                left
+            } else {
+                index
+            })
+        }
+    }
+}
+
+/// Retry only an empty cell in a literal `QTY` column supported by at least two recognized
+/// integer quantities. The retry reads pixels from that cell; it never derives a value from
+/// prices or totals, so an intentionally blank quantity remains blank. ~keep
+fn quantity_retry_region(
+    words: &[HocrWord],
+    quantity_column: usize,
+    blank_row: usize,
+    row_positions: &[u32],
+    column_positions: &[u32],
+    image_width: u32,
+    image_height: u32,
+) -> Option<QuantityRetryRegion> {
+    if blank_row >= row_positions.len() || quantity_column >= column_positions.len() {
+        return None;
+    }
+    let column = quantity_retry_column(words, column_positions, quantity_column, image_width);
+    retry_region_for_row(words, blank_row, column, row_positions, image_width, image_height)
+}
+
+fn quantity_retry_column_index(table: &[Vec<String>]) -> Option<(usize, usize)> {
+    let quantity_column = table
+        .first()?
+        .iter()
+        .position(|header| header.trim().eq_ignore_ascii_case("qty"))?;
+    let mut support = 0usize;
+    let mut blank_row = None;
+    for (row_index, row) in table.iter().enumerate().skip(1) {
+        let quantity = row.get(quantity_column)?.trim();
+        if quantity.is_empty() {
+            if blank_row.replace(row_index).is_some() {
+                return None;
+            }
+        } else if quantity.bytes().all(|byte| byte.is_ascii_digit()) {
+            support += 1;
+        } else {
+            return None;
+        }
+    }
+    (support >= MIN_QUANTITY_COLUMN_SUPPORT).then_some((quantity_column, blank_row?))
+}
+
+fn quantity_retry_column(
+    words: &[HocrWord],
+    column_positions: &[u32],
+    index: usize,
+    image_width: u32,
+) -> QuantityRetryColumn {
+    let (left, right, median_height, word_width) = quantity_column_geometry(words, column_positions, index);
+    let (cell_left, cell_right) = cell_axis_bounds(column_positions, index, image_width);
+    QuantityRetryColumn {
+        index,
+        left,
+        right,
+        median_height,
+        word_width,
+        cell_left,
+        cell_right,
+    }
+}
+
+fn quantity_column_geometry(words: &[HocrWord], column_positions: &[u32], index: usize) -> (u32, u32, u32, u32) {
+    let mean_height = nonzero_mean(words.iter().map(|word| word.height), 1);
+    let mut left = None;
+    let mut right = None;
+    let mut width_sum = 0u64;
+    let mut width_count = 0u64;
+    for word in words {
+        if nearest_position_index(column_positions, word.left) != Some(index) {
+            continue;
+        }
+        left = Some(left.map_or(word.left, |current: u32| current.min(word.left)));
+        let word_right = word.left.saturating_add(word.width);
+        right = Some(right.map_or(word_right, |current: u32| current.max(word_right)));
+        if word.width > 0 {
+            width_sum += u64::from(word.width);
+            width_count += 1;
+        }
+    }
+    let left = left.unwrap_or(column_positions[index]);
+    let right = right.unwrap_or(column_positions[index].saturating_add(mean_height));
+    let word_width = width_sum
+        .checked_div(width_count)
+        .map_or(mean_height, |mean| u32::try_from(mean).unwrap_or(u32::MAX));
+    (left, right, mean_height, word_width)
+}
+
+fn nonzero_mean(values: impl Iterator<Item = u32>, fallback: u32) -> u32 {
+    let (sum, count) = values
+        .filter(|&value| value > 0)
+        .fold((0u64, 0u64), |(sum, count), value| (sum + u64::from(value), count + 1));
+    sum.checked_div(count)
+        .map_or(fallback, |mean| u32::try_from(mean).unwrap_or(u32::MAX))
+}
+
+fn cell_axis_bounds(positions: &[u32], index: usize, limit: u32) -> (u32, u32) {
+    let midpoint = |left: u32, right: u32| u32::try_from((u64::from(left) + u64::from(right)) / 2).unwrap_or(limit);
+    let lower = index
+        .checked_sub(1)
+        .map_or(0, |left| midpoint(positions[left], positions[index]));
+    let upper = positions
+        .get(index + 1)
+        .map_or(limit, |&right| midpoint(positions[index], right));
+    (lower.min(limit), upper.min(limit))
+}
+
+fn retry_region_for_row(
+    words: &[HocrWord],
+    row: usize,
+    column: QuantityRetryColumn,
+    row_positions: &[u32],
+    image_width: u32,
+    image_height: u32,
+) -> Option<QuantityRetryRegion> {
+    let mut row_top = None;
+    let mut row_bottom = None;
+    for word in words {
+        if nearest_position_index(row_positions, word.y_center() as u32) != Some(row) {
+            continue;
+        }
+        row_top = Some(row_top.map_or(word.top, |current: u32| current.min(word.top)));
+        let word_bottom = word.top.saturating_add(word.height);
+        row_bottom = Some(row_bottom.map_or(word_bottom, |current: u32| current.max(word_bottom)));
+    }
+    let row_top = row_top?;
+    let row_bottom = row_bottom?;
+    let horizontal_padding = column.median_height;
+    let vertical_padding = column.median_height / 2;
+    let (row_cell_top, row_cell_bottom) = cell_axis_bounds(row_positions, row, image_height);
+    let left = column.left.saturating_sub(horizontal_padding).max(column.cell_left);
+    let right = column
+        .right
+        .saturating_add(horizontal_padding)
+        .min(image_width)
+        .min(column.cell_right);
+    let top = row_top.saturating_sub(vertical_padding).max(row_cell_top);
+    let bottom = row_bottom
+        .saturating_add(vertical_padding)
+        .min(image_height)
+        .min(row_cell_bottom);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(QuantityRetryRegion {
+        row,
+        column: column.index,
+        left,
+        top,
+        width: right - left,
+        height: bottom - top,
+        word_left: column.left,
+        word_top: row_positions[row].saturating_sub(column.median_height / 2),
+        word_width: column.word_width,
+        word_height: column.median_height,
+    })
+}
+
+fn parse_retry_quantity(text: &str) -> Option<&str> {
+    let quantity = text.trim();
+    (!quantity.is_empty()
+        && quantity.len() <= MAX_RETRY_QUANTITY_DIGITS
+        && quantity.bytes().all(|byte| byte.is_ascii_digit())
+        && quantity.bytes().any(|byte| byte != b'0'))
+    .then_some(quantity)
+}
+
+fn recover_blank_quantity_word(
+    api: &TesseractAPI,
+    config: &TesseractConfig,
+    region: Option<&QuantityRetryRegion>,
+    image_width: u32,
+    image_height: u32,
+) -> Option<HocrWord> {
+    let region = region?;
+    if api.set_page_seg_mode(TessPageSegMode::PSM_SINGLE_LINE).is_err() {
+        return None;
+    }
+    let recovered = recognize_quantity_region(api, config, region);
+    let _ = api.set_rectangle(
+        0,
+        0,
+        i32::try_from(image_width).unwrap_or(i32::MAX),
+        i32::try_from(image_height).unwrap_or(i32::MAX),
+    );
+    let _ = api.set_page_seg_mode(TessPageSegMode::from_int(config.psm as i32));
+    recovered
+}
+
+fn recognize_quantity_region(
+    api: &TesseractAPI,
+    config: &TesseractConfig,
+    region: &QuantityRetryRegion,
+) -> Option<HocrWord> {
+    let left = i32::try_from(region.left).ok()?;
+    let top = i32::try_from(region.top).ok()?;
+    let width = i32::try_from(region.width).ok()?;
+    let height = i32::try_from(region.height).ok()?;
+    api.set_rectangle(left, top, width, height).ok()?;
+    api.recognize().ok()?;
+    let text = api.get_utf8_text().ok()?;
+    let quantity = parse_retry_quantity(&text)?;
+    let confidence = api.mean_text_conf().unwrap_or(-1);
+    if f64::from(confidence) < config.table_min_confidence {
+        return None;
+    }
+    Some(HocrWord {
+        text: quantity.to_string(),
+        left: region.word_left,
+        top: region.word_top,
+        width: region.word_width,
+        height: region.word_height,
+        confidence: f64::from(confidence),
+    })
 }
 
 /// Build content with OCR tables inlined at their correct vertical positions.
@@ -383,6 +672,44 @@ fn flatten_hocr_elements_to_text(elements: &[crate::types::internal::InternalEle
         .join("\n\n")
 }
 
+/// Drop hOCR paragraph elements whose text was already claimed by a detected table (#1571).
+///
+/// `hocr_document` is parsed straight from the raw hOCR before table detection runs, so
+/// nothing ever removes a table's words from it once `tables` is computed: every consumer
+/// built from `internal_document` (the PDF mixed/OCR-only routes and the standalone image
+/// route) receives the table's text twice, once as ordinary paragraphs and once as the
+/// `OcrTable`. `build_content_with_inline_tables` already solves this for the rendered
+/// `content` string using a word-centre-in-bbox test; apply the same test here at the
+/// paragraph level, using the paragraph's own bbox centre, so `internal_document` agrees
+/// with `content` regardless of `output_format` (the string rebuild above is skipped for
+/// Plain/Djot output, but the duplication it was masking is not). ~keep
+fn filter_elements_covered_by_tables(
+    elements: Vec<crate::types::internal::InternalElement>,
+    tables: &[OcrTable],
+) -> Vec<crate::types::internal::InternalElement> {
+    let table_bboxes: Vec<_> = tables.iter().filter_map(|t| t.bounding_box.as_ref()).collect();
+    if table_bboxes.is_empty() {
+        return elements;
+    }
+
+    elements
+        .into_iter()
+        .filter(|element| {
+            let Some(bbox) = element.bbox.as_ref() else {
+                return true;
+            };
+            let center_x = (bbox.x0 + bbox.x1) / 2.0;
+            let center_y = (bbox.y0 + bbox.y1) / 2.0;
+            !table_bboxes.iter().any(|table_bbox| {
+                center_x >= table_bbox.left as f64
+                    && center_x <= table_bbox.right as f64
+                    && center_y >= table_bbox.top as f64
+                    && center_y <= table_bbox.bottom as f64
+            })
+        })
+        .collect()
+}
+
 /// Minimum confidence for accepting orientation detection results.
 ///
 /// Keep in sync with `doc_orientation::MIN_CONFIDENCE` (module is feature-gated,
@@ -441,10 +768,11 @@ struct PreparedOcrImage {
 /// Prepare the raster Tesseract will recognize, and report the resolution it should be told.
 ///
 /// `known_source_dpi` is the true resolution of `rgb_data` when the caller knows it (the PDF OCR
-/// route derives it from the render), and `None` when it genuinely does not (raw images handed in
-/// by a user). Both branches below honour it: the unpreprocessed branch reports it verbatim
-/// instead of the [`RAW_IMAGE_SOURCE_DPI`] assumption, and the preprocessed branch feeds it to
-/// DPI normalization so the resize scales from the real resolution.
+/// route derives it from the render, and [`resolve_known_source_dpi`] also reads it from PNG
+/// density metadata), and `None` when it genuinely does not (raw images handed in by a user).
+/// Both branches below honour it: the unpreprocessed branch reports it verbatim instead of the
+/// [`RAW_IMAGE_SOURCE_DPI`] assumption, and the preprocessed branch feeds it to DPI normalization
+/// so the resize scales from the real resolution.
 fn prepare_ocr_image(
     rgb_data: Vec<u8>,
     width: u32,
@@ -1143,6 +1471,31 @@ fn extract_elements_via_iterator(
     })
 }
 
+/// Resolve the `SecurityLimits` to apply when decoding an image for OCR.
+///
+/// `TesseractConfig::security_limits` wins because it is the only channel that survives
+/// the `OcrBackend` trait boundary: a backend receives `&OcrConfig` and no
+/// `ExtractionConfig`, so on every real backend route the `extraction_config` argument is
+/// a synthetic value built here to carry `output_format` and nothing else (GH#1651). The
+/// `extraction_config` fallback is retained for the direct/in-process call sites that do
+/// pass a real one.
+///
+/// `None` on both means no configured limit reached this call, not that limits should be
+/// waived — this falls back to the same default a configured caller gets when they never
+/// set `security_limits` explicitly (GH#1554: `load_image_for_ocr` previously hardcoded
+/// this default unconditionally, ignoring a caller's own configured, possibly higher,
+/// limit). ~keep
+fn security_limits_for_ocr(
+    tesseract_config: &TesseractConfig,
+    extraction_config: Option<&ExtractionConfig>,
+) -> SecurityLimits {
+    tesseract_config
+        .security_limits
+        .clone()
+        .or_else(|| extraction_config.and_then(|config| config.security_limits.clone()))
+        .unwrap_or_default()
+}
+
 /// Perform OCR on an image using Tesseract.
 ///
 /// This function handles the complete OCR pipeline:
@@ -1178,8 +1531,9 @@ pub(super) fn perform_ocr(
         )
     });
 
+    let security_limits = security_limits_for_ocr(config, extraction_config);
     let rgb_image = {
-        let img = crate::extraction::image::load_image_for_ocr(image_bytes)
+        let img = crate::extraction::image::load_image_for_ocr(image_bytes, &security_limits)
             .map_err(|e| OcrError::ImageProcessingFailed(e.to_string()))?;
         img.into_rgb8()
     };
@@ -1191,6 +1545,7 @@ pub(super) fn perform_ocr(
     });
 
     let images_config = extraction_config.and_then(|extraction_config| extraction_config.images.as_ref());
+    let known_source_dpi = resolve_known_source_dpi(config.source_dpi, image_bytes, orig_width, orig_height);
     let prepared_image = prepare_ocr_image(
         rgb_data,
         orig_width,
@@ -1198,7 +1553,7 @@ pub(super) fn perform_ocr(
         config.preprocessing.as_ref(),
         images_config,
         ci_debug_enabled,
-        config.source_dpi,
+        known_source_dpi,
     );
     #[cfg_attr(not(auto_rotate), allow(unused_mut))]
     let mut image_data = prepared_image.data;
@@ -1633,8 +1988,46 @@ pub(super) fn perform_ocr(
         }
     }
 
-    let mut tables = Vec::new();
+    let mut content = strip_control_characters(&raw_content).into_owned();
+    let retained_text = (config.output_format == "text").then_some(content.as_str());
+    let iterator_extraction =
+        extract_elements_via_iterator(&api, config.page_number, config.min_confidence, retained_text);
     let mut ocr_elements = None;
+    if let Ok(extraction) = &iterator_extraction
+        && let Some(stats) = extraction.retained_text_confidence_stats.as_ref()
+    {
+        insert_retained_word_confidence_metadata(&mut metadata, stats);
+    }
+    match iterator_extraction {
+        Ok(extraction) if !extraction.elements.is_empty() => {
+            insert_word_iterator_skipped_count_metadata(&mut metadata, extraction.skipped_words);
+            if extraction.non_text_block_word_count > 0 {
+                metadata.insert(
+                    "non_text_block_word_count".to_string(),
+                    serde_json::Value::Number(extraction.non_text_block_word_count.into()),
+                );
+            }
+            if let Some(ratio) = extraction.dict_invalid_word_ratio {
+                metadata.insert(
+                    crate::ocr_metadata_keys::OCR_TESSERACT_DICT_INVALID_WORD_RATIO_METADATA_KEY.to_string(),
+                    serde_json::Value::Number(
+                        serde_json::Number::from_f64(ratio).unwrap_or(serde_json::Number::from(0)),
+                    ),
+                );
+            }
+            ocr_elements = Some(extraction.elements);
+        }
+        _ => {
+            if let Some(ref tsv_data) = tsv_data_for_tables {
+                let elements = parse_tsv_to_elements(tsv_data, config.min_confidence, config.page_number);
+                if !elements.is_empty() {
+                    ocr_elements = Some(elements);
+                }
+            }
+        }
+    }
+
+    let mut tables = Vec::new();
 
     if config.enable_table_detection {
         let tsv_data = tsv_data_for_tables.as_ref().unwrap();
@@ -1642,7 +2035,7 @@ pub(super) fn perform_ocr(
         let words = extract_words_from_tsv(tsv_data, config.table_min_confidence)?;
         let regions = cluster_words_into_table_regions(&words);
 
-        for (region_index, region_words) in regions.into_iter().enumerate() {
+        for (region_index, mut region_words) in regions.into_iter().enumerate() {
             if region_words.len() < MIN_TABLE_CANDIDATE_WORDS {
                 tracing::debug!(
                     target: "xberg::ocr::tables",
@@ -1668,11 +2061,43 @@ pub(super) fn perform_ocr(
                 .take(200)
                 .collect();
 
-            let table = reconstruct_table(
+            let (mut table, mut column_positions) = reconstruct_table_with_columns(
                 &region_words,
                 config.table_column_threshold,
                 config.table_row_threshold_ratio,
             );
+            // A section caption sharing this region with the real header row (#1649) always sits
+            // in row 0, ahead of any right-aligned-amount column split, so drop it first. ~keep
+            drop_leading_caption_row(&mut table);
+            merge_disjoint_numeric_columns(&mut table, &mut column_positions, median_word_height(&region_words));
+            let retry_region = if let Some((quantity_column, blank_row)) = quantity_retry_column_index(&table) {
+                let row_positions = detect_rows(&region_words, config.table_row_threshold_ratio);
+                if row_positions.len() == table.len() {
+                    quantity_retry_region(
+                        &region_words,
+                        quantity_column,
+                        blank_row,
+                        &row_positions,
+                        &column_positions,
+                        width,
+                        height,
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            let recovered = recover_blank_quantity_word(&api, config, retry_region.as_ref(), width, height);
+            if let Some(recovered) = recovered {
+                region_words.push(recovered);
+                table = reconstruct_table_with_columns(
+                    &region_words,
+                    config.table_column_threshold,
+                    config.table_row_threshold_ratio,
+                )
+                .0;
+            }
 
             tracing::debug!(
                 target: "xberg::ocr::tables",
@@ -1742,42 +2167,8 @@ pub(super) fn perform_ocr(
         }
     }
 
-    let mut content = strip_control_characters(&raw_content).into_owned();
-    let retained_text = (config.output_format == "text").then_some(content.as_str());
-    let iterator_extraction =
-        extract_elements_via_iterator(&api, config.page_number, config.min_confidence, retained_text);
-    if let Ok(extraction) = &iterator_extraction
-        && let Some(stats) = extraction.retained_text_confidence_stats.as_ref()
-    {
-        insert_retained_word_confidence_metadata(&mut metadata, stats);
-    }
-    match iterator_extraction {
-        Ok(extraction) if !extraction.elements.is_empty() => {
-            insert_word_iterator_skipped_count_metadata(&mut metadata, extraction.skipped_words);
-            if extraction.non_text_block_word_count > 0 {
-                metadata.insert(
-                    "non_text_block_word_count".to_string(),
-                    serde_json::Value::Number(extraction.non_text_block_word_count.into()),
-                );
-            }
-            if let Some(ratio) = extraction.dict_invalid_word_ratio {
-                metadata.insert(
-                    crate::ocr_metadata_keys::OCR_TESSERACT_DICT_INVALID_WORD_RATIO_METADATA_KEY.to_string(),
-                    serde_json::Value::Number(
-                        serde_json::Number::from_f64(ratio).unwrap_or(serde_json::Number::from(0)),
-                    ),
-                );
-            }
-            ocr_elements = Some(extraction.elements);
-        }
-        _ => {
-            if let Some(ref tsv_data) = tsv_data_for_tables {
-                let elements = parse_tsv_to_elements(tsv_data, config.min_confidence, config.page_number);
-                if !elements.is_empty() {
-                    ocr_elements = Some(elements);
-                }
-            }
-        }
+    if let Some(document) = hocr_document.as_mut() {
+        document.elements = filter_elements_covered_by_tables(std::mem::take(&mut document.elements), &tables);
     }
 
     let is_markdown_output = extraction_config
@@ -1790,11 +2181,20 @@ pub(super) fn perform_ocr(
     {
         let rebuilt = build_content_with_inline_tables(tsv_data, &tables, config.table_min_confidence);
         if !rebuilt.is_empty() {
-            content = rebuilt;
-            metadata.insert(
-                "pre_formatted".to_string(),
-                serde_json::Value::String("markdown".to_string()),
-            );
+            if should_adopt_table_rebuild(&content, &rebuilt) {
+                content = rebuilt;
+                metadata.insert(
+                    "pre_formatted".to_string(),
+                    serde_json::Value::String("markdown".to_string()),
+                );
+            } else {
+                tracing::warn!(
+                    target: "xberg::ocr::tables",
+                    original_word_count = content.split_whitespace().count(),
+                    rebuilt_word_count = rebuilt.split_whitespace().count(),
+                    "OCR markdown table rebuild dropped content relative to the original; keeping original content"
+                );
+            }
         }
     }
 
@@ -1902,7 +2302,16 @@ fn process_image_resolved(
 ) -> Result<OcrExtractionResult, OcrError> {
     let image_hash = crate::cache::blake3_hash_bytes(image_bytes);
 
-    let config_str = hash_config(config);
+    // #1787: the cache key must fold in the tessdata directory OCR will actually run against,
+    // not only the optional `config.tessdata_path` override — otherwise two calls that resolve
+    // to different directories through `TESSDATA_PREFIX` or another fallback in the search
+    // chain (see `resolve_tessdata_path`) hash identically and share a cache entry even though
+    // a different tessdata model produced the cached text. Resolved once, up front, so the
+    // lookup below is keyed on the same directory `perform_ocr` will use on a miss.
+    let languages: Vec<String> = config.language.split('+').map(|lang| lang.trim().to_string()).collect();
+    let resolved_tessdata_path = resolve_tessdata_path(&languages, config.tessdata_path.as_deref())?;
+
+    let config_str = hash_config(config, &resolved_tessdata_path);
 
     // `output_format` is part of the cache identity: it selects the renderer and
     // therefore the `content` and `mime_type` of the result. Omitting it served a
@@ -2058,7 +2467,75 @@ mod tests {
     use crate::ocr::hocr_parser::{
         HOCR_FONT_SIZE_ATTRIBUTE, parse_hocr_to_internal_document_with_page_offset_and_stats,
     };
+    use serial_test::serial;
     use tempfile::tempdir;
+
+    #[cfg(feature = "bundle-tessdata-eng")]
+    fn recover_quantity_from_image(image: &image::RgbImage) -> Option<HocrWord> {
+        let tessdata = tempfile::tempdir().expect("temporary tessdata directory must be created");
+        std::fs::write(
+            tessdata.path().join("eng.traineddata"),
+            xberg_tesseract::bundled_eng_traineddata().expect("English tessdata must be bundled for this test"),
+        )
+        .expect("bundled English tessdata must be materialized");
+        let api = xberg_tesseract::TesseractAPI::new().expect("Tesseract API must initialize");
+        api.init(
+            tessdata.path().to_str().expect("temporary tessdata path must be UTF-8"),
+            "eng",
+        )
+        .expect("English tessdata must initialize");
+        api.set_page_seg_mode(TessPageSegMode::PSM_SPARSE_TEXT)
+            .expect("sparse page segmentation mode must apply");
+        api.set_image(
+            image.as_raw(),
+            image.width() as i32,
+            image.height() as i32,
+            3,
+            (image.width() * 3) as i32,
+        )
+        .expect("quantity image must load");
+        api.recognize().expect("initial sparse recognition must complete");
+        let config = TesseractConfig {
+            psm: TessPageSegMode::PSM_SPARSE_TEXT as u8,
+            ..TesseractConfig::default()
+        };
+        let region = QuantityRetryRegion {
+            row: 0,
+            column: 0,
+            left: 0,
+            top: 0,
+            width: image.width(),
+            height: image.height(),
+            word_left: 0,
+            word_top: 0,
+            word_width: image.width(),
+            word_height: image.height(),
+        };
+        recover_blank_quantity_word(&api, &config, Some(&region), image.width(), image.height())
+    }
+
+    #[cfg(feature = "bundle-tessdata-eng")]
+    fn isolated_quantity_image() -> image::RgbImage {
+        image::load_from_memory(include_bytes!("../../../test_data/ocr/isolated_quantity_cell.png"))
+            .expect("embedded quantity PNG must load")
+            .into_rgb8()
+    }
+
+    #[test]
+    #[cfg(feature = "bundle-tessdata-eng")]
+    fn blank_quantity_retry_recognizes_single_and_multi_digit_cells() {
+        let single_digit = isolated_quantity_image();
+        let recovered = recover_quantity_from_image(&single_digit).expect("isolated quantity must be recovered");
+        assert_eq!(recovered.text, "5");
+
+        let digit = image::imageops::crop_imm(&single_digit, 106, 25, 24, 36).to_image();
+        let mut multi_digit = image::RgbImage::from_pixel(170, 91, image::Rgb([255, 255, 255]));
+        for left in [45_i64, 69, 93] {
+            image::imageops::overlay(&mut multi_digit, &digit, left, 25);
+        }
+        let recovered = recover_quantity_from_image(&multi_digit).expect("multi-digit quantity must be recovered");
+        assert_eq!(recovered.text, "555");
+    }
 
     fn confidence_word(text: &str, confidence: f32) -> xberg_tesseract::WordData {
         xberg_tesseract::WordData {
@@ -2071,6 +2548,29 @@ mod tests {
             font_attrs: None,
             language: None,
         }
+    }
+
+    #[test]
+    fn should_reject_table_rebuild_that_drops_words_relative_to_original() {
+        let original = "Site inspections this quarter covered fourteen locations across \
+            the northern basin and several access roads remain washed out following spring runoff";
+        let rebuilt = "| Site | inspections |";
+
+        assert!(
+            !should_adopt_table_rebuild(original, rebuilt),
+            "a rebuild with far fewer words than the original must not replace it"
+        );
+    }
+
+    #[test]
+    fn should_adopt_table_rebuild_that_retains_or_exceeds_original_word_count() {
+        let original = "Name Age\nAlice 30\nBob 40";
+        let rebuilt = "| Name | Age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 40 |";
+
+        assert!(
+            should_adopt_table_rebuild(original, rebuilt),
+            "a rebuild that faithfully reformats the same content into a table must still be adopted"
+        );
     }
 
     #[test]
@@ -2104,6 +2604,77 @@ mod tests {
         assert_eq!(metadata.get("p10_word_conf"), Some(&serde_json::json!(20)));
         assert_eq!(metadata.get("low_conf_word_count"), Some(&serde_json::json!(1)));
         assert_eq!(metadata.len(), 5);
+    }
+
+    /// GH#1554 regression: `perform_ocr` must use the caller's `ExtractionConfig.security_limits`
+    /// rather than always decoding under `SecurityLimits::default()`, which silently refused
+    /// ordinary high-DPI scans a caller had explicitly configured a higher limit to permit.
+    #[test]
+    fn should_use_configured_security_limits_when_extraction_config_present() {
+        let config = ExtractionConfig {
+            security_limits: Some(SecurityLimits {
+                max_content_size: 200 * 1024 * 1024,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let resolved = security_limits_for_ocr(&TesseractConfig::default(), Some(&config));
+
+        assert_eq!(resolved.max_content_size, 200 * 1024 * 1024);
+    }
+
+    /// `None` (no `ExtractionConfig` reached the call) must fall back to
+    /// `SecurityLimits::default()`, not to an unbounded/disabled check.
+    #[test]
+    fn should_fall_back_to_default_security_limits_when_extraction_config_absent() {
+        let resolved = security_limits_for_ocr(&TesseractConfig::default(), None);
+
+        assert_eq!(resolved.max_content_size, SecurityLimits::default().max_content_size);
+    }
+
+    /// GH#1651. The two tests above only ever exercised this helper directly, which is why
+    /// they stayed green while every real backend route decoded under the default: a
+    /// backend gets `&OcrConfig` and no `ExtractionConfig`, so the only value that can
+    /// reach here from a caller is the one `config_to_tesseract` copies onto
+    /// `TesseractConfig`. That value must therefore win. ~keep
+    #[test]
+    fn should_prefer_the_tesseract_config_limits_over_the_extraction_config_limits() {
+        let tesseract_config = TesseractConfig {
+            security_limits: Some(SecurityLimits {
+                max_content_size: 300 * 1024 * 1024,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let extraction_config = ExtractionConfig {
+            security_limits: Some(SecurityLimits {
+                max_content_size: 200 * 1024 * 1024,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let resolved = security_limits_for_ocr(&tesseract_config, Some(&extraction_config));
+
+        assert_eq!(resolved.max_content_size, 300 * 1024 * 1024);
+    }
+
+    /// A backend route supplies a synthetic `ExtractionConfig` carrying only `output_format`,
+    /// so the caller's limits arrive solely on `TesseractConfig` and must still be honoured. ~keep
+    #[test]
+    fn should_use_the_tesseract_config_limits_when_no_extraction_config_is_present() {
+        let tesseract_config = TesseractConfig {
+            security_limits: Some(SecurityLimits {
+                max_content_size: 300 * 1024 * 1024,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let resolved = security_limits_for_ocr(&tesseract_config, None);
+
+        assert_eq!(resolved.max_content_size, 300 * 1024 * 1024);
     }
 
     #[test]
@@ -2469,6 +3040,87 @@ mod tests {
         );
     }
 
+    fn paragraph_with_bbox(text: &str, x0: f64, y0: f64, x1: f64, y1: f64) -> crate::types::internal::InternalElement {
+        let mut elem = crate::types::internal::InternalElement::text(ElementKind::Paragraph, text, 0);
+        elem.bbox = Some(crate::types::extraction::BoundingBox { x0, y0, x1, y1 });
+        elem
+    }
+
+    fn table_at(left: u32, top: u32, right: u32, bottom: u32) -> OcrTable {
+        OcrTable {
+            cells: vec![vec!["cell".to_string()]],
+            markdown: "| cell |".to_string(),
+            page_number: 1,
+            bounding_box: Some(OcrTableBoundingBox {
+                left,
+                top,
+                right,
+                bottom,
+            }),
+        }
+    }
+
+    #[test]
+    fn filter_elements_covered_by_tables_drops_paragraph_inside_table_bbox() {
+        // A paragraph whose bbox is fully inside (so its centre is inside) a detected
+        // table's bbox must be removed -- this is the #1571 duplication itself: the
+        // paragraph's words are also the table's cells.
+        let elements = vec![paragraph_with_bbox("Apple 50 10 00", 10.0, 10.0, 90.0, 30.0)];
+        let tables = vec![table_at(0, 0, 100, 100)];
+
+        let filtered = filter_elements_covered_by_tables(elements, &tables);
+
+        assert!(
+            filtered.is_empty(),
+            "paragraph centred inside the table bbox must be dropped"
+        );
+    }
+
+    #[test]
+    fn filter_elements_covered_by_tables_keeps_paragraph_adjacent_to_table() {
+        // Precision guard (#1571): a paragraph that merely overlaps a table's bbox edge,
+        // with its centre outside the bbox, must survive -- the word-centre rule must not
+        // over-delete prose that sits next to (not inside) a table.
+        let elements = vec![
+            paragraph_with_bbox("Vehicle Maintenance Guide", 10.0, 0.0, 90.0, 15.0),
+            paragraph_with_bbox("Apple 50 10 00", 10.0, 50.0, 90.0, 70.0),
+        ];
+        let tables = vec![table_at(0, 40, 100, 140)];
+
+        let filtered = filter_elements_covered_by_tables(elements, &tables);
+
+        assert_eq!(
+            filtered.len(),
+            1,
+            "only the paragraph centred inside the table bbox should be dropped"
+        );
+        assert_eq!(filtered[0].text, "Vehicle Maintenance Guide");
+    }
+
+    #[test]
+    fn filter_elements_covered_by_tables_is_noop_without_tables() {
+        let elements = vec![paragraph_with_bbox("Apple 50 10 00", 10.0, 10.0, 90.0, 30.0)];
+
+        let filtered = filter_elements_covered_by_tables(elements, &[]);
+
+        assert_eq!(filtered.len(), 1, "no tables detected means nothing should be filtered");
+    }
+
+    #[test]
+    fn filter_elements_covered_by_tables_keeps_elements_without_bbox() {
+        let mut elem = crate::types::internal::InternalElement::text(ElementKind::Paragraph, "no geometry", 0);
+        elem.bbox = None;
+        let tables = vec![table_at(0, 0, 100, 100)];
+
+        let filtered = filter_elements_covered_by_tables(vec![elem], &tables);
+
+        assert_eq!(
+            filtered.len(),
+            1,
+            "an element with no bbox cannot be tested against a table and must survive"
+        );
+    }
+
     #[test]
     fn flatten_hocr_elements_to_text_leaves_content_unchanged_without_font_sizes() {
         let elements = vec![
@@ -2522,6 +3174,158 @@ mod tests {
         let hash2 = crate::cache::blake3_hash_bytes(&image_bytes2);
 
         assert_ne!(hash1, hash2);
+    }
+
+    fn invoice_word(text: &str, left: u32, top: u32, width: u32) -> crate::table_core::HocrWord {
+        crate::table_core::HocrWord {
+            text: text.to_string(),
+            left,
+            top,
+            width,
+            height: 40,
+            confidence: 95.0,
+        }
+    }
+
+    #[test]
+    fn blank_quantity_retry_is_bounded_to_the_missing_quantity_cell() {
+        let words = vec![
+            invoice_word("DESCRIPTION", 279, 100, 250),
+            invoice_word("QTY", 1_699, 100, 90),
+            invoice_word("UNIT PRICE", 2_096, 100, 258),
+            invoice_word("LINE TOTAL", 2_663, 100, 258),
+            invoice_word("Espresso Beans", 279, 200, 400),
+            invoice_word("10", 1_740, 200, 48),
+            invoice_word("$45.00", 2_206, 200, 150),
+            invoice_word("$450.00", 2_744, 200, 175),
+            invoice_word("Cups", 279, 300, 100),
+            invoice_word("200", 1_709, 300, 75),
+            invoice_word("$1.20", 2_233, 300, 125),
+            invoice_word("$240.00", 2_744, 300, 175),
+            invoice_word("Cleaning Tablets", 279, 400, 360),
+            invoice_word("$18.50", 2_206, 400, 150),
+            invoice_word("$92.50", 2_772, 400, 150),
+        ];
+        let table = vec![
+            vec!["DESCRIPTION", "QTY", "UNIT PRICE", "LINE TOTAL"],
+            vec!["Espresso Beans", "10", "$45.00", "$450.00"],
+            vec!["Cups", "200", "$1.20", "$240.00"],
+            vec!["Cleaning Tablets", "", "$18.50", "$92.50"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(str::to_string).collect())
+        .collect::<Vec<Vec<String>>>();
+
+        let (quantity_column, blank_row) =
+            quantity_retry_column_index(&table).expect("fixture qualifies for one retry");
+        let region = quantity_retry_region(
+            &words,
+            quantity_column,
+            blank_row,
+            &[120, 220, 320, 420],
+            &[279, 1_709, 2_219, 2_744],
+            3_200,
+            4_089,
+        )
+        .expect("captured invoice has one bounded retry region");
+
+        assert_eq!(region.row, 3);
+        assert_eq!(region.column, 1);
+        assert_eq!((region.left, region.top), (1_659, 380));
+        assert_eq!((region.width, region.height), (170, 80));
+    }
+
+    #[test]
+    fn blank_quantity_retry_requires_two_recognized_quantity_rows() {
+        let table = vec![
+            vec!["DESCRIPTION", "QTY", "UNIT PRICE", "LINE TOTAL"],
+            vec!["Espresso Beans", "10", "$45.00", "$450.00"],
+            vec!["Cleaning Tablets", "", "$18.50", "$92.50"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(str::to_string).collect())
+        .collect::<Vec<Vec<String>>>();
+
+        assert!(quantity_retry_column_index(&table).is_none());
+    }
+
+    #[test]
+    fn blank_quantity_retry_skips_tables_with_multiple_blank_quantities() {
+        let table = vec![
+            vec!["DESCRIPTION", "QTY", "PRICE"],
+            vec!["Item A", "10", "$10.00"],
+            vec!["Item B", "20", "$20.00"],
+            vec!["Shipping", "", "$25.00"],
+            vec!["Tax", "", "$5.00"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(str::to_string).collect())
+        .collect::<Vec<Vec<String>>>();
+
+        assert!(quantity_retry_column_index(&table).is_none());
+    }
+
+    #[test]
+    fn blank_quantity_retry_clamps_crop_to_adjacent_cells() {
+        let words = vec![
+            invoice_word("DESCRIPTION", 100, 100, 160),
+            invoice_word("QTY", 500, 100, 40),
+            invoice_word("PRICE", 560, 100, 90),
+            invoice_word("Item A", 100, 180, 100),
+            invoice_word("10", 500, 180, 40),
+            invoice_word("$10", 560, 180, 60),
+            invoice_word("Missing", 100, 210, 120),
+            invoice_word("$5", 560, 210, 50),
+            invoice_word("Item B", 100, 240, 100),
+            invoice_word("20", 500, 240, 40),
+            invoice_word("$20", 560, 240, 60),
+        ];
+        let table = vec![
+            vec!["DESCRIPTION", "QTY", "PRICE"],
+            vec!["Item A", "10", "$10"],
+            vec!["Missing", "", "$5"],
+            vec!["Item B", "20", "$20"],
+        ]
+        .into_iter()
+        .map(|row| row.into_iter().map(str::to_string).collect())
+        .collect::<Vec<Vec<String>>>();
+        let (quantity_column, blank_row) =
+            quantity_retry_column_index(&table).expect("fixture qualifies for one retry");
+
+        let region = quantity_retry_region(
+            &words,
+            quantity_column,
+            blank_row,
+            &[120, 200, 230, 260],
+            &[100, 500, 560],
+            800,
+            600,
+        )
+        .expect("tight table has one bounded retry region");
+
+        assert_eq!((region.left, region.top), (460, 215));
+        assert_eq!((region.width, region.height), (70, 30));
+    }
+
+    #[test]
+    fn non_quantity_table_does_not_enter_retry_geometry() {
+        let table = vec![
+            vec!["NAME".to_string(), "PRICE".to_string()],
+            vec!["Item A".to_string(), "$10".to_string()],
+            vec!["Item B".to_string(), "$20".to_string()],
+        ];
+
+        assert!(quantity_retry_column_index(&table).is_none());
+    }
+
+    #[test]
+    fn quantity_retry_text_accepts_only_a_short_positive_integer() {
+        assert_eq!(parse_retry_quantity(" 5\n"), Some("5"));
+        assert_eq!(parse_retry_quantity("200"), Some("200"));
+        assert_eq!(parse_retry_quantity(""), None);
+        assert_eq!(parse_retry_quantity("$5"), None);
+        assert_eq!(parse_retry_quantity("5.0"), None);
+        assert_eq!(parse_retry_quantity("000000000"), None);
     }
 
     #[test]
@@ -2591,7 +3395,14 @@ mod tests {
     /// `use_cache: false` call) that has no equivalent before this change, so there is
     /// nothing "unfixed" to run it against — the bypass plumbing this proves either exists
     /// or the test cannot be written.
+    // `#[serial]`: this test resolves tessdata through the default (no-override) path, which
+    // reads the process-global `XBERG_CACHE_DIR`/`TESSDATA_PREFIX` env vars that
+    // `tesseract_backend::tests` mutates with `std::env::set_var` under its own `#[serial]`
+    // tests. Joining the same lock group prevents this test from resolving a directory that
+    // mutation is deleting mid-scan (an uncaught C++ `filesystem_error` aborting the whole
+    // test process, not a logic bug in the code under test). ~keep
     #[test]
+    #[serial]
     fn process_image_with_cache_does_not_read_or_write_the_cache_when_use_cache_is_false() {
         let api = match xberg_tesseract::TesseractAPI::new() {
             Ok(api) => api,
@@ -2616,7 +3427,10 @@ mod tests {
         // enabled, carrying an obviously-wrong marker. If the bypass ever regresses into a
         // read, this is what would come back instead of a fresh OCR result.
         let image_hash = crate::cache::blake3_hash_bytes(&image_bytes);
-        let config_str = hash_config(&config);
+        let languages: Vec<String> = config.language.split('+').map(|lang| lang.trim().to_string()).collect();
+        let resolved_tessdata_path =
+            resolve_tessdata_path(&languages, config.tessdata_path.as_deref()).expect("tessdata must resolve");
+        let config_str = hash_config(&config, &resolved_tessdata_path);
         let marker = OcrExtractionResult {
             content: "STALE MARKER: use_cache=false must never return this".to_string(),
             mime_type: "text/plain".to_string(),
@@ -2642,6 +3456,121 @@ mod tests {
         assert_eq!(
             stats.total_files, 1,
             "use_cache=false must not write a new cache entry (only the pre-seeded marker file may exist)"
+        );
+    }
+
+    /// Copies a real, working `eng.traineddata` (resolved the same way production OCR does)
+    /// into a fresh temp directory, so tests can build two DIFFERENT resolved tessdata
+    /// directories that both OCR successfully, without depending on any specific host path.
+    /// Returns `None` when no Tesseract/tessdata is available in this environment.
+    /// Deliberately does NOT go through `resolve_tessdata_path(_, None)`: that resolution
+    /// reads the process-global `XBERG_CACHE_DIR`/`TESSDATA_PREFIX` env vars, which other
+    /// tests in this binary (`ocr::tesseract_backend::tests`) mutate with `std::env::set_var`
+    /// while running concurrently. A test that raced that mutation could resolve a directory
+    /// another thread deletes mid-scan, crashing the whole process with an uncaught C++
+    /// `filesystem_error` out of Tesseract's own `GetAvailableLanguagesAsVector` — not a
+    /// logic bug in the code under test, just an unsafe shared-state race. Sourcing real
+    /// `eng.traineddata` bytes from the sibling `xberg-tesseract` build's own `OUT_DIR`
+    /// instead (mirroring `tesseract_backend::tests::real_eng_traineddata_bytes_from_sibling_build_dir`)
+    /// avoids touching that shared state at all.
+    fn real_eng_traineddata_bytes_from_sibling_build_dir() -> Option<Vec<u8>> {
+        let this_out_dir = std::path::PathBuf::from(env!("OUT_DIR"));
+        let build_dir = this_out_dir.parent()?.parent()?;
+        let mut entries: Vec<_> = std::fs::read_dir(build_dir).ok()?.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let name = entry.file_name();
+            if !name.to_string_lossy().starts_with("xberg-tesseract-") {
+                continue;
+            }
+            let candidate = entry.path().join("out").join("eng.traineddata");
+            if let Ok(bytes) = std::fs::read(&candidate) {
+                return Some(bytes);
+            }
+        }
+        None
+    }
+
+    fn copy_working_eng_tessdata_into(dest_dir: &std::path::Path) -> Option<()> {
+        let bytes = real_eng_traineddata_bytes_from_sibling_build_dir()?;
+        std::fs::write(dest_dir.join("eng.traineddata"), bytes).ok()
+    }
+
+    /// Regression test for #1787 part 2: two `TesseractConfig`s that are identical except for
+    /// resolving to different tessdata directories (via the `tessdata_path` override here, which
+    /// exercises the same `resolve_tessdata_path` call `TESSDATA_PREFIX` also goes through) must
+    /// not share a cache entry. Before the fix, `hash_config` only ever saw `config.tessdata_path`
+    /// itself, so this collided and the second call silently read the first directory's result.
+    #[test]
+    fn process_image_with_cache_does_not_share_entries_across_different_resolved_tessdata_directories() {
+        let dir_a = tempdir().unwrap();
+        let dir_b = tempdir().unwrap();
+        if copy_working_eng_tessdata_into(dir_a.path()).is_none()
+            || copy_working_eng_tessdata_into(dir_b.path()).is_none()
+        {
+            return; // no Tesseract/tessdata available in this environment
+        }
+
+        let cache_dir = tempdir().unwrap();
+        let cache = OcrCache::new(Some(cache_dir.path().to_path_buf())).unwrap();
+        let api_pool = TesseractApiPool::new();
+        let image_bytes = tiny_test_png_bytes();
+
+        let config_a = TesseractConfig {
+            output_format: "text".to_string(),
+            enable_table_detection: false,
+            use_cache: true,
+            tessdata_path: Some(dir_a.path().to_path_buf()),
+            ..TesseractConfig::default()
+        };
+        let config_b = TesseractConfig {
+            tessdata_path: Some(dir_b.path().to_path_buf()),
+            ..config_a.clone()
+        };
+
+        process_image_with_cache(&image_bytes, &config_a, &cache, &api_pool, None)
+            .expect("OCR against dir_a must succeed");
+        process_image_with_cache(&image_bytes, &config_b, &cache, &api_pool, None)
+            .expect("OCR against dir_b must succeed");
+
+        let stats = cache.get_stats().unwrap();
+        assert_eq!(
+            stats.total_files, 2,
+            "two different resolved tessdata directories must write two separate cache entries \
+             (#1787), not share one"
+        );
+    }
+
+    /// Negative control for the test above: it must not become so specific that two calls
+    /// resolving to the SAME tessdata directory stop sharing a cache entry.
+    #[test]
+    fn process_image_with_cache_still_shares_entries_for_the_same_resolved_tessdata_directory() {
+        let dir_a = tempdir().unwrap();
+        if copy_working_eng_tessdata_into(dir_a.path()).is_none() {
+            return; // no Tesseract/tessdata available in this environment
+        }
+
+        let cache_dir = tempdir().unwrap();
+        let cache = OcrCache::new(Some(cache_dir.path().to_path_buf())).unwrap();
+        let api_pool = TesseractApiPool::new();
+        let image_bytes = tiny_test_png_bytes();
+
+        let config = TesseractConfig {
+            output_format: "text".to_string(),
+            enable_table_detection: false,
+            use_cache: true,
+            tessdata_path: Some(dir_a.path().to_path_buf()),
+            ..TesseractConfig::default()
+        };
+
+        process_image_with_cache(&image_bytes, &config, &cache, &api_pool, None).expect("first OCR call must succeed");
+        process_image_with_cache(&image_bytes, &config, &cache, &api_pool, None).expect("second OCR call must succeed");
+
+        let stats = cache.get_stats().unwrap();
+        assert_eq!(
+            stats.total_files, 1,
+            "two calls resolving to the same tessdata directory must share one cache entry, \
+             not write a second"
         );
     }
 
@@ -2701,6 +3630,7 @@ mod tests {
             contrast_enhance: false,
             binarization_method: "otsu".to_string(),
             invert_colors: false,
+            normalize_shaded_rows: false,
         }
     }
 
@@ -3246,8 +4176,9 @@ mod tests {
         assert!(metadata.dimension_clamped);
     }
 
-    /// Pixel width of a US Letter page (612pt wide) rendered at the 150 DPI the PDF OCR route
-    /// asks `render_page_with_safeguards` for.
+    /// Pixel width of a US Letter page (612pt wide) rendered at 150 DPI -- an arbitrary
+    /// non-72, non-target render resolution exercising `known_source_dpi`, not tied to
+    /// whatever DPI the PDF OCR route actually renders at (`effective_pdf_render_dpi`, #1577).
     const LETTER_AT_150_DPI_WIDTH_PX: u32 = 1275;
     /// Pixel height of the same page (792pt tall) at 150 DPI.
     const LETTER_AT_150_DPI_HEIGHT_PX: u32 = 1650;
@@ -3368,6 +4299,217 @@ mod tests {
 
         assert_eq!(prepared.source_dpi, 150);
         assert!(!prepared.apply_pix_preprocessing);
+    }
+
+    // GH#1630: standalone image OCR discarded PNG `pHYs` density and always assumed 72 DPI,
+    // resampling a genuine 300 DPI scan even when the requested `target_dpi` was already 300.
+    mod png_source_dpi {
+        use super::*;
+
+        /// Standard PNG CRC-32 (polynomial 0xEDB88320), needed to splice a well-formed `pHYs`
+        /// chunk into a real encoded PNG.
+        fn png_crc32(data: &[u8]) -> u32 {
+            let mut crc: u32 = 0xFFFF_FFFF;
+            for &byte in data {
+                crc ^= u32::from(byte);
+                for _ in 0..8 {
+                    let mask = (crc & 1).wrapping_neg();
+                    crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
+                }
+            }
+            !crc
+        }
+
+        fn png_chunk(chunk_type: &[u8; 4], data: &[u8]) -> Vec<u8> {
+            let mut body = Vec::with_capacity(4 + data.len());
+            body.extend_from_slice(chunk_type);
+            body.extend_from_slice(data);
+            let mut out = Vec::with_capacity(8 + body.len());
+            out.extend_from_slice(&(u32::try_from(data.len()).unwrap()).to_be_bytes());
+            out.extend_from_slice(&body);
+            out.extend_from_slice(&png_crc32(&body).to_be_bytes());
+            out
+        }
+
+        fn encode_png(width: u32, height: u32) -> Vec<u8> {
+            let img = image::RgbImage::from_pixel(width, height, image::Rgb([255, 255, 255]));
+            let mut png = Vec::new();
+            {
+                use image::ImageEncoder;
+                image::codecs::png::PngEncoder::new(&mut png)
+                    .write_image(img.as_raw(), width, height, image::ExtendedColorType::Rgb8)
+                    .expect("encode PNG");
+            }
+            png
+        }
+
+        /// Splice a `pHYs` chunk expressing `ppu` pixels-per-metre (both axes, unit = meter)
+        /// into a real encoded PNG, immediately after IHDR (signature 8 bytes + IHDR chunk 25
+        /// bytes) and always before IDAT.
+        fn png_with_phys_density(width: u32, height: u32, ppu: u32) -> Vec<u8> {
+            const SIGNATURE_AND_IHDR_LEN: usize = 8 + 25;
+            let mut phys_data = Vec::with_capacity(9);
+            phys_data.extend_from_slice(&ppu.to_be_bytes());
+            phys_data.extend_from_slice(&ppu.to_be_bytes());
+            phys_data.push(1); // unit = meter
+            let phys_chunk = png_chunk(b"pHYs", &phys_data);
+
+            let png = encode_png(width, height);
+            let mut out = Vec::with_capacity(png.len() + phys_chunk.len());
+            out.extend_from_slice(&png[..SIGNATURE_AND_IHDR_LEN]);
+            out.extend_from_slice(&phys_chunk);
+            out.extend_from_slice(&png[SIGNATURE_AND_IHDR_LEN..]);
+            out
+        }
+
+        /// 11811 px/m is the reporter's fixture value: 11811 * 0.0254 = 299.9994 DPI, not an
+        /// exact 300 — every assertion below tolerates that rather than requiring an exact
+        /// integer match.
+        const REPORTER_FIXTURE_PPU: u32 = 11_811;
+        const EXPECTED_DPI_FROM_REPORTER_FIXTURE: f64 = 299.999_4;
+        const DPI_TOLERANCE: f64 = 0.001;
+        const TEST_IMAGE_SIDE: u32 = 4;
+
+        fn rgb_fixture() -> Vec<u8> {
+            vec![255u8; TEST_IMAGE_SIDE as usize * TEST_IMAGE_SIDE as usize * RGB_CHANNEL_COUNT]
+        }
+
+        fn preprocessing_targeting(target_dpi: i32) -> crate::types::ImagePreprocessingConfig {
+            crate::types::ImagePreprocessingConfig {
+                target_dpi,
+                ..Default::default()
+            }
+        }
+
+        fn images_config_without_auto_adjust() -> crate::core::config::ImageExtractionConfig {
+            crate::core::config::ImageExtractionConfig {
+                auto_adjust_dpi: false,
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn should_prefer_explicit_source_dpi_over_embedded_png_density() {
+            let png = png_with_phys_density(TEST_IMAGE_SIDE, TEST_IMAGE_SIDE, REPORTER_FIXTURE_PPU);
+
+            let resolved = resolve_known_source_dpi(Some(150.0), &png, TEST_IMAGE_SIDE, TEST_IMAGE_SIDE);
+
+            assert_eq!(
+                resolved,
+                Some(150.0),
+                "a caller-supplied source_dpi hint must win over embedded PNG metadata"
+            );
+        }
+
+        #[test]
+        fn should_decode_source_density_from_embedded_png_metadata() {
+            let png = png_with_phys_density(TEST_IMAGE_SIDE, TEST_IMAGE_SIDE, REPORTER_FIXTURE_PPU);
+
+            let resolved = resolve_known_source_dpi(None, &png, TEST_IMAGE_SIDE, TEST_IMAGE_SIDE)
+                .expect("pHYs density must be detected");
+
+            assert!(
+                (resolved - EXPECTED_DPI_FROM_REPORTER_FIXTURE).abs() < DPI_TOLERANCE,
+                "expected ~{EXPECTED_DPI_FROM_REPORTER_FIXTURE} DPI, got {resolved}"
+            );
+        }
+
+        #[test]
+        fn should_resolve_none_when_neither_explicit_hint_nor_embedded_density_exist() {
+            let png = encode_png(TEST_IMAGE_SIDE, TEST_IMAGE_SIDE);
+
+            assert_eq!(
+                resolve_known_source_dpi(None, &png, TEST_IMAGE_SIDE, TEST_IMAGE_SIDE),
+                None,
+                "a PNG without density metadata must not fabricate a source DPI"
+            );
+        }
+
+        /// No resize when the requested target already matches the embedded source density: the
+        /// GH#1630 reporter's own repro (`target_dpi=300` against a genuine 300 DPI scan).
+        #[test]
+        fn should_skip_resize_when_target_dpi_matches_known_png_density() {
+            let png = png_with_phys_density(TEST_IMAGE_SIDE, TEST_IMAGE_SIDE, REPORTER_FIXTURE_PPU);
+            let known_source_dpi = resolve_known_source_dpi(None, &png, TEST_IMAGE_SIDE, TEST_IMAGE_SIDE);
+            let images_config = images_config_without_auto_adjust();
+            let preprocessing = preprocessing_targeting(300);
+
+            let prepared = prepare_ocr_image(
+                rgb_fixture(),
+                TEST_IMAGE_SIDE,
+                TEST_IMAGE_SIDE,
+                Some(&preprocessing),
+                Some(&images_config),
+                false,
+                known_source_dpi,
+            );
+
+            assert_eq!(prepared.width, TEST_IMAGE_SIDE);
+            assert_eq!(prepared.height, TEST_IMAGE_SIDE);
+            let metadata = prepared
+                .image_preprocessing
+                .expect("preprocessing metadata is recorded");
+            assert!(
+                metadata.skipped_resize,
+                "a 300 target against a ~300 detected source must not resize"
+            );
+        }
+
+        /// A different target DPI still resizes correctly once the true source density is known,
+        /// rather than scaling from the wrong 72 assumption.
+        #[test]
+        fn should_resize_correctly_for_a_different_target_dpi() {
+            let png = png_with_phys_density(TEST_IMAGE_SIDE, TEST_IMAGE_SIDE, REPORTER_FIXTURE_PPU);
+            let known_source_dpi = resolve_known_source_dpi(None, &png, TEST_IMAGE_SIDE, TEST_IMAGE_SIDE);
+            let images_config = images_config_without_auto_adjust();
+            let preprocessing = preprocessing_targeting(150);
+
+            let prepared = prepare_ocr_image(
+                rgb_fixture(),
+                TEST_IMAGE_SIDE,
+                TEST_IMAGE_SIDE,
+                Some(&preprocessing),
+                Some(&images_config),
+                false,
+                known_source_dpi,
+            );
+
+            assert_eq!(
+                prepared.width, 2,
+                "halving from a ~300 DPI source to a 150 DPI target halves the raster"
+            );
+            assert_eq!(prepared.height, 2);
+        }
+
+        /// Control: a PNG carrying no density metadata must keep defaulting to 72 DPI, exactly
+        /// as before this fix.
+        #[test]
+        fn should_default_to_72_dpi_when_png_has_no_density_metadata() {
+            let png = encode_png(TEST_IMAGE_SIDE, TEST_IMAGE_SIDE);
+            let known_source_dpi = resolve_known_source_dpi(None, &png, TEST_IMAGE_SIDE, TEST_IMAGE_SIDE);
+            assert_eq!(known_source_dpi, None);
+
+            let images_config = images_config_without_auto_adjust();
+            let preprocessing = preprocessing_targeting(300);
+            let prepared = prepare_ocr_image(
+                rgb_fixture(),
+                TEST_IMAGE_SIDE,
+                TEST_IMAGE_SIDE,
+                Some(&preprocessing),
+                Some(&images_config),
+                false,
+                known_source_dpi,
+            );
+
+            let metadata = prepared
+                .image_preprocessing
+                .expect("preprocessing metadata is recorded");
+            assert_eq!(
+                metadata.original_dpi,
+                crate::types::ImageDpi::from((f64::from(RAW_IMAGE_SOURCE_DPI), f64::from(RAW_IMAGE_SOURCE_DPI))),
+                "no embedded metadata must leave the historical 72 assumption unchanged"
+            );
+        }
     }
 
     #[test]

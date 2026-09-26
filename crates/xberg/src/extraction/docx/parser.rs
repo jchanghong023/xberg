@@ -9,6 +9,11 @@
 //! - Removed file-path based APIs (we only need bytes/reader)
 //! - Added markdown rendering and formatting support (fixes #376)
 
+// TODO(xberg-io/xberg#1567): 4 cyclomatic-complexity and 39 size/complexity findings
+// in this file, currently excluded via the quality-debt baseline in alef.toml. Splitting
+// these needs compiler-in-the-loop verification, not a mechanical pass. Delete this
+// note and the file's baseline entry together once it goes green. Help wanted.
+
 use crate::extractors::security::{SecurityBudget, SecurityError, SecurityLimits, ZipBombValidator};
 use ahash::AHashMap;
 use serde::{Deserialize, Serialize};
@@ -387,6 +392,33 @@ impl Document {
         }
 
         table_page_numbers
+    }
+
+    /// Return the 1-based page number for each drawing, in `self.drawings` index order.
+    ///
+    /// Derived by walking the parsed element list, exactly as `table_page_numbers` does, rather
+    /// than by searching rendered markdown for a placeholder. `to_markdown` renders every drawing
+    /// to the same `![alt](image)` target, so no per-image key exists in the text to search for;
+    /// the previous lookup asked for one and always missed, reporting page 1 for every image
+    /// (GH#1546). Walking the elements is also independent of `inject_placeholders`, which
+    /// suppresses those placeholders entirely. ~keep
+    pub fn drawing_page_numbers(&self) -> Vec<usize> {
+        let mut drawing_page_numbers = vec![1; self.drawings.len()];
+        let mut current_page = 1;
+
+        for element in &self.elements {
+            match element {
+                DocumentElement::PageBreak => current_page += 1,
+                DocumentElement::Drawing(index) => {
+                    if let Some(page) = drawing_page_numbers.get_mut(*index) {
+                        *page = current_page;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        drawing_page_numbers
     }
 
     /// Internal helper to ensure a blank line before appending new content.
@@ -986,18 +1018,15 @@ impl Table {
         Self::default()
     }
 
-    /// Render this table as a markdown table.
+    /// Build this table's cell grid, writing each `gridSpan`/`vMerge`-spanned cell once at
+    /// its origin and leaving the columns and rows it covers blank.
     ///
-    /// Uses table row and cell properties to improve formatting:
-    /// - Respects `RowProperties.is_header` to identify header rows
-    /// - Handles `CellProperties.grid_span` to account for merged cells
-    ///
-    /// If no explicit header row is marked, treats the first row as the header.
-    pub(crate) fn to_markdown(&self) -> String {
-        if self.rows.is_empty() {
-            return String::new();
-        }
-
+    /// `render` extracts a paragraph's text (`runs_to_markdown` for Markdown output,
+    /// `to_text` for plain text); it is the only difference between `to_markdown` and
+    /// `to_plain_text`'s grids, so both share this builder (xberg-io/xberg#1549 — this is
+    /// also the one grid `extractors/docx.rs`'s consumer-visible paths must match, instead
+    /// of separately cloning a spanned cell's text into every covered column). ~keep
+    pub(crate) fn to_cell_grid(&self, render: impl Fn(&Paragraph) -> String) -> Vec<Vec<String>> {
         let mut cells: Vec<Vec<String>> = Vec::new();
         for row in &self.rows {
             let mut row_cells = Vec::new();
@@ -1012,7 +1041,7 @@ impl Table {
                 } else {
                     cell.paragraphs
                         .iter()
-                        .map(|para| para.runs_to_markdown())
+                        .map(&render)
                         .collect::<Vec<_>>()
                         .join(" ")
                         .trim()
@@ -1027,6 +1056,60 @@ impl Table {
             }
             cells.push(row_cells);
         }
+        cells
+    }
+
+    /// Build the per-cell paragraph style ids for this table, in the exact layout
+    /// [`Table::to_cell_grid`] produces.
+    ///
+    /// Same origin-once rule: a `gridSpan`/`vMerge` cell contributes its style at its origin and
+    /// `None` in every column it covers, so this grid indexes cell-for-cell against the text grid
+    /// and the two cannot drift apart. A cell takes the first style any of its paragraphs
+    /// declares, which is the banner-row case GH#1587 is about -- a single heading-styled
+    /// paragraph in a merged row-0 cell.
+    ///
+    /// Returns style *ids* (`"Heading2"`); resolving those to an outline level and a display name
+    /// needs the document's `StyleCatalog`, which lives on the parser, not on `Table`. ~keep
+    pub(crate) fn to_cell_style_grid(&self) -> Vec<Vec<Option<String>>> {
+        let mut styles: Vec<Vec<Option<String>>> = Vec::new();
+        for row in &self.rows {
+            let mut row_styles = Vec::new();
+            for cell in &row.cells {
+                let is_vmerge_continue = cell
+                    .properties
+                    .as_ref()
+                    .is_some_and(|p| matches!(p.v_merge, Some(super::table::VerticalMerge::Continue)));
+
+                let style = if is_vmerge_continue {
+                    None
+                } else {
+                    cell.paragraphs.iter().find_map(|p| p.style.clone())
+                };
+                row_styles.push(style);
+
+                let span = cell.properties.as_ref().and_then(|p| p.grid_span).unwrap_or(1);
+                for _ in 1..span {
+                    row_styles.push(None);
+                }
+            }
+            styles.push(row_styles);
+        }
+        styles
+    }
+
+    /// Render this table as a markdown table.
+    ///
+    /// Uses table row and cell properties to improve formatting:
+    /// - Respects `RowProperties.is_header` to identify header rows
+    /// - Handles `CellProperties.grid_span` to account for merged cells
+    ///
+    /// If no explicit header row is marked, treats the first row as the header.
+    pub(crate) fn to_markdown(&self) -> String {
+        if self.rows.is_empty() {
+            return String::new();
+        }
+
+        let cells = self.to_cell_grid(Paragraph::runs_to_markdown);
 
         if cells.is_empty() {
             return String::new();
@@ -1083,35 +1166,7 @@ impl Table {
             return String::new();
         }
 
-        let mut cells: Vec<Vec<String>> = Vec::new();
-        for row in &self.rows {
-            let mut row_cells = Vec::new();
-            for cell in &row.cells {
-                let is_vmerge_continue = cell
-                    .properties
-                    .as_ref()
-                    .is_some_and(|p| matches!(p.v_merge, Some(super::table::VerticalMerge::Continue)));
-
-                let cell_text = if is_vmerge_continue {
-                    String::new()
-                } else {
-                    cell.paragraphs
-                        .iter()
-                        .map(|para| para.to_text())
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                        .trim()
-                        .to_string()
-                };
-                row_cells.push(cell_text);
-
-                let span = cell.properties.as_ref().and_then(|p| p.grid_span).unwrap_or(1);
-                for _ in 1..span {
-                    row_cells.push(String::new());
-                }
-            }
-            cells.push(row_cells);
-        }
+        let cells = self.to_cell_grid(Paragraph::to_text);
 
         crate::extraction::cells_to_text(&cells)
     }
@@ -1126,6 +1181,21 @@ struct TableContext {
     current_row: Option<TableRow>,
     current_cell: Option<TableCell>,
     paragraph: Option<Paragraph>,
+    /// Ordinal of the most recently opened `<w:tr>` in this table (0 before the first
+    /// row opens), incremented on every `<w:tr>` `Event::Start`.
+    ///
+    /// Together with [`Self::cell_ordinal`], lets a page-break handler firing inside a
+    /// cell identify which row *and which cell of that row* it belongs to, so a
+    /// `lastRenderedPageBreak` hint Word duplicated into another cell of the same
+    /// straddling row can be recognized as an echo of the same physical break — while a
+    /// row deep enough that one cell alone spans several page breaks still counts each
+    /// of that cell's own hints separately (#1592).
+    row_ordinal: u32,
+    /// Ordinal of the most recently opened `<w:tc>` in this table (0 before the first
+    /// cell opens), incremented on every `<w:tc>` `Event::Start`. Monotonic across the
+    /// whole table, not reset per row, so every cell instance gets a distinct id. See
+    /// [`Self::row_ordinal`].
+    cell_ordinal: u32,
 }
 
 impl TableContext {
@@ -1135,6 +1205,8 @@ impl TableContext {
             current_row: None,
             current_cell: None,
             paragraph: None,
+            row_ordinal: 0,
+            cell_ordinal: 0,
         }
     }
 }
@@ -1152,11 +1224,25 @@ struct BodyParseOutputs {
     tables: Vec<Table>,
     drawings: Vec<super::drawing::Drawing>,
     elements: Vec<DocumentElement>,
-    sections: Vec<super::section::SectionProperties>,
+    sections: Vec<ParsedSection>,
+    /// True when a malformed placement made section-to-element ownership ambiguous.
+    ambiguous_sections: bool,
     revisions: Vec<crate::types::revisions::DocumentRevision>,
     /// `w:id` values from `w:commentReference` markers encountered in this content,
     /// for validation against `word/comments.xml` (#82).
     comment_ref_ids: Vec<String>,
+}
+
+/// Section properties plus the exclusive end of the element range they govern.
+///
+/// Word stores a section's properties at its end: either inside the final
+/// paragraph's `w:pPr`, or as the final body-level `w:sectPr`. Keeping that
+/// endpoint lets post-parse layout heuristics select the section actually in
+/// force without exposing a rendering-only marker in [`DocumentElement`].
+#[derive(Debug)]
+struct ParsedSection {
+    properties: super::section::SectionProperties,
+    end_element_index: Option<usize>,
 }
 
 /// Apply run-level formatting from run property child elements.
@@ -1358,6 +1444,88 @@ fn push_format_revision(
             ..Default::default()
         },
     });
+}
+
+/// Copy numbering a paragraph inherits from its style onto the paragraph itself.
+///
+/// A paragraph is recognised as a list item through `Paragraph::numbering_id`, and
+/// two separate readers ask that question: the markdown rendering in this module,
+/// and the document-structure node builder in `extractors/docx.rs`. Resolving the
+/// inheritance once, here, is what keeps the two answers the same; resolving it at
+/// either reader would fix one and leave the other emitting plain paragraphs.
+///
+/// Word lets a style own the numbering reference rather than the paragraph, which
+/// is how the built-in `List Bullet` and `List Number` styles work, so a list
+/// authored with them carries no `w:numPr` in `document.xml` at all.
+fn apply_style_numbering(catalog: &super::styles::StyleCatalog, document: &mut Document) {
+    fn fill(catalog: &super::styles::StyleCatalog, paragraphs: &mut [Paragraph]) {
+        for para in paragraphs {
+            if para.numbering_id.is_some() {
+                continue;
+            }
+            let Some(style_id) = para.style.as_deref() else {
+                continue;
+            };
+            let Some((numbering_id, level)) = resolve_style_numbering(catalog, style_id) else {
+                continue;
+            };
+            para.numbering_id = Some(numbering_id);
+            para.numbering_level = Some(para.numbering_level.unwrap_or(level));
+        }
+    }
+
+    fn fill_tables(catalog: &super::styles::StyleCatalog, tables: &mut [Table]) {
+        for table in tables {
+            for row in &mut table.rows {
+                for cell in &mut row.cells {
+                    fill(catalog, &mut cell.paragraphs);
+                }
+            }
+        }
+    }
+
+    fill(catalog, &mut document.paragraphs);
+    fill_tables(catalog, &mut document.tables);
+    for header_footer in document.headers.iter_mut().chain(document.footers.iter_mut()) {
+        fill(catalog, &mut header_footer.paragraphs);
+        fill_tables(catalog, &mut header_footer.tables);
+    }
+    for note in document.footnotes.iter_mut().chain(document.endnotes.iter_mut()) {
+        fill(catalog, &mut note.paragraphs);
+    }
+    for comment in &mut document.comments {
+        fill(catalog, &mut comment.paragraphs);
+    }
+}
+
+/// Walk a style's `basedOn` chain for the first numbering reference it carries.
+///
+/// The level is defaulted to 0 when the style sets `w:numId` without `w:ilvl`, which
+/// is the common shape and is how Word reads it. That default is load-bearing:
+/// `Paragraph::to_markdown` needs both values before it treats a paragraph as a list
+/// item, so inheriting the id alone would change nothing.
+///
+/// The chain is bounded at 20 like `resolve_heading_level`, for the same cycles.
+fn resolve_style_numbering(catalog: &super::styles::StyleCatalog, style_id: &str) -> Option<(i64, i64)> {
+    let mut current_id = Some(style_id);
+    let mut visited = 0;
+    while let Some(id) = current_id {
+        if visited > 20 {
+            break;
+        }
+        visited += 1;
+        let style_def = catalog.styles.get(id)?;
+        if let Some(numbering_id) = style_def.paragraph_properties.numbering_id {
+            let level = style_def
+                .paragraph_properties
+                .numbering_level
+                .map(clamp_numbering_level)
+                .unwrap_or(0);
+            return Some((numbering_id, level));
+        }
+        current_id = style_def.based_on.as_deref();
+    }
+    None
 }
 
 /// Maximum indentation depth honoured for a `w:ilvl` (list nesting level).
@@ -1660,8 +1828,8 @@ fn apply_bookmark_start(e: &BytesStart, table_stack: &mut [TableContext], curren
 /// Page-break bookkeeping threaded through the `<w:br>` and `<w:lastRenderedPageBreak>`
 /// handlers.
 ///
-/// These three fields are one piece of state: every handler that touches any of them
-/// touches all of them, and they are only meaningful relative to one another.
+/// These fields are one piece of state: every handler that touches any of them touches
+/// all of them, and they are only meaningful relative to one another.
 #[derive(Debug, Default)]
 struct PageBreakState {
     /// Breaks seen inside a table, flushed once the outermost `</w:tbl>` closes (#1419).
@@ -1672,6 +1840,96 @@ struct PageBreakState {
     ///
     /// Starts `true` so a break with nothing before it is still recorded.
     text_since_break: bool,
+    /// `(table nesting depth, row ordinal, cell ordinal)` of the most recent table-scoped
+    /// page break event seen — hint or authored, suppressed or recorded.
+    ///
+    /// Word writes `w:lastRenderedPageBreak` into *every* cell of a row that straddles a
+    /// page boundary: one physical break, one hint per cell. [`push_or_defer_page_break`]
+    /// treats a hint as that same duplicated echo — and skips it — only when it shares
+    /// the *row* of this position but names a *different cell*; a hint that shares both
+    /// the row and the cell (a row deep enough that one cell alone spans several breaks)
+    /// is a genuinely new transition and still counts (#1592). Updated on every
+    /// table-scoped break regardless of whether it was suppressed, so a chain of
+    /// alternating duplicate/genuine hints across several cells of one row is tracked
+    /// correctly. Cleared whenever `pending_table` is flushed, since the identity is only
+    /// meaningful relative to the table currently being deferred.
+    last_table_break: Option<(usize, u32, u32)>,
+}
+
+fn section_text_column_height_emu(section: &super::section::SectionProperties) -> Option<i64> {
+    const EMUS_PER_TWIP: i64 = super::EMUS_PER_INCH / 1440;
+
+    let page_height = i64::from(section.page_height_twips?);
+    let top = i64::from(section.margins.top?);
+    let bottom = i64::from(section.margins.bottom?);
+    let usable_twips = page_height - top - bottom;
+    (usable_twips > 0).then(|| usable_twips * EMUS_PER_TWIP)
+}
+
+/// Insert conservative page breaks where inline drawings alone cannot fit in
+/// the text column of the section that owns them (#1559).
+fn insert_missing_inline_drawing_page_breaks(
+    elements: &mut Vec<DocumentElement>,
+    drawings: &[super::drawing::Drawing],
+    sections: &[ParsedSection],
+    ambiguous_sections: bool,
+) {
+    if ambiguous_sections || sections.is_empty() {
+        return;
+    }
+
+    let original = std::mem::take(elements);
+    let Some(ends) = sections
+        .iter()
+        .map(|section| section.end_element_index)
+        .collect::<Option<Vec<_>>>()
+    else {
+        *elements = original;
+        return;
+    };
+    if ends.windows(2).any(|pair| pair[0] > pair[1]) || ends.last().is_some_and(|end| *end > original.len()) {
+        *elements = original;
+        return;
+    }
+
+    let mut rebuilt = Vec::with_capacity(original.len());
+    let mut start = 0usize;
+    for (section, end) in sections.iter().zip(ends) {
+        let Some(capacity) = section_text_column_height_emu(&section.properties) else {
+            rebuilt.extend_from_slice(&original[start..end]);
+            start = end;
+            continue;
+        };
+
+        let mut used_height = 0i64;
+        for element in &original[start..end] {
+            match element {
+                DocumentElement::PageBreak => used_height = 0,
+                DocumentElement::Drawing(index) => {
+                    let height = drawings
+                        .get(*index)
+                        .filter(|drawing| matches!(drawing.drawing_type, super::drawing::DrawingType::Inline))
+                        .and_then(|drawing| drawing.extent.as_ref())
+                        .map(|extent| extent.cy)
+                        .filter(|height| *height > 0);
+                    if let Some(height) = height {
+                        let next_height = used_height.saturating_add(height);
+                        if used_height > 0 && next_height > capacity {
+                            rebuilt.push(DocumentElement::PageBreak);
+                            used_height = height;
+                        } else {
+                            used_height = next_height;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            rebuilt.push(element.clone());
+        }
+        start = end;
+    }
+    rebuilt.extend_from_slice(&original[start..]);
+    *elements = rebuilt;
 }
 
 /// Push a page-break marker, or defer it, depending on where it was encountered.
@@ -1680,6 +1938,18 @@ struct PageBreakState {
 /// once the outermost `</w:tbl>` closes and the table element has been pushed (#1419),
 /// since a form feed cannot be written into the middle of a table that renders as a
 /// single markdown block.
+///
+/// Word writes `w:lastRenderedPageBreak` into *every* cell of a row that straddles a
+/// page boundary — one physical break, one hint per cell — so a table-deferred break
+/// also carries a position: table nesting depth plus [`TableContext::row_ordinal`] and
+/// [`TableContext::cell_ordinal`]. A *hint* (`is_hint = true`) that shares its row and
+/// depth with [`PageBreakState::last_table_break`] but names a *different* cell is that
+/// duplicated echo and is skipped; one that shares row, depth, *and* cell — a row deep
+/// enough that a single cell alone spans several page breaks — is a genuinely new
+/// transition and is not skipped. An authored `<w:br w:type="page"/>` (`is_hint =
+/// false`) is never skipped this way — two deliberate breaks in the same row are
+/// legitimate — but its position is still recorded so a later hint echoing it is
+/// recognized (#1592).
 ///
 /// Outside a table, `elements` only gains a `DocumentElement::Paragraph` entry for
 /// the paragraph currently being parsed once its `</w:p>` closes — so a break
@@ -1695,8 +1965,23 @@ fn push_or_defer_page_break(
     current_paragraph: &Option<Paragraph>,
     elements: &mut Vec<DocumentElement>,
     page_breaks: &mut PageBreakState,
+    is_hint: bool,
 ) {
-    if !table_stack.is_empty() {
+    if let Some(row_context) = table_stack.last() {
+        let position = (table_stack.len(), row_context.row_ordinal, row_context.cell_ordinal);
+        let is_duplicate_row_hint = is_hint
+            && page_breaks
+                .last_table_break
+                .is_some_and(|(depth, row, cell)| depth == position.0 && row == position.1 && cell != position.2);
+        // Track the position of every table-scoped break seen, suppressed or not: a
+        // duplicate hint in cell 2 must not hide a genuine later break in cell 3 behind
+        // cell 1's stale position.
+        page_breaks.last_table_break = Some(position);
+        if is_duplicate_row_hint {
+            // Word's per-cell echo of the row's break: the physical break was already
+            // counted from a different cell of this same row.
+            return;
+        }
         page_breaks.pending_table += 1;
         return;
     }
@@ -1748,6 +2033,7 @@ fn apply_break(
             current_paragraph,
             elements,
             page_breaks,
+            false,
         );
         page_breaks.text_since_break = false;
     } else if let Some(run) = current_run {
@@ -1764,6 +2050,12 @@ fn apply_break(
 /// dropped outright; instead, it is only recorded when real text has been emitted
 /// since the previous break, which is exactly the case where it is *not* a redundant
 /// echo of a break already counted.
+///
+/// Inside a table, Word additionally repeats this same hint once per cell of a row
+/// that straddles a page boundary (#1592); the `text_since_break` check above cannot
+/// tell that apart from a hint in a genuinely new row, since a cell's own text between
+/// two hints resets it regardless. [`push_or_defer_page_break`] carries the
+/// row-and-cell identity check (`is_hint = true`) that does.
 ///
 /// See [`push_or_defer_page_break`] for how (and when) the marker is placed relative
 /// to its enclosing table or paragraph, including the [`PageBreakState::pending_table`]
@@ -1784,6 +2076,7 @@ fn apply_last_rendered_page_break(
         current_paragraph,
         elements,
         page_breaks,
+        true,
     );
     page_breaks.text_since_break = false;
 }
@@ -2019,6 +2312,10 @@ impl<R: Read + Seek> DocxParser<R> {
         }
 
         document.style_catalog = self.styles.take();
+        if let Some(catalog) = document.style_catalog.take() {
+            apply_style_numbering(&catalog, &mut document);
+            document.style_catalog = Some(catalog);
+        }
         document.theme = self.theme.take();
         document.image_relationships = self
             .relationships
@@ -2100,12 +2397,18 @@ impl<R: Read + Seek> DocxParser<R> {
     ) -> Result<Vec<String>, DocxParseError> {
         let mut reader = Reader::from_str(xml);
         reader.config_mut().trim_text(false);
-        let out = self.parse_body_elements(&mut reader, None, budget, &mut document.warnings)?;
+        let mut out = self.parse_body_elements(&mut reader, None, budget, &mut document.warnings)?;
+        insert_missing_inline_drawing_page_breaks(
+            &mut out.elements,
+            &out.drawings,
+            &out.sections,
+            out.ambiguous_sections,
+        );
         document.paragraphs = out.paragraphs;
         document.tables = out.tables;
         document.drawings = out.drawings;
         document.elements = out.elements;
-        document.sections = out.sections;
+        document.sections = out.sections.into_iter().map(|section| section.properties).collect();
         document.revisions = out.revisions;
         Ok(out.comment_ref_ids)
     }
@@ -2162,6 +2465,7 @@ impl<R: Read + Seek> DocxParser<R> {
             text_since_break: true,
             ..PageBreakState::default()
         };
+        let mut pending_section: Option<usize> = None;
 
         let mut revision_kind: Option<RevisionKind> = None;
         let mut revision_attrs: (Option<String>, Option<String>, Option<String>) = (None, None, None);
@@ -2262,7 +2566,7 @@ impl<R: Read + Seek> DocxParser<R> {
                             let parsed = super::drawing::parse_vml_pict(reader, budget)?;
                             if mc_fallback_depth == 0
                                 && let Some(drawing) = parsed
-                                && drawing.text_box_content.is_some()
+                                && (drawing.text_box_content.is_some() || drawing.image_ref.is_some())
                             {
                                 let idx = out.drawings.len();
                                 out.drawings.push(drawing);
@@ -2311,6 +2615,7 @@ impl<R: Read + Seek> DocxParser<R> {
                         "w:tr" => {
                             if let Some(ctx) = table_stack.last_mut() {
                                 ctx.current_row = Some(TableRow::default());
+                                ctx.row_ordinal += 1;
                             }
                         }
                         "w:trPr" => {
@@ -2323,6 +2628,7 @@ impl<R: Read + Seek> DocxParser<R> {
                         "w:tc" => {
                             if let Some(ctx) = table_stack.last_mut() {
                                 ctx.current_cell = Some(TableCell::default());
+                                ctx.cell_ordinal += 1;
                             }
                         }
                         "w:tcPr" => {
@@ -2387,6 +2693,25 @@ impl<R: Read + Seek> DocxParser<R> {
                             out.elements.push(DocumentElement::Drawing(idx));
                             page_breaks.text_since_break = true;
                         }
+                        // VML `<v:imagedata>` pictures (legacy `.doc` conversions, OLE object
+                        // previews under `w:object`). `w:pict` is consumed by
+                        // `parse_vml_pict` above and never reaches this arm; `w:object` is
+                        // not otherwise handled, so its `v:imagedata` arrives here. A
+                        // fallback copy inside `mc:Fallback` is skipped: when the
+                        // `mc:Choice` already carried the same image this would duplicate it.
+                        "v:imagedata" => {
+                            if mc_fallback_depth == 0
+                                && let Some(relationship_id) = super::drawing::vml_image_ref(e)
+                            {
+                                let idx = out.drawings.len();
+                                out.drawings.push(super::drawing::Drawing {
+                                    image_ref: Some(relationship_id),
+                                    ..Default::default()
+                                });
+                                out.elements.push(DocumentElement::Drawing(idx));
+                                page_breaks.text_since_break = true;
+                            }
+                        }
                         "w:br" => {
                             apply_break(
                                 e,
@@ -2412,7 +2737,20 @@ impl<R: Read + Seek> DocxParser<R> {
                             // `enter()` above internally, so no manual `budget.leave()` is
                             // needed here. ~keep
                             let sect_props = super::section::parse_section_properties_streaming(reader, budget)?;
-                            out.sections.push(sect_props);
+                            let section_index = out.sections.len();
+                            out.sections.push(ParsedSection {
+                                properties: sect_props,
+                                end_element_index: None,
+                            });
+                            if !table_stack.is_empty() {
+                                out.ambiguous_sections = true;
+                            } else if current_paragraph.is_some() {
+                                if pending_section.replace(section_index).is_some() {
+                                    out.ambiguous_sections = true;
+                                }
+                            } else {
+                                out.sections[section_index].end_element_index = Some(out.elements.len());
+                            }
                         }
                         "w:ins" => {
                             revision_kind = Some(RevisionKind::Insertion);
@@ -2527,8 +2865,38 @@ impl<R: Read + Seek> DocxParser<R> {
                                 }
                             }
                         }
+                        // `<v:imagedata …/>` is self-closing in practice; see the matching
+                        // `v:imagedata` arm in the `Event::Start` block for why it carries an
+                        // `mc:Fallback` guard. VML pictures nested in `w:pict` are handled by
+                        // `parse_vml_pict` and never surface here.
+                        "v:imagedata" => {
+                            if mc_fallback_depth == 0
+                                && let Some(relationship_id) = super::drawing::vml_image_ref(e)
+                            {
+                                let idx = out.drawings.len();
+                                out.drawings.push(super::drawing::Drawing {
+                                    image_ref: Some(relationship_id),
+                                    ..Default::default()
+                                });
+                                out.elements.push(DocumentElement::Drawing(idx));
+                                page_breaks.text_since_break = true;
+                            }
+                        }
                         "w:sectPr" => {
-                            out.sections.push(super::section::SectionProperties::default());
+                            let section_index = out.sections.len();
+                            out.sections.push(ParsedSection {
+                                properties: super::section::SectionProperties::default(),
+                                end_element_index: None,
+                            });
+                            if !table_stack.is_empty() {
+                                out.ambiguous_sections = true;
+                            } else if current_paragraph.is_some() {
+                                if pending_section.replace(section_index).is_some() {
+                                    out.ambiguous_sections = true;
+                                }
+                            } else {
+                                out.sections[section_index].end_element_index = Some(out.elements.len());
+                            }
                         }
                         "w:tblPr" => {
                             if let Some(ctx) = table_stack.last_mut() {
@@ -2667,6 +3035,9 @@ impl<R: Read + Seek> DocxParser<R> {
                                 for _ in 0..std::mem::take(&mut page_breaks.pending_paragraph) {
                                     out.elements.push(DocumentElement::PageBreak);
                                 }
+                                if let Some(section_index) = pending_section.take() {
+                                    out.sections[section_index].end_element_index = Some(out.elements.len());
+                                }
                             }
                         }
                         "w:tc" => {
@@ -2714,6 +3085,10 @@ impl<R: Read + Seek> DocxParser<R> {
                                     if deferred_breaks > 0 {
                                         page_breaks.text_since_break = false;
                                     }
+                                    // The row/cell position recorded for dedup (#1592) is only
+                                    // meaningful relative to the table just flushed; clear it so
+                                    // a later, unrelated table's first row can't collide with it.
+                                    page_breaks.last_table_break = None;
                                 }
                             }
                         }
@@ -4881,6 +5256,24 @@ mod tests {
         )
     }
 
+    fn inline_drawing_xml(id: usize, height_emu: i64) -> String {
+        format!(
+            r#"<w:p><w:r><w:drawing>
+                <wp:inline xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing">
+                    <wp:extent cx="5400000" cy="{height_emu}"/>
+                    <wp:docPr id="{id}" name="Picture {id}"/>
+                    <a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                        <a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                            <pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture">
+                                <pic:blipFill><a:blip r:embed="rId1"/></pic:blipFill>
+                            </pic:pic>
+                        </a:graphicData>
+                    </a:graphic>
+                </wp:inline>
+            </w:drawing></w:r></w:p>"#
+        )
+    }
+
     #[test]
     fn test_plain_paragraph_text() {
         let xml = wrap_body(r#"<w:p><w:r><w:t>Hello World</w:t></w:r></w:p>"#);
@@ -5143,6 +5536,441 @@ mod tests {
         assert!(text[boundaries[1].byte_start..boundaries[1].byte_end].contains("After table"));
     }
 
+    /// GH#1592 reproducer `A-body`: page breaks between body paragraphs, outside any
+    /// table. No table-deferral logic is exercised here at all; this is the baseline
+    /// the table cases below are compared against.
+    #[test]
+    fn gh1592_body_only_breaks_count_once_each() {
+        let xml = wrap_body(
+            r#"<w:p><w:r><w:t>body 0</w:t></w:r></w:p>
+               <w:p><w:r><w:lastRenderedPageBreak/><w:t>body 1</w:t></w:r></w:p>
+               <w:p><w:r><w:lastRenderedPageBreak/><w:t>body 2</w:t></w:r></w:p>"#,
+        );
+        let doc = parse_xml(&xml);
+
+        let (_, boundaries) = doc.extract_text_with_boundaries(true, true);
+        assert_eq!(
+            boundaries.len(),
+            3,
+            "two breaks between body paragraphs must yield three pages"
+        );
+    }
+
+    /// GH#1592 reproducer `B-rows`: one `lastRenderedPageBreak` hint per row, written
+    /// into the first cell only — the shape Word writes when a row's own single-cell
+    /// content is what straddles the boundary. Already correct before the fix; kept as
+    /// a regression guard alongside `C`.
+    #[test]
+    fn gh1592_one_hint_per_row_counts_once_per_row() {
+        let xml = wrap_body(
+            r#"<w:p><w:r><w:t>before</w:t></w:r></w:p>
+               <w:tbl><w:tblPr></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+                 <w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                     <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r0c0</w:t></w:r></w:p>
+                 </w:tc><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                     <w:p><w:r><w:t>r0c1</w:t></w:r></w:p>
+                 </w:tc></w:tr>
+                 <w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                     <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r1c0</w:t></w:r></w:p>
+                 </w:tc><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                     <w:p><w:r><w:t>r1c1</w:t></w:r></w:p>
+                 </w:tc></w:tr>
+                 <w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                     <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r2c0</w:t></w:r></w:p>
+                 </w:tc><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                     <w:p><w:r><w:t>r2c1</w:t></w:r></w:p>
+                 </w:tc></w:tr>
+               </w:tbl>
+               <w:p><w:r><w:t>after</w:t></w:r></w:p>"#,
+        );
+        let doc = parse_xml(&xml);
+
+        let (_, boundaries) = doc.extract_text_with_boundaries(true, true);
+        assert_eq!(boundaries.len(), 4, "three rows, one hint each, must yield four pages");
+    }
+
+    /// GH#1592 reproducer `C-both-cells`: the defect. The *same* three physical breaks
+    /// as `B` above, but Word wrote each row's hint into *both* cells — the shape Word
+    /// actually produces for a straddling row. Duplicates across cells of one row must
+    /// collapse to a single break; rows must still count separately from each other.
+    #[test]
+    fn gh1592_hint_duplicated_into_every_cell_of_a_row_counts_once_per_row() {
+        let xml = wrap_body(
+            r#"<w:p><w:r><w:t>before</w:t></w:r></w:p>
+               <w:tbl><w:tblPr></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+                 <w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                     <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r0c0</w:t></w:r></w:p>
+                 </w:tc><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                     <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r0c1</w:t></w:r></w:p>
+                 </w:tc></w:tr>
+                 <w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                     <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r1c0</w:t></w:r></w:p>
+                 </w:tc><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                     <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r1c1</w:t></w:r></w:p>
+                 </w:tc></w:tr>
+                 <w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                     <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r2c0</w:t></w:r></w:p>
+                 </w:tc><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                     <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>r2c1</w:t></w:r></w:p>
+                 </w:tc></w:tr>
+               </w:tbl>
+               <w:p><w:r><w:t>after</w:t></w:r></w:p>"#,
+        );
+        let doc = parse_xml(&xml);
+
+        let page_break_count = doc
+            .elements
+            .iter()
+            .filter(|e| matches!(e, DocumentElement::PageBreak))
+            .count();
+        assert_eq!(
+            page_break_count, 3,
+            "three rows must contribute three breaks, not six (one per duplicated hint) \
+             or one (collapsed as a single run)"
+        );
+
+        let (_, boundaries) = doc.extract_text_with_boundaries(true, true);
+        assert_eq!(
+            boundaries.len(),
+            4,
+            "the per-cell duplicated hint must not inflate or collapse the row count"
+        );
+    }
+
+    /// GH#1592 reproducer `D-one-cell-deep`: all breaks fall inside a single deep cell
+    /// of a single row, each preceded by that cell's own paragraph text. These are
+    /// genuinely distinct transitions and must all count, even though they share both
+    /// the table and the row with each other — the row-level dedup added for `C` must
+    /// key on cell identity too, or this collapses to one break exactly like `C` did.
+    #[test]
+    fn gh1592_multiple_hints_in_one_deep_cell_of_one_row_all_count() {
+        let xml = wrap_body(
+            r#"<w:p><w:r><w:t>before</w:t></w:r></w:p>
+               <w:tbl><w:tblPr></w:tblPr><w:tblGrid><w:gridCol w:w="2000"/><w:gridCol w:w="2000"/></w:tblGrid>
+                 <w:tr><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                     <w:p><w:r><w:t>long 0</w:t></w:r></w:p>
+                     <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>long 1</w:t></w:r></w:p>
+                     <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>long 2</w:t></w:r></w:p>
+                     <w:p><w:r><w:lastRenderedPageBreak/></w:r><w:r><w:t>long 3</w:t></w:r></w:p>
+                 </w:tc><w:tc><w:tcPr><w:tcW w:w="2000" w:type="dxa"/></w:tcPr>
+                     <w:p><w:r><w:t>side</w:t></w:r></w:p>
+                 </w:tc></w:tr>
+               </w:tbl>
+               <w:p><w:r><w:t>after</w:t></w:r></w:p>"#,
+        );
+        let doc = parse_xml(&xml);
+
+        let page_break_count = doc
+            .elements
+            .iter()
+            .filter(|e| matches!(e, DocumentElement::PageBreak))
+            .count();
+        assert_eq!(
+            page_break_count, 3,
+            "three hints inside one cell of one row are three distinct transitions"
+        );
+
+        let (_, boundaries) = doc.extract_text_with_boundaries(true, true);
+        assert_eq!(boundaries.len(), 4);
+    }
+
+    /// GH#1559: Word can paginate a vertical block of inline images without
+    /// writing a `lastRenderedPageBreak` for one of the transitions.
+    #[test]
+    fn should_infer_missing_page_break_when_inline_drawings_exceed_section_height() {
+        let xml = wrap_body(&format!(
+            r#"<w:p><w:r><w:t>PAGE ONE TEXT</w:t></w:r></w:p>
+               {}
+               <w:p><w:r><w:lastRenderedPageBreak/><w:t>PAGE TWO TEXT</w:t></w:r></w:p>
+               {}{}{}
+               <w:p><w:r><w:lastRenderedPageBreak/><w:t>TAIL MARKER</w:t></w:r></w:p>
+               <w:sectPr>
+                 <w:pgSz w:w="11906" w:h="16838"/>
+                 <w:pgMar w:top="1417" w:right="1417" w:bottom="1417" w:left="1417"/>
+               </w:sectPr>"#,
+            inline_drawing_xml(1, 4_000_000),
+            inline_drawing_xml(2, 3_500_000),
+            inline_drawing_xml(3, 3_500_000),
+            inline_drawing_xml(4, 3_500_000),
+        ));
+        let doc = parse_xml(&xml);
+
+        assert_eq!(doc.drawing_page_numbers(), vec![1, 2, 2, 3]);
+        let page_breaks = doc
+            .elements
+            .iter()
+            .filter(|element| matches!(element, DocumentElement::PageBreak))
+            .count();
+        assert_eq!(page_breaks, 3, "two recorded breaks plus one inferred break");
+
+        let (text, boundaries) = doc.extract_text_with_boundaries(true, true);
+        assert_eq!(boundaries.len(), 4);
+        let tail = &boundaries[3];
+        assert!(text[tail.byte_start..tail.byte_end].contains("TAIL MARKER"));
+    }
+
+    /// Section properties describe the content that precedes them. A paragraph-level
+    /// `sectPr` therefore closes the first span after that paragraph, while the final
+    /// body-level `sectPr` closes the second span (#1559).
+    #[test]
+    fn should_use_the_geometry_of_each_section_for_inferred_breaks() {
+        let xml = wrap_body(&format!(
+            r#"{}{}
+               <w:p><w:pPr><w:sectPr>
+                 <w:pgSz w:w="10000" w:h="10000"/>
+                 <w:pgMar w:top="1000" w:right="1000" w:bottom="1000" w:left="1000"/>
+               </w:sectPr></w:pPr><w:r><w:t>END FIRST SECTION</w:t></w:r></w:p>
+               {}{}
+               <w:sectPr>
+                 <w:pgSz w:w="12000" w:h="12000"/>
+                 <w:pgMar w:top="500" w:right="500" w:bottom="500" w:left="500"/>
+               </w:sectPr>"#,
+            inline_drawing_xml(1, 3_000_000),
+            inline_drawing_xml(2, 3_000_000),
+            inline_drawing_xml(3, 3_000_000),
+            inline_drawing_xml(4, 3_000_000),
+        ));
+        let doc = parse_xml(&xml);
+
+        assert_eq!(doc.sections.len(), 2);
+        assert_eq!(doc.sections[0].page_height_twips, Some(10_000));
+        assert_eq!(doc.sections[1].page_height_twips, Some(12_000));
+        let page_breaks = doc
+            .elements
+            .iter()
+            .filter(|element| matches!(element, DocumentElement::PageBreak))
+            .count();
+        assert_eq!(page_breaks, 1, "only the tighter first section should overflow");
+        assert_eq!(doc.drawing_page_numbers(), vec![1, 2, 2, 2]);
+    }
+
+    #[test]
+    fn should_skip_only_a_section_whose_page_geometry_is_incomplete() {
+        let xml = wrap_body(&format!(
+            r#"{}{}
+               <w:p><w:pPr><w:sectPr><w:pgSz w:w="10000" w:h="10000"/></w:sectPr></w:pPr></w:p>
+               {}{}
+               <w:sectPr>
+                 <w:pgSz w:w="10000" w:h="10000"/>
+                 <w:pgMar w:top="1000" w:right="1000" w:bottom="1000" w:left="1000"/>
+               </w:sectPr>"#,
+            inline_drawing_xml(1, 3_000_000),
+            inline_drawing_xml(2, 3_000_000),
+            inline_drawing_xml(3, 3_000_000),
+            inline_drawing_xml(4, 3_000_000),
+        ));
+        let doc = parse_xml(&xml);
+
+        assert_eq!(doc.drawing_page_numbers(), vec![1, 1, 1, 2]);
+    }
+
+    #[test]
+    fn should_not_create_a_blank_page_for_one_oversized_inline_drawing() {
+        let xml = wrap_body(&format!(
+            r#"{}
+               <w:sectPr>
+                 <w:pgSz w:w="10000" w:h="10000"/>
+                 <w:pgMar w:top="1000" w:right="1000" w:bottom="1000" w:left="1000"/>
+               </w:sectPr>"#,
+            inline_drawing_xml(1, 6_000_000),
+        ));
+        let doc = parse_xml(&xml);
+        assert!(
+            !doc.elements
+                .iter()
+                .any(|element| matches!(element, DocumentElement::PageBreak))
+        );
+        assert_eq!(doc.drawing_page_numbers(), vec![1]);
+    }
+
+    #[test]
+    fn should_ignore_anchored_and_dimensionless_drawings_and_allow_an_exact_fit() {
+        let mut elements = vec![
+            DocumentElement::Drawing(0),
+            DocumentElement::Drawing(1),
+            DocumentElement::Drawing(2),
+            DocumentElement::Drawing(3),
+            DocumentElement::Drawing(4),
+        ];
+        let drawings = vec![
+            super::super::drawing::Drawing {
+                extent: Some(super::super::drawing::Extent { cx: 1, cy: 4_000_000 }),
+                ..Default::default()
+            },
+            super::super::drawing::Drawing {
+                drawing_type: super::super::drawing::DrawingType::Anchored(Default::default()),
+                extent: Some(super::super::drawing::Extent { cx: 1, cy: 4_000_000 }),
+                ..Default::default()
+            },
+            super::super::drawing::Drawing::default(),
+            super::super::drawing::Drawing {
+                extent: Some(super::super::drawing::Extent { cx: 1, cy: 1_080_000 }),
+                ..Default::default()
+            },
+            super::super::drawing::Drawing {
+                extent: Some(super::super::drawing::Extent { cx: 1, cy: -1 }),
+                ..Default::default()
+            },
+        ];
+        let sections = vec![ParsedSection {
+            properties: super::super::section::SectionProperties {
+                page_height_twips: Some(10_000),
+                margins: super::super::section::PageMargins {
+                    top: Some(1_000),
+                    bottom: Some(1_000),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            end_element_index: Some(elements.len()),
+        }];
+
+        insert_missing_inline_drawing_page_breaks(&mut elements, &drawings, &sections, false);
+
+        assert!(
+            !elements
+                .iter()
+                .any(|element| matches!(element, DocumentElement::PageBreak)),
+            "4,000,000 + 1,080,000 EMU exactly fills the column"
+        );
+
+        let mut reset_elements = vec![
+            DocumentElement::Drawing(0),
+            DocumentElement::PageBreak,
+            DocumentElement::Drawing(0),
+        ];
+        let reset_sections = vec![ParsedSection {
+            properties: sections[0].properties.clone(),
+            end_element_index: Some(reset_elements.len()),
+        }];
+        insert_missing_inline_drawing_page_breaks(&mut reset_elements, &drawings, &reset_sections, false);
+        assert_eq!(
+            reset_elements
+                .iter()
+                .filter(|element| matches!(element, DocumentElement::PageBreak))
+                .count(),
+            1,
+            "the recorded break must reset the height budget without gaining a duplicate"
+        );
+    }
+
+    #[test]
+    fn should_disable_inference_when_a_section_is_nested_in_a_table() {
+        let xml = wrap_body(&format!(
+            r#"{}{}
+               <w:tbl><w:tblPr/><w:tblGrid><w:gridCol w:w="2000"/></w:tblGrid>
+                 <w:tr><w:tc><w:p><w:pPr><w:sectPr>
+                   <w:pgSz w:w="10000" w:h="10000"/>
+                   <w:pgMar w:top="1000" w:bottom="1000"/>
+                 </w:sectPr></w:pPr></w:p></w:tc></w:tr>
+               </w:tbl>
+               <w:sectPr>
+                 <w:pgSz w:w="10000" w:h="10000"/>
+                 <w:pgMar w:top="1000" w:bottom="1000"/>
+               </w:sectPr>"#,
+            inline_drawing_xml(1, 3_000_000),
+            inline_drawing_xml(2, 3_000_000),
+        ));
+        let doc = parse_xml(&xml);
+
+        assert!(
+            !doc.elements
+                .iter()
+                .any(|element| matches!(element, DocumentElement::PageBreak)),
+            "ambiguous section ownership must disable synthetic pagination"
+        );
+    }
+
+    #[test]
+    fn should_disable_inference_for_nonmonotonic_section_endpoints() {
+        let mut elements = vec![DocumentElement::Drawing(0), DocumentElement::Drawing(1)];
+        let drawings = vec![
+            super::super::drawing::Drawing {
+                extent: Some(super::super::drawing::Extent { cx: 1, cy: 3_000_000 }),
+                ..Default::default()
+            },
+            super::super::drawing::Drawing {
+                extent: Some(super::super::drawing::Extent { cx: 1, cy: 3_000_000 }),
+                ..Default::default()
+            },
+        ];
+        let properties = super::super::section::SectionProperties {
+            page_height_twips: Some(10_000),
+            margins: super::super::section::PageMargins {
+                top: Some(1_000),
+                bottom: Some(1_000),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let sections = vec![
+            ParsedSection {
+                properties: properties.clone(),
+                end_element_index: Some(2),
+            },
+            ParsedSection {
+                properties,
+                end_element_index: Some(1),
+            },
+        ];
+
+        insert_missing_inline_drawing_page_breaks(&mut elements, &drawings, &sections, false);
+
+        assert!(
+            !elements
+                .iter()
+                .any(|element| matches!(element, DocumentElement::PageBreak)),
+            "invalid section ownership must leave the original elements untouched"
+        );
+    }
+
+    /// GH#1562: quick-xml emits XML and numeric references as `GeneralRef`
+    /// events, so both text-box routes must resolve them explicitly.
+    #[test]
+    fn should_preserve_entity_references_in_drawingml_and_vml_textboxes() {
+        let escaped = "Research &amp; Development &lt;tagged&gt; &#8364;50 &amp; more";
+        let xml = wrap_body(&format!(
+            r#"<w:p><w:r><w:t>BODY: {escaped}</w:t></w:r></w:p>
+               <w:p><w:r><w:drawing>
+                 <wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                   <wps:txbx><w:txbxContent><w:p><w:r><w:t>{escaped}</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+                 </wps:wsp>
+               </w:drawing></w:r></w:p>
+               <w:p><w:r><w:pict><v:shape xmlns:v="urn:schemas-microsoft-com:vml">
+                 <v:textbox><w:txbxContent><w:p><w:r><w:t>{escaped}</w:t></w:r></w:p></w:txbxContent></v:textbox>
+               </v:shape></w:pict></w:r></w:p>"#,
+        ));
+        let doc = parse_xml(&xml);
+        let expected = "Research & Development <tagged> €50 & more";
+
+        assert_eq!(doc.paragraphs[0].to_text(), format!("BODY: {expected}"));
+        let textboxes: Vec<&str> = doc
+            .drawings
+            .iter()
+            .filter_map(|drawing| drawing.text_box_content.as_deref())
+            .collect();
+        assert_eq!(textboxes, vec![expected, expected]);
+    }
+
+    #[test]
+    fn should_account_textbox_text_against_the_content_budget() {
+        let xml = wrap_body(
+            r#"<w:p><w:r><w:drawing>
+                 <wps:wsp xmlns:wps="http://schemas.microsoft.com/office/word/2010/wordprocessingShape">
+                   <wps:txbx><w:txbxContent><w:p><w:r><w:t>1234&amp;6789</w:t></w:r></w:p></w:txbxContent></wps:txbx>
+                 </wps:wsp>
+               </w:drawing></w:r></w:p>"#,
+        );
+        let limits = crate::extractors::security::SecurityLimits {
+            max_content_size: 8,
+            ..Default::default()
+        };
+        let mut budget = SecurityBudget::from_limits(&limits);
+
+        let result = try_parse_xml_with_budget(&xml, &mut budget);
+        assert!(matches!(result, Err(DocxParseError::SecurityLimit(_))));
+    }
+
     #[test]
     fn test_bold_formatting() {
         let xml = wrap_body(r#"<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Bold</w:t></w:r></w:p>"#);
@@ -5384,6 +6212,194 @@ mod tests {
         assert_eq!(table.rows[0].cells.len(), 2);
         let md = doc.to_markdown(true);
         assert!(md.contains("Has content"), "Markdown: {}", md);
+    }
+
+    /// A list authored with Word's built-in `List Bullet` style carries no
+    /// `w:numPr` in `document.xml`: the numbering reference lives on the style.
+    /// The paragraph still has to read as a list item (GH#1663).
+    #[test]
+    fn a_paragraph_inherits_the_numbering_its_style_carries() {
+        let mut catalog = super::super::styles::StyleCatalog::default();
+        catalog.styles.insert(
+            "ListBullet".to_string(),
+            super::super::styles::StyleDefinition {
+                id: "ListBullet".to_string(),
+                name: Some("List Bullet".to_string()),
+                style_type: super::super::styles::StyleType::Paragraph,
+                based_on: None,
+                next_style: None,
+                is_default: false,
+                paragraph_properties: super::super::styles::ParagraphProperties {
+                    numbering_id: Some(1),
+                    ..Default::default()
+                },
+                run_properties: Default::default(),
+            },
+        );
+        let mut doc = Document {
+            paragraphs: vec![Paragraph {
+                style: Some("ListBullet".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        apply_style_numbering(&catalog, &mut doc);
+
+        assert_eq!(doc.paragraphs[0].numbering_id, Some(1));
+        assert_eq!(
+            doc.paragraphs[0].numbering_level,
+            Some(0),
+            "a style that sets w:numId without w:ilvl is level 0, and to_markdown needs both"
+        );
+    }
+
+    /// Numbering written on the paragraph itself outranks the style's, so a list
+    /// item that overrides its style keeps its own definition and level.
+    #[test]
+    fn paragraph_numbering_outranks_the_numbering_on_its_style() {
+        let mut catalog = super::super::styles::StyleCatalog::default();
+        catalog.styles.insert(
+            "ListBullet".to_string(),
+            super::super::styles::StyleDefinition {
+                id: "ListBullet".to_string(),
+                name: Some("List Bullet".to_string()),
+                style_type: super::super::styles::StyleType::Paragraph,
+                based_on: None,
+                next_style: None,
+                is_default: false,
+                paragraph_properties: super::super::styles::ParagraphProperties {
+                    numbering_id: Some(1),
+                    ..Default::default()
+                },
+                run_properties: Default::default(),
+            },
+        );
+        let mut doc = Document {
+            paragraphs: vec![Paragraph {
+                style: Some("ListBullet".to_string()),
+                numbering_id: Some(7),
+                numbering_level: Some(2),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+
+        apply_style_numbering(&catalog, &mut doc);
+
+        assert_eq!(doc.paragraphs[0].numbering_id, Some(7));
+        assert_eq!(doc.paragraphs[0].numbering_level, Some(2));
+    }
+
+    const LIST_BULLET_STYLES_XML: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style>
+  <w:style w:type="paragraph" w:styleId="ListBullet">
+    <w:name w:val="List Bullet"/>
+    <w:basedOn w:val="Normal"/>
+    <w:pPr><w:numPr><w:numId w:val="1"/></w:numPr></w:pPr>
+  </w:style>
+  <w:style w:type="paragraph" w:styleId="ListBulletChild">
+    <w:name w:val="List Bullet Child"/>
+    <w:basedOn w:val="ListBullet"/>
+  </w:style>
+</w:styles>"#;
+
+    fn list_styled_paragraph(text: &str) -> String {
+        format!(r#"<w:p><w:pPr><w:pStyle w:val="ListBullet"/></w:pPr><w:r><w:t>{text}</w:t></w:r></w:p>"#)
+    }
+
+    fn docx_with_list_style(body: &str, extra_parts: &[(&str, &str)]) -> Vec<u8> {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options: zip::write::FileOptions<()> =
+            zip::write::FileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        zip.start_file("word/document.xml", options).unwrap();
+        zip.write_all(wrap_body(body).as_bytes()).unwrap();
+        zip.start_file("word/styles.xml", options).unwrap();
+        zip.write_all(LIST_BULLET_STYLES_XML.as_bytes()).unwrap();
+        for (path, xml) in extra_parts {
+            zip.start_file(*path, options).unwrap();
+            zip.write_all(xml.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    fn parse_bytes(bytes: &[u8]) -> Document {
+        let mut budget = SecurityBudget::with_defaults();
+        parse_document(bytes, &mut budget, &default_limits()).expect("docx parses")
+    }
+
+    /// End-to-end proof that `apply_style_numbering` is wired into `DocxParser::parse`:
+    /// a real archive through `parse_document`, not the extracted helper called directly
+    /// against a hand-built `Document` (GH#1663).
+    #[test]
+    fn a_body_paragraph_inherits_list_numbering_from_its_style_through_parse_document() {
+        let body = format!("{}{}", list_styled_paragraph("First"), list_styled_paragraph("Second"));
+        let doc = parse_bytes(&docx_with_list_style(&body, &[]));
+        assert_eq!(doc.paragraphs.len(), 2);
+        assert_eq!(doc.paragraphs[0].numbering_id, Some(1));
+        assert_eq!(doc.paragraphs[0].numbering_level, Some(0));
+        let md = doc.to_markdown(true);
+        assert_eq!(md, "- First\n- Second", "markdown: {md:?}");
+    }
+
+    /// The numbering reference is found through `basedOn`: `ListBulletChild` carries no
+    /// `w:numPr` of its own and inherits it from `ListBullet` (GH#1663).
+    #[test]
+    fn a_paragraph_inherits_list_numbering_from_a_style_two_levels_up() {
+        let body = r#"<w:p><w:pPr><w:pStyle w:val="ListBulletChild"/></w:pPr><w:r><w:t>Nested</w:t></w:r></w:p>"#;
+        let doc = parse_bytes(&docx_with_list_style(body, &[]));
+        assert_eq!(doc.paragraphs.len(), 1);
+        assert_eq!(doc.paragraphs[0].numbering_id, Some(1));
+        assert_eq!(doc.paragraphs[0].numbering_level, Some(0));
+        assert_eq!(doc.to_markdown(true), "- Nested");
+    }
+
+    #[test]
+    fn a_table_cell_paragraph_inherits_list_numbering_from_its_style() {
+        let body = format!(
+            "<w:tbl><w:tr><w:tc>{}</w:tc></w:tr></w:tbl>",
+            list_styled_paragraph("In a cell")
+        );
+        let doc = parse_bytes(&docx_with_list_style(&body, &[]));
+        let cell = &doc.tables[0].rows[0].cells[0];
+        assert_eq!(cell.paragraphs[0].numbering_id, Some(1));
+        assert_eq!(cell.paragraphs[0].numbering_level, Some(0));
+    }
+
+    #[test]
+    fn a_header_paragraph_inherits_list_numbering_from_its_style() {
+        let header = format!(
+            r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">{}</w:hdr>"#,
+            list_styled_paragraph("In a header")
+        );
+        let doc = parse_bytes(&docx_with_list_style("", &[("word/header1.xml", &header)]));
+        assert_eq!(doc.headers.len(), 1, "header part was picked up");
+        assert_eq!(doc.headers[0].paragraphs[0].numbering_id, Some(1));
+    }
+
+    #[test]
+    fn a_footnote_paragraph_inherits_list_numbering_from_its_style() {
+        // ids -1/0/1 are reserved separators; 2 is the first real footnote id.
+        let footnotes = format!(
+            r#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="2">{}</w:footnote></w:footnotes>"#,
+            list_styled_paragraph("In a footnote")
+        );
+        let doc = parse_bytes(&docx_with_list_style("", &[("word/footnotes.xml", &footnotes)]));
+        assert_eq!(doc.footnotes.len(), 1);
+        assert_eq!(doc.footnotes[0].paragraphs[0].numbering_id, Some(1));
+    }
+
+    #[test]
+    fn a_comment_paragraph_inherits_list_numbering_from_its_style() {
+        let comments = format!(
+            r#"<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="0" w:author="A">{}</w:comment></w:comments>"#,
+            list_styled_paragraph("In a comment")
+        );
+        let doc = parse_bytes(&docx_with_list_style("", &[("word/comments.xml", &comments)]));
+        assert_eq!(doc.comments.len(), 1);
+        assert_eq!(doc.comments[0].paragraphs[0].numbering_id, Some(1));
     }
 
     #[test]

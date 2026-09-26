@@ -3,8 +3,9 @@
 //! Verifies that embedded images in PDFs produce proper `![](image_N.fmt)`
 //! references instead of empty `![]()` placeholders.
 
+// `Runtime::new` needs tokio's `rt-multi-thread`, which bare `pdf` does not pull in. ~keep
+#![cfg(all(feature = "pdf", feature = "tokio-runtime"))]
 #![allow(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)] // ~keep: test/bench binaries print by design; org logging policy exempts tests
-#![cfg(feature = "pdf")]
 
 use std::path::PathBuf;
 use xberg::core::config::{ExtractionConfig, OutputFormat};
@@ -670,7 +671,18 @@ fn test_no_decompression_when_images_disabled() {
     let path = test_documents_dir().join("pdf/embedded_images_tables.pdf");
     assert!(path.exists(), "missing fixture: {}", path.display());
 
-    let config = ExtractionConfig::default();
+    // Upstream's default is extract_images=false; this fork flips the absent-section
+    // default to EXTRACT (fork.md), and embedded-image OCR is on by default too. The
+    // #985 skip path is only reached with a full opt-out, so spell both switches out.
+    use xberg::core::config::ImageExtractionConfig;
+    let config = ExtractionConfig {
+        images: Some(ImageExtractionConfig {
+            extract_images: false,
+            run_ocr_on_images: false,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
     let rt = tokio::runtime::Runtime::new().unwrap();
     let result = rt
         .block_on(extract_uri_document(&path, None, &config))
@@ -752,7 +764,17 @@ fn test_no_decompression_trace_when_images_disabled() {
     let subscriber = tracing_subscriber::registry().with(filter).with(capture_clone);
 
     let result = tracing::subscriber::with_default(subscriber, || {
-        let config = ExtractionConfig::default();
+        // Same fork-default adjustment as `test_no_decompression_when_images_disabled`:
+        // a full opt-out (extraction AND embedded-image OCR) is what reaches the skip path.
+        use xberg::core::config::ImageExtractionConfig;
+        let config = ExtractionConfig {
+            images: Some(ImageExtractionConfig {
+                extract_images: false,
+                run_ocr_on_images: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -790,6 +812,12 @@ fn test_no_decompression_trace_when_images_disabled() {
 /// the native path the decompression was unbounded.  The OCR path was never
 /// covered by a test, so a regression disabling decompression for
 /// `ocr_inline_images=true` would be invisible.
+// Gated on `ocr`, NOT on `ocr-pipeline`: `ocr = ["ocr-pipeline", ...]`, so the
+// pipeline feature can be on with no backend registered, and this test then fails
+// with `OCR backend 'tesseract' not registered` rather than being skipped. Without
+// any gate it fails a step earlier, at config validation, on every `pdf`-only leg.
+// Both reds read exactly like a real regression. ~keep
+#[cfg(feature = "ocr")]
 #[test]
 fn test_ocr_inline_images_enters_decompression_path() {
     use xberg::PdfConfig;
@@ -1172,6 +1200,14 @@ fn test_include_page_rasters_emits_warning_on_document_level_ocr_bypass() {
             include_page_rasters: true,
             ..Default::default()
         }),
+        // Zero margins are what select the document-level OCR path; the non-zero defaults
+        // (0.06 / 0.05) route to per-page image OCR instead, and this mock's `process_image`
+        // panics by design. See `should_use_per_page_ocr_only_when_effective_margins_are_nonzero`. ~keep
+        pdf_options: Some(xberg::PdfConfig {
+            top_margin_fraction: Some(0.0),
+            bottom_margin_fraction: Some(0.0),
+            ..Default::default()
+        }),
         use_cache: false,
         ..Default::default()
     };
@@ -1293,4 +1329,210 @@ fn test_chunk_image_indices_empty_when_images_disabled() {
             );
         }
     }
+}
+
+/// GH#1703: an OCR-only config (`ocr: Some(_)`, `images: None`) must not retain every
+/// embedded image's raw bytes just because GH#1662's read gate needed them to run OCR.
+/// `images` must come back empty and page `image_indices` must stay consistent (empty)
+/// with it, while the document's own extracted text still comes through in `content`.
+///
+/// `images: None` never routes embedded-image OCR text into `content` for PDF, with or
+/// without this fix -- `inject_placeholders` (the only way a PDF gets `ElementKind::Image`
+/// elements for `render_plain`/`render_markdown` to read `ocr_result` off) reads
+/// `config.images.as_ref().is_some_and(...)`, which is `false` when `images` itself is
+/// `None`. See `test_ocr_only_config_with_placeholders_preserves_ocr_text` below for the
+/// config shape where that text does surface, and where this fix must not swallow it. ~keep
+#[cfg(feature = "ocr")]
+#[test]
+fn test_ocr_only_config_returns_no_images() {
+    use async_trait::async_trait;
+    use xberg::core::config::{OcrConfig, PageConfig};
+    use xberg::plugins::{OcrBackend, OcrBackendType, Plugin, register_ocr_backend, unregister_ocr_backend};
+    use xberg::types::ExtractedDocument;
+
+    const SENTINEL_OCR_TEXT: &str = "GH1703_SENTINEL_OCR_TEXT";
+    const BACKEND_NAME: &str = "gh1703-fixed-text-ocr";
+
+    struct FixedTextOcrBackend;
+
+    #[async_trait]
+    impl OcrBackend for FixedTextOcrBackend {
+        fn backend_type(&self) -> OcrBackendType {
+            OcrBackendType::Custom
+        }
+        fn supports_language(&self, _: &str) -> bool {
+            true
+        }
+        async fn process_image(&self, _: &[u8], _config: &OcrConfig) -> xberg::Result<ExtractedDocument> {
+            let mut document = ExtractedDocument::default();
+            document.content = SENTINEL_OCR_TEXT.to_string();
+            Ok(document)
+        }
+    }
+
+    impl Plugin for FixedTextOcrBackend {
+        fn name(&self) -> &str {
+            BACKEND_NAME
+        }
+        fn version(&self) -> String {
+            "0.0.0".to_string()
+        }
+        fn initialize(&self) -> xberg::Result<()> {
+            Ok(())
+        }
+        fn shutdown(&self) -> xberg::Result<()> {
+            Ok(())
+        }
+    }
+
+    register_ocr_backend(std::sync::Arc::new(FixedTextOcrBackend)).unwrap();
+    struct BackendGuard(&'static str);
+    impl Drop for BackendGuard {
+        fn drop(&mut self) {
+            let _ = unregister_ocr_backend(self.0);
+        }
+    }
+    let _guard = BackendGuard(BACKEND_NAME);
+
+    let path = test_documents_dir().join("pdf/embedded_images_tables.pdf");
+    let config = ExtractionConfig {
+        ocr: Some(OcrConfig {
+            backend: BACKEND_NAME.to_string(),
+            ..Default::default()
+        }),
+        images: None,
+        pages: Some(PageConfig {
+            extract_pages: true,
+            ..Default::default()
+        }),
+        use_cache: false,
+        ..Default::default()
+    };
+
+    let result = extract_uri_document_blocking(&path, None, &config).expect("extraction must succeed");
+
+    // (fork) 本 fork 与上游 GH#1703 的取舍相反：缺省 `images` 段视为抽取图片
+    //（`wants_own_bytes_in_result()` 默认真，见 fork.md「默认抽取图片」），所以
+    // 字节保留、image_indices 指向保留的图片；counts 与 content 断言不变。
+    assert_eq!(
+        result.images.as_ref().map(|v| v.len()).unwrap_or(0),
+        1,
+        "fork default: an absent images section retains the embedded image bytes that fed OCR"
+    );
+    assert_eq!(
+        result.counts.images, 1,
+        "DocumentCounts::images is documented as always populated"
+    );
+
+    if let Some(pages) = result.pages.as_ref() {
+        assert!(
+            pages.iter().any(|page| !page.image_indices.is_empty()),
+            "fork default: the retained image must stay referenced by its page's image_indices"
+        );
+    }
+
+    assert!(
+        !result.content.trim().is_empty(),
+        "document content must still be extracted alongside the retained images"
+    );
+}
+
+/// GH#1703, OCR-text-survives variant: `images: Some(extract_images: false)` leaves
+/// `inject_placeholders` at its default `true`, so the PDF extractor creates
+/// `ElementKind::Image` elements and `render_plain`/`render_markdown` read
+/// `ExtractedImage.ocr_result` off them while rendering `content`. This is the
+/// config shape the GH#1703 fix must not regress: `should_retain_images_after_ocr`
+/// says drop the bytes (extract_images is false), but `drop_ocr_only_images` must run
+/// AFTER `derive_extraction_result` has already rendered that OCR text into `content`,
+/// or this test goes red with the bytes AND the text both gone.
+#[cfg(feature = "ocr")]
+#[test]
+fn test_ocr_only_config_with_placeholders_preserves_ocr_text() {
+    use async_trait::async_trait;
+    use xberg::core::config::{ImageExtractionConfig, OcrConfig};
+    use xberg::plugins::{OcrBackend, OcrBackendType, Plugin, register_ocr_backend, unregister_ocr_backend};
+    use xberg::types::ExtractedDocument;
+
+    const SENTINEL_OCR_TEXT: &str = "GH1703_PLACEHOLDER_SENTINEL_OCR_TEXT";
+    const BACKEND_NAME: &str = "gh1703-placeholders-fixed-text-ocr";
+
+    struct FixedTextOcrBackend;
+
+    #[async_trait]
+    impl OcrBackend for FixedTextOcrBackend {
+        fn backend_type(&self) -> OcrBackendType {
+            OcrBackendType::Custom
+        }
+        fn supports_language(&self, _: &str) -> bool {
+            true
+        }
+        async fn process_image(&self, _: &[u8], _config: &OcrConfig) -> xberg::Result<ExtractedDocument> {
+            let mut document = ExtractedDocument::default();
+            document.content = SENTINEL_OCR_TEXT.to_string();
+            Ok(document)
+        }
+    }
+
+    impl Plugin for FixedTextOcrBackend {
+        fn name(&self) -> &str {
+            BACKEND_NAME
+        }
+        fn version(&self) -> String {
+            "0.0.0".to_string()
+        }
+        fn initialize(&self) -> xberg::Result<()> {
+            Ok(())
+        }
+        fn shutdown(&self) -> xberg::Result<()> {
+            Ok(())
+        }
+    }
+
+    register_ocr_backend(std::sync::Arc::new(FixedTextOcrBackend)).unwrap();
+    struct BackendGuard(&'static str);
+    impl Drop for BackendGuard {
+        fn drop(&mut self) {
+            let _ = unregister_ocr_backend(self.0);
+        }
+    }
+    let _guard = BackendGuard(BACKEND_NAME);
+
+    let path = test_documents_dir().join("pdf/embedded_images_tables.pdf");
+    let config = ExtractionConfig {
+        ocr: Some(OcrConfig {
+            backend: BACKEND_NAME.to_string(),
+            ..Default::default()
+        }),
+        images: Some(ImageExtractionConfig {
+            extract_images: false,
+            ..Default::default()
+        }),
+        use_cache: false,
+        ..Default::default()
+    };
+
+    let result = extract_uri_document_blocking(&path, None, &config).expect("extraction must succeed");
+
+    assert!(
+        result.images.as_ref().map(|v| v.is_empty()).unwrap_or(true),
+        "extract_images=false must not retain embedded image bytes even though OCR ran; \
+         got {} image(s)",
+        result.images.as_ref().map(|v| v.len()).unwrap_or(0)
+    );
+    // (fork) 与上游 GH#1703 的第二半相反：本 fork 把 PDF 占位符注入收紧到「图片
+    // 输出门」（`pdf_image_output_requested`，#796：extract_images=false 时不注入
+    // 占位符，避免渲染出指向永不落盘文件的 `![]()` 悬空引用）。没有占位符，
+    // Markdown 渲染就没有挂 OCR 文本的锚点，所以这条配置形态下 OCR 文本不进
+    // content。fork 的「不出图片、只要 OCR 文本」模式由 `images.ocr_text_only =
+    // true` 承担（extract_images 仍为 true），那条路径的守卫在
+    // comrak_bridge 的 `doc.ocr_text_only && has_ocr` 分支。
+    assert!(
+        !result.content.contains(SENTINEL_OCR_TEXT),
+        "fork behavior: with extract_images=false no placeholder anchors the OCR text, \
+         so it must not land in content either (see pdf_image_output_requested, #796)"
+    );
+    assert!(
+        !result.content.trim().is_empty(),
+        "document content must still be extracted"
+    );
 }

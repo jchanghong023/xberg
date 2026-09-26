@@ -24,10 +24,12 @@ describe("XbergEngine construction", () => {
 describe("XbergEngine.ocr with injected backend", () => {
   it("returns per-line text, confidence, and bounding boxes", async () => {
     const injection = {
-      ocr: async (_bytes: Uint8Array, _opts: unknown) => ({
-        text: "hello from ocr",
-        lines: [{ text: "hello from ocr", confidence: 0.98, bbox: { x: 1, y: 2, width: 3, height: 4 } }],
-      }),
+      ocr: {
+        ocr: async (_bytes: Uint8Array, _opts: unknown) => ({
+          text: "hello from ocr",
+          lines: [{ text: "hello from ocr", confidence: 0.98, bbox: { x: 1, y: 2, width: 3, height: 4 } }],
+        }),
+      },
     };
     const engine = new XbergEngine({}, injection);
 
@@ -42,7 +44,7 @@ describe("XbergEngine.ocr with injected backend", () => {
 
   it("degrades to empty lines when the backend omits geometry", async () => {
     const injection = {
-      ocr: async () => ({ text: "no geometry available" }),
+      ocr: { ocr: async () => ({ text: "no geometry available" }) },
     };
     const engine = new XbergEngine({}, injection);
 
@@ -55,9 +57,11 @@ describe("XbergEngine.ocr with injected backend", () => {
   it("forwards the language option to the backend", async () => {
     let seenLanguage: string | undefined;
     const injection = {
-      ocr: async (_bytes: Uint8Array, opts: { language?: string }) => {
-        seenLanguage = opts.language;
-        return { text: "ok", lines: [] };
+      ocr: {
+        ocr: async (_bytes: Uint8Array, opts: { language?: string }) => {
+          seenLanguage = opts.language;
+          return { text: "ok", lines: [] };
+        },
       },
     };
     const engine = new XbergEngine({}, injection);
@@ -76,7 +80,7 @@ describe("XbergEngine.ocr error paths", () => {
   });
 
   it("rejects on empty image bytes", async () => {
-    const injection = { ocr: async () => ({ text: "unreachable", lines: [] }) };
+    const injection = { ocr: { ocr: async () => ({ text: "unreachable", lines: [] }) } };
     const engine = new XbergEngine({}, injection);
 
     await expect(engine.ocr(new Uint8Array([]), undefined)).rejects.toMatch(/empty/);

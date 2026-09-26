@@ -70,6 +70,11 @@ const BATCH_CACHE_KEY_NAMESPACE: &[u8] = b"xberg-engine-extract-batch-v2";
 /// ([`NoopCache`](crate::engine::seams::NoopCache),
 /// [`NoopProgressSink`](crate::engine::seams::NoopProgressSink)), so callers who
 /// inject nothing see byte-identical behavior.
+// (fork) perf-tracing：引擎单文档抽取整体 span（含缓存查取与真实抽取）。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(target = "perf", name = "engine_extract", skip_all)
+)]
 pub(crate) async fn extract(
     inner: &super::EngineInner,
     input: ExtractInput,
@@ -214,6 +219,16 @@ fn batch_content_cache_key(inputs: &[ExtractInput], base_config: &ExtractionConf
 }
 
 /// Extract content from multiple bytes or URI inputs.
+// (fork) perf-tracing：引擎批量抽取整体 span；逐文档耗时由内层 extract_file/extract_bytes 记录。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(
+        target = "perf",
+        name = "engine_extract_batch",
+        skip_all,
+        fields(count = inputs.len())
+    )
+)]
 pub(crate) async fn extract_batch(
     inner: &super::EngineInner,
     inputs: Vec<ExtractInput>,
@@ -387,7 +402,10 @@ async fn extract_batch_concurrent(
         return Ok(output);
     }
 
-    crate::core::config::concurrency::init_batch_thread_pool(config.concurrency.as_ref());
+    // Batch workers each receive a divided per-document budget, but Rayon is global and
+    // immutable after first initialization, so the pools take the whole batch budget here
+    // rather than the smaller share the first worker to start would otherwise install.
+    crate::core::config::concurrency::init_thread_pools(config.concurrency.as_ref());
     let base_config = Arc::new(config.clone());
     let mut pending: VecDeque<PendingBatchItem> = VecDeque::with_capacity(input_count);
 
@@ -1086,8 +1104,13 @@ fn resolve_batch_input_config(
 
     let mut resolved = Arc::unwrap_or_clone(resolved);
     if needs_thread_budget {
+        // Only the thread budget is divided across batch workers. A caller's
+        // `max_concurrent_ocr` is a memory bound on the host, not a per-document
+        // share, so it survives the rewrite; rebuilding the struct from scratch
+        // silently dropped it. ~keep
         resolved.concurrency = Some(crate::core::config::ConcurrencyConfig {
             max_threads: Some(thread_budget),
+            ..resolved.concurrency.unwrap_or_default()
         });
     }
     resolved.ensure_cancel_token();
@@ -1101,8 +1124,10 @@ fn resolve_batch_base_config(base_config: &Arc<ExtractionConfig>, thread_budget:
     }
 
     let mut resolved = (**base_config).clone();
+    // As in `resolve_batch_input_config`: divide the thread budget, carry the rest. ~keep
     resolved.concurrency = Some(crate::core::config::ConcurrencyConfig {
         max_threads: Some(thread_budget),
+        ..resolved.concurrency.unwrap_or_default()
     });
     Arc::new(resolved)
 }
@@ -1496,6 +1521,7 @@ async fn result_from_scrape_page(
         content,
         scrape.markdown.is_some(),
         &content_type,
+        &scrape.html,
         links_to_uris(scrape.links.iter().map(|link| (&link.url, &link.text))),
         config,
     )
@@ -1534,6 +1560,7 @@ async fn result_from_crawl_page(
         content,
         page.markdown.is_some(),
         &content_type,
+        &page.html,
         links_to_uris(page.links.iter().map(|link| (&link.url, &link.text))),
         config,
     )
@@ -1559,17 +1586,36 @@ async fn run_url_page_pipeline(
     content: String,
     is_markdown: bool,
     content_type: &str,
+    source_html: &str,
     uris: Vec<ExtractedUri>,
     config: &ExtractionConfig,
 ) -> Result<ExtractedDocument> {
+    #[cfg(not(feature = "html"))]
+    let _ = source_html;
     let source_mime_type = normalized_content_type(content_type);
     let extraction_mime_type = if is_markdown {
         "text/markdown".to_string()
     } else {
         source_mime_type.clone()
     };
+    #[cfg(feature = "html")]
+    let is_html_source = source_mime_type.starts_with("text/html");
     let mut result = extract_bytes(content.as_bytes(), &extraction_mime_type, config).await?;
     result.mime_type = source_mime_type.into();
+
+    // ~keep The line above restamps the result `text/html`, so a consumer reading
+    // `metadata.format.html` is entitled to find it. But when crawlberg supplied pre-rendered
+    // markdown the extraction ran as `text/markdown`, so the HTML extractor never ran and no
+    // HtmlMetadata was ever produced -- leaving `format: None` contradicting the MIME type
+    // (CI E2E `test_metadata_access`). Recover it from the page HTML instead.
+    #[cfg(feature = "html")]
+    if is_html_source
+        && result.metadata.format.is_none()
+        && !source_html.is_empty()
+        && let Some(html_metadata) = crate::extraction::html::extract_html_metadata_only(source_html)
+    {
+        result.metadata.format = Some(crate::types::FormatMetadata::Html(Box::new(html_metadata)));
+    }
     match result.uris.as_mut() {
         Some(existing) => existing.extend(uris),
         None if !uris.is_empty() => result.uris = Some(uris),

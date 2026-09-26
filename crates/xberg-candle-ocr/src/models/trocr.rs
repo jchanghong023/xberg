@@ -250,6 +250,75 @@ impl TrocrEngine {
         ))
     }
 
+    /// Autoregressively decode token ids from `encoder_hidden_states`, one token per iteration,
+    /// stopping at `eos_token_id` or 1000 iterations. Split out of [`Self::process_image`] to
+    /// keep that function under the workspace line-count limit. ~keep
+    fn decode_tokens(&self, model: &mut trocr::TrOCRModel, encoder_hidden_states: &Tensor) -> Result<Vec<u32>> {
+        let decoder_start_token_id = self.decoder_start_token_id;
+        let eos_token_id = self.eos_token_id;
+
+        let mut token_ids = vec![decoder_start_token_id];
+
+        let mut logits_processor = candle_transformers::generation::LogitsProcessor::new(1337, None, None);
+
+        tracing::debug!(
+            start_token = decoder_start_token_id,
+            eos_token = eos_token_id,
+            "TrOCR: beginning decoding loop"
+        );
+
+        for index in 0..1000 {
+            let context_size = if index >= 1 { 1 } else { token_ids.len() };
+            let start_pos = token_ids.len().saturating_sub(context_size);
+            let input_ids = Tensor::new(&token_ids[start_pos..], &self.device)
+                .map_err(|e| CandleOcrError::InferenceFailed(format!("Token tensor creation failed: {}", e)))?
+                .unsqueeze(0)
+                .map_err(|e| CandleOcrError::InferenceFailed(format!("Token unsqueeze failed: {}", e)))?;
+
+            let logits = model
+                .decode(&input_ids, encoder_hidden_states, start_pos)
+                .map_err(|e| CandleOcrError::InferenceFailed(format!("Decoder forward failed: {}", e)))?;
+
+            let logits = logits
+                .squeeze(0)
+                .map_err(|e| CandleOcrError::InferenceFailed(format!("Logits squeeze(0) failed: {}", e)))?;
+            let logits = logits
+                .get(
+                    logits
+                        .dim(0)
+                        .map_err(|e| CandleOcrError::InferenceFailed(format!("Logits dim(0) failed: {}", e)))?
+                        - 1,
+                )
+                .map_err(|e| CandleOcrError::InferenceFailed(format!("Logits indexing failed: {}", e)))?;
+
+            let token = logits_processor
+                .sample(&logits)
+                .map_err(|e| CandleOcrError::InferenceFailed(format!("Token sampling failed: {}", e)))?;
+
+            token_ids.push(token);
+
+            if index < 5 {
+                tracing::trace!(
+                    iteration = index,
+                    token = token,
+                    num_tokens = token_ids.len(),
+                    "TrOCR: decode iteration"
+                );
+            }
+
+            if token == eos_token_id {
+                tracing::debug!(
+                    iterations = index + 1,
+                    num_tokens = token_ids.len(),
+                    "TrOCR: reached EOS token"
+                );
+                break;
+            }
+        }
+
+        Ok(token_ids)
+    }
+
     /// Process a single image and extract text via OCR.
     ///
     /// # Arguments
@@ -289,67 +358,7 @@ impl TrocrEngine {
 
         tracing::debug!(encoder_shape = ?encoder_hidden_states.shape().dims(), "TrOCR: encoder hidden states shape");
 
-        let decoder_start_token_id = self.decoder_start_token_id;
-        let eos_token_id = self.eos_token_id;
-
-        let mut token_ids = vec![decoder_start_token_id];
-
-        let mut logits_processor = candle_transformers::generation::LogitsProcessor::new(1337, None, None);
-
-        tracing::debug!(
-            start_token = decoder_start_token_id,
-            eos_token = eos_token_id,
-            "TrOCR: beginning decoding loop"
-        );
-
-        for index in 0..1000 {
-            let context_size = if index >= 1 { 1 } else { token_ids.len() };
-            let start_pos = token_ids.len().saturating_sub(context_size);
-            let input_ids = Tensor::new(&token_ids[start_pos..], &self.device)
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("Token tensor creation failed: {}", e)))?
-                .unsqueeze(0)
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("Token unsqueeze failed: {}", e)))?;
-
-            let logits = model_guard
-                .decode(&input_ids, &encoder_hidden_states, start_pos)
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("Decoder forward failed: {}", e)))?;
-
-            let logits = logits
-                .squeeze(0)
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("Logits squeeze(0) failed: {}", e)))?;
-            let logits = logits
-                .get(
-                    logits
-                        .dim(0)
-                        .map_err(|e| CandleOcrError::InferenceFailed(format!("Logits dim(0) failed: {}", e)))?
-                        - 1,
-                )
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("Logits indexing failed: {}", e)))?;
-
-            let token = logits_processor
-                .sample(&logits)
-                .map_err(|e| CandleOcrError::InferenceFailed(format!("Token sampling failed: {}", e)))?;
-
-            token_ids.push(token);
-
-            if index < 5 {
-                tracing::trace!(
-                    iteration = index,
-                    token = token,
-                    num_tokens = token_ids.len(),
-                    "TrOCR: decode iteration"
-                );
-            }
-
-            if token == eos_token_id {
-                tracing::debug!(
-                    iterations = index + 1,
-                    num_tokens = token_ids.len(),
-                    "TrOCR: reached EOS token"
-                );
-                break;
-            }
-        }
+        let token_ids = self.decode_tokens(&mut model_guard, &encoder_hidden_states)?;
 
         let decoded_text = self
             .tokenizer

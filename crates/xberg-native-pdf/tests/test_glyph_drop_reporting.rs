@@ -227,13 +227,20 @@ fn pdf_with_broken_font(page_count: usize) -> Vec<u8> {
     buf
 }
 
-/// Glyph-drop warnings naming our fixture font, drained from the global sink.
+/// Glyph-drop warnings drained from the global sink.
+///
+/// No font-name filter. `TextRasterizer::report_drops` builds its message with
+/// `tally.warning("redacted")` — the PDF font name is deliberately withheld so it
+/// cannot leak into logs — so filtering on the fixture's `BrokenSubset` name matched
+/// nothing and this test could never pass. It was masked because the unit-test script
+/// aborts on the first failing binary, and `test_decoder_characterization` (which had
+/// the identical defect) failed first. Draining before and after each render is what
+/// makes the result attributable, not the name. ~keep
 fn drain_broken_subset_warnings() -> Vec<String> {
     drain_global_warnings()
         .into_iter()
         .filter(|w| w.category == WarningCategory::GlyphDropped)
         .map(|w| w.message)
-        .filter(|m| m.contains("BrokenSubset"))
         .collect()
 }
 

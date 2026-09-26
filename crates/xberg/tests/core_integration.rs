@@ -58,7 +58,8 @@ async fn test_extract_file_basic() {
     let output = result.expect("Operation failed");
     let result = successful_single_result(&output);
 
-    assert_text_content(&result.content, "Hello, Xberg!");
+    // fork 默认 Markdown 渲染（fork.md）：`!` 转义为 `\!`（渲染等价）；上游断言按 Plain 写
+    assert_text_content(&result.content, r"Hello, Xberg\!");
     assert_eq!(result.mime_type, "text/plain");
     assert!(result.chunks.is_none(), "Chunks should be None without chunking config");
     assert!(result.detected_languages.is_none(), "Language detection not enabled");
@@ -258,7 +259,7 @@ fn test_mime_detection_comprehensive() {
         ("test.md", "text/markdown"),
         ("test.html", "text/html"),
         ("test.json", "application/json"),
-        ("test.yaml", "application/x-yaml"),
+        ("test.yaml", "application/yaml"),
         ("test.toml", "application/toml"),
         ("test.xml", "application/xml"),
         ("test.pdf", "application/pdf"),
@@ -298,7 +299,7 @@ fn test_mime_validation() {
     assert!(validate_mime_type("application/pdf").is_ok());
     assert!(validate_mime_type("text/plain").is_ok());
     assert!(validate_mime_type("image/png").is_ok());
-    assert!(validate_mime_type("image/custom-format").is_ok());
+    assert!(validate_mime_type("image/custom-format").is_err());
 
     assert!(validate_mime_type("application/unknown").is_err());
 }
@@ -466,13 +467,13 @@ async fn test_extract_batch_reports_malformed_inputs_in_envelope() {
     assert_eq!(output.summary.errors, 2);
 
     assert_eq!(output.errors[0].index, 0);
-    assert_eq!(output.errors[0].code, 1002);
+    assert_eq!(output.errors[0].code, 1003);
     assert_eq!(output.errors[0].error_type, "validation");
     assert_eq!(output.errors[0].source, "<bytes>");
     assert!(output.errors[0].message.contains("requires the 'bytes' field"));
 
     assert_eq!(output.errors[1].index, 1);
-    assert_eq!(output.errors[1].code, 1002);
+    assert_eq!(output.errors[1].code, 1003);
     assert_eq!(output.errors[1].error_type, "validation");
     assert_eq!(output.errors[1].source, "<uri>");
     assert!(output.errors[1].message.contains("requires the 'uri' field"));

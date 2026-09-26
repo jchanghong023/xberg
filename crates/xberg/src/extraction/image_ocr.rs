@@ -25,7 +25,327 @@
 //! A real, global provider-side limit is enforced once per shared LLM client instead —
 //! see [`crate::llm::client::create_client`].
 
+use std::borrow::Cow;
+
 use crate::types::{ExtractedDocument, ExtractedImage};
+
+/// Why a Windows metafile could not be prepared for OCR, tagged with the pipeline stage so
+/// the resulting warning says whether format detection or rasterization failed. Dimension
+/// bounding failures share the rasterization stage — both answer "this metafile cannot be
+/// turned into a bitmap within its limits", and the `reason` carries the specific bound
+/// that was exceeded.
+#[derive(Debug)]
+pub(crate) struct ImageOcrPreprocessError {
+    stage: &'static str,
+    reason: String,
+}
+
+impl ImageOcrPreprocessError {
+    fn new(stage: &'static str, reason: impl Into<String>) -> Self {
+        Self {
+            stage,
+            reason: reason.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for ImageOcrPreprocessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.stage, self.reason)
+    }
+}
+
+fn read_i32_le(data: &[u8], offset: usize) -> Option<i64> {
+    let end = offset.checked_add(4)?;
+    let bytes = data.get(offset..end)?;
+    Some(i64::from(i32::from_le_bytes(bytes.try_into().ok()?)))
+}
+
+fn read_u16_le(data: &[u8], offset: usize) -> Option<u16> {
+    let end = offset.checked_add(2)?;
+    let bytes = data.get(offset..end)?;
+    Some(u16::from_le_bytes(bytes.try_into().ok()?))
+}
+
+/// Read the intrinsic pixel size of an EMF/WMF straight from its header.
+///
+/// Returns `None` for anything that is not a metafile, or whose header does not yield a
+/// positive size. Used only when the shape carries no usable width/height.
+fn infer_metafile_dimensions(data: &[u8], format: &str) -> Option<(u32, u32)> {
+    match format {
+        "emf" => {
+            let width = read_i32_le(data, 16)?.checked_sub(read_i32_le(data, 8)?)?.abs();
+            let height = read_i32_le(data, 20)?.checked_sub(read_i32_le(data, 12)?)?.abs();
+            Some((u32::try_from(width).ok()?, u32::try_from(height).ok()?))
+                .filter(|(width, height)| *width > 0 && *height > 0)
+        }
+        "wmf" if data.starts_with(&[0xD7, 0xCD, 0xC6, 0x9A]) => {
+            let left = i64::from(i16::from_le_bytes([*data.get(6)?, *data.get(7)?]));
+            let top = i64::from(i16::from_le_bytes([*data.get(8)?, *data.get(9)?]));
+            let right = i64::from(i16::from_le_bytes([*data.get(10)?, *data.get(11)?]));
+            let bottom = i64::from(i16::from_le_bytes([*data.get(12)?, *data.get(13)?]));
+            let units_per_inch = u64::from(read_u16_le(data, 14)?);
+            let width_units = right.checked_sub(left)?;
+            let height_units = bottom.checked_sub(top)?;
+            if width_units <= 0 || height_units <= 0 || units_per_inch == 0 {
+                return None;
+            }
+            let to_pixels = |units: i64| {
+                u32::try_from((u64::try_from(units).ok()?.saturating_mul(96) + units_per_inch / 2) / units_per_inch)
+                    .ok()
+                    .filter(|value| *value > 0)
+            };
+            Some((to_pixels(width_units)?, to_pixels(height_units)?))
+        }
+        _ => None,
+    }
+}
+
+/// Resolve the target raster size for a metafile: the shape's declared size when present,
+/// otherwise the intrinsic header size, scaled to `ImageExtractionConfig::target_dpi` and
+/// clamped to `max_image_dimension`. The whole result is rejected up front if the RGBA
+/// buffer (or a conservative PNG bound) would exceed the configured content limit, so GDI is
+/// never asked to allocate a surface larger than the caller permits.
+fn bounded_metafile_dimensions(
+    image: &ExtractedImage,
+    image_config: &crate::core::config::ImageExtractionConfig,
+    security_limits: &crate::extractors::security::SecurityLimits,
+) -> Result<(u32, u32), ImageOcrPreprocessError> {
+    let detected_format = crate::extraction::image_format::detect_image_format(&image.data);
+    let intrinsic = infer_metafile_dimensions(&image.data, detected_format.as_ref());
+    let width = image
+        .width
+        .filter(|value| *value > 0)
+        .or_else(|| intrinsic.as_ref().map(|dimensions| dimensions.0))
+        .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "shape width is unavailable"))?;
+    let height = image
+        .height
+        .filter(|value| *value > 0)
+        .or_else(|| intrinsic.as_ref().map(|dimensions| dimensions.1))
+        .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "shape height is unavailable"))?;
+    let dpi = u64::try_from(image_config.target_dpi)
+        .map_err(|_| ImageOcrPreprocessError::new("rasterize_decode", "target DPI is invalid"))?;
+    let mut width = u64::from(width)
+        .checked_mul(dpi)
+        .and_then(|value| value.checked_add(48))
+        .map(|value| value / 96)
+        .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "scaled width overflow"))?
+        .max(1);
+    let mut height = u64::from(height)
+        .checked_mul(dpi)
+        .and_then(|value| value.checked_add(48))
+        .map(|value| value / 96)
+        .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "scaled height overflow"))?
+        .max(1);
+    let maximum = u64::try_from(image_config.max_image_dimension)
+        .map_err(|_| ImageOcrPreprocessError::new("rasterize_decode", "maximum image dimension is invalid"))?;
+    if maximum == 0 {
+        return Err(ImageOcrPreprocessError::new(
+            "rasterize_decode",
+            "maximum image dimension is zero",
+        ));
+    }
+    let largest = width.max(height);
+    if largest > maximum {
+        width = width
+            .checked_mul(maximum)
+            .map(|value| value / largest)
+            .unwrap_or(0)
+            .max(1);
+        height = height
+            .checked_mul(maximum)
+            .map(|value| value / largest)
+            .unwrap_or(0)
+            .max(1);
+    }
+    let pixels = width
+        .checked_mul(height)
+        .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "pixel count overflow"))?;
+    let rgba_bytes = pixels
+        .checked_mul(4)
+        .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "RGBA allocation overflow"))?;
+    let png_bound = rgba_bytes
+        .checked_add(rgba_bytes / 16)
+        .and_then(|value| value.checked_add(65_536))
+        .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "PNG buffer bound overflow"))?;
+    let content_limit = u64::try_from(security_limits.max_content_size).unwrap_or(u64::MAX);
+    if rgba_bytes > content_limit || png_bound > content_limit {
+        return Err(ImageOcrPreprocessError::new(
+            "rasterize_decode",
+            "metafile raster exceeds configured content limit",
+        ));
+    }
+    Ok((
+        u32::try_from(width).map_err(|_| ImageOcrPreprocessError::new("rasterize_decode", "width exceeds u32"))?,
+        u32::try_from(height).map_err(|_| ImageOcrPreprocessError::new("rasterize_decode", "height exceeds u32"))?,
+    ))
+}
+
+/// Return the bytes to hand to the OCR backend: the original raster image unchanged, or a
+/// freshly rasterized PNG for an EMF/WMF. On non-Windows hosts, or when a declared metafile
+/// fails header validation, this is an error rather than a silently misdecoded buffer.
+fn prepare_image_for_ocr<'a>(
+    image: &'a ExtractedImage,
+    image_config: &crate::core::config::ImageExtractionConfig,
+    security_limits: &crate::extractors::security::SecurityLimits,
+) -> Result<Cow<'a, [u8]>, ImageOcrPreprocessError> {
+    let detected = crate::extraction::image_format::detect_image_format(&image.data);
+    let declared_vector = matches!(image.format.as_ref(), "emf" | "wmf");
+    if !matches!(detected.as_ref(), "emf" | "wmf") {
+        if declared_vector {
+            return Err(ImageOcrPreprocessError::new(
+                "format_detect",
+                "declared metafile failed header validation",
+            ));
+        }
+        return Ok(Cow::Borrowed(&image.data));
+    }
+
+    let (width, height) = bounded_metafile_dimensions(image, image_config, security_limits)?;
+
+    #[cfg(windows)]
+    {
+        use image::ImageEncoder;
+        use xberg_windows_metafile::{MetafileKind, rasterize};
+
+        let kind = match detected.as_ref() {
+            "emf" => MetafileKind::Emf,
+            "wmf" if image.data.starts_with(&[0xD7, 0xCD, 0xC6, 0x9A]) => MetafileKind::PlaceableWmf,
+            "wmf" => MetafileKind::StandardWmf,
+            _ => unreachable!("metafile format checked above"),
+        };
+        let raster = rasterize(&image.data, kind, width, height)
+            .map_err(|error| ImageOcrPreprocessError::new("rasterize_decode", error.to_string()))?;
+        let expected = usize::try_from(raster.width)
+            .ok()
+            .and_then(|w| usize::try_from(raster.height).ok().and_then(|h| w.checked_mul(h)))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "RGBA result size overflow"))?;
+        if raster.rgba.len() != expected {
+            return Err(ImageOcrPreprocessError::new(
+                "rasterize_decode",
+                "rasterizer returned an invalid RGBA length",
+            ));
+        }
+        let png_capacity = expected
+            .checked_add(expected / 16)
+            .and_then(|value| value.checked_add(65_536))
+            .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "PNG buffer bound overflow"))?;
+        if png_capacity > security_limits.max_content_size {
+            return Err(ImageOcrPreprocessError::new(
+                "rasterize_decode",
+                "PNG buffer bound exceeds configured content limit",
+            ));
+        }
+        let mut png = Vec::new();
+        png.try_reserve(png_capacity)
+            .map_err(|error| ImageOcrPreprocessError::new("rasterize_decode", error.to_string()))?;
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(
+                &raster.rgba,
+                raster.width,
+                raster.height,
+                image::ExtendedColorType::Rgba8,
+            )
+            .map_err(|error| ImageOcrPreprocessError::new("rasterize_decode", error.to_string()))?;
+        if png.len() > security_limits.max_content_size {
+            return Err(ImageOcrPreprocessError::new(
+                "rasterize_decode",
+                "encoded PNG exceeds configured content limit",
+            ));
+        }
+        Ok(Cow::Owned(png))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (width, height);
+        Err(ImageOcrPreprocessError::new(
+            "rasterize_decode",
+            "Windows metafile rasterization is unavailable on this platform",
+        ))
+    }
+}
+
+/// Rasterize an EMF/WMF image to a [`image::DynamicImage`] for consumers other than OCR
+/// (e.g. the `images.output_format` re-encode pass). Non-metafile inputs are an error.
+pub(crate) fn rasterize_metafile_to_dynamic_image(
+    image: &ExtractedImage,
+    image_config: &crate::core::config::ImageExtractionConfig,
+    security_limits: &crate::extractors::security::SecurityLimits,
+) -> Result<image::DynamicImage, ImageOcrPreprocessError> {
+    let detected = crate::extraction::image_format::detect_image_format(&image.data);
+    if !matches!(detected.as_ref(), "emf" | "wmf") {
+        return Err(ImageOcrPreprocessError::new(
+            "format_detect",
+            "input is not a Windows metafile",
+        ));
+    }
+
+    let (width, height) = bounded_metafile_dimensions(image, image_config, security_limits)?;
+
+    #[cfg(windows)]
+    {
+        use xberg_windows_metafile::{MetafileKind, rasterize};
+
+        let kind = match detected.as_ref() {
+            "emf" => MetafileKind::Emf,
+            "wmf" if image.data.starts_with(&[0xD7, 0xCD, 0xC6, 0x9A]) => MetafileKind::PlaceableWmf,
+            "wmf" => MetafileKind::StandardWmf,
+            _ => unreachable!("metafile format checked above"),
+        };
+        let raster = rasterize(&image.data, kind, width, height)
+            .map_err(|error| ImageOcrPreprocessError::new("rasterize_decode", error.to_string()))?;
+        let expected = usize::try_from(raster.width)
+            .ok()
+            .and_then(|w| usize::try_from(raster.height).ok().and_then(|h| w.checked_mul(h)))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "RGBA result size overflow"))?;
+        if raster.rgba.len() != expected {
+            return Err(ImageOcrPreprocessError::new(
+                "rasterize_decode",
+                "rasterizer returned an invalid RGBA length",
+            ));
+        }
+        let rgba_bytes = u64::try_from(expected).unwrap_or(u64::MAX);
+        let content_limit = u64::try_from(security_limits.max_content_size).unwrap_or(u64::MAX);
+        if rgba_bytes > content_limit {
+            return Err(ImageOcrPreprocessError::new(
+                "rasterize_decode",
+                "metafile raster exceeds configured content limit",
+            ));
+        }
+        let rgba_img = image::RgbaImage::from_raw(raster.width, raster.height, raster.rgba)
+            .ok_or_else(|| ImageOcrPreprocessError::new("rasterize_decode", "RGBA buffer size mismatch"))?;
+        Ok(image::DynamicImage::ImageRgba8(rgba_img))
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (width, height);
+        Err(ImageOcrPreprocessError::new(
+            "rasterize_decode",
+            "Windows metafile rasterization is unavailable on this platform",
+        ))
+    }
+}
+
+/// One image queued for OCR: its index into `images`, the whole image (metafile
+/// rasterization runs inside the task and needs the bytes plus the declared format), the
+/// per-image `OcrConfig` clone (output format/acceleration/security limits applied), and the
+/// image-extraction knobs and security limits the rasterizer bounds its GDI surface with.
+#[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
+type PendingOcrTask = (
+    usize,
+    ExtractedImage,
+    crate::core::config::OcrConfig,
+    crate::core::config::ImageExtractionConfig,
+    crate::extractors::security::SecurityLimits,
+);
+
+/// The image index paired with its OCR outcome, as returned by a spawned task.
+#[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
+type OcrTaskResult = (usize, crate::Result<ExtractedDocument>);
 
 /// Process extracted images with OCR if configured.
 ///
@@ -48,67 +368,50 @@ use crate::types::{ExtractedDocument, ExtractedImage};
 /// budget (never a VLM-specific request limit — see the module docs) using a
 /// replenished task set, so queued images do not create an unbounded number of
 /// futures. Concurrent document extractions each enforce their own limit.
+// (fork) perf-tracing：图片 OCR 批处理阶段 span（一次调用 = 一份文档的全部图片）。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(
+        target = "perf",
+        name = "image_ocr",
+        skip_all,
+        fields(images = images.len())
+    )
+)]
 #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
 pub(crate) async fn process_images_with_ocr(
     mut images: Vec<ExtractedImage>,
     config: &crate::core::config::ExtractionConfig,
     warnings: &mut Vec<crate::types::ProcessingWarning>,
 ) -> crate::Result<Vec<ExtractedImage>> {
-    if images.is_empty() || config.ocr.is_none() {
+    // `runs_ocr_on_embedded_images` rather than `config.ocr.is_some()`: this early return
+    // was a third separately-written copy of the pipeline's gate, so `ocr_embedded_images:
+    // Some(true)` without an `ocr` block would have been accepted by the caller and then
+    // silently discarded here. Same predicate everywhere -- see GH#1662, GH#1752. ~keep
+    // (fork: the predicate keeps the fork defaults — embedded-image OCR on without an
+    // `ocr` block, falling back to the default backend config — and hard opt-outs
+    // `disable_ocr` / `ocr.enabled = false` still win inside it.)
+    if images.is_empty() || !config.runs_ocr_on_embedded_images() {
         return Ok(images);
     }
 
-    let ocr_config = config.ocr.as_ref().unwrap();
-    let output_format = config.output_format.clone();
-    let acceleration = ocr_config.acceleration.clone();
-
-    use std::collections::VecDeque;
-    use tokio::task::JoinSet;
-
-    let max_tasks = crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref());
-
-    type OcrTaskResult = (usize, crate::Result<ExtractedDocument>);
-    type PendingOcrTask = (usize, bytes::Bytes, crate::core::config::OcrConfig);
-    let mut join_set: JoinSet<OcrTaskResult> = JoinSet::new();
-    let mut pending: VecDeque<PendingOcrTask> = VecDeque::with_capacity(images.len());
-
-    for (idx, image) in images.iter().enumerate() {
-        let image_data = image.data.clone();
-        let mut ocr_config_clone = ocr_config.clone();
-        ocr_config_clone.output_format = Some(output_format.clone());
-        ocr_config_clone.acceleration = acceleration.clone();
-        pending.push_back((idx, image_data, ocr_config_clone));
+    // Opting in without an `ocr` block is an AUTOMATIC trigger: with nothing registered to
+    // run it, spawning a task per image would only produce one failure warning per image. ~keep
+    if config.ocr.is_none() && !crate::plugins::registry::automatic_ocr_backend_is_registered() {
+        return Ok(images);
     }
 
-    let spawn_task = |join_set: &mut JoinSet<OcrTaskResult>, (idx, image_data, ocr_config_clone): PendingOcrTask| {
-        join_set.spawn(async move {
-            let backend = {
-                let registry = crate::plugins::registry::get_ocr_backend_registry();
-                let registry = registry.read();
-                match registry.get(&ocr_config_clone.backend) {
-                    Ok(b) => b.clone(),
-                    Err(e) => {
-                        return (
-                            idx,
-                            Err(crate::XbergError::Ocr {
-                                message: format!("OCR backend '{}' not found: {}", ocr_config_clone.backend, e),
-                                source: None,
-                            }),
-                        );
-                    }
-                }
-            };
+    let default_ocr_config = crate::core::config::OcrConfig::default();
+    let ocr_config = config.ocr.as_ref().unwrap_or(&default_ocr_config);
+    let max_tasks = crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref());
+    let mut pending = build_pending_ocr_tasks(&images, ocr_config, config);
 
-            let ocr_result = backend.process_image(&image_data, &ocr_config_clone).await;
-            (idx, ocr_result)
-        });
-    };
-
+    let mut join_set: tokio::task::JoinSet<OcrTaskResult> = tokio::task::JoinSet::new();
     while join_set.len() < max_tasks {
         let Some(task) = pending.pop_front() else {
             break;
         };
-        spawn_task(&mut join_set, task);
+        spawn_ocr_task(&mut join_set, task);
     }
 
     while let Some(join_result) = join_set.join_next().await {
@@ -117,36 +420,163 @@ pub(crate) async fn process_images_with_ocr(
             source: None,
         })?;
 
-        match ocr_result {
-            Ok(extraction_result) => {
-                // Keep the backend's result whole. Rebuilding it field-by-field silently
-                // dropped everything the backend populated besides content/mime_type/
-                // ocr_elements — tables, metadata (OCR language, PSM, confidence),
-                // formulas, llm_usage (VLM cost accounting), detected_languages and
-                // processing_warnings. The PDF inline-image path already stores the
-                // backend result unmodified; mirror it here.
-                let mut ocr_document = extraction_result;
-                // Recursion guard: OCR output must never carry nested images, or an
-                // archive/recursive consumer would extract images out of OCR output.
-                ocr_document.images = None;
-                ocr_config.apply_public_element_policy(&mut ocr_document);
-                images[idx].ocr_result = Some(Box::new(ocr_document));
-            }
-            Err(e) => {
-                warnings.push(crate::types::ProcessingWarning {
-                    source: std::borrow::Cow::Borrowed("image_ocr"),
-                    message: std::borrow::Cow::Owned(format!("Image {} OCR failed: {}", idx, e)),
-                });
-                images[idx].ocr_result = None;
-            }
-        }
+        apply_ocr_result(&mut images, idx, ocr_result, ocr_config, warnings);
 
         if let Some(task) = pending.pop_front() {
-            spawn_task(&mut join_set, task);
+            spawn_ocr_task(&mut join_set, task);
         }
     }
 
     Ok(images)
+}
+
+/// Build one pending OCR task per image, applying the caller's output format, acceleration, and
+/// security limits onto a per-image `OcrConfig` clone.
+///
+/// GH#1554: `OcrConfig::security_limits` has no other way to reach a caller's configured
+/// limits - the `OcrBackend::process_image` trait method takes only `OcrConfig`, not
+/// `ExtractionConfig` - so it must be copied onto each per-image clone here, mirroring
+/// `acceleration`. `ExtractionConfig::security_limits` is the source of truth; a backend seeing
+/// `None` here must fall back to `SecurityLimits::default()`, never disable the check. ~keep
+#[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
+fn build_pending_ocr_tasks(
+    images: &[ExtractedImage],
+    ocr_config: &crate::core::config::OcrConfig,
+    config: &crate::core::config::ExtractionConfig,
+) -> std::collections::VecDeque<PendingOcrTask> {
+    let output_format = config.output_format.clone();
+    let acceleration = ocr_config.acceleration.clone();
+    let security_limits = config.security_limits.clone();
+
+    // Rasterization runs before any backend sees the image, so it must bound the GDI surface
+    // itself; a caller that configured no `security_limits` gets the crate defaults rather
+    // than an unbounded allocation. `OcrConfig::security_limits` keeps the `Option` above.
+    let raster_security_limits = security_limits.clone().unwrap_or_default();
+    // Metafile rasterization needs the same image-extraction knobs the extractors already
+    // honour (`target_dpi`, `max_image_dimension`), so pull the section once for every task.
+    let image_config = config.images.clone().unwrap_or_default();
+
+    let mut pending = std::collections::VecDeque::with_capacity(images.len());
+    for (idx, image) in images.iter().cloned().enumerate() {
+        let mut ocr_config_clone = ocr_config.clone();
+        ocr_config_clone.output_format = Some(output_format.clone());
+        ocr_config_clone.acceleration = acceleration.clone();
+        // Conditional for the same reason as the standalone-image route (GH#1651): do not
+        // replace a directly-set `OcrConfig::security_limits` with `None`. ~keep
+        if let Some(limits) = security_limits.clone() {
+            ocr_config_clone.security_limits = Some(limits);
+        }
+        pending.push_back((
+            idx,
+            image,
+            ocr_config_clone,
+            image_config.clone(),
+            raster_security_limits.clone(),
+        ));
+    }
+    pending
+}
+
+/// Spawn one OCR task onto `join_set`, resolving the backend from the registry at spawn time.
+///
+/// The task carries the whole image rather than bare bytes because EMF/WMF entries are
+/// rasterized here, off the async executor (GDI work is CPU-bound and blocking), before any
+/// backend sees them. The declared format is honoured alongside the detected one because a
+/// caller may label the bytes `emf`/`wmf` while the header is subtly invalid; that mismatch
+/// must fail loudly instead of being fed to the backend as an opaque blob.
+#[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
+fn spawn_ocr_task(join_set: &mut tokio::task::JoinSet<OcrTaskResult>, task: PendingOcrTask) {
+    join_set.spawn(async move {
+        let (idx, image, ocr_config_clone, image_config, security_limits) = task;
+        let ocr_result = async {
+            // EMF/WMF are vector formats no OCR backend can decode. Rasterize them to a
+            // PNG first, off the async executor (GDI work is CPU-bound and blocking).
+            // The declared format is also honoured because a caller may label the bytes
+            // `emf`/`wmf` while the header is subtly invalid; that mismatch must fail
+            // loudly instead of being fed to the backend as an opaque blob.
+            let detected = crate::extraction::image_format::detect_image_format(&image.data);
+            let is_metafile =
+                matches!(detected.as_ref(), "emf" | "wmf") || matches!(image.format.as_ref(), "emf" | "wmf");
+            let prepared: bytes::Bytes = if is_metafile {
+                tokio::task::spawn_blocking(move || {
+                    prepare_image_for_ocr(&image, &image_config, &security_limits)
+                        .map(|cow| bytes::Bytes::from(cow.into_owned()))
+                })
+                .await
+                .map_err(|error| crate::XbergError::Ocr {
+                    message: format!("metafile rasterization task panicked: {}", error),
+                    source: None,
+                })?
+                .map_err(|error| crate::XbergError::Ocr {
+                    message: format!("metafile rasterization failed at {}: {}", error.stage, error.reason),
+                    source: None,
+                })?
+            } else {
+                image.data.clone()
+            };
+
+            let backend = {
+                let registry = crate::plugins::registry::get_ocr_backend_registry();
+                let registry = registry.read();
+                match registry.get(&ocr_config_clone.backend) {
+                    Ok(b) => b.clone(),
+                    Err(e) => {
+                        return Err(crate::XbergError::Ocr {
+                            message: format!("OCR backend '{}' not found: {}", ocr_config_clone.backend, e),
+                            source: None,
+                        });
+                    }
+                }
+            };
+
+            backend.process_image(&prepared, &ocr_config_clone).await
+        }
+        .await;
+        (idx, ocr_result)
+    });
+}
+
+/// Apply one completed OCR task's result onto `images[idx]`, recording a warning on failure.
+#[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
+fn apply_ocr_result(
+    images: &mut [ExtractedImage],
+    idx: usize,
+    ocr_result: crate::Result<ExtractedDocument>,
+    ocr_config: &crate::core::config::OcrConfig,
+    warnings: &mut Vec<crate::types::ProcessingWarning>,
+) {
+    match ocr_result {
+        Ok(extraction_result) => {
+            // Keep the backend's result whole. Rebuilding it field-by-field silently
+            // dropped everything the backend populated besides content/mime_type/
+            // ocr_elements — tables, metadata (OCR language, PSM, confidence),
+            // formulas, llm_usage (VLM cost accounting), detected_languages and
+            // processing_warnings. The PDF inline-image path already stores the
+            // backend result unmodified; mirror it here. ~keep
+            let mut ocr_document = extraction_result;
+            // Recursion guard: OCR output must never carry nested images, or an
+            // archive/recursive consumer would extract images out of OCR output. ~keep
+            ocr_document.images = None;
+            ocr_config.apply_public_element_policy(&mut ocr_document);
+            // (fork) The markdown renderer builds the image's OCR grid fence from this
+            // very result (`ExtractedImage::ocr_result`), so with `numeric_repair` on the
+            // repair must reach every representation it carries; otherwise the fence keeps
+            // the unrepaired token right next to the repaired prose the standalone-image
+            // route extracted.
+            if ocr_config.numeric_repair {
+                let content_is_prose = crate::extractors::pdf::ocr::ocr_content_is_repairable_prose(ocr_config);
+                crate::extractors::pdf::ocr::repair_extracted_document_numbers(&mut ocr_document, content_is_prose);
+            }
+            images[idx].ocr_result = Some(Box::new(ocr_document));
+        }
+        Err(e) => {
+            warnings.push(crate::types::ProcessingWarning {
+                source: std::borrow::Cow::Borrowed("image_ocr"),
+                message: std::borrow::Cow::Owned(format!("Image {} OCR failed: {}", idx, e)),
+            });
+            images[idx].ocr_result = None;
+        }
+    }
 }
 
 #[cfg(all(test, feature = "ocr", feature = "tokio-runtime"))]
@@ -187,6 +617,101 @@ mod tests {
     struct GatedBackend {
         calls: Arc<AtomicUsize>,
         gate: Arc<Notify>,
+    }
+
+    const SECURITY_LIMITS_CAPTURE_BACKEND_NAME: &str = "security-limits-capture-test-backend";
+
+    /// Captures the `security_limits` on the `OcrConfig` it receives, so the test can assert
+    /// on what actually reached the backend rather than trusting the caller's intent.
+    struct SecurityLimitsCaptureBackend {
+        observed_max_content_size: Arc<std::sync::Mutex<Option<Option<usize>>>>,
+    }
+
+    impl Plugin for SecurityLimitsCaptureBackend {
+        fn name(&self) -> &str {
+            SECURITY_LIMITS_CAPTURE_BACKEND_NAME
+        }
+
+        fn version(&self) -> String {
+            "1.0.0".to_string()
+        }
+
+        fn initialize(&self) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn shutdown(&self) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl OcrBackend for SecurityLimitsCaptureBackend {
+        async fn process_image(&self, _image_bytes: &[u8], config: &OcrConfig) -> crate::Result<ExtractedDocument> {
+            let observed = config.security_limits.as_ref().map(|limits| limits.max_content_size);
+            *self.observed_max_content_size.lock().unwrap() = Some(observed);
+            Ok(ExtractedDocument::default())
+        }
+
+        fn supports_language(&self, _lang: &str) -> bool {
+            true
+        }
+
+        fn backend_type(&self) -> OcrBackendType {
+            OcrBackendType::Custom
+        }
+    }
+
+    /// GH#1554 regression: `ExtractionConfig::security_limits` must reach the `OcrConfig`
+    /// handed to `OcrBackend::process_image` for embedded-image OCR (DOCX/PPTX/etc.), the
+    /// same way `OcrConfig::acceleration` already does. Before this fix, `OcrConfig` had no
+    /// `security_limits` field at all, so a caller's configured, possibly higher, limit could
+    /// never reach a backend through this path — every backend silently decoded under
+    /// `SecurityLimits::default()` regardless of what the caller configured.
+    #[tokio::test]
+    async fn extraction_config_security_limits_reach_embedded_image_ocr_config() {
+        let observed_max_content_size = Arc::new(std::sync::Mutex::new(None));
+        crate::plugins::register_ocr_backend(Arc::new(SecurityLimitsCaptureBackend {
+            observed_max_content_size: Arc::clone(&observed_max_content_size),
+        }))
+        .expect("register security-limits capture OCR backend");
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = crate::plugins::unregister_ocr_backend(SECURITY_LIMITS_CAPTURE_BACKEND_NAME);
+            }
+        }
+        let _guard = Guard;
+
+        let configured_limit = 200 * 1024 * 1024;
+        let config = crate::core::config::ExtractionConfig {
+            ocr: Some(OcrConfig {
+                backend: SECURITY_LIMITS_CAPTURE_BACKEND_NAME.to_string(),
+                ..Default::default()
+            }),
+            security_limits: Some(crate::extractors::security::SecurityLimits {
+                max_content_size: configured_limit,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let images = vec![ExtractedImage {
+            data: Bytes::from_static(b"image"),
+            ..Default::default()
+        }];
+        let mut warnings = Vec::new();
+
+        process_images_with_ocr(images, &config, &mut warnings)
+            .await
+            .expect("embedded-image OCR must succeed");
+
+        assert!(warnings.is_empty());
+        let observed = observed_max_content_size.lock().unwrap();
+        assert_eq!(
+            *observed,
+            Some(Some(configured_limit)),
+            "OcrConfig::security_limits must carry the caller's ExtractionConfig::security_limits"
+        );
     }
 
     struct PolicyIgnoringBackend;
@@ -303,7 +828,10 @@ mod tests {
                 }),
                 ..Default::default()
             }),
-            concurrency: Some(ConcurrencyConfig { max_threads: Some(2) }),
+            concurrency: Some(ConcurrencyConfig {
+                max_threads: Some(2),
+                max_concurrent_ocr: None,
+            }),
             ..Default::default()
         };
         let images = (0..6)
@@ -358,5 +886,112 @@ mod tests {
         assert!(nested.ocr_elements.is_none());
         assert!(warnings.is_empty());
         crate::plugins::unregister_ocr_backend(POLICY_BACKEND_NAME).unwrap();
+    }
+
+    const DISABLED_OCR_BACKEND_NAME: &str = "disabled-image-ocr-test-backend";
+
+    /// Counts every `process_image` call, so a test can assert that a caller who disabled OCR
+    /// never reached the backend rather than trusting the returned images alone.
+    struct CountingBackend {
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl Plugin for CountingBackend {
+        fn name(&self) -> &str {
+            DISABLED_OCR_BACKEND_NAME
+        }
+
+        fn version(&self) -> String {
+            "1.0.0".to_string()
+        }
+
+        fn initialize(&self) -> crate::Result<()> {
+            Ok(())
+        }
+
+        fn shutdown(&self) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl OcrBackend for CountingBackend {
+        async fn process_image(&self, _image_bytes: &[u8], _config: &OcrConfig) -> crate::Result<ExtractedDocument> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(ExtractedDocument::default())
+        }
+
+        fn supports_language(&self, _lang: &str) -> bool {
+            true
+        }
+
+        fn backend_type(&self) -> OcrBackendType {
+            OcrBackendType::Custom
+        }
+    }
+
+    struct DisabledBackendGuard;
+
+    impl Drop for DisabledBackendGuard {
+        fn drop(&mut self) {
+            let _ = crate::plugins::unregister_ocr_backend(DISABLED_OCR_BACKEND_NAME);
+        }
+    }
+
+    /// `disable_ocr` and the `ocr.enabled = false` shorthand are documented as hard switches
+    /// ("Disable OCR entirely, even for images"), but this helper used to synthesize a default
+    /// (enabled) `OcrConfig` when none was configured and forward any caller config verbatim —
+    /// so an explicit opt-out still OCR'd every image and loaded the default backend's model.
+    /// Both variants must now short-circuit before the backend runs, while the images survive
+    /// unprocessed.
+    #[tokio::test]
+    async fn disabled_ocr_never_reaches_the_backend() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        crate::plugins::register_ocr_backend(Arc::new(CountingBackend {
+            calls: Arc::clone(&calls),
+        }))
+        .expect("register counting OCR backend");
+        let _guard = DisabledBackendGuard;
+
+        let image = || ExtractedImage {
+            data: Bytes::from_static(b"image"),
+            ..Default::default()
+        };
+        let mut warnings = Vec::new();
+
+        let config = crate::core::config::ExtractionConfig {
+            ocr: Some(OcrConfig {
+                backend: DISABLED_OCR_BACKEND_NAME.to_string(),
+                enabled: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let images = process_images_with_ocr(vec![image()], &config, &mut warnings)
+            .await
+            .expect("a disabled OCR config must still return the images");
+        assert!(
+            images[0].ocr_result.is_none(),
+            "ocr.enabled = false must skip embedded-image OCR"
+        );
+
+        let config = crate::core::config::ExtractionConfig {
+            disable_ocr: true,
+            ..Default::default()
+        };
+        let images = process_images_with_ocr(vec![image()], &config, &mut warnings)
+            .await
+            .expect("a disabled OCR config must still return the images");
+        assert!(
+            images[0].ocr_result.is_none(),
+            "disable_ocr must skip embedded-image OCR"
+        );
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a caller who disabled OCR must never reach the OCR backend"
+        );
+        assert!(warnings.is_empty());
     }
 }

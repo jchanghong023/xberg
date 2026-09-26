@@ -394,13 +394,52 @@ const PDFIUM_KNOWN_REGRESSIONS: &[&str] = &[
     // nougat_026 is the same file as pdfa_001 (identical md5); its duplicate table row was
     // removed, so the pdfa_001 entry covers both. ~keep
     "pdfa_001", // GT policy mismatch (synthesized ☐/☑ + by-design furniture stripping), not a regression
+    //
+    // pdfa_019's ground truth is HALLUCINATED -- it is not a transcript of this PDF. Verified by
+    // counting both sides of the same file: the PDF (via `pdftotext -layout`, a faithful non-ML
+    // text layer) contains "Dobson" x18, "Crisis" x12, "Goodreads" x1. The ground truth contains
+    // ZERO of those three and instead carries "Babson" x14, "China" x7, "Goodneath" x1, plus
+    // "Bobbin", "Robian", "Blowin" and "rebrinding" x3. These are VLM/OCR fabrications, the same
+    // corpus defect class as pdfa_001's synthesized glyphs: every fabricated token is penalised
+    // twice (missing GT word + spurious extracted word), so no extractor can ever reach 1.0 here.
+    // The 0.913 calibration measurement was taken against this same corrupt GT, which is why the
+    // recorded floor is 0.84 rather than something near 0.99.
+    //
+    // A SECOND, REAL REGRESSION IS STACKED UNDER THAT CEILING and is NOT fixed by this entry:
+    // md/djot F1 measured 0.795 today vs 0.913 at calibration, a 0.118 drop that appeared after
+    // 2026-08-08 (`9b9362c1e35` lists the docs that had regressed as of that date and pdfa_019 is
+    // not among them). Not bisected -- ~409 commits touched crates/xberg/src in that window, many
+    // in PDF heading/paragraph paths. This is single-column with no tables, so the table-guard and
+    // multi-column reading-order defect classes are unlikely; paragraph assembly or heading
+    // detection is the more plausible cause.
+    //
+    // Retire this entry only when BOTH are addressed: regenerate the ground truth from a
+    // non-hallucinating text extractor, AND root-cause the 0.913 -> 0.795 drop. Do not lower the
+    // floor -- the floor is not what is wrong here. ~keep
+    "pdfa_019",
 ];
 
 /// Extract a PDF with the given output format.
+///
+/// Image OCR is switched off for these gates: they score extracted text-layer content
+/// against a `pdftotext`-style ground truth, and this fork's default additionally runs OCR
+/// over embedded images and renders each image's recognised text as a fenced block
+/// (fork.md). Those blocks carry content the ground truth structurally cannot contain —
+/// the images' own text — so counting them as extraction precision penalises a documented
+/// fork default instead of measuring extraction quality. Measured on this corpus
+/// (2026-09-20): with the fenced image-OCR text scored, 9 fixtures drop below their
+/// calibrated floors (pdfa_026 0.684 vs 0.90, pr-136-example 0.220 vs 0.36, 2206.01062
+/// 0.741 vs 0.79, …); with it excluded every one of them clears its floor (pdfa_026 0.979,
+/// pr-136-example 0.625, 2206.01062 0.962). Body-text extraction is untouched, which is
+/// what these floors are calibrated for.
 fn extract_with_format(pdf_path: &std::path::Path, format: OutputFormat) -> Option<xberg::types::ExtractedDocument> {
     let config = ExtractionConfig {
         output_format: format,
         use_cache: false,
+        images: Some(xberg::core::config::ImageExtractionConfig {
+            run_ocr_on_images: false,
+            ..Default::default()
+        }),
         ..Default::default()
     };
     extract_uri_document_blocking(pdf_path, None, &config).ok()

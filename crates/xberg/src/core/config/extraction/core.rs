@@ -90,6 +90,52 @@ pub struct ExtractionConfig {
     #[serde(default)]
     pub disable_ocr: bool,
 
+    /// Whether a PDF whose native text layer is empty or near-empty falls back to OCR
+    /// under [`OcrStrategy::Auto`] (GH#1752).
+    ///
+    /// `None` (the default) derives the answer from whether [`Self::ocr`] is set, which is
+    /// exactly the behaviour shipped before this field existed: with an `ocr` block the
+    /// fallback always runs, and without one it runs only when the page's native text is
+    /// *completely* empty (#1338). That carve-out means a scanned page carrying a visible
+    /// page label, Bates number or scanner stamp keeps only that label.
+    ///
+    /// `Some(true)` applies the near-empty fallback without requiring an `ocr` block: the
+    /// text-quality gate decides, using [`OcrConfig::default`]'s thresholds when no block is
+    /// present, and an automatic OCR backend must be registered.
+    ///
+    /// `Some(false)` suppresses the fallback even when an `ocr` block is present.
+    #[serde(default)]
+    pub ocr_near_empty_fallback: Option<bool>,
+
+    /// Whether [`OcrStrategy::ScannedPages`] folds the per-page text-quality gate into its
+    /// page selection, on top of the pages scan detection flagged (GH#1752).
+    ///
+    /// `None` (the default) derives the answer from whether [`Self::ocr`] is set, which is
+    /// exactly the behaviour shipped before this field existed. Without an `ocr` block
+    /// `ScannedPages` therefore degrades to detected-scans-only.
+    ///
+    /// `Some(true)` runs the gate without requiring an `ocr` block, using
+    /// [`OcrConfig::default`]'s thresholds; an automatic OCR backend must be registered.
+    ///
+    /// `Some(false)` selects detected scans only even when an `ocr` block is present, which
+    /// is the setting that avoids paying for recognition across a whole mixed document.
+    #[serde(default)]
+    pub ocr_scanned_page_quality_gate: Option<bool>,
+
+    /// Whether images embedded in a container document (DOCX, PPTX, ODT, HTML, ...) are sent
+    /// to OCR (GH#1752).
+    ///
+    /// `None` (the default) derives the answer from whether [`Self::ocr`] is set, which is
+    /// exactly the behaviour shipped before this field existed. `Some(true)` recognises
+    /// picture text without requiring an `ocr` block; `Some(false)` suppresses it even when
+    /// a block is present.
+    ///
+    /// Orthogonal to [`ImageExtractionConfig::run_ocr_on_images`], which still has to be
+    /// `true` (its own default) for embedded-image OCR to run. See
+    /// [`Self::runs_ocr_on_embedded_images`].
+    #[serde(default)]
+    pub ocr_embedded_images: Option<bool>,
+
     /// Text chunking configuration (None = chunking disabled)
     #[serde(default)]
     pub chunking: Option<ChunkingConfig>,
@@ -207,11 +253,11 @@ pub struct ExtractionConfig {
     #[serde(default = "ExtractionConfig::default_max_embedded_file_bytes")]
     pub max_embedded_file_bytes: Option<u64>,
 
-    /// Content text format (default: Plain).
+    /// Content text format (default: `Markdown`).
     ///
     /// Controls the format of the extracted content:
-    /// - `Plain`: Raw extracted text (default)
-    /// - `Markdown`: Markdown formatted output
+    /// - `Plain`: Raw extracted text
+    /// - `Markdown`: Markdown formatted output (default)
     /// - `Djot`: Djot markup format (requires djot feature)
     /// - `Html`: HTML formatted output
     ///
@@ -541,6 +587,9 @@ impl Default for ExtractionConfig {
             ocr_strategy: OcrStrategy::Auto,
             force_ocr_pages: None,
             disable_ocr: false,
+            ocr_near_empty_fallback: None,
+            ocr_scanned_page_quality_gate: None,
+            ocr_embedded_images: None,
             chunking: None,
             content_filter: None,
             images: None,
@@ -566,7 +615,7 @@ impl Default for ExtractionConfig {
             transcription: None,
             use_layout_for_markdown: false,
             result_format: crate::types::ResultFormat::Unified,
-            output_format: OutputFormat::Plain,
+            output_format: OutputFormat::Markdown,
             escape_markdown: true,
             table_anchors: false,
             jupyter_cell_rendering: JupyterCellRendering::Both,
@@ -1053,13 +1102,65 @@ impl ExtractionConfig {
     /// For text-only extractions (no OCR, no image extraction), skipping image
     /// decompression can improve CPU utilization by 5-10% by avoiding wasteful
     /// image I/O and processing when results won't be used.
-    /// Returns `true` when image binary data should be extracted.
+    /// Returns `true` when a CONTAINER document (DOCX, PPT, PPTX, HTML, ...) needs
+    /// to read an embedded image's binary data out of its archive or source.
     ///
-    /// True when `config.images.extract_images` is set, captioning is configured, or QR-code
-    /// detection is enabled. Captioning and QR-code detection both require image bytes
-    /// regardless of whether the caller also requested image extraction.
+    /// True unless the caller opted out via `config.images.extract_images = false` —
+    /// an absent `images` section means "use the defaults", not "no images". Also true
+    /// when embedded images get OCR'd, captioning is configured, or QR-code detection
+    /// is enabled: all of them consume bytes the container would otherwise skip. The
+    /// embedded-image OCR disjunct exists because before it did, a container asked this
+    /// question, was told no, and attached an image with an empty buffer, which OCR then
+    /// ran on and reported `Could not determine image format` (GH#1662).
     pub fn needs_image_data(&self) -> bool {
-        self.images.as_ref().is_some_and(|i| i.extract_images)
+        self.images.as_ref().map(|i| i.extract_images).unwrap_or(true)
+            || self.runs_ocr_on_embedded_images()
+            || self.captioning.is_some()
+            || self.qr_codes == Some(true)
+    }
+
+    /// Whether embedded images get OCR'd.
+    ///
+    /// This is THE condition -- `core/pipeline/mod.rs` and
+    /// `extraction::image_ocr::process_images_with_ocr` both call this method rather than
+    /// re-deriving it, because when two copies of it drifted apart a container extractor
+    /// asked `needs_image_data` and was told no, so it attached an image with an empty
+    /// buffer, and the OCR path then ran on those zero bytes and reported `Could not
+    /// determine image format` (GH#1662). A re-derived copy anywhere reopens that defect;
+    /// `embedded_image_ocr_gate_has_no_second_copy` in `core/pipeline/tests.rs` fails if
+    /// one appears. ~keep
+    ///
+    /// [`Self::ocr_embedded_images`] is the caller's explicit answer to the OCR half.
+    /// Fork deviation: when it is `None` this defaults to `true` instead of deriving from
+    /// whether an `ocr` block is present -- `process_images_with_ocr` falls back to the
+    /// default backend config, so an `ocr` section is NOT required (the fork's default
+    /// backend is PaddleOCR pp-ocrv6 tiny).
+    ///
+    /// `disable_ocr` still wins regardless: it is documented as skipping OCR "for all
+    /// document types", and `ocr_embedded_images` (like the plain presence of an `ocr`
+    /// block before it) is an AUTOMATIC trigger, not an explicit request like `force_ocr` --
+    /// see [`Self::effective_disable_ocr`]'s callers elsewhere (`needs_image_processing`,
+    /// `extractors/image.rs`, `engine/extract_impl.rs`) for the same precedent.
+    pub fn runs_ocr_on_embedded_images(&self) -> bool {
+        cfg!(all(feature = "ocr", feature = "tokio-runtime"))
+            && !self.effective_disable_ocr()
+            && self.ocr_embedded_images.unwrap_or(true)
+            && self.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true)
+    }
+
+    /// Returns `true` when a standalone image extraction (the whole input document IS
+    /// the image, not a container's embedded picture) should attach its own already-read
+    /// bytes to the result's `images` array.
+    ///
+    /// Deliberately narrower than [`needs_image_data`](Self::needs_image_data): a standalone
+    /// image's content is read in full before this question is ever asked, whether or not OCR
+    /// runs, so OCR being configured is not by itself a reason to echo those bytes back in the
+    /// public output. Fork default: image extraction is ON when the `images` section is
+    /// absent, so a standalone image's bytes land in the result by default; explicit
+    /// `images.extract_images = false` opts out (captioning and QR-code detection still
+    /// need the bytes regardless).
+    pub fn wants_own_bytes_in_result(&self) -> bool {
+        self.images.as_ref().map(|i| i.extract_images).unwrap_or(true)
             || self.captioning.is_some()
             || self.qr_codes == Some(true)
     }
@@ -1651,19 +1752,77 @@ mod tests {
         );
     }
 
+    /// Embedded-image OCR reads the image bytes, so a configuration that runs it
+    /// has to report that it needs them. A container extractor asks this question
+    /// to decide whether to read the image out of its archive; when the answer was
+    /// no, the image still reached the OCR path, with an empty buffer (GH#1662).
     #[test]
-    fn test_needs_image_data_includes_qr_codes() {
+    fn a_config_that_ocrs_embedded_images_needs_the_image_data() {
         let config = ExtractionConfig {
-            qr_codes: Some(true),
+            ocr: Some(OcrConfig::default()),
             ..Default::default()
         };
-        assert!(config.needs_image_data());
+        assert!(
+            config.needs_image_data(),
+            "OCR of embedded images consumes the bytes, so they must be read"
+        );
+    }
 
+    /// Turning embedded-image OCR off leaves the answer where it was, so a
+    /// text-only extraction still skips reading images out of the container.
+    #[test]
+    fn a_config_that_does_not_ocr_embedded_images_still_skips_the_data() {
         let config = ExtractionConfig {
-            qr_codes: Some(false),
+            ocr: Some(OcrConfig::default()),
+            images: Some(ImageExtractionConfig {
+                extract_images: false,
+                run_ocr_on_images: false,
+                ..Default::default()
+            }),
             ..Default::default()
         };
         assert!(!config.needs_image_data());
+    }
+
+    #[test]
+    fn test_needs_image_data_defaults_on_and_includes_qr_codes() {
+        let config = ExtractionConfig::default();
+        assert!(config.needs_image_data(), "image data is requested by default");
+
+        let config = ExtractionConfig {
+            images: Some(crate::core::config::ImageExtractionConfig {
+                extract_images: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            config.needs_image_data(),
+            "embedded-image OCR is on by default, so extract_images = false alone still reads bytes"
+        );
+
+        let config = ExtractionConfig {
+            images: Some(crate::core::config::ImageExtractionConfig {
+                extract_images: false,
+                run_ocr_on_images: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !config.needs_image_data(),
+            "extract_images = false + run_ocr_on_images = false opts out of reading image data"
+        );
+
+        let config = ExtractionConfig {
+            images: Some(crate::core::config::ImageExtractionConfig {
+                extract_images: false,
+                ..Default::default()
+            }),
+            qr_codes: Some(true),
+            ..Default::default()
+        };
+        assert!(config.needs_image_data(), "QR detection still needs image bytes");
     }
 
     #[test]
@@ -1776,6 +1935,190 @@ mod tests {
             err.to_string(),
             "Validation error: Invalid CSV delimiter ''. Must be exactly one ASCII character (e.g. ',', ';', '\\t', '|')."
         );
+    }
+
+    /// GH#1752. The load-bearing property of all three new settings: leaving one unset must
+    /// reproduce the derived answer bit-for-bit, for every shape of `ocr` block. Written as a
+    /// comparison against the pre-#1752 expression rather than against hard-coded booleans so
+    /// it fails if the *derivation* drifts, not merely if a literal was mistyped.
+    #[test]
+    fn ocr_behaviour_settings_left_unset_reproduce_the_derived_answer() {
+        for ocr in [None, Some(OcrConfig::default())] {
+            for images in [
+                None,
+                Some(ImageExtractionConfig::default()),
+                Some(ImageExtractionConfig {
+                    run_ocr_on_images: false,
+                    ..Default::default()
+                }),
+            ] {
+                let config = ExtractionConfig {
+                    ocr: ocr.clone(),
+                    images: images.clone(),
+                    ..Default::default()
+                };
+
+                assert_eq!(
+                    config.ocr_near_empty_fallback, None,
+                    "ocr_near_empty_fallback must default to None"
+                );
+                assert_eq!(
+                    config.ocr_scanned_page_quality_gate, None,
+                    "ocr_scanned_page_quality_gate must default to None"
+                );
+                assert_eq!(
+                    config.ocr_embedded_images, None,
+                    "ocr_embedded_images must default to None"
+                );
+
+                // Fork: with the setting unset the answer stays `run_ocr_on_images` alone --
+                // embedded-image OCR is on by default (no `ocr` block required; the missing
+                // block falls back to the default backend config), not `ocr.is_some() && …`
+                // as upstream derives it.
+                let pre_1752 = config.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true);
+                assert_eq!(
+                    config.runs_ocr_on_embedded_images(),
+                    pre_1752,
+                    "with ocr_embedded_images unset the answer must stay `run_ocr_on_images` \
+                     (fork: on by default without an `ocr` block), \
+                     for ocr={:?} images={:?}",
+                    config.ocr.is_some(),
+                    config.images.as_ref().map(|i| i.run_ocr_on_images),
+                );
+            }
+        }
+    }
+
+    /// `Some(_)` decides the OCR half outright, in both directions, and neither direction can
+    /// override `run_ocr_on_images: false` -- the two settings are orthogonal, not a fallback
+    /// chain.
+    #[test]
+    fn ocr_embedded_images_overrides_the_presence_of_an_ocr_block_in_both_directions() {
+        let on_without_block = ExtractionConfig {
+            ocr: None,
+            ocr_embedded_images: Some(true),
+            ..Default::default()
+        };
+        assert!(
+            on_without_block.runs_ocr_on_embedded_images(),
+            "Some(true) must recognise picture text with no `ocr` block"
+        );
+        assert!(
+            on_without_block.needs_image_data(),
+            "and the container must therefore still read the bytes (GH#1662)"
+        );
+
+        // Fork: image extraction is on by default, so "nothing else is asking for the bytes"
+        // needs it turned off explicitly here -- the point under test is the OCR half alone.
+        let off_with_block = ExtractionConfig {
+            ocr: Some(OcrConfig::default()),
+            ocr_embedded_images: Some(false),
+            images: Some(ImageExtractionConfig {
+                extract_images: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !off_with_block.runs_ocr_on_embedded_images(),
+            "Some(false) must suppress embedded-image OCR even with an `ocr` block"
+        );
+        assert!(
+            !off_with_block.needs_image_data(),
+            "and nothing else is asking for the bytes, so they must not be read"
+        );
+
+        let on_but_images_opted_out = ExtractionConfig {
+            ocr: None,
+            ocr_embedded_images: Some(true),
+            images: Some(ImageExtractionConfig {
+                run_ocr_on_images: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !on_but_images_opted_out.runs_ocr_on_embedded_images(),
+            "`images.run_ocr_on_images: false` still wins: the two settings are independent"
+        );
+    }
+
+    /// `disable_ocr: true` is documented as skipping OCR "for all document types" and must
+    /// win over `ocr_embedded_images: Some(true)`, the same way it already wins over a plain
+    /// `ocr` block elsewhere (`needs_image_processing`'s `ocr_enabled`, `extractors/image.rs`,
+    /// `engine/extract_impl.rs`).
+    #[test]
+    fn disable_ocr_suppresses_embedded_image_ocr_even_when_opted_in() {
+        // Fork: image extraction is on by default; turn it off so the bytes in question are
+        // "only embedded-image OCR wanted" and the second assertion isolates the OCR half.
+        let config = ExtractionConfig {
+            ocr: None,
+            ocr_embedded_images: Some(true),
+            disable_ocr: true,
+            images: Some(ImageExtractionConfig {
+                extract_images: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(
+            !config.runs_ocr_on_embedded_images(),
+            "disable_ocr must suppress embedded-image OCR even when explicitly opted in"
+        );
+        assert!(
+            !config.needs_image_data(),
+            "and the container must not pay for reading bytes only embedded-image OCR wanted"
+        );
+    }
+
+    /// `wants_own_bytes_in_result` is deliberately narrower and must not start echoing a
+    /// standalone image's bytes back just because the new opt-in turned embedded-image OCR on.
+    #[test]
+    fn ocr_embedded_images_does_not_widen_wants_own_bytes_in_result() {
+        // Fork: image extraction is on by default; turn it off so the narrower predicate's
+        // remaining conditions (captioning, qr_codes) are the only things under test.
+        let config = ExtractionConfig {
+            ocr: None,
+            ocr_embedded_images: Some(true),
+            images: Some(ImageExtractionConfig {
+                extract_images: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert!(config.runs_ocr_on_embedded_images());
+        assert!(
+            !config.wants_own_bytes_in_result(),
+            "the narrower predicate must keep its three conditions (extract_images, captioning, qr_codes)"
+        );
+    }
+
+    /// `deny_unknown_fields` is on, so a config file written before these fields existed must
+    /// still deserialize -- and land on the derived behaviour.
+    #[test]
+    fn a_config_without_the_new_ocr_fields_deserializes_to_the_derived_behaviour() {
+        let config: ExtractionConfig =
+            serde_json::from_str(r#"{"ocr":{"backend":"tesseract"}}"#).expect("older config must still parse");
+        assert_eq!(config.ocr_near_empty_fallback, None);
+        assert_eq!(config.ocr_scanned_page_quality_gate, None);
+        assert_eq!(config.ocr_embedded_images, None);
+        assert!(config.runs_ocr_on_embedded_images());
+    }
+
+    /// All three round-trip through the wire format, so a binding can actually set them.
+    #[test]
+    fn the_new_ocr_fields_round_trip_through_json() {
+        let config = ExtractionConfig {
+            ocr_near_empty_fallback: Some(true),
+            ocr_scanned_page_quality_gate: Some(false),
+            ocr_embedded_images: Some(true),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&config).expect("serialize");
+        let round_tripped: ExtractionConfig = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(round_tripped.ocr_near_empty_fallback, Some(true));
+        assert_eq!(round_tripped.ocr_scanned_page_quality_gate, Some(false));
+        assert_eq!(round_tripped.ocr_embedded_images, Some(true));
     }
 
     #[test]

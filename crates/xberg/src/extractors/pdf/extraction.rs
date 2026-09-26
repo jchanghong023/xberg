@@ -24,6 +24,7 @@ pub(crate) type PdfExtractionPhaseResult = (
     Vec<crate::types::PdfFormField>,
     Vec<crate::types::ProcessingWarning>,
     Option<Vec<String>>,
+    Vec<crate::types::internal::PdfPageCoordinateFrame>,
 );
 
 #[cfg(feature = "pdf")]
@@ -62,13 +63,24 @@ fn effective_layout_acceleration<'a>(
 /// (`core/pipeline/format.rs`'s `custom_fallback_to_plain`). `DocTags` is a real,
 /// always-registered built-in renderer that needs the same geometry and headings
 /// as Markdown/Djot/HTML, so it gets its own explicit arm instead.
+///
+/// `include_document_structure` triggers it directly (GH#1668): a caller who set
+/// only that flag, with `output_format` left at its `Plain` default, used to get
+/// `flat_pdf_document`'s paragraph-only elements. `include_document_structure`
+/// then dutifully built a structure tree from them, correctly, since the tree
+/// builder is not what was broken -- it had nothing but paragraphs to build
+/// from. `counts.tables` looked unaffected because it reads `doc.tables`
+/// directly, never the element tree, so the document looked like it knew about
+/// its own tables while the structure asking for them came back flat.
 fn needs_structured_extraction(
     hierarchy_enabled: bool,
+    include_document_structure: bool,
     output_format: &OutputFormat,
     ocr_inline_images: bool,
     content_filter_configured: bool,
 ) -> bool {
     hierarchy_enabled
+        || include_document_structure
         || matches!(
             output_format,
             OutputFormat::Markdown | OutputFormat::Djot | OutputFormat::Html | OutputFormat::DocTags
@@ -86,6 +98,68 @@ fn hierarchy_cluster_count(config: &ExtractionConfig) -> usize {
             || crate::core::config::HierarchyConfig::default().k_clusters,
             |hierarchy| hierarchy.k_clusters,
         )
+}
+
+/// Whether extracted-image MARKERS may be injected into the content.
+///
+/// Distinct from [`pdf_images_requested`]: reading the bytes also happens for
+/// embedded-image OCR / captioning / QR when `extract_images = false`
+/// (`needs_image_data`), but the caller opted out of image OUTPUT — dangling
+/// `![](image_N.ext)` references to files that are never written are exactly
+/// regression #796, so placeholder injection follows the output gate
+/// (`wants_own_bytes_in_result`) instead.
+pub(crate) fn pdf_image_output_requested(config: &ExtractionConfig) -> bool {
+    let pdf_level_opt_out = config
+        .pdf_options
+        .as_ref()
+        .is_some_and(|options| !options.extract_images);
+    config.wants_own_bytes_in_result() && !pdf_level_opt_out
+}
+
+/// Whether this extraction should pull image bytes out of the PDF.
+///
+/// The general level goes through `needs_image_data()`: `images.extract_images`
+/// alone does NOT veto when embedded-image OCR/captioning/QR still consume the
+/// bytes (`runs_ocr_on_embedded_images`, GH#1662) — the pipeline's
+/// `drop_opted_out_images` keeps such entries out of the public result
+/// afterwards. `pdf_options.extract_images = false` is the PDF-specific veto on
+/// top: an OR of the two levels would let the CLI's `--pdf-*` flags materialize
+/// `pdf_options` (with `Default`'s `true`) and silently re-enable extraction the
+/// caller had turned off with `--extract-images false`.
+fn pdf_images_requested(config: &ExtractionConfig) -> bool {
+    let pdf_level_opt_out = config
+        .pdf_options
+        .as_ref()
+        .is_some_and(|options| !options.extract_images);
+    config.needs_image_data() && !pdf_level_opt_out
+}
+
+/// Whether OCR is the ONLY reason image bytes were requested for this document at all (GH#1732).
+///
+/// When true, a full-page image on a page that already has native text can skip its decode
+/// entirely: `should_skip_pdf_image_ocr` (`core/pipeline/mod.rs`) will exclude it from OCR, and
+/// `drop_ocr_only_images` (same file) will then drop it from the result, unread. Mirrors
+/// `should_retain_images_after_ocr` (same file) -- `wants_own_bytes_in_result`,
+/// `ocr_inline_images`, and `images.include_page_rasters` are exactly the ways that function's
+/// WRITE gate can keep an image alive after OCR -- plus two more consumers that read
+/// `ExtractedImage.data` unconditionally, before OCR or `drop_ocr_only_images` ever run:
+/// `pdf_options.extract_images` gates `images_extraction_enabled` independently of
+/// `wants_own_bytes_in_result`, and `StyledHtmlRenderer::render_image`
+/// (`rendering/html_styled.rs`) base64-encodes `image.data` unconditionally whenever HTML output
+/// uses `html_output`, as part of a pre-render pass that runs before OCR and before
+/// `drop_ocr_only_images`. Both must also block this fast path. ~keep
+#[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
+fn only_reason_images_were_requested_is_ocr(config: &ExtractionConfig, ocr_inline_images: bool) -> bool {
+    let html_reads_image_data = config.output_format == OutputFormat::Html && config.html_output.is_some();
+    config.runs_ocr_on_embedded_images()
+        && !config.wants_own_bytes_in_result()
+        && !ocr_inline_images
+        && !config.images.as_ref().is_some_and(|images| images.include_page_rasters)
+        && !config
+            .pdf_options
+            .as_ref()
+            .is_some_and(|options| options.extract_images)
+        && !html_reads_image_data
 }
 
 /// Report a table-extraction failure that took out a whole detector pass, not just one page.
@@ -376,10 +450,27 @@ pub(crate) fn extract_all_from_native_document(
         .as_ref()
         .is_some_and(|options| options.extract_annotations);
     let force_annotation_page_tracking = annotation_fallback_requested && config.pages.is_none();
+    let hierarchy_enabled = config
+        .pdf_options
+        .as_ref()
+        .is_some_and(|options| options.hierarchy.as_ref().is_some_and(|hierarchy| hierarchy.enabled));
+    // ~keep A `PageHierarchy` can only be hung off a `PageContent` (`pages.rs`'s
+    // `assign_hierarchy_to_pages`), and `page_contents` is produced only when
+    // `pages.extract_pages` is set. `PageConfig::default()` leaves that `false`, so
+    // `pdf_options.hierarchy.enabled` was a silent no-op unless the caller also set an
+    // unrelated flag nothing in the hierarchy config points at: headings were detected, then
+    // dropped for want of a page to attach them to (CI E2E `test_pdf_hierarchy_config`).
+    // Asking for the hierarchy is the opt-in for the per-page tracking it requires.
+    let force_hierarchy_page_tracking =
+        hierarchy_enabled && !config.pages.as_ref().is_some_and(|pages| pages.extract_pages);
     let mut tracked_config;
-    let text_config = if force_annotation_page_tracking {
+    let text_config = if force_annotation_page_tracking || force_hierarchy_page_tracking {
         tracked_config = config.clone();
-        tracked_config.pages = Some(crate::core::config::PageConfig::default());
+        let mut page_config = tracked_config.pages.take().unwrap_or_default();
+        if force_hierarchy_page_tracking {
+            page_config.extract_pages = true;
+        }
+        tracked_config.pages = Some(page_config);
         &tracked_config
     } else {
         config
@@ -432,12 +523,9 @@ pub(crate) fn extract_all_from_native_document(
         .as_ref()
         .map(|options| options.ocr_inline_images)
         .unwrap_or(false);
-    let hierarchy_enabled = config
-        .pdf_options
-        .as_ref()
-        .is_some_and(|options| options.hierarchy.as_ref().is_some_and(|hierarchy| hierarchy.enabled));
     let needs_structured = needs_structured_extraction(
         hierarchy_enabled,
+        config.include_document_structure,
         &config.output_format,
         ocr_inline_images,
         config.content_filter.is_some(),
@@ -528,17 +616,33 @@ pub(crate) fn extract_all_from_native_document(
         pdf_metadata.page_structure = None;
     }
 
-    let images_extraction_enabled =
-        config.needs_image_data() || config.pdf_options.as_ref().map(|p| p.extract_images).unwrap_or(false);
+    let images_extraction_enabled = pdf_images_requested(config);
+
+    // Non-empty only when OCR is the SOLE reason `images_extraction_enabled` is true, so a
+    // full-page image on an already-text-bearing page can skip its decode entirely instead of
+    // being decoded, PNG re-encoded, and thrown away by `drop_ocr_only_images` (GH#1732). Any
+    // other consumer of image bytes leaves this empty and every image decodes as before. ~keep
+    #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
+    let ocr_skip_candidate_pages = if only_reason_images_were_requested_is_ocr(config, ocr_inline_images) {
+        crate::pdf::native::images::ocr_skip_candidate_pages(pdf_metadata.page_structure.as_ref())
+    } else {
+        std::collections::HashMap::new()
+    };
+    #[cfg(not(all(feature = "ocr", feature = "tokio-runtime")))]
+    let ocr_skip_candidate_pages: std::collections::HashMap<u32, (f64, f64)> = std::collections::HashMap::new();
 
     let (images, image_positions) = if images_extraction_enabled || ocr_inline_images {
         let max_images = config.images.as_ref().and_then(|i| i.max_images_per_page);
-        let (extracted, image_warnings) =
-            crate::pdf::native::images::extract_images_with_data(&mut doc, max_images, config.cancel_token.as_ref())
-                .map_err(|e| crate::error::XbergError::Parsing {
-                    message: format!("xberg_native_pdf image extraction failed: {e}"),
-                    source: None,
-                })?;
+        let (extracted, image_warnings) = crate::pdf::native::images::extract_images_with_data(
+            &mut doc,
+            max_images,
+            config.cancel_token.as_ref(),
+            &ocr_skip_candidate_pages,
+        )
+        .map_err(|e| crate::error::XbergError::Parsing {
+            message: format!("xberg_native_pdf image extraction failed: {e}"),
+            source: None,
+        })?;
         extraction_warnings.extend(image_warnings);
 
         let positions: Vec<(u32, u32)> = extracted
@@ -554,6 +658,12 @@ pub(crate) fn extract_all_from_native_document(
         return Err(crate::error::XbergError::Cancelled);
     }
 
+    // GH#1653 + GH#1654: one raw-MediaBox coordinate frame per page, computed alongside the
+    // margin-filtering media-box read below while the native document is still in scope. Not
+    // yet filtered to pages that actually end up with hierarchy blocks -- `mod.rs` does that
+    // once `assign_hierarchy_to_pages` has run, since that happens after this function
+    // returns and the `NativeDocument` this loop reads from is dropped. ~keep
+    let mut pdf_page_coordinate_frames: Vec<crate::types::internal::PdfPageCoordinateFrame> = Vec::new();
     let pre_rendered_doc = if needs_structured && !config.force_ocr {
         let k = hierarchy_cluster_count(config);
 
@@ -593,7 +703,7 @@ pub(crate) fn extract_all_from_native_document(
         };
 
         for (page_index, segments) in all_page_segments.iter_mut().enumerate() {
-            let (_, lower_y, _, upper_y) =
+            let (llx, lower_y, urx, upper_y) =
                 doc.doc
                     .get_page_media_box(page_index)
                     .map_err(|error| crate::error::XbergError::Parsing {
@@ -604,6 +714,34 @@ pub(crate) fn extract_all_from_native_document(
                         source: None,
                     })?;
             retain_segments_inside_page_margins(segments, lower_y.min(upper_y), lower_y.max(upper_y), margins);
+
+            // Fail closed by omission (GH#1654): a page whose `/Rotate` is present but
+            // malformed gets no record at all rather than a silently-degraded
+            // `clockwise_rotation: 0`, which would be indistinguishable from an honestly
+            // absent `/Rotate`. ~keep
+            match doc.doc.get_page_rotation_status(page_index) {
+                Ok(xberg_native_pdf::PageRotation::Absent) => {
+                    pdf_page_coordinate_frames.extend(crate::types::internal::PdfPageCoordinateFrame::new(
+                        (page_index + 1) as u32,
+                        llx,
+                        lower_y,
+                        urx,
+                        upper_y,
+                        0,
+                    ));
+                }
+                Ok(xberg_native_pdf::PageRotation::Valid(rotation)) => {
+                    pdf_page_coordinate_frames.extend(crate::types::internal::PdfPageCoordinateFrame::new(
+                        (page_index + 1) as u32,
+                        llx,
+                        lower_y,
+                        urx,
+                        upper_y,
+                        rotation,
+                    ));
+                }
+                Ok(xberg_native_pdf::PageRotation::Malformed) | Err(_) => {}
+            }
         }
 
         let total_segs: usize = all_page_segments.iter().map(|s| s.len()).sum();
@@ -614,8 +752,8 @@ pub(crate) fn extract_all_from_native_document(
             "native structure: extracted segments for heading detection"
         );
 
-        let inject_placeholders =
-            images_extraction_enabled && config.images.as_ref().map(|c| c.inject_placeholders).unwrap_or(false);
+        let inject_placeholders = pdf_image_output_requested(config)
+            && config.images.as_ref().map(|c| c.inject_placeholders).unwrap_or(false);
 
         match crate::pdf::structure::extract_document_structure_from_segments(
             all_page_segments,
@@ -719,6 +857,7 @@ pub(crate) fn extract_all_from_native_document(
         form_fields,
         extraction_warnings,
         page_labels,
+        pdf_page_coordinate_frames,
     ))
 }
 
@@ -828,7 +967,7 @@ fn apply_reordered_text_to_page_contents(
 /// Join per-page texts, recording each page's byte range in the combined
 /// string, faithful to how `extract_text_from_native_document` assembles it:
 /// a rendered page marker before each page when `insert_page_markers` is on,
-/// otherwise `"\n\n"` separators between pages. Markers and separators belong
+/// otherwise `PAGE_SEPARATOR` between pages. Markers and separators belong
 /// to no page.
 fn join_pages_with_boundaries(
     pages: &[String],
@@ -842,7 +981,7 @@ fn join_pages_with_boundaries(
             let marker = config.marker_format.replace("{page_num}", &(idx + 1).to_string());
             content.push_str(&marker);
         } else if idx > 0 {
-            content.push_str("\n\n");
+            content.push_str(crate::pdf::native::text::PAGE_SEPARATOR);
         }
         let byte_start = content.len();
         content.push_str(page_text);
@@ -858,10 +997,136 @@ fn join_pages_with_boundaries(
 #[cfg(test)]
 mod tests {
     use super::{
-        hierarchy_cluster_count, needs_structured_extraction, page_has_exact_text_block,
+        hierarchy_cluster_count, needs_structured_extraction, page_has_exact_text_block, pdf_images_requested,
         retain_segments_inside_page_margins, table_stage_failure_warning,
     };
     use crate::core::config::OutputFormat;
+
+    // GH#1732: `only_reason_images_were_requested_is_ocr` must return `true` only when no
+    // other consumer -- extract_images, captioning, QR codes, inline-image OCR, page rasters,
+    // `pdf_options.extract_images`, or styled-HTML rendering -- would ever read image bytes.
+    #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
+    mod only_reason_is_ocr {
+        use super::super::only_reason_images_were_requested_is_ocr;
+        use crate::core::config::{
+            ExtractionConfig, HtmlOutputConfig, ImageExtractionConfig, OcrConfig, OutputFormat, PdfConfig,
+        };
+
+        fn ocr_only_config() -> ExtractionConfig {
+            ExtractionConfig {
+                ocr: Some(OcrConfig::default()),
+                // Fork default: image extraction is ON when the `images` section is absent
+                // (`wants_own_bytes_in_result`), so image bytes always have a consumer until
+                // output is explicitly turned off. The predicate under test here is
+                // "OCR is the sole consumer", so the helper opts out of image output
+                // explicitly; upstream's default leaves it off and needs no such pin. ~keep
+                images: Some(ImageExtractionConfig {
+                    extract_images: false,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        }
+
+        #[test]
+        fn true_when_ocr_is_the_sole_consumer() {
+            assert!(only_reason_images_were_requested_is_ocr(&ocr_only_config(), false));
+        }
+
+        #[test]
+        fn false_when_ocr_is_not_configured() {
+            assert!(!only_reason_images_were_requested_is_ocr(
+                &ExtractionConfig::default(),
+                false
+            ));
+        }
+
+        #[test]
+        fn false_when_extract_images_is_requested() {
+            let config = ExtractionConfig {
+                images: Some(ImageExtractionConfig {
+                    extract_images: true,
+                    ..Default::default()
+                }),
+                ..ocr_only_config()
+            };
+            assert!(!only_reason_images_were_requested_is_ocr(&config, false));
+        }
+
+        #[test]
+        fn false_when_captioning_is_configured() {
+            let config = ExtractionConfig {
+                captioning: Some(crate::core::config::CaptioningConfig {
+                    llm: crate::core::config::LlmConfig::default(),
+                    prompt: None,
+                    min_image_area: 1,
+                }),
+                ..ocr_only_config()
+            };
+            assert!(!only_reason_images_were_requested_is_ocr(&config, false));
+        }
+
+        #[test]
+        fn false_when_qr_codes_is_enabled() {
+            let config = ExtractionConfig {
+                qr_codes: Some(true),
+                ..ocr_only_config()
+            };
+            assert!(!only_reason_images_were_requested_is_ocr(&config, false));
+        }
+
+        #[test]
+        fn false_when_ocr_inline_images_is_requested() {
+            assert!(!only_reason_images_were_requested_is_ocr(&ocr_only_config(), true));
+        }
+
+        #[test]
+        fn false_when_page_rasters_are_included() {
+            let config = ExtractionConfig {
+                images: Some(ImageExtractionConfig {
+                    extract_images: false,
+                    include_page_rasters: true,
+                    ..Default::default()
+                }),
+                ..ocr_only_config()
+            };
+            assert!(!only_reason_images_were_requested_is_ocr(&config, false));
+        }
+
+        #[test]
+        fn false_when_pdf_options_extract_images_is_set() {
+            let config = ExtractionConfig {
+                pdf_options: Some(PdfConfig {
+                    extract_images: true,
+                    ..Default::default()
+                }),
+                ..ocr_only_config()
+            };
+            assert!(!only_reason_images_were_requested_is_ocr(&config, false));
+        }
+
+        #[test]
+        fn false_when_styled_html_output_is_configured() {
+            let config = ExtractionConfig {
+                output_format: OutputFormat::Html,
+                html_output: Some(HtmlOutputConfig::default()),
+                ..ocr_only_config()
+            };
+            assert!(!only_reason_images_were_requested_is_ocr(&config, false));
+        }
+
+        #[test]
+        fn true_when_html_format_without_html_output_config() {
+            // `StyledHtmlRenderer` only runs when `html_output` is also configured
+            // (`core/pipeline/mod.rs`'s `styled_html_prerender`); plain HTML rendering goes
+            // through `comrak_bridge`, which already checks `!img.data.is_empty()`.
+            let config = ExtractionConfig {
+                output_format: OutputFormat::Html,
+                ..ocr_only_config()
+            };
+            assert!(only_reason_images_were_requested_is_ocr(&config, false));
+        }
+    }
 
     #[test]
     fn should_match_multiline_annotation_as_contiguous_lines_inside_page_text() {
@@ -883,6 +1148,60 @@ mod tests {
             hierarchy_cluster_count(&config),
             crate::core::config::HierarchyConfig::default().k_clusters
         );
+    }
+
+    #[test]
+    fn pdf_image_extraction_defaults_on_without_pdf_options() {
+        let config = crate::core::config::ExtractionConfig::default();
+        assert!(pdf_images_requested(&config));
+    }
+
+    #[test]
+    fn pdf_level_extract_images_false_vetoes_default_on_images_section() {
+        // `--pdf-extract-images false` with no `images` section: the general switch still
+        // says "extract" (absent section = defaults), the PDF-level flag must win.
+        let mut config = crate::core::config::ExtractionConfig::default();
+        let mut pdf_options = crate::core::config::PdfConfig::default();
+        pdf_options.extract_images = false;
+        config.pdf_options = Some(pdf_options);
+        assert!(!pdf_images_requested(&config));
+    }
+
+    #[test]
+    fn general_level_extract_images_false_beats_materialized_pdf_default() {
+        // `--extract-images false` plus any other `--pdf-*` flag: the CLI materializes
+        // `pdf_options` with `Default`'s `extract_images = true`; the general opt-out
+        // must still turn extraction off. `run_ocr_on_images = false` makes it a FULL
+        // opt-out — with embedded-image OCR left on (the default), bytes are still
+        // read for OCR and the pipeline's `drop_opted_out_images` keeps them
+        // out of the result, so reading alone is no longer "extraction".
+        let mut config = crate::core::config::ExtractionConfig {
+            images: Some(crate::core::config::ImageExtractionConfig {
+                extract_images: false,
+                run_ocr_on_images: false,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        config.pdf_options = Some(crate::core::config::PdfConfig::default());
+        assert!(!pdf_images_requested(&config));
+
+        config.images = Some(crate::core::config::ImageExtractionConfig {
+            extract_images: false,
+            run_ocr_on_images: true,
+            ..Default::default()
+        });
+        assert!(
+            pdf_images_requested(&config),
+            "OCR still consumes the bytes; the opt-out that matters for output is the strip"
+        );
+    }
+
+    #[test]
+    fn explicit_pdf_level_true_keeps_default_extraction_on() {
+        let mut config = crate::core::config::ExtractionConfig::default();
+        config.pdf_options = Some(crate::core::config::PdfConfig::default());
+        assert!(pdf_images_requested(&config));
     }
 
     #[test]
@@ -962,7 +1281,7 @@ mod tests {
     #[test]
     fn should_not_trigger_structured_extraction_for_unregistered_custom_format() {
         let output_format = OutputFormat::Custom("markdwon".to_string());
-        assert!(!needs_structured_extraction(false, &output_format, false, false));
+        assert!(!needs_structured_extraction(false, false, &output_format, false, false));
     }
 
     /// `DocTags` is a real, always-registered built-in renderer (see
@@ -970,7 +1289,13 @@ mod tests {
     /// geometry/headings as Markdown, Djot, and HTML.
     #[test]
     fn should_trigger_structured_extraction_for_doctags_format() {
-        assert!(needs_structured_extraction(false, &OutputFormat::DocTags, false, false));
+        assert!(needs_structured_extraction(
+            false,
+            false,
+            &OutputFormat::DocTags,
+            false,
+            false
+        ));
     }
 
     /// The pre-existing markup formats must keep triggering the structured path.
@@ -978,28 +1303,88 @@ mod tests {
     fn should_trigger_structured_extraction_for_markdown_djot_and_html() {
         assert!(needs_structured_extraction(
             false,
+            false,
             &OutputFormat::Markdown,
             false,
             false
         ));
-        assert!(needs_structured_extraction(false, &OutputFormat::Djot, false, false));
-        assert!(needs_structured_extraction(false, &OutputFormat::Html, false, false));
+        assert!(needs_structured_extraction(
+            false,
+            false,
+            &OutputFormat::Djot,
+            false,
+            false
+        ));
+        assert!(needs_structured_extraction(
+            false,
+            false,
+            &OutputFormat::Html,
+            false,
+            false
+        ));
     }
 
     /// `Plain` and `Json` must not trigger the structured path on their own.
     #[test]
     fn should_not_trigger_structured_extraction_for_plain_or_json() {
-        assert!(!needs_structured_extraction(false, &OutputFormat::Plain, false, false));
-        assert!(!needs_structured_extraction(false, &OutputFormat::Json, false, false));
+        assert!(!needs_structured_extraction(
+            false,
+            false,
+            &OutputFormat::Plain,
+            false,
+            false
+        ));
+        assert!(!needs_structured_extraction(
+            false,
+            false,
+            &OutputFormat::Json,
+            false,
+            false
+        ));
+    }
+
+    /// GH#1668: `include_document_structure` alone, with everything else left at
+    /// its default (`Plain` output, no hierarchy, no inline OCR, no content
+    /// filter), must trigger the structured path on its own. Before this fix a
+    /// caller who set only this flag silently got `flat_pdf_document`'s
+    /// paragraph-only elements, and the structure tree it asked for came back
+    /// holding nothing else.
+    #[test]
+    fn should_trigger_structured_extraction_for_include_document_structure_alone() {
+        assert!(needs_structured_extraction(
+            false,
+            true,
+            &OutputFormat::Plain,
+            false,
+            false
+        ));
     }
 
     /// Hierarchy, inline-image OCR, and explicit content filtering require the
     /// structured path regardless of output format.
     #[test]
     fn should_trigger_structured_extraction_when_structure_dependent_options_are_enabled() {
-        assert!(needs_structured_extraction(true, &OutputFormat::Plain, false, false));
-        assert!(needs_structured_extraction(false, &OutputFormat::Plain, true, false));
-        assert!(needs_structured_extraction(false, &OutputFormat::Plain, false, true));
+        assert!(needs_structured_extraction(
+            true,
+            false,
+            &OutputFormat::Plain,
+            false,
+            false
+        ));
+        assert!(needs_structured_extraction(
+            false,
+            false,
+            &OutputFormat::Plain,
+            true,
+            false
+        ));
+        assert!(needs_structured_extraction(
+            false,
+            false,
+            &OutputFormat::Plain,
+            false,
+            true
+        ));
     }
 
     #[cfg(feature = "layout-detection")]
@@ -1061,6 +1446,7 @@ mod tests {
                 speaker_notes: None,
                 section_name: None,
                 sheet_name: None,
+                ocr_confidence: None,
                 image_preprocessing: None,
             },
             PageContent {
@@ -1074,6 +1460,7 @@ mod tests {
                 speaker_notes: None,
                 section_name: None,
                 sheet_name: None,
+                ocr_confidence: None,
                 image_preprocessing: None,
             },
         ]);

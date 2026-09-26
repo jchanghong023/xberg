@@ -84,6 +84,7 @@ pub(super) fn assemble_mixed_ocr_page_document(
             &doc.tables,
             Some(&doc.images),
             &[],
+            &Default::default(),
         );
         assembled.processing_warnings = std::mem::take(&mut doc.processing_warnings);
         doc = assembled;
@@ -145,6 +146,23 @@ pub(super) fn attach_page_ocr_payload(
         }
         doc.prebuilt_ocr_elements.get_or_insert_with(Vec::new).extend(elements);
     }
+}
+/// Copy the payload fields that a page document already carried before the document-global
+/// restructuring heuristic (`heuristically_restructured_ocr_pages`, in `pipeline.rs`) rebuilt
+/// it: the heuristic's combined document has no notion of the backend's raw per-word OCR
+/// elements, this page's earlier warnings, or its OCR coordinate frame -- all three come from
+/// the page document `build_mixed_ocr_page_document`/`build_pipeline_ocr_page_document` already
+/// built. Missing the frame here silently drops it from every non-`Plain` mixed-route output
+/// while every other unit test stays green, because the heuristic only runs when structured
+/// output is requested (GH#1645).
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn carry_page_ocr_payload_forward(
+    existing: &crate::types::internal::InternalDocument,
+    new_page_doc: &mut crate::types::internal::InternalDocument,
+) {
+    new_page_doc.prebuilt_ocr_elements = existing.prebuilt_ocr_elements.clone();
+    new_page_doc.processing_warnings = existing.processing_warnings.clone();
+    new_page_doc.ocr_coordinate_frame = existing.ocr_coordinate_frame;
 }
 /// Rescale an OCR backend's pixel-space bounding boxes into the PDF page's own
 /// coordinate space before its structured document is assembled (#1423).
@@ -349,7 +367,8 @@ pub(super) fn build_mixed_ocr_page_document(
 )> {
     let mut backend_tables = std::mem::take(&mut result.tables);
     let mut raw_backend_elements = result.ocr_elements.take().unwrap_or_default();
-    let (_, element_layout_height) = resolved_ocr_layout_dimensions(&result.metadata, image_width_px, image_height_px);
+    let (element_layout_width, element_layout_height) =
+        resolved_ocr_layout_dimensions(&result.metadata, image_width_px, image_height_px);
     let (backend_elements, element_margin_outcome) = public_ocr_elements_for_pdf_page(
         &mut raw_backend_elements,
         public_ocr_config,
@@ -401,6 +420,19 @@ pub(super) fn build_mixed_ocr_page_document(
         );
     }
     attach_page_ocr_payload(&mut assembled, Vec::new(), backend_elements, page_number);
+    // ~keep The frame is sourced from the same `resolved_ocr_layout_dimensions` call above
+    // that decided where `backend_elements`' bboxes live, so the frame and the elements
+    // cannot disagree by construction (GH#1645). Never fabricated: `resolved_ocr_layout_dimensions`
+    // only falls back to the render raster when page-local processed metadata is absent or
+    // invalid -- that fallback is still the raster the elements actually live in, not a
+    // guess -- and a degenerate render raster (0x0) leaves both zero, so no frame is recorded.
+    if element_layout_width != 0 && element_layout_height != 0 {
+        assembled.ocr_coordinate_frame = Some(crate::types::internal::OcrPageCoordinateFrame::new(
+            page_number,
+            element_layout_width,
+            element_layout_height,
+        ));
+    }
     Some((assembled, paragraphs))
 }
 /// Convert one OCR formula bbox to PDF points.
@@ -509,6 +541,17 @@ pub(super) fn build_pipeline_ocr_page_document(
     );
 
     attach_page_ocr_payload(&mut doc, tables, elements, page_number);
+    // ~keep Unlike `build_mixed_ocr_page_document`, this route has no page-local processed-
+    // image metadata to resolve against: `doc`'s OCR elements are in `raster_size_px` pixel
+    // space at this point (see this function's doc comment), so the raster IS the frame
+    // (GH#1645). Never fabricated: skipped entirely when the raster is degenerate (0x0).
+    if raster_width_px != 0 && raster_height_px != 0 {
+        doc.ocr_coordinate_frame = Some(crate::types::internal::OcrPageCoordinateFrame::new(
+            page_number,
+            raster_width_px,
+            raster_height_px,
+        ));
+    }
     normalize_mixed_ocr_document_page(&mut doc, page_number);
     Some(doc)
 }
@@ -596,7 +639,7 @@ pub(crate) fn merge_ocr_pages_into_native(
     apply_ocr_page_replacements(native_text, boundaries, &accepted)
 }
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
-pub(super) fn destructive_ocr_information_loss(
+pub(crate) fn destructive_ocr_information_loss(
     native_page: &str,
     ocr_text: &str,
     thresholds: &OcrQualityThresholds,
@@ -1875,12 +1918,26 @@ pub(super) fn heuristically_restructured_ocr_pages(
             return None;
         }
         let mut filtered_pages = pages.to_vec();
-        crate::pdf::structure::pipeline::strip_repeating_text_from_pages(&mut filtered_pages, page_heights);
+        // Same permission derivation as `FurniturePermissions::from_extraction_config`:
+        // an edge band the config asked to keep (`include_headers`/`include_footers`)
+        // must not feed the cross-page streak detection either.
+        let (strip_top_edges, strip_bottom_edges) = config
+            .content_filter
+            .as_ref()
+            .map(|filter| (!filter.include_headers, !filter.include_footers))
+            .unwrap_or((true, true));
+        crate::pdf::structure::pipeline::strip_repeating_text_from_pages(
+            &mut filtered_pages,
+            page_heights,
+            strip_top_edges,
+            strip_bottom_edges,
+        );
         return Some(crate::pdf::structure::assemble_internal_document(
             filtered_pages,
             collected_tables,
             None,
             &[],
+            &Default::default(),
         ));
     }
 
@@ -1939,7 +1996,9 @@ pub(super) fn heuristically_restructured_ocr_pages(
     );
 
     match result {
-        Ok(doc) if !doc.elements.is_empty() && restructured_document_retains_prose(pages, &doc) => Some(doc),
+        Ok(doc) if !doc.elements.is_empty() && restructured_document_retains_prose(pages, collected_tables, &doc) => {
+            Some(doc)
+        }
         Ok(_) => None,
         Err(error) => {
             tracing::warn!(
@@ -1951,8 +2010,84 @@ pub(super) fn heuristically_restructured_ocr_pages(
     }
 }
 
+/// Every canonical alphanumeric character of the baseline text must survive in the
+/// restructured text for the document-global heuristic's output to be trusted (GH#1622).
+///
+/// `extract_document_structure_from_segments` rebuilds paragraphs from bare
+/// `SegmentData` geometry with no knowledge of the ML layout regions (Picture, Table)
+/// that `ocr_doc_to_layout_paragraphs` already classified -- it can silently drop a
+/// segment its own font-clustering heuristic treats as furniture or noise. The
+/// previous gate here only asked whether the *whole document* still had one non-empty,
+/// non-table element (`.any(..)`), so a single surviving word anywhere passed it even
+/// when an entire page's body vanished; measurement-discipline requires an absolute
+/// count, not a document-wide existence check.
+///
+/// This is a hardening of a guard proven too weak on its own terms, not a confirmed fix
+/// for any specific report: GH#1622's "entire page body lost" symptom was not reproduced
+/// on the fixture available while investigating it (that document never exercises this
+/// heuristic branch at all, since it already carries ML-detected headings).
+///
+/// Compares CHARACTERS, not words: a first attempt compared word tokens and regressed two
+/// existing tests (`mixed_ocr_*_route_promotes_document_global_headings`). The restructuring
+/// pass legitimately re-wraps text across the line/segment boundaries it reads -- on that
+/// fixture, "list of findings" split across a line break came back as "list offindings",
+/// dropping one space. No content word was lost, but word-level tokenization sees "of" and
+/// "findings" vanish and "offindings" appear, reading a benign re-wrap as loss. Every
+/// underlying letter is still present and in order-preserving-enough position; comparing the
+/// alphanumeric character multiset (ignoring whitespace/word-boundary placement entirely,
+/// the same way `pdf::structure::assembly::table_coverage_tokens` ignores punctuation
+/// placement) is insensitive to exactly this class of re-wrap while remaining exactly as
+/// sensitive to genuine deletion: a dropped word still drops that many characters from the
+/// multiset, measurably. ~keep
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+const MIN_OCR_STRUCTURE_HEURISTIC_CHAR_RETENTION: f64 = 1.0;
+
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+fn ocr_structure_heuristic_canonical_chars(text: &str) -> Vec<char> {
+    text.chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// Fraction of `baseline_text`'s canonical alphanumeric characters (as a multiset) that also
+/// appear in `restructured_text`. Mirrors `extractors::image::alphanumeric_token_retention`'s
+/// proven shape -- the fix for the same class of loss on the plain-image layout path -- but is
+/// reimplemented locally rather than exported: that function is private to `image.rs` and
+/// this is only the second call site (`avoid-duplication`: extract after the third). Unlike
+/// that word-token version, this compares characters (see the constant's doc comment for why).
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+fn ocr_structure_heuristic_char_retention(restructured_text: &str, baseline_text: &str) -> f64 {
+    let baseline_chars = ocr_structure_heuristic_canonical_chars(baseline_text);
+    if baseline_chars.is_empty() {
+        return 1.0;
+    }
+
+    let mut restructured_char_counts = std::collections::HashMap::<char, usize>::new();
+    for character in ocr_structure_heuristic_canonical_chars(restructured_text) {
+        *restructured_char_counts.entry(character).or_default() += 1;
+    }
+
+    let retained = baseline_chars
+        .iter()
+        .filter(|character| {
+            let Some(count) = restructured_char_counts.get_mut(*character) else {
+                return false;
+            };
+            if *count == 0 {
+                return false;
+            }
+            *count -= 1;
+            true
+        })
+        .count();
+
+    retained as f64 / baseline_chars.len() as f64
+}
+
 /// Whether `doc` -- built by `extract_document_structure_from_segments` from
-/// `segments_from_ocr_pages(pages)` -- actually kept the prose `pages` carried.
+/// `segments_from_ocr_pages(pages)` -- actually kept the prose `pages` (and
+/// `collected_tables`) carried.
 ///
 /// `segments_from_ocr_pages` harvests `SegmentData` only out of `PdfParagraph.lines`.
 /// A bare-text OCR backend with no per-line geometry (the VLM backend never populates
@@ -1961,17 +2096,22 @@ pub(super) fn heuristically_restructured_ocr_pages(
 /// `ocr_text_to_paragraphs`, which carries the page's content in `.text` and leaves
 /// `.lines` empty. Every such page therefore contributes zero segments to this
 /// heuristic no matter how much prose it holds, so `extract_document_structure_from_segments`
-/// reconstructs zero paragraphs for it. `assemble_internal_document` still emits a
-/// `Table` element for every `tables` entry regardless, so a page with at least one
-/// table produced a non-empty `doc` -- passing the caller's bare
-/// `!doc.elements.is_empty()` gate -- even though every paragraph of prose the page
-/// held had vanished. Declining here sends the caller to its own `.text`-based
-/// fallback assembly instead, which never loses prose this way. The refusal is per input
-/// paragraph rather than document-wide: a geometry-backed page retaining its prose must not
-/// hide a separate bare-text page that contributed no segments. ~keep
+/// reconstructs zero paragraphs for it. Declining here sends the caller to its own
+/// `.text`-based fallback assembly instead, which never loses prose this way. The
+/// per-paragraph `lines.is_empty()` refusal below is unconditional (not folded into the
+/// token check) so a geometry-backed page retaining its prose must not hide a separate
+/// bare-text page that contributed no segments.
+///
+/// Beyond that, the token check below (GH#1622) compares `doc`'s rendered plain text
+/// against the *lossless* baseline assembly of the same `pages`/`collected_tables`
+/// (`assemble_internal_document`, unconditionally preserved regardless of layout
+/// classification -- see `ocr_doc_to_layout_paragraphs` and `layout_classify`'s Picture
+/// arm) and requires every baseline token to survive; anything less rejects the
+/// heuristic's output entirely so the caller falls back to that same lossless baseline. ~keep
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 fn restructured_document_retains_prose(
     pages: &[Vec<crate::pdf::structure::types::PdfParagraph>],
+    collected_tables: &[crate::types::Table],
     doc: &crate::types::internal::InternalDocument,
 ) -> bool {
     if pages
@@ -1984,13 +2124,23 @@ fn restructured_document_retains_prose(
     let had_prose = pages
         .iter()
         .flatten()
-        .any(|paragraph| !paragraph.text.trim().is_empty() || !paragraph.lines.is_empty());
+        .any(|paragraph| !paragraph.text.trim().is_empty() || !paragraph.lines.is_empty())
+        || collected_tables.iter().any(|table| !table.markdown.trim().is_empty());
     if !had_prose {
         return true;
     }
-    doc.elements.iter().any(|element| {
-        !element.text.trim().is_empty() && !matches!(element.kind, crate::types::internal::ElementKind::Table { .. })
-    })
+
+    let baseline = crate::pdf::structure::assemble_internal_document(
+        pages.to_vec(),
+        collected_tables,
+        None,
+        &[],
+        &Default::default(),
+    );
+    let baseline_text = crate::rendering::render_plain(&baseline);
+    let restructured_text = crate::rendering::render_plain(doc);
+    ocr_structure_heuristic_char_retention(&restructured_text, &baseline_text)
+        >= MIN_OCR_STRUCTURE_HEURISTIC_CHAR_RETENTION
 }
 /// Split the single, document-wide [`crate::types::internal::InternalDocument`]
 /// [`heuristically_restructured_ocr_pages`] produced back into one per-page document per
@@ -2105,5 +2255,123 @@ pub(super) fn recognized_table_to_public_table(
         }),
         table_id: Some(format!("table-{}", table_index + 1)),
         columns: recognized.cells.first().cloned(),
+        cell_styles: Vec::new(),
+    }
+}
+
+#[cfg(all(test, any(feature = "ocr", feature = "ocr-pipeline")))]
+mod tests {
+    use super::*;
+    use crate::pdf::structure::types::PdfParagraph;
+    use crate::types::internal::InternalDocument;
+    use crate::types::internal_builder::InternalDocumentBuilder;
+
+    /// A geometry-backed paragraph (populated `lines`, empty `.text`), matching the shape
+    /// `ocr_doc_to_layout_paragraphs` actually produces. `restructured_document_retains_prose`
+    /// unconditionally rejects a paragraph that has prose `.text` but empty `.lines` (the
+    /// bare-text VLM-backend shape) before it ever reaches the token-retention check this
+    /// module adds, so a `.lines`-populated paragraph is what exercises that check.
+    fn bare_paragraph(text: &str) -> PdfParagraph {
+        let segment = crate::pdf::hierarchy::SegmentData {
+            text: text.to_string(),
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 12.0,
+            font_size: 12.0,
+            is_bold: false,
+            is_italic: false,
+            is_monospace: false,
+            baseline_y: 0.0,
+            rotation_degrees: 0.0,
+            assigned_role: None,
+        };
+        let line = crate::pdf::structure::types::PdfLine {
+            segments: vec![segment],
+            baseline_y: 0.0,
+            dominant_font_size: 12.0,
+            is_bold: false,
+            is_monospace: false,
+        };
+        PdfParagraph {
+            word_count: PdfParagraph::compute_word_count("", std::slice::from_ref(&line)),
+            text: String::new(),
+            lines: vec![line],
+            dominant_font_size: 12.0,
+            heading_level: None,
+            is_bold: false,
+            is_list_item: false,
+            is_code_block: false,
+            is_formula: false,
+            is_page_furniture: false,
+            layout_class: None,
+            layout_region_path: None,
+            caption_for: None,
+            block_bbox: None,
+        }
+    }
+
+    fn doc_with_paragraph(text: &str) -> InternalDocument {
+        let mut builder = InternalDocumentBuilder::new("pdf");
+        builder.push_paragraph(text, vec![], None, None);
+        builder.build()
+    }
+
+    /// GH#1622, direction 1: a heuristic-restructured document that dropped a word the
+    /// lossless baseline carried must be rejected, so the caller falls back to the
+    /// lossless assembly and the word is recovered rather than silently lost.
+    #[test]
+    fn should_reject_restructured_document_that_dropped_a_baseline_word() {
+        let pages = vec![vec![bare_paragraph(
+            "Site 07 access blocked by washout near ridge trail",
+        )]];
+        let restructured = doc_with_paragraph("Site 07 access blocked by washout");
+
+        assert!(
+            !restructured_document_retains_prose(&pages, &[], &restructured),
+            "dropping 'near ridge trail' must be detected and rejected"
+        );
+    }
+
+    /// GH#1622, direction 2 (negative control against #1616-style duplication): a
+    /// restructured document that retains every baseline word exactly once must be
+    /// accepted as-is -- proving the gate does not force a spurious fallback (which
+    /// would duplicate content) when nothing was lost.
+    #[test]
+    fn should_accept_restructured_document_that_retains_every_baseline_word_once() {
+        let pages = vec![vec![bare_paragraph("Site 07 access blocked by washout")]];
+        let restructured = doc_with_paragraph("Site 07 access blocked by washout");
+
+        assert!(
+            restructured_document_retains_prose(&pages, &[], &restructured),
+            "a fully-retained restructuring must not be rejected"
+        );
+    }
+
+    /// A table's markdown content counts toward the baseline: text TATR moved out of
+    /// plain paragraphs and into a recognized table must not be treated as lost.
+    #[test]
+    fn should_treat_recognized_table_markdown_as_retained_baseline_text() {
+        let pages: Vec<Vec<PdfParagraph>> = vec![vec![]];
+        let table = crate::types::Table {
+            markdown: "| Samples | Status |\n| --- |\n| 6 | Complete |".to_string(),
+            page_number: 1,
+            ..Default::default()
+        };
+        let mut builder = InternalDocumentBuilder::new("pdf");
+        builder.push_table(table.clone(), Some(1), None);
+        let restructured = builder.build();
+
+        assert!(restructured_document_retains_prose(&pages, &[table], &restructured));
+    }
+
+    /// A restructured document with no elements at all, compared against a baseline
+    /// that had real prose, must be rejected -- the "entire body lost" shape of GH#1622.
+    #[test]
+    fn should_reject_an_empty_restructured_document_when_baseline_had_prose() {
+        let pages = vec![vec![bare_paragraph("This entire page of prose vanished")]];
+        let empty = InternalDocumentBuilder::new("pdf").build();
+
+        assert!(!restructured_document_retains_prose(&pages, &[], &empty));
     }
 }

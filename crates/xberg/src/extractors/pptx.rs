@@ -18,6 +18,12 @@ use std::path::Path;
 /// Supports: .pptx, .pptm, .ppsx
 pub struct PptxExtractor;
 
+/// Flat content-budget charge for one list container element pushed by the
+/// second-pass reader. Containers carry no text, so without this charge the
+/// per-line text accounting would under-count a deck whose items sit at deep
+/// indentation. 64 bytes covers the element struct plus its hash id.
+const LIST_CONTAINER_BUDGET_BYTES: usize = 64;
+
 impl Default for PptxExtractor {
     fn default() -> Self {
         Self::new()
@@ -152,22 +158,35 @@ impl PptxExtractor {
         let forms = Self::math_forms(formulas);
 
         for (slide_num, content) in slide_contents {
+            // add_notes writes a slide's notes last, as one string — so a blank
+            // line inside the notes splits them across blocks, and only the
+            // first carries the marker. Once notes start, every later block of
+            // the same slide is note text and none of it can be the title.
             let mut in_notes = false;
-
             for block in content.split("\n\n") {
                 budget.step()?;
-                let trimmed = block.trim();
+                let mut trimmed = block.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
 
-                if trimmed.starts_with("### Notes:") || trimmed == "Notes:" {
+                // The notes marker is written directly above the notes text, so the two
+                // share a blank-line-separated block (`### Notes:\n<text>`) whenever the
+                // note has no blank line of its own. Dropping the whole block therefore
+                // dropped the note's first paragraph — every note for a one-paragraph
+                // note, since that paragraph is the block. Strip the marker and keep
+                // whatever follows it. What follows is the note's content, so it never
+                // counts as the slide's title: a note opening with `# ` is prose, and
+                // taking it as a heading folded the whole note into one element.
+                if let Some(rest) = Self::strip_notes_marker(trimmed) {
+                    trimmed = rest.trim();
                     in_notes = true;
-                    continue;
+                    if trimmed.is_empty() {
+                        continue;
+                    }
                 }
 
-                if let Some(title_text) = trimmed.strip_prefix("# ") {
-                    in_notes = false;
+                if !in_notes && let Some(title_text) = trimmed.strip_prefix("# ") {
                     saw_title = true;
                     let (title_text, title_formulas) =
                         Self::split_line_math(title_text, &forms, formulas, plain_output);
@@ -180,59 +199,127 @@ impl PptxExtractor {
                     continue;
                 }
 
-                if in_notes {
-                    in_notes = false;
-                }
-
                 if trimmed.starts_with('|') {
-                    let cells = Self::parse_markdown_table(trimmed);
+                    // A block that opens with a table row can still carry picture placeholders:
+                    // the content builder appends one for every picture, and a picture that sits
+                    // inside the table's area lands in the same blank-line-separated block.
+                    // Handing those lines to the table parser turned them into cells, where the
+                    // image promotion — which walks paragraphs — never saw them, so the picture
+                    // disappeared from the output. Split them back out and let each keep its
+                    // place around the table.
+                    let lines: Vec<&str> = trimmed.lines().collect();
+                    let first_table = lines.iter().position(|line| line.trim_start().starts_with('|'));
+                    let (leading, rest) = lines.split_at(first_table.unwrap_or(lines.len()));
+                    let (table_lines, trailing): (Vec<&str>, Vec<&str>) =
+                        rest.iter().partition(|line| line.trim_start().starts_with('|'));
+
+                    let push_lines = |builder: &mut InternalDocumentBuilder,
+                                      lines: &[&str],
+                                      budget: &mut SecurityBudget|
+                     -> Result<()> {
+                        for line in lines {
+                            let line = line.trim();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            let (line_text, line_formulas) =
+                                Self::split_line_math(line, &forms, formulas, plain_output);
+                            Self::push_line_formulas(builder, &line_formulas, *slide_num, budget)?;
+                            let text = line_text.trim();
+                            if !text.is_empty() {
+                                budget.account_text(text.len())?;
+                                builder.push_paragraph(text, Vec::new(), Some(*slide_num), None);
+                            }
+                        }
+                        Ok(())
+                    };
+
+                    push_lines(&mut builder, leading, budget)?;
+                    let table_text = table_lines.join("\n");
+                    let cells = Self::parse_markdown_table(&table_text);
                     if !cells.is_empty() {
                         builder.push_table_from_cells(&cells, Some(*slide_num), None);
                     }
+                    push_lines(&mut builder, &trailing, budget)?;
                     continue;
                 }
 
-                let mut in_list: Option<bool> = None;
+                // One entry per open list, outermost first: the deck's own outline is
+                // expressed as indentation in the Markdown (`add_list_item` indents two
+                // spaces per level), and the renderer only indents nested lists. Keeping
+                // the items in a single flat list lost every level.
+                let mut open_lists: Vec<bool> = Vec::new();
 
                 for line in trimmed.lines() {
-                    let (line_text, line_formulas) = Self::split_line_math(line, &forms, formulas, plain_output);
-                    let lt = line_text.trim();
-                    if lt.is_empty() && line_formulas.is_empty() {
-                        if in_list.is_some() {
-                            builder.end_list();
-                            in_list = None;
-                        }
-                        continue;
-                    }
-
-                    let list_match = if let Some(item_text) = lt.strip_prefix("- ") {
+                    // Marker and indentation are read off the raw line: split_line_math
+                    // collapses whitespace, which would flatten a nested item whose text
+                    // carries a formula back to depth 0. The depth is clamped to the
+                    // same ceiling the write side applies to `a:pPr/@lvl`: the reader
+                    // sees arbitrary text, and a multi-megabyte indent would otherwise
+                    // open millions of list containers.
+                    let depth = ((line.len() - line.trim_start().len()) / crate::extraction::pptx::LIST_INDENT.len())
+                        .min(crate::extraction::pptx::MAX_LIST_NESTING_LEVEL as usize);
+                    let raw = line.trim_start();
+                    let list_match = if let Some(item_text) = raw.strip_prefix("- ") {
                         Some((false, item_text))
                     } else {
-                        Self::strip_ordered_prefix(lt).map(|item_text| (true, item_text))
+                        Self::strip_ordered_prefix(raw).map(|item_text| (true, item_text))
                     };
 
                     if let Some((ordered, item_text)) = list_match {
-                        match in_list {
-                            Some(prev_ordered) if prev_ordered != ordered => {
-                                builder.end_list();
-                                builder.push_list(ordered);
-                                in_list = Some(ordered);
-                            }
-                            None => {
-                                builder.push_list(ordered);
-                                in_list = Some(ordered);
-                            }
-                            _ => {}
+                        // The item's text is what follows the marker; its math is split
+                        // out of that, so an item that is only a formula keeps its place
+                        // in the list instead of falling out of it.
+                        let (item_text, item_formulas) =
+                            Self::split_line_math(item_text, &forms, formulas, plain_output);
+                        let item_text = item_text.trim();
+                        if item_text.is_empty() && item_formulas.is_empty() {
+                            continue;
+                        }
+                        while open_lists.len() > depth + 1 {
+                            builder.end_list();
+                            open_lists.pop();
+                        }
+                        while open_lists.len() < depth + 1 {
+                            // List containers carry no text of their own, so the
+                            // per-line text accounting below would let a hostile
+                            // deck buy ~9 elements per byte of marker. Charge each
+                            // container a flat share of the content budget.
+                            budget.account_text(LIST_CONTAINER_BUDGET_BYTES)?;
+                            builder.push_list(ordered);
+                            open_lists.push(ordered);
+                        }
+                        if let Some(innermost) = open_lists.last_mut()
+                            && *innermost != ordered
+                        {
+                            // A numbered run inside a bulleted one: a Markdown list holds one
+                            // kind, so the innermost list is closed and reopened.
+                            budget.account_text(2 * LIST_CONTAINER_BUDGET_BYTES)?;
+                            builder.end_list();
+                            builder.push_list(ordered);
+                            *innermost = ordered;
                         }
                         // A list item's math becomes its own element ahead of the
                         // item, the order DOCX uses for math runs in a paragraph.
-                        Self::push_line_formulas(&mut builder, &line_formulas, *slide_num, budget)?;
-                        budget.account_text(item_text.len())?;
-                        builder.push_list_item(item_text, ordered, vec![], Some(*slide_num), None);
+                        Self::push_line_formulas(&mut builder, &item_formulas, *slide_num, budget)?;
+                        if !item_text.is_empty() {
+                            // The raw line (indentation + marker + text) is the
+                            // budgeted unit: accounting only the post-marker text
+                            // would leave megabytes of leading spaces free.
+                            budget.account_text(line.len())?;
+                            builder.push_list_item(item_text, ordered, vec![], Some(*slide_num), None);
+                        }
                     } else {
-                        if in_list.is_some() {
+                        let (line_text, line_formulas) = Self::split_line_math(line, &forms, formulas, plain_output);
+                        let lt = line_text.trim();
+                        if lt.is_empty() && line_formulas.is_empty() {
+                            while open_lists.pop().is_some() {
+                                builder.end_list();
+                            }
+                            continue;
+                        }
+                        while open_lists.pop().is_some() {
                             builder.end_list();
-                            in_list = None;
                         }
                         Self::push_line_formulas(&mut builder, &line_formulas, *slide_num, budget)?;
                         if !lt.is_empty() {
@@ -242,7 +329,7 @@ impl PptxExtractor {
                     }
                 }
 
-                if in_list.is_some() {
+                while open_lists.pop().is_some() {
                     builder.end_list();
                 }
             }
@@ -257,27 +344,78 @@ impl PptxExtractor {
         Ok(builder.build())
     }
 
+    /// Strip a speaker-notes marker off a content block, returning the text after it.
+    ///
+    /// The content builder writes the marker immediately above the notes (see
+    /// `ContentBuilder::add_notes`), so the marker only ever opens a block or shares
+    /// one with the note's first paragraph. A paragraph that merely starts with
+    /// "Notes:" as prose does not have the line break the marker has, and is left
+    /// alone.
+    fn strip_notes_marker(block: &str) -> Option<&str> {
+        const MARKERS: [&str; 2] = ["### Notes:", "Notes:"];
+        MARKERS.iter().find_map(|marker| {
+            let rest = block.strip_prefix(marker)?;
+            (rest.is_empty() || rest.starts_with('\n')).then_some(rest)
+        })
+    }
+
     /// Parse a markdown table block into a 2D cell grid.
+    ///
+    /// Cells are written with `|` escaped as `\|` and line breaks as `<br>`
+    /// (see `ContentBuilder::add_table`), so the split skips `\|` and restores
+    /// it to `|`. A row counts as the column separator only when every cell it
+    /// carries is dashes, optionally with alignment colons — a substring test
+    /// would also drop data rows that merely contain `---`.
     fn parse_markdown_table(table_text: &str) -> Vec<Vec<String>> {
         let mut cells = Vec::new();
         for line in table_text.lines() {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
+            let stripped = line.trim().trim_matches('|');
+            if stripped.is_empty() {
                 continue;
             }
-            if trimmed.contains("---") {
+            let row: Vec<String> = Self::split_table_row(stripped);
+            if row.iter().all(|cell| Self::is_separator_cell(cell)) {
                 continue;
             }
-            let row: Vec<String> = trimmed
-                .trim_matches('|')
-                .split('|')
-                .map(|cell| cell.trim().to_string())
-                .collect();
-            if !row.is_empty() {
-                cells.push(row);
-            }
+            cells.push(row);
         }
         cells
+    }
+
+    /// Split one table row's text (outer pipes already trimmed) on unescaped
+    /// `|`, restoring each `\|` to a literal `|` and each doubled `\\` to a
+    /// single `\` — the two spellings `ContentBuilder::escape_table_cell` emits.
+    /// Without the doubling fold, a cell holding one literal backslash (a Windows
+    /// path, say) would gain one on every bake→parse round trip.
+    fn split_table_row(row: &str) -> Vec<String> {
+        let mut cells = Vec::new();
+        let mut cell = String::new();
+        let mut chars = row.chars().peekable();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '\\' if chars.peek() == Some(&'|') => {
+                    chars.next();
+                    cell.push('|');
+                }
+                '\\' if chars.peek() == Some(&'\\') => {
+                    chars.next();
+                    cell.push('\\');
+                }
+                '|' => {
+                    cells.push(cell.trim().to_string());
+                    cell = String::new();
+                }
+                _ => cell.push(ch),
+            }
+        }
+        cells.push(cell.trim().to_string());
+        cells
+    }
+
+    /// Whether one cell is a GFM column separator (`---`, `:---:`, ...).
+    fn is_separator_cell(cell: &str) -> bool {
+        let body = cell.trim().trim_matches(':');
+        !body.is_empty() && body.chars().all(|ch| ch == '-')
     }
 }
 
@@ -374,10 +512,314 @@ impl PptxExtractor {
 
         if extract_images {
             doc.images = pptx_result.images;
+            promote_baked_image_references(&mut doc);
+            strip_repeated_decoration_images(&mut doc);
         }
 
         Ok(doc)
     }
+}
+
+/// Drop watermark/logo images that repeat across many slides.
+///
+/// Corporate decks stamp the same logo onto a large share of slides; each copy
+/// becomes its own image element and its own (often OCR-empty) fence in the
+/// output, burying the slide content under repeated decoration. An image whose
+/// exact bytes appear on at least a quarter of the slides — and on at least
+/// three — is decoration and its element is removed; unique diagrams and
+/// screenshots never meet that bar. Only the referencing elements are dropped:
+/// the image data itself stays in `doc.images`, so downstream consumers that
+/// read the image list directly are unaffected.
+fn strip_repeated_decoration_images(doc: &mut InternalDocument) {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let slide_count = doc
+        .elements
+        .iter()
+        .filter_map(|element| element.page)
+        .max()
+        .unwrap_or(0);
+    if slide_count < 3 {
+        return;
+    }
+    let minimum_slides = (((slide_count as f64) * 0.25).ceil() as u32).max(3);
+
+    // Slides referencing each image index.
+    let mut slides_per_image: ahash::AHashMap<u32, std::collections::BTreeSet<u32>> = ahash::AHashMap::new();
+    for element in doc.elements.iter() {
+        if let crate::types::internal::ElementKind::Image { image_index } = element.kind
+            && let Some(page) = element.page
+        {
+            slides_per_image.entry(image_index).or_default().insert(page);
+        }
+    }
+
+    // Slides covered per content hash (several indexes can share one logo's bytes),
+    // plus each image's hash: the retain below then decides from that map instead of
+    // re-hashing the image bytes once per referencing element.
+    let mut slides_per_hash: ahash::AHashMap<u64, std::collections::BTreeSet<u32>> = ahash::AHashMap::new();
+    let mut hash_by_index: ahash::AHashMap<u32, u64> = ahash::AHashMap::new();
+    for (image_index, image) in doc.images.iter().enumerate() {
+        let Some(referencing) = slides_per_image.get(&(image_index as u32)) else {
+            continue;
+        };
+        let mut hasher = DefaultHasher::new();
+        image.data.hash(&mut hasher);
+        let hash = hasher.finish();
+        hash_by_index.insert(image_index as u32, hash);
+        slides_per_hash
+            .entry(hash)
+            .or_default()
+            .extend(referencing.iter().copied());
+    }
+    let decoration_hashes: std::collections::HashSet<u64> = slides_per_hash
+        .into_iter()
+        .filter(|(_, slides)| slides.len() as u32 >= minimum_slides)
+        .map(|(hash, _)| hash)
+        .collect();
+    if decoration_hashes.is_empty() {
+        return;
+    }
+
+    // Every index sharing a decoration image's bytes gets the same (dropped) decision.
+    let decoration_indexes: ahash::AHashSet<u32> = hash_by_index
+        .into_iter()
+        .filter(|(_, hash)| decoration_hashes.contains(hash))
+        .map(|(index, _)| index)
+        .collect();
+    doc.elements.retain(|element| {
+        !matches!(element.kind, crate::types::internal::ElementKind::Image { image_index } if decoration_indexes.contains(&image_index))
+    });
+}
+
+/// Turn the `![alt](target)` placeholders the PPTX content builder bakes into slide text into
+/// real image elements.
+///
+/// A placeholder left as paragraph text is escaped by the Markdown writer (`\![alt](target)`)
+/// and points at a path inside the package (`../media/image4.png`), so it is neither a live
+/// image reference nor resolvable next to the extracted output. Rendering from an image element
+/// yields the same `![alt](image_N.ext)` form DOCX/PDF already produce, naming the file the
+/// extractor writes.
+///
+/// Each placeholder carries the package target it was baked from, and every extracted image
+/// records that target as its `source_path`, so the two are matched by identity. A positional
+/// pairing cannot work: the builder emits placeholders in slide geometry order (`y`, then `x`)
+/// while `doc.images` follows slide XML order, and an image whose bytes could not be read is
+/// skipped when the images are collected — either one shifts every later placeholder onto the
+/// wrong picture and alt text.
+///
+/// One paragraph can hold more than one placeholder — two pictures side by side on a slide are
+/// written into the same paragraph — and the slide's own text can share it. Promoting one
+/// paragraph as a single image dropped the further references (and the text with them), so this
+/// walks every reference in the paragraph, emits one image element per reference in order, and
+/// keeps the surrounding text as its own paragraph. A placeholder whose image could not be read
+/// is left as text rather than dropped, as before. ~keep
+fn promote_baked_image_references(doc: &mut InternalDocument) {
+    use crate::types::internal::ElementKind;
+
+    let mut used = vec![false; doc.images.len()];
+    let elements = std::mem::take(&mut doc.elements);
+    let mut promoted = Vec::with_capacity(elements.len());
+
+    for elem in elements {
+        if !matches!(elem.kind, ElementKind::Paragraph) {
+            promoted.push(elem);
+            continue;
+        }
+        let references = markdown_image_references(&elem.text);
+        if references.is_empty() {
+            promoted.push(elem);
+            continue;
+        }
+
+        let mut cursor = 0usize;
+        let leftover = |text: &str, cursor: &mut usize, end: usize, elem: &crate::types::internal::InternalElement| {
+            let slice = text[*cursor..end].trim();
+            *cursor = end;
+            if slice.is_empty() {
+                None
+            } else {
+                let mut paragraph =
+                    crate::types::internal::InternalElement::text(ElementKind::Paragraph, slice, elem.depth);
+                paragraph.page = elem.page;
+                paragraph.bbox = elem.bbox;
+                paragraph.layer = elem.layer;
+                Some(paragraph)
+            }
+        };
+
+        for (range, alt, target) in references {
+            let Some(image_index) = take_image_for_target(&doc.images, &used, &target, elem.page) else {
+                // No extracted image for this placeholder (its bytes were unreadable, or it is
+                // the slide's own text that happens to look like a reference): leave it as text.
+                continue;
+            };
+            if let Some(paragraph) = leftover(&elem.text, &mut cursor, range.start, &elem) {
+                promoted.push(paragraph);
+            }
+            let description = &mut doc.images[image_index].description;
+            if description.as_deref().map(str::trim).unwrap_or("").is_empty() && !alt.is_empty() {
+                *description = Some(alt);
+            }
+            let mut image = elem.clone();
+            image.kind = ElementKind::Image {
+                image_index: image_index as u32,
+            };
+            image.text = doc.images[image_index].description.clone().unwrap_or_default();
+            image.annotations = Vec::new();
+            promoted.push(image);
+            cursor = range.end;
+            used[image_index] = true;
+        }
+
+        if let Some(paragraph) = leftover(&elem.text, &mut cursor, elem.text.len(), &elem) {
+            promoted.push(paragraph);
+        }
+    }
+
+    doc.elements = promoted;
+}
+
+/// Byte ranges and alt texts of every `![alt](target)` reference in `text`.
+///
+/// The pipeline's `is_markdown_image_reference` only answers whether a whole string *is* one
+/// reference, which is all the callers that rewrite pre-rendered text need; this walks the
+/// string, so a paragraph holding several placeholders yields all of them.
+///
+/// The alt of a baked placeholder is backslash-escaped by the content builder
+/// (see `ContentBuilder::add_image_with_desc`), so the `](` and `)` scans skip
+/// an escaped character instead of stopping at a literal `\]` inside the alt,
+/// and the alt is returned with those escapes undone. The target is escaped
+/// the same way (`\(`, `\)`, `\\`) — a rel target carrying a bare `)` once cut
+/// the destination short so it never matched its image — and is returned with
+/// those escapes undone.
+fn markdown_image_references(text: &str) -> Vec<(std::ops::Range<usize>, String, String)> {
+    let mut found = Vec::new();
+    let mut from = 0usize;
+    while let Some(open) = text[from..].find("![") {
+        let start = from + open;
+        let Some(alt_close) = find_unescaped(&text[start + 2..], b"](").map(|offset| start + 2 + offset) else {
+            break;
+        };
+        let Some(target_close) = find_unescaped(&text[alt_close + 2..], b")").map(|offset| alt_close + 2 + offset)
+        else {
+            break;
+        };
+        found.push((
+            start..target_close + 1,
+            unescape_alt_text(&text[start + 2..alt_close]).trim().to_string(),
+            unescape_target_text(text[alt_close + 2..target_close].trim()),
+        ));
+        from = target_close + 1;
+    }
+    found
+}
+
+/// Index of the first occurrence of `needle` in `s` that is not part of a
+/// backslash escape. A `\` escapes the byte after it — the escaping the content
+/// builder applies to an alt's `[`, `]` and `\` — so a literal `\]` inside the
+/// alt must not end the `](` scan.
+fn find_unescaped(s: &str, needle: &[u8]) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 0usize;
+    while i + needle.len() <= bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            i += 2;
+            continue;
+        }
+        if bytes[i..].starts_with(needle) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Undo the alt-text escaping the content builder applied (`\[`, `\]`, `\\`).
+/// A backslash before any other character stays as written: the builder
+/// escapes only those three, and the Markdown writer escapes the rest on its
+/// own when it renders the promoted element.
+fn unescape_alt_text(alt: &str) -> String {
+    if !alt.contains('\\') {
+        return alt.to_string();
+    }
+    let mut unescaped = String::with_capacity(alt.len());
+    let mut characters = alt.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\\'
+            && let Some(&next) = characters.peek()
+            && matches!(next, '[' | ']' | '\\')
+        {
+            characters.next();
+            unescaped.push(next);
+            continue;
+        }
+        unescaped.push(character);
+    }
+    unescaped
+}
+
+/// Undo the target escaping the content builder applied (`\(`, `\)`, `\\`), so
+/// the raw target matches its image's `source_path` again. A backslash before
+/// any other character stays as written, mirroring the builder's escape set.
+fn unescape_target_text(target: &str) -> String {
+    if !target.contains('\\') {
+        return target.to_string();
+    }
+    let mut unescaped = String::with_capacity(target.len());
+    let mut characters = target.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '\\'
+            && let Some(&next) = characters.peek()
+            && matches!(next, '(' | ')' | '\\')
+        {
+            characters.next();
+            unescaped.push(next);
+            continue;
+        }
+        unescaped.push(character);
+    }
+    unescaped
+}
+
+/// Index of the extracted image a placeholder refers to.
+///
+/// The placeholder was baked from the slide's rel target and the image records that same target
+/// as its `source_path`, so the match is by identity: positional pairing cannot survive the two
+/// orders differing (placeholders follow slide geometry, images follow slide XML) or an unreadable
+/// image being skipped.
+///
+/// A placeholder whose baked target is empty — the slide referenced an image whose rel could not
+/// be resolved — carries no identity to match on, so it falls back to the first unused image
+/// *on its own slide* (`page`). `doc.images` spans the whole deck, and a document-order fallback
+/// let a broken placeholder claim a later slide's picture (marking it used), after which that
+/// slide's own placeholder could only stay as escaped text. A placeholder that names a target no
+/// image claims is the slide's own text (or an image whose bytes could not be read) and stays
+/// text rather than taking a neighbour's picture.
+fn take_image_for_target(
+    images: &[crate::types::ExtractedImage],
+    used: &[bool],
+    target: &str,
+    page: Option<u32>,
+) -> Option<usize> {
+    let unused = |index: usize| !used.get(index).copied().unwrap_or(true);
+
+    images
+        .iter()
+        .enumerate()
+        .find(|(index, image)| unused(*index) && image.source_path.as_deref().is_some_and(|path| path.trim() == target))
+        .map(|(index, _)| index)
+        .or_else(|| {
+            if !target.is_empty() {
+                return None;
+            }
+            images
+                .iter()
+                .enumerate()
+                .find(|(index, image)| unused(*index) && image.page_number == page)
+                .map(|(index, _)| index)
+        })
 }
 
 impl Plugin for PptxExtractor {
@@ -511,6 +953,7 @@ impl InternalDocumentExtractor for PptxExtractor {
             .await;
             if !children.is_empty() {
                 doc.children = Some(children);
+                crate::extraction::ooxml_embedded::append_embedded_object_text(&mut doc);
             }
             doc.processing_warnings.extend(embed_warnings);
         }
@@ -570,6 +1013,45 @@ impl InternalDocumentExtractor for PptxExtractor {
             &mut budget,
         )?;
         doc.processing_warnings.extend(pptx_warnings);
+
+        // `extract_content` extracts `ppt/embeddings/*` children, but the CLI (and any caller
+        // that hands PPTX extractors a path) goes through `extract_path`, which reads and
+        // parses the archive itself. Without this block, embedded OLE objects — the Visio/
+        // Excel/`.bin` packages the slides carry — silently produce no children on that path.
+        // Only the bytes are needed, so re-read the file here rather than widening the
+        // extraction API; a read failure is reported as a warning, not a hard failure.
+        if config.max_archive_depth > 0 {
+            // Same zero-copy reader the Excel path uses for `xl/embeddings/`: `std::fs::read`
+            // copied the whole presentation onto the heap a second time (the container was
+            // already opened from the file) just to look for `ppt/embeddings/`.
+            match crate::core::io::open_file_bytes(path) {
+                Ok(content) => {
+                    let (children, embed_warnings) = crate::extraction::ooxml_embedded::extract_ooxml_embedded_objects(
+                        &content,
+                        "ppt/embeddings/",
+                        "pptx",
+                        config,
+                    )
+                    .await;
+                    if !children.is_empty() {
+                        doc.children = Some(children);
+                        crate::extraction::ooxml_embedded::append_embedded_object_text(&mut doc);
+                    }
+                    doc.processing_warnings.extend(embed_warnings);
+                }
+                Err(error) => {
+                    doc.processing_warnings.push(crate::types::ProcessingWarning {
+                        source: Cow::Borrowed("pptx"),
+                        message: Cow::Owned(format!(
+                            "embedded objects were not extracted: could not re-read '{}': {}",
+                            path.display(),
+                            error
+                        )),
+                    });
+                }
+            }
+        }
+
         Ok(doc)
     }
 
@@ -591,6 +1073,65 @@ impl InternalDocumentExtractor for PptxExtractor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// REV-CB regression for GH#1687 (shares the GH#1662/GH#1686 fix): an OCR-only
+    /// `ExtractionConfig` (no `images.extract_images`, no captioning, no QR codes) must
+    /// still read a slide's embedded raster image bytes out of the PPTX archive, not
+    /// skip it. `needs_image_data` gained the OCR disjunct that makes this true (#1662);
+    /// PPTX shares that predicate with DOCX and HTML through
+    /// `PptxExtractor::extract_content`'s `config.needs_image_data()` call, but until now
+    /// nothing exercised that call site directly for PPTX. Before the fix, `extract_images`
+    /// stayed `false` for an OCR-only config, so the slide-image loop in
+    /// `extraction::pptx::extract_pptx_from_bytes_with_slide_contents` never ran at all and
+    /// `doc.images` stayed empty, silently, with no warning.
+    #[tokio::test]
+    async fn test_pptx_ocr_only_config_reads_real_embedded_image_bytes() {
+        use crate::core::config::ExtractionConfig;
+        use crate::plugins::InternalDocumentExtractor;
+
+        let payload = "PNGPAYLOAD".repeat(64);
+        let slide_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <p:cSld><p:spTree>
+        <p:pic>
+            <p:nvPicPr><p:cNvPr id="2" name="Picture 1"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+            <p:blipFill><a:blip r:embed="rId2"/></p:blipFill>
+            <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/></a:xfrm></p:spPr>
+        </p:pic>
+    </p:spTree></p:cSld>
+</p:sld>"#;
+        let slide_rels_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+    <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+</Relationships>"#;
+
+        let pptx = crate::extraction::pptx::tests::build_single_slide_pptx(
+            slide_xml,
+            Some(slide_rels_xml),
+            &[("ppt/media/image1.png", payload.as_bytes())],
+        );
+
+        let config = ExtractionConfig {
+            ocr: Some(crate::core::config::OcrConfig::default()),
+            ..Default::default()
+        };
+
+        let extractor = PptxExtractor::new();
+        let mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+        let internal_doc = extractor
+            .extract_content(&pptx, mime, &config)
+            .await
+            .expect("a pptx with one embedded image must extract");
+
+        assert_eq!(internal_doc.images.len(), 1, "the single picture must yield one image");
+        assert_eq!(
+            internal_doc.images[0].data.as_ref(),
+            payload.as_bytes(),
+            "an OCR-only config must still read the real embedded-image bytes, not skip the image entirely"
+        );
+    }
 
     /// A slide with math: the LaTeX must reach `ExtractedDocument.formulas`, not
     /// only the text. The deck holds display math in its own shape, inline math
@@ -909,6 +1450,150 @@ mod tests {
             .map(|e| e.text.as_str())
             .collect();
         assert_eq!(headings, vec!["Growth is"], "the heading keeps its words");
+    }
+
+    /// A nested item whose text carries a formula keeps its level — the depth is
+    /// read off the raw line, because split_line_math collapses whitespace — and
+    /// an item that is only a formula stays inside the list instead of falling
+    /// out of it with a stray `-` paragraph.
+    #[test]
+    fn test_build_internal_document_keeps_nested_and_pure_math_list_items_in_place() {
+        use crate::types::internal::ElementKind;
+
+        let content = "- outer\n  - inner $x^{2}$\n  - $y$\n";
+        let formulas = vec![("x^{2}".to_string(), false), ("y".to_string(), false)];
+        let mut budget = SecurityBudget::with_defaults();
+        let doc = PptxExtractor::build_internal_document(&[(1, content.to_string())], 1, &formulas, false, &mut budget)
+            .unwrap();
+
+        let items: Vec<&str> = doc
+            .elements
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::ListItem { .. }))
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(
+            items,
+            vec!["outer", "inner"],
+            "the pure-formula item leaves no empty item"
+        );
+
+        let math: Vec<&str> = doc
+            .elements
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::Formula))
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(math, vec!["x^{2}", "y"], "each item's formula is emitted");
+
+        let list_starts = doc
+            .elements
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::ListStart { .. }))
+            .count();
+        assert_eq!(list_starts, 2, "the nested item's list is a list inside the outer one");
+
+        assert!(
+            !doc.elements
+                .iter()
+                .any(|e| e.kind == ElementKind::Paragraph && e.text.trim() == "-"),
+            "the formula's list marker must not fall out as a stray paragraph"
+        );
+    }
+
+    /// A note whose first line starts with `# ` is note text, not the slide's
+    /// title: the title branch is skipped for a marker-stripped notes block.
+    #[test]
+    fn test_build_internal_document_keeps_note_starting_with_hash_out_of_the_outline() {
+        use crate::types::internal::ElementKind;
+
+        let content = "# Real Title\n\n### Notes:\n# not a title\nsecond note line\n";
+        let mut budget = SecurityBudget::with_defaults();
+        let doc =
+            PptxExtractor::build_internal_document(&[(1, content.to_string())], 1, &[], false, &mut budget).unwrap();
+
+        let headings: Vec<&str> = doc
+            .elements
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::Heading { .. }))
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(
+            headings,
+            vec!["Real Title"],
+            "the note's `#` line must not become a heading"
+        );
+
+        let note_kept = doc
+            .elements
+            .iter()
+            .any(|e| e.kind == ElementKind::Paragraph && e.text.contains("# not a title"));
+        assert!(note_kept, "the note's first paragraph must survive as body text");
+    }
+
+    /// The notes flag outlives its block: `add_notes` writes a slide's notes as
+    /// one string, and a blank line inside them splits the block — only the
+    /// first carries the marker, so a later note paragraph starting with `# `
+    /// must still not become the slide's title. The next slide's title branch
+    /// works again, because the flag resets per slide.
+    #[test]
+    fn test_build_internal_document_keeps_later_note_paragraphs_out_of_the_outline() {
+        use crate::types::internal::ElementKind;
+
+        let slide_contents = vec![
+            (
+                1u32,
+                "# Slide One\n\n### Notes:\nfirst note\n\n# also note text\n".to_string(),
+            ),
+            (2u32, "# Slide Two\n".to_string()),
+        ];
+        let mut budget = SecurityBudget::with_defaults();
+        let doc = PptxExtractor::build_internal_document(&slide_contents, 2, &[], false, &mut budget).unwrap();
+
+        let headings: Vec<&str> = doc
+            .elements
+            .iter()
+            .filter(|e| matches!(e.kind, ElementKind::Heading { .. }))
+            .map(|e| e.text.as_str())
+            .collect();
+        assert_eq!(
+            headings,
+            vec!["Slide One", "Slide Two"],
+            "the second note paragraph is not a heading, the next slide's title is"
+        );
+    }
+
+    /// An escaped `\|` round-trips as a literal pipe inside its cell, a
+    /// separator row is skipped, and a data cell that merely contains `---` is
+    /// kept (the old substring test dropped its whole row).
+    #[test]
+    fn test_parse_markdown_table_keeps_escaped_pipes_and_only_drops_separator_rows() {
+        let cells = PptxExtractor::parse_markdown_table("| A | B |\n| --- | --- |\n| a\\|b | x---y |\n");
+        assert_eq!(
+            cells,
+            vec![
+                vec!["A".to_string(), "B".to_string()],
+                vec!["a|b".to_string(), "x---y".to_string()]
+            ],
+            "the escaped pipe stays in its cell and the --- cell stays a cell"
+        );
+
+        let aligned = PptxExtractor::parse_markdown_table("| H |\n| :---: |\n| v |\n");
+        assert_eq!(
+            aligned,
+            vec![vec!["H".to_string()], vec!["v".to_string()]],
+            "alignment colons still mark a separator"
+        );
+
+        // The writer doubles a literal backslash, so a cell holding `a\|b` leaves the
+        // builder as `a` + `\\` + `\|` + `b`; the reader must fold both spellings back
+        // or the backslash doubles on every bake→parse round trip.
+        let backslashes = PptxExtractor::parse_markdown_table("| a\\\\\\|b | c\\\\d |\n");
+        assert_eq!(
+            backslashes,
+            vec![vec!["a\\|b".to_string(), "c\\d".to_string()]],
+            "doubled backslashes fold once and the escaped pipe stays a pipe"
+        );
     }
 
     #[test]
@@ -1443,6 +2128,294 @@ mod tests {
         assert!(
             err_msg.contains(&default_limit.to_string()),
             "error should mention the default limit ({default_limit}), got: {err_msg}"
+        );
+    }
+
+    /// A logo stamped byte-identical onto a quarter of the slides is
+    /// decoration: every element referencing it is removed, while a unique
+    /// diagram and a logo that only repeats on too few slides survive.
+    #[test]
+    fn repeated_watermark_logos_are_dropped_across_slides() {
+        use crate::types::ExtractedImage;
+        use crate::types::internal::{ElementKind, InternalElement};
+        use std::borrow::Cow;
+
+        let logo = bytes::Bytes::from_static(b"LOGO-BYTES");
+        let diagram = bytes::Bytes::from_static(b"DIAGRAM-BYTES");
+        let rare = bytes::Bytes::from_static(b"RARE-LOGO-BYTES");
+        let mut doc = InternalDocument::new("pptx");
+        for slide in 1u32..=4u32 {
+            let logo_index = doc.images.len() as u32;
+            doc.images.push(ExtractedImage {
+                data: logo.clone(),
+                format: Cow::Borrowed("png"),
+                image_index: logo_index,
+                ..Default::default()
+            });
+            doc.push_element(
+                InternalElement::text(
+                    ElementKind::Image {
+                        image_index: logo_index,
+                    },
+                    "BD21298_",
+                    0,
+                )
+                .with_page(slide),
+            );
+        }
+        let diagram_index = doc.images.len() as u32;
+        doc.images.push(ExtractedImage {
+            data: diagram,
+            format: Cow::Borrowed("png"),
+            image_index: diagram_index,
+            ..Default::default()
+        });
+        doc.push_element(
+            InternalElement::text(
+                ElementKind::Image {
+                    image_index: diagram_index,
+                },
+                "chart",
+                0,
+            )
+            .with_page(2),
+        );
+        let rare_index = doc.images.len() as u32;
+        for slide in 1u32..=2u32 {
+            doc.images.push(ExtractedImage {
+                data: rare.clone(),
+                format: Cow::Borrowed("png"),
+                image_index: rare_index,
+                ..Default::default()
+            });
+            doc.push_element(
+                InternalElement::text(
+                    ElementKind::Image {
+                        image_index: rare_index,
+                    },
+                    "rare",
+                    0,
+                )
+                .with_page(slide),
+            );
+        }
+
+        strip_repeated_decoration_images(&mut doc);
+
+        let kinds: Vec<ElementKind> = doc.elements.iter().map(|element| element.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ElementKind::Image { image_index: 4 },
+                ElementKind::Image { image_index: 5 },
+                ElementKind::Image { image_index: 5 },
+            ],
+            "the unique diagram and the rarely repeated logo must survive; got: {kinds:?}"
+        );
+    }
+
+    /// Regression: two pictures written into one paragraph. Promoting the paragraph as a single
+    /// image dropped the second picture and the slide text that shared the paragraph with it.
+    #[test]
+    fn promotes_every_baked_reference_in_a_paragraph() {
+        use crate::types::ExtractedImage;
+        use crate::types::internal::{ElementKind, InternalElement};
+        use std::borrow::Cow;
+
+        let mut doc = InternalDocument::new("pptx");
+        doc.push_element(InternalElement::text(
+            ElementKind::Paragraph,
+            "![first](../media/image1.png)![second](../media/image2.wmf)尾随文字",
+            0,
+        ));
+        doc.images = vec![
+            ExtractedImage {
+                format: Cow::Borrowed("png"),
+                source_path: Some("../media/image1.png".to_string()),
+                ..Default::default()
+            },
+            ExtractedImage {
+                format: Cow::Borrowed("wmf"),
+                source_path: Some("../media/image2.wmf".to_string()),
+                ..Default::default()
+            },
+        ];
+
+        promote_baked_image_references(&mut doc);
+
+        let kinds: Vec<ElementKind> = doc.elements.iter().map(|elem| elem.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                ElementKind::Image { image_index: 0 },
+                ElementKind::Image { image_index: 1 },
+                ElementKind::Paragraph,
+            ],
+            "each reference must become its own image element, in document order"
+        );
+        assert_eq!(doc.elements[0].text, "first", "alt text describes the first image");
+        assert_eq!(doc.elements[1].text, "second", "alt text describes the second image");
+        assert_eq!(
+            doc.elements[2].text, "尾随文字",
+            "text sharing the paragraph with the placeholders must survive"
+        );
+        assert_eq!(doc.images[0].description.as_deref(), Some("first"));
+        assert_eq!(doc.images[1].description.as_deref(), Some("second"));
+    }
+
+    /// A paragraph holding exactly one placeholder keeps producing exactly one image element.
+    #[test]
+    fn promotes_a_lone_baked_reference() {
+        use crate::types::ExtractedImage;
+        use crate::types::internal::{ElementKind, InternalElement};
+        use std::borrow::Cow;
+
+        let mut doc = InternalDocument::new("pptx");
+        doc.push_element(InternalElement::text(
+            ElementKind::Paragraph,
+            "![alt](../media/image7.png)",
+            0,
+        ));
+        doc.images = vec![ExtractedImage {
+            format: Cow::Borrowed("png"),
+            source_path: Some("../media/image7.png".to_string()),
+            ..Default::default()
+        }];
+
+        promote_baked_image_references(&mut doc);
+
+        assert_eq!(doc.elements.len(), 1, "one placeholder must yield one element");
+        assert_eq!(doc.elements[0].kind, ElementKind::Image { image_index: 0 });
+    }
+
+    /// An alt carrying `](`, `[` or `\` is baked into the placeholder with
+    /// CommonMark escapes; the promotion scan must skip those escapes (a
+    /// literal `\]` in the alt once ended the parse at the wrong place and
+    /// left the picture as escaped text) and restore the original alt text.
+    #[test]
+    fn promotes_a_reference_whose_alt_breaks_the_marker() {
+        use crate::types::ExtractedImage;
+        use crate::types::internal::{ElementKind, InternalElement};
+        use std::borrow::Cow;
+
+        let mut doc = InternalDocument::new("pptx");
+        // What `add_image_with_desc` bakes for the description `see ](fig \ x`.
+        doc.push_element(InternalElement::text(
+            ElementKind::Paragraph,
+            r"![see \](fig \\ x](../media/image1.png)",
+            0,
+        ));
+        doc.images = vec![ExtractedImage {
+            format: Cow::Borrowed("png"),
+            source_path: Some("../media/image1.png".to_string()),
+            ..Default::default()
+        }];
+
+        promote_baked_image_references(&mut doc);
+
+        assert_eq!(
+            doc.elements.len(),
+            1,
+            "the escaped alt must not break the reference: {:?}",
+            doc.elements
+        );
+        assert_eq!(doc.elements[0].kind, ElementKind::Image { image_index: 0 });
+        assert_eq!(
+            doc.images[0].description.as_deref(),
+            Some("see ](fig \\ x"),
+            "the promoted alt must be the original, unescaped text"
+        );
+    }
+
+    /// A rel target carrying `(`/`)` is baked with CommonMark escapes so the
+    /// promotion scan finds the true closing paren; the target is restored to
+    /// its raw form before matching, or the picture would stay orphaned as
+    /// literal text (`media/image (1).png`, as third-party producers name it).
+    #[test]
+    fn promotes_a_reference_whose_target_breaks_the_scan() {
+        use crate::types::ExtractedImage;
+        use crate::types::internal::{ElementKind, InternalElement};
+        use std::borrow::Cow;
+
+        let mut doc = InternalDocument::new("pptx");
+        // What `add_image_with_desc` bakes for the target `../media/image (1).png`.
+        doc.push_element(InternalElement::text(
+            ElementKind::Paragraph,
+            r"![figure](../media/image \(1\).png)",
+            0,
+        ));
+        doc.images = vec![ExtractedImage {
+            format: Cow::Borrowed("png"),
+            source_path: Some("../media/image (1).png".to_string()),
+            ..Default::default()
+        }];
+
+        promote_baked_image_references(&mut doc);
+
+        assert_eq!(
+            doc.elements.len(),
+            1,
+            "the escaped target must not break the reference: {:?}",
+            doc.elements
+        );
+        assert_eq!(doc.elements[0].kind, ElementKind::Image { image_index: 0 });
+    }
+
+    /// A placeholder whose rel could not be resolved bakes an empty target; its
+    /// positional fallback must stay on the placeholder's own slide. A
+    /// whole-deck fallback let slide 1's broken placeholder claim slide 2's
+    /// only picture (marking it used), after which slide 2's own placeholder
+    /// could only stay as escaped text — one wrong image and one silently lost.
+    #[test]
+    fn empty_target_fallback_does_not_cross_slides() {
+        use crate::types::ExtractedImage;
+        use crate::types::internal::{ElementKind, InternalElement};
+        use std::borrow::Cow;
+
+        let mut doc = InternalDocument::new("pptx");
+        // Slide 1: the broken placeholder (empty target, no image of its own).
+        doc.push_element(InternalElement::text(ElementKind::Paragraph, "![]()", 0).with_page(1));
+        // Slide 2: its own real placeholder for the deck's only image.
+        doc.push_element(
+            InternalElement::text(ElementKind::Paragraph, "![chart](../media/image9.png)", 0).with_page(2),
+        );
+        doc.images = vec![ExtractedImage {
+            format: Cow::Borrowed("png"),
+            image_index: 0,
+            page_number: Some(2),
+            source_path: Some("../media/image9.png".to_string()),
+            ..Default::default()
+        }];
+
+        promote_baked_image_references(&mut doc);
+
+        let kinds: Vec<ElementKind> = doc.elements.iter().map(|element| element.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![ElementKind::Paragraph, ElementKind::Image { image_index: 0 }],
+            "the broken slide-1 placeholder must stay text; slide 2 keeps its own picture"
+        );
+        assert!(
+            doc.elements[0].text.trim().starts_with("!["),
+            "the broken placeholder survives as text: {:?}",
+            doc.elements[0].text
+        );
+
+        // The fallback itself survives on the placeholder's own slide: a broken
+        // placeholder still takes an unused image of its own page.
+        let mut doc = InternalDocument::new("pptx");
+        doc.push_element(InternalElement::text(ElementKind::Paragraph, "![]()", 0).with_page(1));
+        doc.images = vec![ExtractedImage {
+            format: Cow::Borrowed("png"),
+            image_index: 0,
+            page_number: Some(1),
+            ..Default::default()
+        }];
+        promote_baked_image_references(&mut doc);
+        assert_eq!(
+            doc.elements[0].kind,
+            ElementKind::Image { image_index: 0 },
+            "an unused image on the placeholder's own slide is still fair game"
         );
     }
 }

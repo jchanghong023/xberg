@@ -147,7 +147,7 @@ Enabling it improves structural F1 at the cost of inference latency (~150-300 ms
 
 Layout detection is a *structure signal*, not an output format: it feeds the same heading, table,
 list, and figure classification that the font-clustering heuristic produces, and both are discarded
-when `output_format` is `Plain` (the default), because `Plain` emits raw text with no structural
+when `output_format` is `Plain`, because `Plain` emits raw text with no structural
 markup to carry the result. Pair layout detection with a structured `output_format` — `Markdown`,
 `Djot`, `Html`, or `DocTags` — or the inference cost of running the model is spent for no visible
 effect on `content`. `output_format` and `layout` are independent config fields; enabling one does

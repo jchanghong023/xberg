@@ -53,6 +53,32 @@ pub struct PdfMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scanned_pages: Option<Vec<u32>>,
 
+    /// Pages whose text was dominated by fabricated character mappings (1-indexed):
+    /// `MappingProvenance::Fallback`, a font whose glyph-to-Unicode mapping resolved to
+    /// a value the extractor chose rather than read from the file (issue #1254). This is
+    /// a fact about how the text was derived, independent of `scanned_pages`'s raster-based
+    /// scan detection, and independent of whether the resulting text happens to look
+    /// structurally like prose (issue #1667: a broken mapping that lands on ordinary
+    /// letters and punctuation passes every character-shape check but is still fabricated).
+    ///
+    /// `None` when `OcrQualityThresholds::enable_provenance_ocr_routing` is `false`; empty
+    /// when no page qualifies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fabricated_text_pages: Option<Vec<u32>>,
+
+    /// Pages whose native text layer reads as no real detectable language (1-indexed): a
+    /// `/ToUnicode` CMap (or other mapping tier) that resolves every glyph to *a* character,
+    /// consistently the WRONG one (e.g. a ROT-shifted mapping), so the page is structurally
+    /// indistinguishable from real prose to `fabricated_text_pages`'s provenance check and to
+    /// every character-shape heuristic (issue #1696; issue #1667's `quality_score: 1.0` with
+    /// no warning on such a page is the same underlying gap). This is a content-plausibility
+    /// fact, independent of `fabricated_text_pages` and of `scanned_pages`.
+    ///
+    /// `None` when `OcrQualityThresholds::enable_plausibility_ocr_routing` is `false`; empty
+    /// when no page qualifies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub implausible_text_pages: Option<Vec<u32>>,
+
     /// Pages the `auto` layout strategy skipped (1-indexed).
     ///
     /// `None` unless layout detection ran with `LayoutStrategy::Auto`; empty

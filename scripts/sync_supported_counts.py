@@ -37,6 +37,14 @@ NON_PUBLICATION_PATH_PARTS = frozenset(
     }
 )
 GENERATED_PLUGIN_ROOTS = frozenset({".claude-plugin", ".codex-plugin", ".cursor-plugin", ".factory-plugin"})
+# Everything under plugin/ outside .ai-rulez/ is generated output, and most of it
+# carries no marker because ai-rulez writes JSON, which has no comment syntax. The
+# marketplace README is the one hand-written source that lives in that tree: no
+# generator writes it (a `--plugin` regen leaves it untouched) and it carries its own
+# `~keep` note. Treating it as generated made `sync` skip it while `verify` still
+# checked it, so the two could never agree and the count stayed stale at 106 through
+# a full regen. ~keep
+PLUGIN_SOURCE_PATHS = frozenset({("plugin", "README.md")})
 GENERATED_HEADER_LINE_LIMIT = 5
 PUBLICATION_TEXT_SUFFIXES = frozenset(
     {
@@ -317,6 +325,8 @@ def _is_generated_output(text_file: TextFile) -> bool:
     ):
         return True
     parts = text_file.path.parts
+    if parts in PLUGIN_SOURCE_PATHS:
+        return False
     if parts and parts[0] in GENERATED_PLUGIN_ROOTS:
         return True
     if len(parts) >= 2 and parts[:2] == (".agents", "plugins"):

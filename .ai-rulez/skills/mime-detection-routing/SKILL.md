@@ -25,7 +25,7 @@ Policy -> content and/or extension evidence -> validate_mime_type -> registry.ge
 `EXT_TO_MIME` and `SUPPORTED_MIME_TYPES` are `LazyLock`s **derived** from it by iteration —
 there is no `m.insert` call site to add to, and hand-editing either is impossible.
 
-The full registry publishes 106 formats, 140 unique extensions, and 53 aliases, verified by
+The full registry publishes 110 formats, 146 unique extensions, and 58 aliases, verified by
 `scripts/sync_supported_counts.py verify`. The published count constants describe that static
 registry; runtime availability is its intersection with registered extractors. Extension lookup is
 case-insensitive (the extension is lowercased before the map hit).

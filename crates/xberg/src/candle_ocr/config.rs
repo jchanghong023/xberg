@@ -159,19 +159,48 @@ pub struct GlmOcrBackendOptions {
     pub cache_dir: Option<String>,
 }
 
+/// Floating-point precision accepted by `candle-deepseek-ocr` backend options.
+///
+/// `Auto` (the default) resolves per compute device: BF16 on CUDA, F16 on Metal, F32 on CPU.
+/// A dtype with no kernel on the selected device fails the load hard rather than silently
+/// falling back to another precision -- this is not a tuning knob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CandleDeepseekOcrDtype {
+    #[default]
+    Auto,
+    F32,
+    F16,
+    Bf16,
+}
+
 /// Runtime options accepted by the `candle-deepseek-ocr` backend.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct DeepseekOcrBackendOptions {
-    /// Local DeepSeek-OCR model directory. The backend requires this option.
+    /// Local DeepSeek-OCR model directory. Takes precedence over `model_id` when present.
     #[serde(alias = "model-path", skip_serializing_if = "Option::is_none")]
     pub model_path: Option<String>,
+    /// Optional Hugging Face repository identifier. Defaults to the checksum-pinned
+    /// `deepseek-ai/DeepSeek-OCR`. Ignored when `model_path` is set.
+    #[serde(alias = "model-id", skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
+    /// Optional immutable Hugging Face model revision. The default model is pinned
+    /// automatically; a custom `model_id` requires this to be set explicitly.
+    #[serde(alias = "hf-revision", alias = "revision", skip_serializing_if = "Option::is_none")]
+    pub hf_revision: Option<String>,
+    /// Optional Hugging Face cache root.
+    #[serde(alias = "cache-dir", skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<String>,
     /// Optional per-call device override.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device: Option<CandleDevicePreference>,
     /// DeepSeek-OCR model generation, either 1 or 2. Defaults to 2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<u32>,
+    /// Optional weight precision override; see [`CandleDeepseekOcrDtype`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dtype: Option<CandleDeepseekOcrDtype>,
 }
 
 #[cfg(any(
@@ -193,7 +222,20 @@ where
             "invalid {backend_name} backend_options: expected a JSON object"
         )));
     }
-    serde_json::from_value(value.clone())
+    // The PDF OCR route stamps `source_dpi` and `page_rotation_degrees` into every backend's
+    // shared `backend_options` object regardless of which backend will read it (xberg#1672,
+    // `extractors::pdf::ocr::pipeline::ocr_config_with_page_rotation_hint`), and
+    // `OcrConfig::backend_options`'s own contract says unknown keys are silently ignored. No
+    // candle backend option struct declares either field, so strip exactly those two known
+    // pipeline hint keys before the `deny_unknown_fields` deserialize below -- which keeps
+    // reporting a real typo in a candle-specific option (any other unknown key) as the
+    // validation error it is.
+    let mut value = value.clone();
+    if let Some(obj) = value.as_object_mut() {
+        obj.remove(crate::core::config::ocr::SOURCE_DPI_BACKEND_OPTION);
+        obj.remove(crate::core::config::ocr::PAGE_ROTATION_DEGREES_BACKEND_OPTION);
+    }
+    serde_json::from_value(value)
         .map_err(|error| XbergError::validation(format!("invalid {backend_name} backend_options: {error}")))
 }
 
@@ -360,17 +402,35 @@ mod tests {
 
         let deepseek = DeepseekOcrBackendOptions {
             model_path: Some("/models/deepseek".to_string()),
+            model_id: Some("example/deepseek-ocr".to_string()),
+            hf_revision: Some("deepseek-revision".to_string()),
+            cache_dir: Some("/cache/deepseek".to_string()),
             device: Some(CandleDevicePreference::Auto),
             version: Some(3),
+            dtype: Some(CandleDeepseekOcrDtype::Bf16),
         };
         assert_eq!(
             serde_json::to_value(deepseek).unwrap(),
             serde_json::json!({
                 "model_path": "/models/deepseek",
+                "model_id": "example/deepseek-ocr",
+                "hf_revision": "deepseek-revision",
+                "cache_dir": "/cache/deepseek",
                 "device": "auto",
-                "version": 3
+                "version": 3,
+                "dtype": "bf16"
             })
         );
+    }
+
+    #[test]
+    fn should_default_deepseek_dtype_to_auto_when_absent() {
+        let options: DeepseekOcrBackendOptions = parse_backend_options(None, "candle-deepseek-ocr").unwrap();
+        assert_eq!(options.dtype, None);
+
+        let explicit = serde_json::json!({"dtype": "f16"});
+        let options: DeepseekOcrBackendOptions = parse_backend_options(Some(&explicit), "candle-deepseek-ocr").unwrap();
+        assert_eq!(options.dtype, Some(CandleDeepseekOcrDtype::F16));
     }
 
     #[test]
@@ -415,6 +475,40 @@ mod tests {
             .to_string();
         assert!(error.contains("unknown field `versoin`"));
         assert!(error.contains("candle-deepseek-ocr backend_options"));
+    }
+
+    /// xberg#1672: the PDF OCR page path stamps `source_dpi` and `page_rotation_degrees` into
+    /// the shared `backend_options` object for every backend
+    /// (`extractors::pdf::ocr::pipeline::ocr_config_with_page_rotation_hint`).
+    /// `OcrConfig::backend_options`'s own contract says unknown keys are silently ignored, and no
+    /// candle backend option struct declares either field, so both keys must be tolerated here
+    /// too -- not just any unknown key, which `should_reject_invalid_candle_backend_options_with_context`
+    /// above still rejects.
+    ///
+    /// Fails on unfixed code: `deny_unknown_fields` rejects `source_dpi` with `unknown field
+    /// source_dpi, expected one of ...` for every one of the four candle backends.
+    #[test]
+    fn should_ignore_pdf_pipeline_hint_keys_in_candle_backend_options() {
+        let hints = serde_json::json!({"source_dpi": 150.0, "page_rotation_degrees": 270});
+
+        let trocr: TrocrBackendOptions = parse_backend_options(Some(&hints), "candle-trocr").unwrap();
+        assert_eq!(trocr, TrocrBackendOptions::default());
+
+        let paddle: PaddleOcrVlBackendOptions = parse_backend_options(Some(&hints), "candle-paddleocr-vl").unwrap();
+        assert_eq!(paddle, PaddleOcrVlBackendOptions::default());
+
+        let glm: GlmOcrBackendOptions = parse_backend_options(Some(&hints), "candle-glm-ocr").unwrap();
+        assert_eq!(glm, GlmOcrBackendOptions::default());
+
+        let deepseek: DeepseekOcrBackendOptions = parse_backend_options(Some(&hints), "candle-deepseek-ocr").unwrap();
+        assert_eq!(deepseek, DeepseekOcrBackendOptions::default());
+
+        // A hint alongside a real option must still combine correctly, not disappear with the
+        // rest of the object.
+        let mixed = serde_json::json!({"source_dpi": 150.0, "task": "table"});
+        let paddle_mixed: PaddleOcrVlBackendOptions =
+            parse_backend_options(Some(&mixed), "candle-paddleocr-vl").unwrap();
+        assert_eq!(paddle_mixed.task, Some(PaddleOcrVlTaskKind::Table));
     }
 
     #[test]

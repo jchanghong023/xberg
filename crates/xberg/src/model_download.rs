@@ -10,6 +10,7 @@
         not(target_arch = "wasm32"),
         any(
             feature = "candle-paddleocr-vl",
+            feature = "candle-deepseek-ocr",
             paddle_ocr,
             auto_rotate,
             layout_detection,
@@ -30,6 +31,7 @@ use std::time::Duration;
     auto_rotate,
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
+    feature = "candle-deepseek-ocr",
     feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
@@ -42,6 +44,7 @@ use sha2::{Digest, Sha256};
     auto_rotate,
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
+    feature = "candle-deepseek-ocr",
     feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
@@ -54,6 +57,7 @@ use std::io::{BufReader, Read};
     auto_rotate,
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
+    feature = "candle-deepseek-ocr",
     feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
@@ -66,6 +70,7 @@ use std::path::Path;
     auto_rotate,
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
+    feature = "candle-deepseek-ocr",
     feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
@@ -87,6 +92,7 @@ use std::path::PathBuf;
         not(target_arch = "wasm32"),
         any(
             feature = "candle-paddleocr-vl",
+            feature = "candle-deepseek-ocr",
             paddle_ocr,
             auto_rotate,
             layout_detection,
@@ -109,6 +115,7 @@ const DEFAULT_MODEL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -125,6 +132,7 @@ static QUARANTINE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
     not(target_arch = "wasm32"),
     any(
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         paddle_ocr,
         auto_rotate,
         layout_detection,
@@ -145,6 +153,7 @@ const HF_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
     not(target_arch = "wasm32"),
     any(
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         paddle_ocr,
         auto_rotate,
         layout_detection,
@@ -170,6 +179,7 @@ const HF_MAX_RETRY_ATTEMPTS: usize = 2;
     not(target_arch = "wasm32"),
     any(
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         paddle_ocr,
         auto_rotate,
         layout_detection,
@@ -187,6 +197,7 @@ struct Ipv4FirstResolver;
     not(target_arch = "wasm32"),
     any(
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         paddle_ocr,
         auto_rotate,
         layout_detection,
@@ -220,6 +231,7 @@ impl reqwest::dns::Resolve for Ipv4FirstResolver {
     not(target_arch = "wasm32"),
     any(
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         paddle_ocr,
         auto_rotate,
         layout_detection,
@@ -248,6 +260,7 @@ fn order_ipv4_first(addrs: &mut [std::net::SocketAddr]) {
     not(target_arch = "wasm32"),
     any(
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         paddle_ocr,
         auto_rotate,
         layout_detection,
@@ -288,6 +301,7 @@ pub(crate) fn hf_client_builder() -> hf_hub::HFClientBuilder {
         not(target_arch = "wasm32"),
         any(
             feature = "candle-paddleocr-vl",
+            feature = "candle-deepseek-ocr",
             paddle_ocr,
             auto_rotate,
             layout_detection,
@@ -319,6 +333,7 @@ pub(crate) fn model_download_timeout() -> Duration {
     auto_rotate,
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
+    feature = "candle-deepseek-ocr",
     feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
@@ -337,6 +352,7 @@ pub(crate) fn hf_offline_mode() -> bool {
     auto_rotate,
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
+    feature = "candle-deepseek-ocr",
     feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
@@ -354,6 +370,7 @@ fn env_flag_enabled(value: &std::ffi::OsStr) -> bool {
     auto_rotate,
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
+    feature = "candle-deepseek-ocr",
     feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
@@ -382,6 +399,7 @@ fn offline_cache_miss(repo_id: &str, remote_filename: &str, revision: Option<&st
         not(target_arch = "wasm32"),
         any(
             feature = "candle-paddleocr-vl",
+            feature = "candle-deepseek-ocr",
             paddle_ocr,
             auto_rotate,
             layout_detection,
@@ -442,6 +460,7 @@ where
     auto_rotate,
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
+    feature = "candle-deepseek-ocr",
     feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
@@ -468,6 +487,7 @@ pub(crate) fn download_lock(key: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -488,6 +508,7 @@ pub(crate) struct ArtifactFileLock {
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -510,6 +531,7 @@ impl Drop for ArtifactFileLock {
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -520,6 +542,15 @@ pub(crate) fn acquire_artifact_file_lock(path: &Path) -> Result<ArtifactFileLock
     acquire_artifact_file_lock_with_timeout(path, model_download_timeout())
 }
 
+/// Whether `error` reports lock contention (another handle holds the artifact
+/// lock, so waiting can still succeed) rather than a real I/O failure.
+///
+/// fs2 0.4.3 maps the Unix `EWOULDBLOCK` family to `ErrorKind::WouldBlock`, but
+/// on Windows it returns `LockFileEx`'s raw `ERROR_LOCK_VIOLATION` (33) unmapped
+/// and std's `decode_error_kind` only maps the socket `WSAEWOULDBLOCK` spelling —
+/// without this check, Windows lock contention fails the acquisition outright
+/// instead of retrying, e.g. when concurrent test binaries publish to the same
+/// shared model cache. ~keep
 #[cfg(all(
     not(target_arch = "wasm32"),
     any(
@@ -528,6 +559,36 @@ pub(crate) fn acquire_artifact_file_lock(path: &Path) -> Result<ArtifactFileLock
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "transcription",
+        feature = "chunking-tokenizers",
+        feature = "onnx-runtime",
+        feature = "static-embeddings"
+    )
+))]
+fn is_lock_contention(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        const ERROR_LOCK_VIOLATION: i32 = 33;
+        error.raw_os_error() == Some(ERROR_LOCK_VIOLATION)
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
+}
+
+#[cfg(all(
+    not(target_arch = "wasm32"),
+    any(
+        paddle_ocr,
+        layout_detection,
+        auto_rotate,
+        feature = "ner-onnx",
+        feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -564,10 +625,10 @@ pub(crate) fn acquire_artifact_file_lock_with_timeout(
                     path: path.to_path_buf(),
                 });
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && started.elapsed() < timeout => {
+            Err(error) if is_lock_contention(&error) && started.elapsed() < timeout => {
                 std::thread::sleep(LOCK_RETRY_INTERVAL.min(timeout.saturating_sub(started.elapsed())));
             }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            Err(error) if is_lock_contention(&error) => {
                 return Err(format!(
                     "Timed out after {}s waiting for model-cache lock {}",
                     timeout.as_secs_f64(),
@@ -592,6 +653,7 @@ pub(crate) fn acquire_artifact_file_lock_with_timeout(
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -615,6 +677,7 @@ fn hf_artifact_lock_path(repo_id: &str, cache_dir: Option<&Path>, expected_sha25
     auto_rotate,
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
+    feature = "candle-deepseek-ocr",
     feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
@@ -634,6 +697,7 @@ fn is_sha256_hex(value: &str) -> bool {
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -693,6 +757,7 @@ pub(crate) fn hf_cached_file(
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -716,6 +781,7 @@ const PROGRESS_RENDER_INTERVAL: Duration = Duration::from_secs(1);
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -739,6 +805,7 @@ struct TracingDownloadProgress {
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -762,6 +829,7 @@ struct TracingProgressState {
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -799,6 +867,7 @@ impl TracingDownloadProgress {
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -858,6 +927,7 @@ impl hf_hub::progress::ProgressHandler for TracingDownloadProgress {
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -880,6 +950,7 @@ fn render_progress(message: &str) {
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -909,6 +980,7 @@ fn format_transfer(completed: u64, total: u64) -> String {
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -934,6 +1006,7 @@ fn format_bytes(bytes: u64) -> String {
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -957,6 +1030,7 @@ pub(crate) fn progress_handler(progress: crate::core::config::DownloadProgress) 
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -1049,6 +1123,7 @@ mod progress_tests {
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -1095,6 +1170,7 @@ pub(crate) fn hf_resolve_file(
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -1264,6 +1340,7 @@ pub(crate) fn hf_download_revision(repo_id: &str, remote_filename: &str, revisio
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -1405,6 +1482,7 @@ pub(crate) fn hf_force_download_revision(
     auto_rotate,
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
+    feature = "candle-deepseek-ocr",
     feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
@@ -1448,6 +1526,7 @@ fn verified_cached_path(
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -1474,6 +1553,7 @@ struct QuarantinedEntry {
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -1540,6 +1620,7 @@ fn quarantine_hf_cache_entry(
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -1567,6 +1648,7 @@ fn deterministic_hf_blob_path(snapshot: &Path, expected_sha256: &str) -> Option<
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -1592,6 +1674,7 @@ fn hf_blob_belongs_to_snapshot(snapshot: &Path, blob: &Path) -> bool {
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -1668,6 +1751,7 @@ fn restore_quarantined_entries(
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -1712,6 +1796,7 @@ pub(crate) fn hf_cached_revision(
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -1755,6 +1840,7 @@ pub(crate) fn hf_cached_revision_with_client(
 #[cfg(any(
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
+    feature = "candle-deepseek-ocr",
     feature = "onnx-runtime",
     all(feature = "static-embeddings", not(target_arch = "wasm32"))
 ))]
@@ -1793,6 +1879,7 @@ pub(crate) fn parse_sha256_manifest(content: &str) -> Result<Vec<(String, String
     auto_rotate,
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
+    feature = "candle-deepseek-ocr",
     feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
@@ -1839,6 +1926,7 @@ pub(crate) fn verify_sha256(path: &Path, expected: &str, label: &str) -> Result<
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
@@ -2204,6 +2292,27 @@ mod hf_cache_tests {
         drop(first);
         acquire_artifact_file_lock_with_timeout(&path, Duration::from_secs(1)).unwrap();
     }
+
+    /// Windows regression: fs2 returns `ERROR_LOCK_VIOLATION` (33) unmapped from
+    /// `try_lock_exclusive`, which must be treated as retryable contention — a
+    /// waiter has to outlast the holder and succeed, not fail with "os error 33".
+    #[test]
+    fn artifact_file_lock_waits_for_peer_release() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("artifact-wait.lock");
+        let held = acquire_artifact_file_lock_with_timeout(&path, Duration::from_secs(1)).unwrap();
+
+        let waiter_path = path.clone();
+        let waiter = std::thread::spawn(move || {
+            acquire_artifact_file_lock_with_timeout(&waiter_path, Duration::from_secs(10)).unwrap();
+        });
+        // Let the waiter hit contention at least once before the holder releases.
+        std::thread::sleep(Duration::from_millis(200));
+        drop(held);
+        waiter
+            .join()
+            .expect("waiter must acquire the lock after the holder releases it");
+    }
 }
 
 /// Central registry of every vendored, checked-in SHA-256 manifest across model
@@ -2269,6 +2378,12 @@ pub(crate) fn vendored_model_manifests() -> Vec<(&'static str, &'static str)> {
         crate::candle_ocr::model_stager::PADDLEOCR_VL_16_SHA256_MANIFEST,
     ));
 
+    #[cfg(all(feature = "candle-deepseek-ocr", not(target_arch = "wasm32")))]
+    manifests.push((
+        "deepseek-ocr",
+        crate::candle_ocr::model_stager::DEEPSEEK_OCR_SHA256_MANIFEST,
+    ));
+
     manifests
 }
 
@@ -2326,6 +2441,7 @@ mod download_deadline_tests {
     not(target_arch = "wasm32"),
     any(
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         paddle_ocr,
         auto_rotate,
         layout_detection,
@@ -2458,6 +2574,7 @@ mod tests {
     any(
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "onnx-runtime",
         all(feature = "static-embeddings", not(target_arch = "wasm32"))
     )
@@ -2517,6 +2634,6 @@ mod vendored_manifest_registry_tests {
     #[test]
     fn registry_never_panics_even_when_empty() {
         let manifests = vendored_model_manifests();
-        assert!(manifests.len() <= 6, "registry declares more families than expected");
+        assert!(manifests.len() <= 7, "registry declares more families than expected");
     }
 }

@@ -72,3 +72,98 @@ fn test_docx_ocr_content_injection() {
         eprintln!("No OCR content produced for images; skipping injection verification");
     }
 }
+
+/// GH#1703 (fork-adjusted): an OCR-only DOCX config (`ocr: Some(_)`, `images: None`) in
+/// this fork *retains* the embedded images' raw bytes — an absent `images` section means
+/// "extract images" here (`needs_image_data()` defaults true, see fork.md), which is the
+/// deliberate divergence from upstream's read-for-OCR-then-drop fix. What must still hold
+/// from GH#1703: the fixed text the mock backend produced lands in `content`, proving the
+/// OCR pass over the read bytes works, and `counts.images` stays populated.
+#[test]
+fn test_docx_ocr_only_config_returns_no_images() {
+    use async_trait::async_trait;
+    use xberg::plugins::{OcrBackend, OcrBackendType, Plugin, register_ocr_backend, unregister_ocr_backend};
+    use xberg::types::ExtractedDocument;
+
+    const SENTINEL_OCR_TEXT: &str = "GH1703_DOCX_SENTINEL_OCR_TEXT";
+    const BACKEND_NAME: &str = "gh1703-docx-fixed-text-ocr";
+
+    struct FixedTextOcrBackend;
+
+    #[async_trait]
+    impl OcrBackend for FixedTextOcrBackend {
+        fn backend_type(&self) -> OcrBackendType {
+            OcrBackendType::Custom
+        }
+        fn supports_language(&self, _: &str) -> bool {
+            true
+        }
+        async fn process_image(&self, _: &[u8], _config: &OcrConfig) -> xberg::Result<ExtractedDocument> {
+            let mut document = ExtractedDocument::default();
+            document.content = SENTINEL_OCR_TEXT.to_string();
+            Ok(document)
+        }
+    }
+
+    impl Plugin for FixedTextOcrBackend {
+        fn name(&self) -> &str {
+            BACKEND_NAME
+        }
+        fn version(&self) -> String {
+            "0.0.0".to_string()
+        }
+        fn initialize(&self) -> xberg::Result<()> {
+            Ok(())
+        }
+        fn shutdown(&self) -> xberg::Result<()> {
+            Ok(())
+        }
+    }
+
+    register_ocr_backend(std::sync::Arc::new(FixedTextOcrBackend)).unwrap();
+    struct BackendGuard(&'static str);
+    impl Drop for BackendGuard {
+        fn drop(&mut self) {
+            let _ = unregister_ocr_backend(self.0);
+        }
+    }
+    let _guard = BackendGuard(BACKEND_NAME);
+
+    let file_path = get_test_file_path("docx/word_sample.docx");
+
+    let config = ExtractionConfig {
+        ocr: Some(OcrConfig {
+            backend: BACKEND_NAME.to_string(),
+            ..Default::default()
+        }),
+        images: None,
+        force_ocr: true,
+        use_cache: false,
+        ..Default::default()
+    };
+
+    let result = extract_uri_document_blocking(&file_path, None, &config).expect("extraction must succeed");
+
+    // (fork) 本 fork 的默认行为与上游 GH#1703 相反：缺省 `images` 段视为抽取图片
+    //（`needs_image_data()` 默认真，见 fork.md「默认抽取图片」），所以字节要保留、
+    // counts 与 content 断言不变——上游"读给 OCR 用完即丢字节"的修复在默认配置下
+    // 不采纳；需要丢弃字节时由调用方显式配置 `images`。
+    assert_eq!(
+        result.images.as_ref().map(|v| v.len()).unwrap_or(0),
+        1,
+        "fork default: an absent images section retains the embedded image bytes that fed OCR"
+    );
+    assert_eq!(
+        result.counts.images, 1,
+        "DocumentCounts::images is documented as always populated"
+    );
+    assert!(
+        !result.content.trim().is_empty(),
+        "document content must still be extracted alongside the retained images"
+    );
+    assert!(
+        result.content.contains(SENTINEL_OCR_TEXT),
+        "embedded-image OCR text must still land in content alongside the retained raw bytes; got content:\n{}",
+        result.content
+    );
+}

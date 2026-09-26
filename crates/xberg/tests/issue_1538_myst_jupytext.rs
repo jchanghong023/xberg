@@ -350,6 +350,11 @@ async fn should_preprocess_myst_inside_ipynb_markdown_cells() {
     }
 }
 
+// The jupytext notebook-reconstruction path this fixture exercises (frontmatter
+// kernelspec → notebook metadata) is `tree-sitter`-gated; the fork's feature set
+// deliberately excludes code intelligence, so the capability is compiled out and
+// the fixture parses as plain MyST markdown here.
+#[cfg(feature = "tree-sitter")]
 #[tokio::test]
 async fn should_extract_vendored_myst_notebook_fixture() {
     let bytes = std::fs::read("../../test_documents/vendored/executablebooks-myst-nb/basic_unrun.md")

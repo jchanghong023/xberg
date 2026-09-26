@@ -10,6 +10,8 @@ use crate::types::annotations::PdfAnnotation;
 use crate::types::document_structure::ContentLayer;
 use crate::types::internal::{ElementKind, InternalDocument};
 
+use super::{image_ocr_contents, inline_attributes_suffix, ocr_duplicate_indices};
+
 use super::common::{
     annotation_display_text, annotation_type_label, get_admonition_kind, get_admonition_title, parse_metadata_entries,
     render_table_plain,
@@ -19,8 +21,12 @@ use super::common::{
 pub(crate) fn render_plain(doc: &InternalDocument) -> String {
     let mut out = String::with_capacity(doc.elements.len() * 80);
     let mut last_heading_depth: Option<u16> = None;
+    let repeated_ocr = ocr_duplicate_indices(&body_paragraph_texts(doc), &image_ocr_contents(doc, false));
 
-    for elem in &doc.elements {
+    for (index, elem) in doc.elements.iter().enumerate() {
+        if repeated_ocr[index] {
+            continue;
+        }
         if elem.layer != ContentLayer::Body {
             continue;
         }
@@ -51,22 +57,11 @@ pub(crate) fn render_plain(doc: &InternalDocument) -> String {
                         out.push_str(&indent);
                     }
 
-                    if let (true, Some(attrs)) = (matches!(elem.kind, ElementKind::Heading { .. }), &elem.attributes) {
-                        out.push_str(&elem.text);
-                        let mut filtered_attrs: Vec<_> = attrs
-                            .iter()
-                            .filter(|(k, v)| !k.starts_with("xmlns") && !v.is_empty())
-                            .collect();
-                        filtered_attrs.sort_by_key(|(k, _)| k.as_str());
-                        let formatted_attrs: Vec<String> =
-                            filtered_attrs.iter().map(|(k, v)| format!("{}: {}", k, v)).collect();
-                        if !formatted_attrs.is_empty() {
-                            out.push_str(" (");
-                            out.push_str(&formatted_attrs.join(", "));
-                            out.push(')');
-                        }
-                    } else {
-                        out.push_str(&elem.text);
+                    out.push_str(&elem.text);
+                    if matches!(elem.kind, ElementKind::Heading { .. })
+                        && let Some(suffix) = elem.attributes.as_ref().and_then(inline_attributes_suffix)
+                    {
+                        out.push_str(&suffix);
                     }
 
                     if matches!(elem.kind, ElementKind::Heading { .. }) {
@@ -116,11 +111,14 @@ pub(crate) fn render_plain(doc: &InternalDocument) -> String {
             }
             ElementKind::Image { image_index } => {
                 if let Some(img) = doc.images.get(image_index as usize) {
-                    if let Some(ref desc) = img.description
-                        && !desc.is_empty()
+                    // Same alt policy as the comrak writers (`comrak_bridge`): a path-like
+                    // `@descr` Office bakes into the image is dropped rather than leaking
+                    // host paths into the plain output.
+                    if let Some(desc) =
+                        crate::extraction::markdown_utils::sanitize_image_alt_text(img.description.clone())
                     {
                         out.push_str("[Image: ");
-                        out.push_str(desc);
+                        out.push_str(&desc);
                         out.push_str("]\n\n");
                     }
 
@@ -131,11 +129,16 @@ pub(crate) fn render_plain(doc: &InternalDocument) -> String {
                         out.push_str(&ocr_result.content);
                         out.push_str("\n\n");
                     }
-                } else if !elem.text.trim().is_empty() {
+                } else if let Some(text) =
+                    crate::extraction::markdown_utils::sanitize_image_alt_text(Some(elem.text.trim().to_string()))
+                {
                     // An image the extractor could not resolve (a missing archive
-                    // member) still carries its alt text or caption.
+                    // member) still carries its alt text or caption — sanitized
+                    // like the comrak and djot fallbacks, so a filesystem path an
+                    // Office author baked in drops instead of leaking host paths
+                    // through the plain output.
                     out.push_str("[Image: ");
-                    out.push_str(elem.text.trim());
+                    out.push_str(&text);
                     out.push_str("]\n\n");
                 }
             }
@@ -295,9 +298,55 @@ fn render_annotations_plain(annotations: &[PdfAnnotation]) -> String {
     out
 }
 
+/// The text of each element when it is a body paragraph, and an empty string otherwise.
+///
+/// The empty string is the neutral value [`ocr_duplicate_indices`] expects for entries that
+/// cannot take part in a reproduction of a picture's recognized text. Titles and headings are
+/// excluded on purpose: a heading that reproduces a logo's text is document structure standing
+/// before the image, not the inlined copy (which the pipeline inserts as a plain paragraph
+/// after the image reference), and deleting it would tear the outline apart.
+pub(super) fn body_paragraph_texts(doc: &InternalDocument) -> Vec<&str> {
+    doc.elements
+        .iter()
+        .map(|elem| {
+            if elem.layer == ContentLayer::Body && matches!(elem.kind, ElementKind::Paragraph) {
+                elem.text.as_str()
+            } else {
+                ""
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A title/heading that reproduces an image's recognized text must stay out of
+    /// the dedup candidates: the inlined copy the dedup deletes is a plain
+    /// paragraph after the image reference, while the heading is structure
+    /// before it. Feeding the heading's text to `ocr_duplicate_indices` would
+    /// delete the heading and keep the copy.
+    #[test]
+    fn body_paragraph_texts_excludes_titles_and_headings() {
+        let mut b = crate::types::internal_builder::InternalDocumentBuilder::new("test");
+        b.push_heading(1, "Acme Dashboard", None, None);
+        b.push_paragraph("![](image_0.png)", vec![], None, None);
+        b.push_paragraph("Acme Dashboard", vec![], None, None);
+        let doc = b.build();
+
+        let texts = body_paragraph_texts(&doc);
+        assert_eq!(
+            texts,
+            vec!["", "![](image_0.png)", "Acme Dashboard"],
+            "the heading must be a neutral entry, not a dedup candidate"
+        );
+
+        let ocr = vec!["Acme Dashboard"];
+        let repeated = ocr_duplicate_indices(&texts, &ocr);
+        assert_eq!(repeated, vec![false, false, true], "only the copy paragraph is deleted");
+    }
+
     use crate::types::document_structure::ContentLayer;
     use crate::types::internal_builder::InternalDocumentBuilder;
 

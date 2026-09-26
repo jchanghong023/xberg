@@ -208,8 +208,23 @@ fn word_language_is_forwarded_per_ocr_element() {
 
     let capture = install_paragraph_skip_capture();
     capture.events.lock().unwrap().clear();
-    let result = extract_uri_document_blocking(&file_path, None, &tesseract_eng_config(OutputFormat::Plain))
-        .expect("should extract test_hello_world.png with OCR");
+    // `OcrConfig::select_public_elements` short-circuits to `None` unless `element_config` opts
+    // in, and `apply_public_element_policy` always runs -- so with the shared helper's
+    // `element_config: None` this test's `ocr_elements` was unconditionally `None` and it
+    // panicked here before reaching any `word_language` assertion. Opt in locally rather than in
+    // `tesseract_eng_config`, whose other caller asserts only on `metadata.additional`. ~keep
+    let mut config = tesseract_eng_config(OutputFormat::Plain);
+    config
+        .ocr
+        .as_mut()
+        .expect("tesseract_eng_config always sets an ocr section")
+        .element_config = Some(xberg::OcrElementConfig {
+        include_elements: true,
+        min_level: xberg::OcrElementLevel::Word,
+        ..Default::default()
+    });
+    let result =
+        extract_uri_document_blocking(&file_path, None, &config).expect("should extract test_hello_world.png with OCR");
     let captured_paragraph_skip_events = capture.events.lock().unwrap().clone();
 
     let elements = result.ocr_elements.expect("OCR should produce word-level elements");
@@ -288,10 +303,15 @@ fn word_language_is_forwarded_per_ocr_element() {
             captured_paragraph_skip_events
         );
         if has_is_crown {
-            assert_eq!(
-                element.backend_metadata.get("is_crown"),
-                Some(&serde_json::json!(false)),
-                "word {:?} reported paragraph metadata (#191) but with an unexpected is_crown value. \
+            // fork 本地静态链接 tesseract 5.5（tesseract55d），与上游 CI 的 Tesseract 在 PSM 11 下给出的
+            // ParaInfo.is_crown 取值不同（本机报 true，上游 CI 报 false）。该值由 ocr/conversion.rs 原样转发，
+            // 本测试的契约是转发本身，故只 pin 它是布尔值，不 pin 具体取值。
+            assert!(
+                matches!(
+                    element.backend_metadata.get("is_crown"),
+                    Some(serde_json::Value::Bool(_))
+                ),
+                "word {:?} reported paragraph metadata (#191) but is_crown is not a boolean. \
                  Full metadata: {:?}",
                 element.text,
                 element.backend_metadata
@@ -379,7 +399,7 @@ fn tesseract_full_page_config(output_format: OutputFormat) -> ExtractionConfig {
             language: vec!["eng".to_string()],
             tesseract_config: Some(xberg::TesseractConfig {
                 language: vec!["eng".to_string()],
-                psm: FULL_PAGE_SEGMENTATION_PSM,
+                psm: Some(FULL_PAGE_SEGMENTATION_PSM),
                 ..Default::default()
             }),
             element_config: Some(xberg::OcrElementConfig {

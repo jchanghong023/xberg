@@ -366,9 +366,10 @@ async fn test_odt_formula_extraction_produces_real_latex() {
         .await
         .expect("Should extract formula successfully");
 
+    // fork 默认 Markdown 渲染：公式以 `$$...$$` 围栏数学输出（fork.md）
     assert_eq!(
         result.content.trim(),
-        "E=m\\cdot c^{2}",
+        "$$E=m\\cdot c^{2}$$",
         "Formula should render as real LaTeX, not a StarMath annotation or num/den approximation"
     );
     assert!(

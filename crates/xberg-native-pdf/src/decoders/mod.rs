@@ -19,6 +19,7 @@ mod ascii85;
 mod ascii_hex;
 mod brotli;
 pub(crate) mod ccitt;
+mod ccitt_tables;
 mod dct;
 mod flate;
 mod jbig2;
@@ -45,9 +46,51 @@ pub use runlength::RunLengthDecoder;
 ///
 /// Default values:
 /// - Max decompression ratio: 100:1 (compressed:decompressed)
-/// - Max decompressed size: 100 MB
+/// - Max decompressed size: [`flate::DEFAULT_MAX_DECOMPRESSED_BYTES`] (256 MB),
+///   overridable by the same environment variable
 const DEFAULT_MAX_DECOMPRESSION_RATIO: u32 = 100;
-const DEFAULT_MAX_DECOMPRESSED_SIZE: usize = 100 * 1024 * 1024;
+
+/// Absolute output cap applied when a caller passes no [`ParserOptions`].
+///
+/// This is deliberately the SAME number `FlateDecoder` already enforces on its own
+/// output rather than a second, lower one. A separate 100 MB cap here rejected
+/// streams the flate stage had just produced and accepted, which discarded a real
+/// page's entire text layer with nothing but a warning (GH#1754): one page of a
+/// statistics textbook is a 24 MB compressed content stream that decodes to 194 MB
+/// at a ratio of 8:1 — nothing like a bomb, and well inside the flate stage's 256 MB
+/// ceiling. Deriving it from `flate::effective_limit()` also makes
+/// `XBERG_NATIVE_PDF_MAX_DECOMPRESS_MB` mean what it says: one knob for the crate's
+/// decompression ceiling, not one that governs the flate stage while a hardcoded
+/// second limit silently overrides it downward.
+///
+/// Bomb protection is unchanged in kind, but be exact about which guard covers what.
+/// The 100:1 ratio check below is what separates a bomb from a merely large stream
+/// for flate. It cannot fire on a pure RunLength stream at all: the densest encoding
+/// that filter permits is a `[129, byte]` pair — 2 input bytes for 128 output bytes —
+/// so 64:1 is the most it can achieve and it never reaches the threshold. This
+/// absolute cap is therefore RunLength's only guard. `StreamDecoder::decode` carries
+/// the resolved cap (GH#1764) so `RunLengthDecoder` and `LzwDecoder` — the two filters
+/// that can expand output far beyond their input — abort mid-decode once output
+/// crosses it, instead of building the full expansion and only then having it
+/// rejected here. ~keep
+pub(crate) fn default_max_decompressed_size() -> usize {
+    usize::try_from(flate::effective_limit()).unwrap_or(usize::MAX)
+}
+
+/// Shared mid-decode bound check for decoders that can expand output far beyond their
+/// input (`RunLengthDecoder`, `LzwDecoder`). Returns an error naming both the observed
+/// size and the limit as soon as `output_len` crosses `max_output_bytes`; `0` disables
+/// the check. Called after every decoded unit rather than once at the end, so the
+/// decoder can never build more than one unit past the cap (GH#1764). ~keep
+pub(crate) fn check_output_cap(filter_name: &str, output_len: usize, max_output_bytes: usize) -> Result<()> {
+    if max_output_bytes > 0 && output_len > max_output_bytes {
+        return Err(Error::Decode(format!(
+            "{filter_name}: output size {output_len} bytes exceeds the {max_output_bytes} byte \
+             safety limit; stream may be a decompression bomb"
+        )));
+    }
+    Ok(())
+}
 
 /// PDF stream filter types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,16 +122,24 @@ pub enum Filter {
 /// Each decoder implements a specific PDF filter algorithm and can decode
 /// compressed or encoded stream data.
 pub trait StreamDecoder {
-    /// Decode the input data.
+    /// Decode the input data, aborting once decoded output would exceed `max_output_bytes`.
     ///
     /// # Arguments
     ///
     /// * `input` - The encoded/compressed data
+    /// * `max_output_bytes` - Upper bound on decoded output size, in bytes. `0` disables
+    ///   the check, matching [`crate::parser_config::ParserOptions::max_decompressed_size`]'s
+    ///   convention. Decoders whose output cannot exceed their input (pass-through filters,
+    ///   the ASCII encodings) may ignore this parameter. `FlateDecoder` enforces its own,
+    ///   independently configured cap instead. `RunLengthDecoder` and `LzwDecoder` must honor
+    ///   it: both can expand output far beyond their input, and previously built their entire
+    ///   output before any caller checked it against a limit (GH#1764).
     ///
     /// # Returns
     ///
-    /// The decoded data or an error if decoding fails.
-    fn decode(&self, input: &[u8]) -> Result<Vec<u8>>;
+    /// The decoded data, or an error if decoding fails or `max_output_bytes` is exceeded
+    /// before decoding completes.
+    fn decode(&self, input: &[u8], max_output_bytes: usize) -> Result<Vec<u8>>;
 
     /// Get the name of this decoder (e.g., "FlateDecode").
     fn name(&self) -> &str;
@@ -228,7 +279,7 @@ fn decode_stream_with_options_and_expected_size(
         .unwrap_or(DEFAULT_MAX_DECOMPRESSION_RATIO);
     let max_size = options
         .map(|o| o.max_decompressed_size)
-        .unwrap_or(DEFAULT_MAX_DECOMPRESSED_SIZE);
+        .unwrap_or_else(default_max_decompressed_size);
 
     let compressed_size = data.len();
     let mut current = data.to_vec();
@@ -236,7 +287,7 @@ fn decode_stream_with_options_and_expected_size(
     for (filter_index, filter_name) in filters.iter().enumerate() {
         let decoder = create_decoder(filter_name)?;
 
-        current = decoder.decode(&current)?;
+        current = decoder.decode(&current, max_size)?;
 
         // SECURITY: Check decompression ratio after each filter. Image callers may
         // provide the exact byte count implied by Width x Height x components x bpc
@@ -288,7 +339,8 @@ fn decode_stream_with_options_and_expected_size(
 /// xref-stream decoding), neither of which has a `ParserOptions` to thread
 /// through. It delegates to [`decode_stream_with_options`] with `options:
 /// None` so those callers still get the default decompression-bomb guard
-/// (100:1 ratio, 100 MB output cap) rather than none at all — without that,
+/// (100:1 ratio, 256 MB output cap by default — overridable via
+/// `XBERG_NATIVE_PDF_MAX_DECOMPRESS_MB`) rather than none at all — without that,
 /// chained filters like `RunLengthDecode` or `LZWDecode` have no cap of their
 /// own and a few KB of input can expand by orders of magnitude before this
 /// function ever returns.
@@ -472,14 +524,14 @@ mod tests {
     /// A genuine decompression bomb — high ratio AND an absolute output large enough to
     /// matter — must still be rejected. This is the guardrail test: a fix that merely
     /// raised or removed the ratio limit would pass the test above while leaving actual
-    /// bombs unguarded. The output here (64 MB) sits comfortably above
-    /// `DEFAULT_MAX_DECOMPRESSED_SIZE` (100 MB), so rejection can only come from the ratio
-    /// check, not the absolute-size cap — proving the ratio guard itself still fires once
-    /// output clears the floor, rather than having been disabled altogether.
+    /// bombs unguarded. The output here (64 MB) sits below the absolute cap
+    /// [`default_max_decompressed_size`] resolves to, so rejection can only come from the
+    /// ratio check — proving the ratio guard itself still fires once output clears the
+    /// floor, rather than having been disabled altogether.
     #[test]
     fn generic_bomb_below_absolute_cap_is_rejected_by_ratio_check() {
         const DECOMPRESSED_LEN: usize = 64 * 1024 * 1024;
-        const { assert!(DECOMPRESSED_LEN < DEFAULT_MAX_DECOMPRESSED_SIZE) };
+        assert!(DECOMPRESSED_LEN < default_max_decompressed_size());
 
         let original = vec![0u8; DECOMPRESSED_LEN];
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
@@ -499,5 +551,56 @@ mod tests {
             }
             other => panic!("expected a ratio-based Decode error, got: {other:?}"),
         }
+    }
+
+    /// GH#1754. The pipeline's implicit absolute cap (the one used when a caller passes
+    /// no `ParserOptions`, which every page-content decode does) was a hardcoded 100 MB
+    /// while `FlateDecoder`'s own ceiling is 256 MB. A stream the flate stage had just
+    /// produced and accepted was therefore rejected one line later, and the caller —
+    /// per-page text extraction — turned that `Err` into an empty page with nothing but
+    /// a warning. The carrier was page 574 of a statistics textbook: a 24 MB content
+    /// stream decoding to 194 MB at a ratio of 8:1, which is nothing like a bomb.
+    ///
+    /// This reproduces the shape at the smallest size that crosses the old boundary:
+    /// output just past 100 MB at a ratio far under the 100:1 bomb threshold.
+    /// `Compression::none()` gives that ratio for free — stored deflate blocks, so
+    /// both the encode and the decode run at memcpy speed — and the payload is fed in
+    /// chunks so no third copy of it is ever materialised.
+    #[test]
+    fn should_accept_a_large_low_ratio_stream_the_flate_stage_itself_allows() {
+        const OLD_PIPELINE_CAP: usize = 100 * 1024 * 1024;
+        const CHUNK: usize = 1024 * 1024;
+        const CHUNKS: usize = OLD_PIPELINE_CAP / CHUNK + 1;
+        const DECOMPRESSED_LEN: usize = CHUNK * CHUNKS;
+
+        const {
+            assert!(
+                DECOMPRESSED_LEN > OLD_PIPELINE_CAP,
+                "the fixture must cross the cap it exists to test"
+            )
+        };
+        assert!(
+            DECOMPRESSED_LEN < default_max_decompressed_size(),
+            "the default cap must be the flate stage's own ceiling, not a second lower one"
+        );
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::none());
+        let chunk = vec![0u8; CHUNK];
+        for _ in 0..CHUNKS {
+            encoder.write_all(&chunk).unwrap();
+        }
+        drop(chunk);
+        let compressed = encoder.finish().unwrap();
+
+        let ratio = DECOMPRESSED_LEN as u64 / compressed.len().max(1) as u64;
+        assert!(
+            ratio <= DEFAULT_MAX_DECOMPRESSION_RATIO as u64,
+            "the fixture must be rejectable only by the absolute cap, not the ratio check; ratio was {ratio}:1"
+        );
+
+        let filters = vec!["FlateDecode".to_string()];
+        let decoded = decode_stream_with_options(&compressed, &filters, None, None)
+            .expect("a large, low-ratio stream inside the flate ceiling must not be read as a bomb");
+        assert_eq!(decoded.len(), DECOMPRESSED_LEN);
     }
 }

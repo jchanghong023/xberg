@@ -2,7 +2,7 @@
 //!
 //! This module defines types for representing Djot document structures.
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
 use super::Table;
@@ -10,7 +10,7 @@ use super::metadata::KeyValueAttribute;
 use super::metadata::Metadata;
 
 /// Attributes associated with a named Djot element.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct DjotAttributeGroup {
     /// Element identifier used by the Djot attribute map.
     pub identifier: String,
@@ -25,15 +25,9 @@ enum DjotAttributeGroupWire {
     Named { identifier: String, attributes: Attributes },
 }
 
-impl Serialize for DjotAttributeGroup {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (&self.identifier, &self.attributes).serialize(serializer)
-    }
-}
-
+// ~keep Deserialize stays hand-written (not derived) so a legacy positional
+// `[identifier, attributes]` array from pre-migration callers still parses; only Serialize now
+// emits the named object.
 impl<'de> Deserialize<'de> for DjotAttributeGroup {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -49,16 +43,13 @@ impl<'de> Deserialize<'de> for DjotAttributeGroup {
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for DjotAttributeGroup {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        use utoipa::openapi::schema::{ArrayBuilder, ArrayItems, Object, Schema, Type};
+        use utoipa::openapi::schema::{Object, ObjectBuilder, Type};
 
-        ArrayBuilder::new()
-            .items(ArrayItems::False)
-            .prefix_items([
-                Schema::Object(Object::with_type(Type::String)),
-                <Attributes as utoipa::PartialSchema>::schema().into(),
-            ])
-            .min_items(Some(2))
-            .max_items(Some(2))
+        ObjectBuilder::new()
+            .property("identifier", Object::with_type(Type::String))
+            .required("identifier")
+            .property("attributes", <Attributes as utoipa::PartialSchema>::schema())
+            .required("attributes")
             .into()
     }
 }
@@ -331,25 +322,37 @@ mod binding_value_serde_tests {
 
     #[cfg(feature = "api")]
     #[test]
-    fn should_describe_djot_attribute_group_as_legacy_array_schema() {
+    fn should_describe_djot_attribute_group_as_named_object_schema() {
         let schema = serde_json::to_value(<DjotAttributeGroup as utoipa::PartialSchema>::schema())
             .expect("schema must serialize");
-        assert_eq!(schema["type"], "array");
-        assert_eq!(schema["minItems"], 2);
-        assert_eq!(schema["maxItems"], 2);
-        assert_eq!(schema["items"], false);
-        assert_eq!(schema["prefixItems"].as_array().map(Vec::len), Some(2));
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["identifier"]["type"], "string");
+        assert_eq!(schema["properties"]["attributes"]["type"], "object");
+        let required = schema["required"].as_array().expect("schema must have required fields");
+        assert_eq!(required.len(), 2);
+        assert!(required.contains(&json!("identifier")));
+        assert!(required.contains(&json!("attributes")));
     }
 
     #[test]
-    fn should_preserve_legacy_djot_attribute_tuple_wire_format() {
+    fn should_still_accept_legacy_positional_array_for_djot_attribute_group() {
         let legacy = json!(["section", {
             "id": "intro",
             "classes": ["lead"],
             "key_values": [["role", "doc-introduction"]]
         }]);
         let group: DjotAttributeGroup =
-            serde_json::from_value(legacy.clone()).expect("legacy attribute group must deserialize");
+            serde_json::from_value(legacy).expect("legacy attribute group must deserialize");
+
+        assert_eq!(group.identifier, "section");
+        assert_eq!(group.attributes.id.as_deref(), Some("intro"));
+        assert_eq!(group.attributes.classes, vec!["lead".to_string()]);
+        assert_eq!(group.attributes.key_values[0].key, "role");
+        assert_eq!(group.attributes.key_values[0].value, "doc-introduction");
+    }
+
+    #[test]
+    fn should_serialize_djot_attribute_group_as_named_object() {
         let named: DjotAttributeGroup = serde_json::from_value(json!({
             "identifier": "section",
             "attributes": {
@@ -360,33 +363,31 @@ mod binding_value_serde_tests {
         }))
         .expect("named attribute group must deserialize");
 
-        assert_eq!(group.identifier, "section");
-        assert_eq!(group.attributes.id.as_deref(), Some("intro"));
-        assert_eq!(group.attributes.key_values[0].key, "role");
-        assert_eq!(named.identifier, group.identifier);
-        assert_eq!(named.attributes.id, group.attributes.id);
-        assert_eq!(named.attributes.classes, group.attributes.classes);
-        assert_eq!(named.attributes.key_values, group.attributes.key_values);
-        assert_eq!(
-            serde_json::to_value(group).expect("attribute group must serialize"),
-            legacy
-        );
+        assert_eq!(named.identifier, "section");
+        assert_eq!(named.attributes.id.as_deref(), Some("intro"));
         assert_eq!(
             serde_json::to_value(named).expect("named attribute group must serialize"),
-            legacy
+            json!({
+                "identifier": "section",
+                "attributes": {
+                    "id": "intro",
+                    "classes": ["lead"],
+                    "key_values": [{"key": "role", "value": "doc-introduction"}]
+                }
+            })
         );
     }
 
     #[test]
-    fn should_preserve_legacy_attributes_object_wire_format() {
+    fn should_still_accept_legacy_attributes_array_and_serialize_key_values_as_objects() {
         let legacy = json!({"key_values": [["lang", "en"]]});
-        let attributes: Attributes =
-            serde_json::from_value(legacy.clone()).expect("legacy attributes must deserialize");
+        let attributes: Attributes = serde_json::from_value(legacy).expect("legacy attributes must deserialize");
 
+        assert_eq!(attributes.key_values[0].key, "lang");
         assert_eq!(attributes.key_values[0].value, "en");
         assert_eq!(
             serde_json::to_value(attributes).expect("attributes must serialize"),
-            legacy
+            json!({"key_values": [{"key": "lang", "value": "en"}]})
         );
     }
 }

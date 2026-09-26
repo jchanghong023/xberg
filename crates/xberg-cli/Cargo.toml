@@ -161,6 +161,10 @@ summarization-llm = ["legacy-base", "xberg/summarization-llm"]
 # inference stack. The `all` release and container profile enables it so the CLI
 # exposes every capability included by xberg's corresponding full feature set.
 transcription = ["legacy-base", "xberg/transcription"]
+# (fork) 性能打点开关：转发 xberg/perf-tracing 打开库内关键阶段 span（target "perf"），
+# 并启用本 crate 的独立性能日志（perf.rs，tracing-appender 按天滚动落盘）。标准构建 /
+# fulltest / slowtest 的 feature 集不含它，默认零影响；构建与验证命令见 AGENTS.md。
+perf-tracing = ["dep:tracing-appender", "xberg/perf-tracing"]
 heic = ["legacy-base", "formats", "xberg/heic"]
 # Self-contained static single-file CLI for `cargo binstall xberg-cli`. Every
 # capability here is pure-Rust and statically linkable on musl: document
@@ -226,6 +230,9 @@ serde_toon_format = { workspace = true }
 # trimmed from the workspace-level baseline (see root Cargo.toml).
 tokio = { workspace = true, features = ["process", "fs", "rt-multi-thread"] }
 tracing = { workspace = true }
+# (fork) perf-tracing 专用：性能日志独立文件的 rolling + 非阻塞 writer。可选依赖，只有
+# perf-tracing feature 打开时才进依赖图（默认构建不编译、不链接）。
+tracing-appender = { workspace = true, optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tree-sitter-language-pack = { workspace = true, features = ["dynamic-loading", "download", "serde"], optional = true }
 xberg = { workspace = true, features = ["tokio-runtime", "simd-utf8"] }
@@ -234,3 +241,8 @@ xberg = { workspace = true, features = ["tokio-runtime", "simd-utf8"] }
 bytes = { workspace = true }
 tempfile = { workspace = true }
 ureq = { version = "3.4", features = ["json"] }
+
+# Windows peak-RSS self-report for the extract JSON envelope (`peak_memory` module);
+# same windows-sys version `xberg-windows-metafile` pins.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

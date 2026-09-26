@@ -29,14 +29,14 @@ use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
-use ahash::AHashMap;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 
 use crate::Result;
 use crate::candle_ocr::config::{
     PaddleOcrVlBackendOptions, PaddleOcrVlTaskKind, parse_backend_options, validate_optional_non_empty,
 };
 use crate::core::config::OcrConfig;
+use crate::engine_cache::EngineCache;
 use crate::plugins::{OcrBackend, OcrBackendType, Plugin};
 use crate::types::ExtractedDocument;
 use xberg_candle_ocr::DType;
@@ -49,19 +49,20 @@ type PoolKey = (String, PaddleOcrVlTask, DevicePreference);
 /// Pooled engine value: mutex-wrapped engine for interior mutability.
 type PooledEngine = Arc<Mutex<PaddleOcrVlEngine>>;
 
-/// Process-wide engine pool keyed by model path, task, and device preference.
+/// Process-wide engine cache keyed by model path, task, and device preference.
 ///
 /// `DevicePreference::Auto` keeps its own slot because it resolves to whatever
 /// is available at runtime — collapsing it onto a concrete device would be wrong.
 ///
 /// Engines are wrapped in `Mutex` because `PaddleOcrVlEngine::process_image`
 /// takes `&mut self` (it manages an internal KV cache).
-static ENGINE_POOL: LazyLock<RwLock<AHashMap<PoolKey, PooledEngine>>> = LazyLock::new(|| RwLock::new(AHashMap::new()));
+static ENGINE_POOL: LazyLock<EngineCache<PoolKey, Mutex<PaddleOcrVlEngine>>> = LazyLock::new(EngineCache::unbounded);
 
 /// Return a cached engine for `(task, preference)`, initialising one on first use.
 ///
-/// Uses a read → miss → write → double-check pattern so that two racing callers
-/// do not both pay the initialisation cost.
+/// Delegates to [`EngineCache::get_or_try_init`], which stays locked across the
+/// load, so a second caller for the same key waits for the first engine
+/// instead of building another.
 ///
 /// # Errors
 ///
@@ -74,36 +75,25 @@ fn get_or_init_engine(
 ) -> crate::Result<PooledEngine> {
     let key: PoolKey = (model_path.to_string(), task, preference);
 
-    {
-        let pool = ENGINE_POOL.read();
-        if let Some(engine) = pool.get(&key) {
-            return Ok(Arc::clone(engine));
-        }
-    }
-
-    let candle_device = preference.select().map_err(|e| crate::XbergError::Ocr {
-        message: format!("Failed to select compute device: {e}"),
-        source: Some(Box::new(e)),
-    })?;
-
-    tracing::info!(
-        task = ?task,
-        preference = ?preference,
-        "Initialising PaddleOCR-VL engine (cold start)"
-    );
-    let new_engine =
-        PaddleOcrVlEngine::new(model_path, task, candle_device, DType::F32).map_err(|e| crate::XbergError::Ocr {
-            message: format!("PaddleOCR-VL engine initialisation failed: {e}"),
+    ENGINE_POOL.get_or_try_init(key, || {
+        let candle_device = preference.select().map_err(|e| crate::XbergError::Ocr {
+            message: format!("Failed to select compute device: {e}"),
             source: Some(Box::new(e)),
         })?;
-    let new_engine = Arc::new(Mutex::new(new_engine));
 
-    let mut pool = ENGINE_POOL.write();
-    if let Some(existing) = pool.get(&key) {
-        return Ok(Arc::clone(existing));
-    }
-    pool.insert(key, Arc::clone(&new_engine));
-    Ok(new_engine)
+        tracing::info!(
+            task = ?task,
+            preference = ?preference,
+            "Initialising PaddleOCR-VL engine (cold start)"
+        );
+        let new_engine = PaddleOcrVlEngine::new(model_path, task, candle_device, DType::F32).map_err(|e| {
+            crate::XbergError::Ocr {
+                message: format!("PaddleOCR-VL engine initialisation failed: {e}"),
+                source: Some(Box::new(e)),
+            }
+        })?;
+        Ok(Mutex::new(new_engine))
+    })
 }
 
 /// Default HuggingFace repo id for PaddleOCR-VL weights: a checksum-pinned mirror of
@@ -272,6 +262,10 @@ impl OcrBackend for PaddleOcrVlBackend {
     /// engine initialisation, or inference fails.
     async fn process_image(&self, image_bytes: &[u8], config: &OcrConfig) -> Result<ExtractedDocument> {
         let options = self.parse_options(config)?;
+        // A non-OCR task (table/formula/chart) is expected to emit markup, so the
+        // bare-LaTeX rule in `filter_implausible_lines` must not apply to it (GH#1676).
+        // ~keep
+        let plain_text_task = options.task == PaddleOcrVlTask::Ocr;
 
         if image_bytes.is_empty() {
             return Err(crate::XbergError::Validation {
@@ -317,10 +311,13 @@ impl OcrBackend for PaddleOcrVlBackend {
         Ok(super::ocr_result::build_ocr_document(
             content,
             Vec::new(),
-            Cow::Borrowed("text/markdown"),
             image_bytes,
             config,
-            "candle-paddleocr-vl",
+            super::ocr_result::OcrDocumentContext {
+                mime_type: Cow::Borrowed("text/markdown"),
+                backend_name: "candle-paddleocr-vl",
+                plain_text_task,
+            },
         ))
     }
 

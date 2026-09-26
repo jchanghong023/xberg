@@ -16,6 +16,12 @@ public func extractionConfigValidateFromJson<GenericIntoRustString: IntoRustStri
 public func extractionConfigNeedsImageDataFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> RustString {
     try { let val = __swift_bridge__$extraction_config_needs_image_data_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return RustString(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
 }
+public func extractionConfigRunsOcrOnEmbeddedImagesFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> RustString {
+    try { let val = __swift_bridge__$extraction_config_runs_ocr_on_embedded_images_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return RustString(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
+}
+public func extractionConfigWantsOwnBytesInResultFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> RustString {
+    try { let val = __swift_bridge__$extraction_config_wants_own_bytes_in_result_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return RustString(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
+}
 public func extractionConfigNeedsImageProcessingFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> RustString {
     try { let val = __swift_bridge__$extraction_config_needs_image_processing_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return RustString(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
 }
@@ -136,6 +142,9 @@ public func listDocumentExtractors() throws -> RustVec<RustString> {
 public func listEmbeddingBackends() throws -> RustVec<RustString> {
     try { let val = __swift_bridge__$list_embedding_backends(); if val.is_ok { return RustVec(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
 }
+public func listOcrBackendCapabilities() throws -> RustVec<OcrBackendCapabilities> {
+    try { let val = __swift_bridge__$list_ocr_backend_capabilities(); if val.is_ok { return RustVec(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
+}
 public func listOcrBackends() throws -> RustVec<RustString> {
     try { let val = __swift_bridge__$list_ocr_backends(); if val.is_ok { return RustVec(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
 }
@@ -156,6 +165,9 @@ public func listTokenizerBackends() throws -> RustVec<RustString> {
 }
 public func listValidators() throws -> RustVec<RustString> {
     try { let val = __swift_bridge__$list_validators(); if val.is_ok { return RustVec(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
+}
+public func ocrBackendSupportsLanguage<GenericIntoRustString: IntoRustString>(_ backend: GenericIntoRustString, _ language: GenericIntoRustString) throws -> Bool {
+    try { let val = __swift_bridge__$ocr_backend_supports_language({ let rustString = backend.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), { let rustString = language.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); switch val.tag { case __swift_bridge__$ResultBoolAndString$ResultOk: return val.payload.ok case __swift_bridge__$ResultBoolAndString$ResultErr: throw RustString(ptr: val.payload.err) default: fatalError() } }()
 }
 public func maxSimRank(_ query: MultiVectorEmbedding, _ docs: RustVec<MultiVectorEmbedding>) -> RustVec<LateInteractionMatch> {
     RustVec(ptr: __swift_bridge__$max_sim_rank({query.isOwned = false; return query.ptr;}(), { let val = docs; val.isOwned = false; return val.ptr }()))
@@ -931,6 +943,9 @@ public func nerConfigFromJson<GenericIntoRustString: IntoRustString>(_ json: Gen
 public func ngramRangeFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> NgramRange {
     try { let val = __swift_bridge__$ngram_range_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return NgramRange(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
 }
+public func ocrBackendCapabilitiesFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> OcrBackendCapabilities {
+    try { let val = __swift_bridge__$ocr_backend_capabilities_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return OcrBackendCapabilities(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
+}
 public func ocrConfidenceFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> OcrConfidence {
     try { let val = __swift_bridge__$ocr_confidence_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return OcrConfidence(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
 }
@@ -987,6 +1002,9 @@ public func pageHierarchyFromJson<GenericIntoRustString: IntoRustString>(_ json:
 }
 public func pageInfoFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> PageInfo {
     try { let val = __swift_bridge__$page_info_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return PageInfo(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
+}
+public func pageOcrConfidenceFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> PageOcrConfidence {
+    try { let val = __swift_bridge__$page_ocr_confidence_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return PageOcrConfidence(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
 }
 public func pageRangeFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> PageRange {
     try { let val = __swift_bridge__$page_range_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return PageRange(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
@@ -1107,6 +1125,9 @@ public func svgOptionsFromJson<GenericIntoRustString: IntoRustString>(_ json: Ge
 }
 public func tableFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> Table {
     try { let val = __swift_bridge__$table_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return Table(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
+}
+public func tableCellStyleFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> TableCellStyle {
+    try { let val = __swift_bridge__$table_cell_style_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return TableCellStyle(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
 }
 public func tableDiffFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> TableDiff {
     try { let val = __swift_bridge__$table_diff_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return TableDiff(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
@@ -1341,6 +1362,9 @@ public func browserWaitFromJson<GenericIntoRustString: IntoRustString>(_ json: G
 }
 public func callModeFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> CallMode {
     try { let val = __swift_bridge__$call_mode_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return CallMode(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
+}
+public func candleDeepseekOcrDtypeFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> CandleDeepseekOcrDtype {
+    try { let val = __swift_bridge__$candle_deepseek_ocr_dtype_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return CandleDeepseekOcrDtype(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
 }
 public func candleDevicePreferenceFromJson<GenericIntoRustString: IntoRustString>(_ json: GenericIntoRustString) throws -> CandleDevicePreference {
     try { let val = __swift_bridge__$candle_device_preference_from_json({ let rustString = json.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); if val.is_ok { return CandleDevicePreference(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
@@ -1891,6 +1915,9 @@ public func __alef_phantom_vec_metadata() -> RustVec<Metadata> {
 public func __alef_phantom_vec_ner_config() -> RustVec<NerConfig> {
     RustVec(ptr: __swift_bridge__$__alef_phantom_vec_ner_config())
 }
+public func __alef_phantom_vec_ocr_backend_capabilities() -> RustVec<OcrBackendCapabilities> {
+    RustVec(ptr: __swift_bridge__$__alef_phantom_vec_ocr_backend_capabilities())
+}
 public func __alef_phantom_vec_ocr_confidence() -> RustVec<OcrConfidence> {
     RustVec(ptr: __swift_bridge__$__alef_phantom_vec_ocr_confidence())
 }
@@ -1953,6 +1980,9 @@ public func __alef_phantom_vec_page_hierarchy() -> RustVec<PageHierarchy> {
 }
 public func __alef_phantom_vec_page_info() -> RustVec<PageInfo> {
     RustVec(ptr: __swift_bridge__$__alef_phantom_vec_page_info())
+}
+public func __alef_phantom_vec_page_ocr_confidence() -> RustVec<PageOcrConfidence> {
+    RustVec(ptr: __swift_bridge__$__alef_phantom_vec_page_ocr_confidence())
 }
 public func __alef_phantom_vec_page_span() -> RustVec<PageSpan> {
     RustVec(ptr: __swift_bridge__$__alef_phantom_vec_page_span())
@@ -2061,6 +2091,9 @@ public func __alef_phantom_vec_table() -> RustVec<Table> {
 }
 public func __alef_phantom_vec_table_cell() -> RustVec<TableCell> {
     RustVec(ptr: __swift_bridge__$__alef_phantom_vec_table_cell())
+}
+public func __alef_phantom_vec_table_cell_style() -> RustVec<TableCellStyle> {
+    RustVec(ptr: __swift_bridge__$__alef_phantom_vec_table_cell_style())
 }
 public func __alef_phantom_vec_table_grid() -> RustVec<TableGrid> {
     RustVec(ptr: __swift_bridge__$__alef_phantom_vec_table_grid())
@@ -2547,6 +2580,9 @@ public func __alef_phantom_vec_yake_params() -> RustVec<YakeParams> {
 }
 public func __alef_phantom_vec_boundary_reason() -> RustVec<BoundaryReason> {
     RustVec(ptr: __swift_bridge__$__alef_phantom_vec_boundary_reason())
+}
+public func __alef_phantom_vec_candle_deepseek_ocr_dtype() -> RustVec<CandleDeepseekOcrDtype> {
+    RustVec(ptr: __swift_bridge__$__alef_phantom_vec_candle_deepseek_ocr_dtype())
 }
 public func __alef_phantom_vec_candle_device_preference() -> RustVec<CandleDevicePreference> {
     RustVec(ptr: __swift_bridge__$__alef_phantom_vec_candle_device_preference())
@@ -5113,11 +5149,11 @@ extension CodeDataNodeRef {
         { let val = __swift_bridge__$CodeDataNode$value(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
     }
 
-    public func attributes() -> RustVec<CodeDataAttribute> {
+    public func attributes() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$CodeDataNode$attributes(ptr))
     }
 
-    public func children() -> RustVec<CodeDataNode> {
+    public func children() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$CodeDataNode$children(ptr))
     }
 
@@ -5210,7 +5246,7 @@ public class CodeMetadataRef {
     }
 }
 extension CodeMetadataRef {
-    public func chunks() -> RustVec<CodeChunkInfo> {
+    public func chunks() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$CodeMetadata$chunks(ptr))
     }
 
@@ -5282,8 +5318,8 @@ public class ConcurrencyConfig: ConcurrencyConfigRefMut {
     }
 }
 extension ConcurrencyConfig {
-    public convenience init(_ max_threads: Optional<UInt>) {
-        self.init(ptr: __swift_bridge__$ConcurrencyConfig$new(max_threads.intoFfiRepr()))
+    public convenience init(_ max_threads: Optional<UInt>, _ max_concurrent_ocr: Optional<UInt>) {
+        self.init(ptr: __swift_bridge__$ConcurrencyConfig$new(max_threads.intoFfiRepr(), max_concurrent_ocr.intoFfiRepr()))
     }
 }
 public class ConcurrencyConfigRefMut: ConcurrencyConfigRef {
@@ -5301,6 +5337,10 @@ public class ConcurrencyConfigRef {
 extension ConcurrencyConfigRef {
     public func maxThreads() -> Optional<UInt> {
         __swift_bridge__$ConcurrencyConfig$max_threads(ptr).intoSwiftRepr()
+    }
+
+    public func maxConcurrentOcr() -> Optional<UInt> {
+        __swift_bridge__$ConcurrencyConfig$max_concurrent_ocr(ptr).intoSwiftRepr()
     }
 }
 extension ConcurrencyConfig: Vectorizable {
@@ -6701,8 +6741,8 @@ public class DeepseekOcrBackendOptions: DeepseekOcrBackendOptionsRefMut {
     }
 }
 extension DeepseekOcrBackendOptions {
-    public convenience init<GenericIntoRustString: IntoRustString>(_ model_path: Optional<GenericIntoRustString>, _ device: Optional<CandleDevicePreference>, _ version: Optional<UInt32>) {
-        self.init(ptr: __swift_bridge__$DeepseekOcrBackendOptions$new({ if let rustString = optionalStringIntoRustString(model_path) { rustString.isOwned = false; return rustString.ptr } else { return nil } }(), { if let val = device { val.isOwned = false; return val.ptr } else { return nil } }(), version.intoFfiRepr()))
+    public convenience init<GenericIntoRustString: IntoRustString>(_ model_path: Optional<GenericIntoRustString>, _ model_id: Optional<GenericIntoRustString>, _ hf_revision: Optional<GenericIntoRustString>, _ cache_dir: Optional<GenericIntoRustString>, _ device: Optional<CandleDevicePreference>, _ version: Optional<UInt32>, _ dtype: Optional<CandleDeepseekOcrDtype>) {
+        self.init(ptr: __swift_bridge__$DeepseekOcrBackendOptions$new({ if let rustString = optionalStringIntoRustString(model_path) { rustString.isOwned = false; return rustString.ptr } else { return nil } }(), { if let rustString = optionalStringIntoRustString(model_id) { rustString.isOwned = false; return rustString.ptr } else { return nil } }(), { if let rustString = optionalStringIntoRustString(hf_revision) { rustString.isOwned = false; return rustString.ptr } else { return nil } }(), { if let rustString = optionalStringIntoRustString(cache_dir) { rustString.isOwned = false; return rustString.ptr } else { return nil } }(), { if let val = device { val.isOwned = false; return val.ptr } else { return nil } }(), version.intoFfiRepr(), { if let val = dtype { val.isOwned = false; return val.ptr } else { return nil } }()))
     }
 }
 public class DeepseekOcrBackendOptionsRefMut: DeepseekOcrBackendOptionsRef {
@@ -6722,12 +6762,28 @@ extension DeepseekOcrBackendOptionsRef {
         { let val = __swift_bridge__$DeepseekOcrBackendOptions$model_path(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
     }
 
+    public func modelId() -> Optional<RustString> {
+        { let val = __swift_bridge__$DeepseekOcrBackendOptions$model_id(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
+    }
+
+    public func hfRevision() -> Optional<RustString> {
+        { let val = __swift_bridge__$DeepseekOcrBackendOptions$hf_revision(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
+    }
+
+    public func cacheDir() -> Optional<RustString> {
+        { let val = __swift_bridge__$DeepseekOcrBackendOptions$cache_dir(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
+    }
+
     public func device() -> Optional<RustString> {
         { let val = __swift_bridge__$DeepseekOcrBackendOptions$device(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
     }
 
     public func version() -> Optional<UInt32> {
         __swift_bridge__$DeepseekOcrBackendOptions$version(ptr).intoSwiftRepr()
+    }
+
+    public func dtype() -> Optional<RustString> {
+        { let val = __swift_bridge__$DeepseekOcrBackendOptions$dtype(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
     }
 }
 extension DeepseekOcrBackendOptions: Vectorizable {
@@ -8038,7 +8094,7 @@ extension DocumentNodeRef {
         { let val = __swift_bridge__$DocumentNode$bbox(ptr); if val != nil { return BoundingBox(ptr: val!) } else { return nil } }()
     }
 
-    public func annotations() -> RustVec<TextAnnotation> {
+    public func annotations() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$DocumentNode$annotations(ptr))
     }
 
@@ -8315,7 +8371,7 @@ public class DocumentStructureRef {
     }
 }
 extension DocumentStructureRef {
-    public func nodes() -> RustVec<DocumentNode> {
+    public func nodes() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$DocumentStructure$nodes(ptr))
     }
 
@@ -8323,7 +8379,7 @@ extension DocumentStructureRef {
         { let val = __swift_bridge__$DocumentStructure$source_format(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
     }
 
-    public func relationships() -> RustVec<DocumentRelationship> {
+    public func relationships() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$DocumentStructure$relationships(ptr))
     }
 
@@ -10185,7 +10241,7 @@ public class ExcelWorkbookRef {
     }
 }
 extension ExcelWorkbookRef {
-    public func sheets() -> RustVec<ExcelSheet> {
+    public func sheets() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$ExcelWorkbook$sheets(ptr))
     }
 
@@ -10952,6 +11008,18 @@ extension ExtractionConfigRef {
 
     public func disableOcr() -> Bool {
         __swift_bridge__$ExtractionConfig$disable_ocr(ptr)
+    }
+
+    public func ocrNearEmptyFallback() -> Optional<Bool> {
+        __swift_bridge__$ExtractionConfig$ocr_near_empty_fallback(ptr).intoSwiftRepr()
+    }
+
+    public func ocrScannedPageQualityGate() -> Optional<Bool> {
+        __swift_bridge__$ExtractionConfig$ocr_scanned_page_quality_gate(ptr).intoSwiftRepr()
+    }
+
+    public func ocrEmbeddedImages() -> Optional<Bool> {
+        __swift_bridge__$ExtractionConfig$ocr_embedded_images(ptr).intoSwiftRepr()
     }
 
     public func chunking() -> Optional<ChunkingConfig> {
@@ -11930,7 +11998,7 @@ extension FootnoteRef {
         RustString(ptr: __swift_bridge__$Footnote$label(ptr))
     }
 
-    public func content() -> RustVec<FormattedBlock> {
+    public func content() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$Footnote$content(ptr))
     }
 }
@@ -12275,7 +12343,7 @@ extension FormattedBlockRef {
         __swift_bridge__$FormattedBlock$level(ptr).intoSwiftRepr()
     }
 
-    public func inlineContent() -> RustVec<InlineElement> {
+    public func inlineContent() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$FormattedBlock$inline_content(ptr))
     }
 
@@ -12291,7 +12359,7 @@ extension FormattedBlockRef {
         { let val = __swift_bridge__$FormattedBlock$code(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
     }
 
-    public func children() -> RustVec<FormattedBlock> {
+    public func children() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$FormattedBlock$children(ptr))
     }
 }
@@ -12671,6 +12739,14 @@ extension GridCellRef {
 
     public func bbox() -> Optional<BoundingBox> {
         { let val = __swift_bridge__$GridCell$bbox(ptr); if val != nil { return BoundingBox(ptr: val!) } else { return nil } }()
+    }
+
+    public func headingLevel() -> Optional<UInt8> {
+        __swift_bridge__$GridCell$heading_level(ptr).intoSwiftRepr()
+    }
+
+    public func styleName() -> Optional<RustString> {
+        { let val = __swift_bridge__$GridCell$style_name(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
     }
 }
 extension GridCell: Vectorizable {
@@ -13460,19 +13536,19 @@ extension HtmlMetadataRef {
         RustString(ptr: __swift_bridge__$HtmlMetadata$meta_tags(ptr))
     }
 
-    public func headers() -> RustVec<HeaderMetadata> {
+    public func headers() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$HtmlMetadata$headers(ptr))
     }
 
-    public func links() -> RustVec<LinkMetadata> {
+    public func links() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$HtmlMetadata$links(ptr))
     }
 
-    public func images() -> RustVec<ImageMetadataType> {
+    public func images() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$HtmlMetadata$images(ptr))
     }
 
-    public func structuredData() -> RustVec<StructuredData> {
+    public func structuredData() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$HtmlMetadata$structured_data(ptr))
     }
 }
@@ -14156,8 +14232,8 @@ public class ImagePreprocessingConfig: ImagePreprocessingConfigRefMut {
     }
 }
 extension ImagePreprocessingConfig {
-    public convenience init<GenericIntoRustString: IntoRustString>(_ target_dpi: Int32, _ auto_rotate: Bool, _ deskew: Bool, _ denoise: Bool, _ contrast_enhance: Bool, _ binarization_method: GenericIntoRustString, _ invert_colors: Bool) {
-        self.init(ptr: __swift_bridge__$ImagePreprocessingConfig$new(target_dpi, auto_rotate, deskew, denoise, contrast_enhance, { let rustString = binarization_method.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), invert_colors))
+    public convenience init<GenericIntoRustString: IntoRustString>(_ target_dpi: Int32, _ auto_rotate: Bool, _ deskew: Bool, _ denoise: Bool, _ contrast_enhance: Bool, _ binarization_method: GenericIntoRustString, _ invert_colors: Bool, _ normalize_shaded_rows: Bool) {
+        self.init(ptr: __swift_bridge__$ImagePreprocessingConfig$new(target_dpi, auto_rotate, deskew, denoise, contrast_enhance, { let rustString = binarization_method.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), invert_colors, normalize_shaded_rows))
     }
 }
 public class ImagePreprocessingConfigRefMut: ImagePreprocessingConfigRef {
@@ -14199,6 +14275,10 @@ extension ImagePreprocessingConfigRef {
 
     public func invertColors() -> Bool {
         __swift_bridge__$ImagePreprocessingConfig$invert_colors(ptr)
+    }
+
+    public func normalizeShadedRows() -> Bool {
+        __swift_bridge__$ImagePreprocessingConfig$normalize_shaded_rows(ptr)
     }
 }
 extension ImagePreprocessingConfig: Vectorizable {
@@ -14505,7 +14585,7 @@ extension JatsMetadataRef {
         RustString(ptr: __swift_bridge__$JatsMetadata$history_dates(ptr))
     }
 
-    public func contributorRoles() -> RustVec<ContributorRole> {
+    public func contributorRoles() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$JatsMetadata$contributor_roles(ptr))
     }
 }
@@ -16059,6 +16139,10 @@ extension LlmConfigRef {
     public func maxConcurrency() -> Optional<UInt> {
         __swift_bridge__$LlmConfig$max_concurrency(ptr).intoSwiftRepr()
     }
+
+    public func maxResponseBytes() -> Optional<UInt> {
+        __swift_bridge__$LlmConfig$max_response_bytes(ptr).intoSwiftRepr()
+    }
 }
 extension LlmConfig: Vectorizable {
     public static func vecOfSelfNew() -> UnsafeMutableRawPointer {
@@ -17454,6 +17538,90 @@ extension NgramRange: Vectorizable {
 }
 
 
+public class OcrBackendCapabilities: OcrBackendCapabilitiesRefMut {
+    public var isOwned: Bool = true
+
+    public override init(ptr: UnsafeMutableRawPointer) {
+        super.init(ptr: ptr)
+    }
+
+    deinit {
+        if isOwned {
+            __swift_bridge__$OcrBackendCapabilities$_free(ptr)
+        }
+    }
+}
+public class OcrBackendCapabilitiesRefMut: OcrBackendCapabilitiesRef {
+    public override init(ptr: UnsafeMutableRawPointer) {
+        super.init(ptr: ptr)
+    }
+}
+public class OcrBackendCapabilitiesRef {
+    public var ptr: UnsafeMutableRawPointer
+
+    public init(ptr: UnsafeMutableRawPointer) {
+        self.ptr = ptr
+    }
+}
+extension OcrBackendCapabilitiesRef {
+    public func name() -> RustString {
+        RustString(ptr: __swift_bridge__$OcrBackendCapabilities$name(ptr))
+    }
+
+    public func supportedLanguages() -> RustVec<RustString> {
+        RustVec(ptr: __swift_bridge__$OcrBackendCapabilities$supported_languages(ptr))
+    }
+}
+extension OcrBackendCapabilities: Vectorizable {
+    public static func vecOfSelfNew() -> UnsafeMutableRawPointer {
+        __swift_bridge__$Vec_OcrBackendCapabilities$new()
+    }
+
+    public static func vecOfSelfFree(vecPtr: UnsafeMutableRawPointer) {
+        __swift_bridge__$Vec_OcrBackendCapabilities$drop(vecPtr)
+    }
+
+    public static func vecOfSelfPush(vecPtr: UnsafeMutableRawPointer, value: OcrBackendCapabilities) {
+        __swift_bridge__$Vec_OcrBackendCapabilities$push(vecPtr, {value.isOwned = false; return value.ptr;}())
+    }
+
+    public static func vecOfSelfPop(vecPtr: UnsafeMutableRawPointer) -> Optional<Self> {
+        let pointer = __swift_bridge__$Vec_OcrBackendCapabilities$pop(vecPtr)
+        if pointer == nil {
+            return nil
+        } else {
+            return (OcrBackendCapabilities(ptr: pointer!) as! Self)
+        }
+    }
+
+    public static func vecOfSelfGet(vecPtr: UnsafeMutableRawPointer, index: UInt) -> Optional<OcrBackendCapabilitiesRef> {
+        let pointer = __swift_bridge__$Vec_OcrBackendCapabilities$get(vecPtr, index)
+        if pointer == nil {
+            return nil
+        } else {
+            return OcrBackendCapabilitiesRef(ptr: pointer!)
+        }
+    }
+
+    public static func vecOfSelfGetMut(vecPtr: UnsafeMutableRawPointer, index: UInt) -> Optional<OcrBackendCapabilitiesRefMut> {
+        let pointer = __swift_bridge__$Vec_OcrBackendCapabilities$get_mut(vecPtr, index)
+        if pointer == nil {
+            return nil
+        } else {
+            return OcrBackendCapabilitiesRefMut(ptr: pointer!)
+        }
+    }
+
+    public static func vecOfSelfAsPtr(vecPtr: UnsafeMutableRawPointer) -> UnsafePointer<OcrBackendCapabilitiesRef> {
+        UnsafePointer<OcrBackendCapabilitiesRef>(OpaquePointer(__swift_bridge__$Vec_OcrBackendCapabilities$as_ptr(vecPtr)))
+    }
+
+    public static func vecOfSelfLen(vecPtr: UnsafeMutableRawPointer) -> UInt {
+        __swift_bridge__$Vec_OcrBackendCapabilities$len(vecPtr)
+    }
+}
+
+
 public class OcrConfidence: OcrConfidenceRefMut {
     public var isOwned: Bool = true
 
@@ -17629,12 +17797,20 @@ extension OcrConfigRef {
         { let val = __swift_bridge__$OcrConfig$acceleration(ptr); if val != nil { return AccelerationConfig(ptr: val!) } else { return nil } }()
     }
 
+    public func securityLimits() -> Optional<SecurityLimits> {
+        { let val = __swift_bridge__$OcrConfig$security_limits(ptr); if val != nil { return SecurityLimits(ptr: val!) } else { return nil } }()
+    }
+
     public func tessdataBytes() -> RustString {
         RustString(ptr: __swift_bridge__$OcrConfig$tessdata_bytes(ptr))
     }
 
     public func tessdataPath() -> Optional<RustString> {
         { let val = __swift_bridge__$OcrConfig$tessdata_path(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
+    }
+
+    public func numericRepair() -> Bool {
+        __swift_bridge__$OcrConfig$numeric_repair(ptr)
     }
 }
 extension OcrConfig: Vectorizable {
@@ -17930,7 +18106,7 @@ extension OcrExtractionResultRef {
         RustString(ptr: __swift_bridge__$OcrExtractionResult$metadata(ptr))
     }
 
-    public func tables() -> RustVec<OcrTable> {
+    public func tables() -> RustVec<RustString> {
         RustVec(ptr: __swift_bridge__$OcrExtractionResult$tables(ptr))
     }
 
@@ -18384,8 +18560,8 @@ public class OcrQualityThresholds: OcrQualityThresholdsRefMut {
     }
 }
 extension OcrQualityThresholds {
-    public convenience init(_ min_total_non_whitespace: UInt, _ min_non_whitespace_per_page: Double, _ min_meaningful_word_len: UInt, _ min_meaningful_words: UInt, _ min_alnum_ratio: Double, _ min_garbage_chars: UInt, _ max_fragmented_word_ratio: Double, _ critical_fragmented_word_ratio: Double, _ max_ocr_output_fragmented_word_ratio: Double, _ min_ocr_mean_confidence: Double, _ min_words_for_ocr_output_check: UInt, _ max_ocr_output_dict_invalid_word_ratio: Double, _ discard_suspected_ocr_noise: Bool, _ min_avg_word_length: Double, _ min_words_for_avg_length_check: UInt, _ min_consecutive_repeat_ratio: Double, _ min_words_for_repeat_check: UInt, _ substantive_min_chars: UInt, _ non_text_min_chars: UInt, _ alnum_ws_ratio_threshold: Double, _ pipeline_min_quality: Double, _ min_undecodable_ratio: Double, _ enable_provenance_ocr_routing: Bool, _ min_provenance_fallback_ratio: Double) {
-        self.init(ptr: __swift_bridge__$OcrQualityThresholds$new(min_total_non_whitespace, min_non_whitespace_per_page, min_meaningful_word_len, min_meaningful_words, min_alnum_ratio, min_garbage_chars, max_fragmented_word_ratio, critical_fragmented_word_ratio, max_ocr_output_fragmented_word_ratio, min_ocr_mean_confidence, min_words_for_ocr_output_check, max_ocr_output_dict_invalid_word_ratio, discard_suspected_ocr_noise, min_avg_word_length, min_words_for_avg_length_check, min_consecutive_repeat_ratio, min_words_for_repeat_check, substantive_min_chars, non_text_min_chars, alnum_ws_ratio_threshold, pipeline_min_quality, min_undecodable_ratio, enable_provenance_ocr_routing, min_provenance_fallback_ratio))
+    public convenience init(_ min_total_non_whitespace: UInt, _ min_non_whitespace_per_page: Double, _ min_meaningful_word_len: UInt, _ min_meaningful_words: UInt, _ min_alnum_ratio: Double, _ min_garbage_chars: UInt, _ max_fragmented_word_ratio: Double, _ critical_fragmented_word_ratio: Double, _ max_ocr_output_fragmented_word_ratio: Double, _ min_ocr_mean_confidence: Double, _ min_words_for_ocr_output_check: UInt, _ max_ocr_output_dict_invalid_word_ratio: Double, _ discard_suspected_ocr_noise: Bool, _ min_avg_word_length: Double, _ min_words_for_avg_length_check: UInt, _ min_consecutive_repeat_ratio: Double, _ min_words_for_repeat_check: UInt, _ substantive_min_chars: UInt, _ non_text_min_chars: UInt, _ alnum_ws_ratio_threshold: Double, _ pipeline_min_quality: Double, _ min_undecodable_ratio: Double, _ enable_provenance_ocr_routing: Bool, _ min_provenance_fallback_ratio: Double, _ enable_plausibility_ocr_routing: Bool, _ min_reliable_language_chunk_ratio: Double) {
+        self.init(ptr: __swift_bridge__$OcrQualityThresholds$new(min_total_non_whitespace, min_non_whitespace_per_page, min_meaningful_word_len, min_meaningful_words, min_alnum_ratio, min_garbage_chars, max_fragmented_word_ratio, critical_fragmented_word_ratio, max_ocr_output_fragmented_word_ratio, min_ocr_mean_confidence, min_words_for_ocr_output_check, max_ocr_output_dict_invalid_word_ratio, discard_suspected_ocr_noise, min_avg_word_length, min_words_for_avg_length_check, min_consecutive_repeat_ratio, min_words_for_repeat_check, substantive_min_chars, non_text_min_chars, alnum_ws_ratio_threshold, pipeline_min_quality, min_undecodable_ratio, enable_provenance_ocr_routing, min_provenance_fallback_ratio, enable_plausibility_ocr_routing, min_reliable_language_chunk_ratio))
     }
 }
 public class OcrQualityThresholdsRefMut: OcrQualityThresholdsRef {
@@ -18495,6 +18671,14 @@ extension OcrQualityThresholdsRef {
 
     public func minProvenanceFallbackRatio() -> Double {
         __swift_bridge__$OcrQualityThresholds$min_provenance_fallback_ratio(ptr)
+    }
+
+    public func enablePlausibilityOcrRouting() -> Bool {
+        __swift_bridge__$OcrQualityThresholds$enable_plausibility_ocr_routing(ptr)
+    }
+
+    public func minReliableLanguageChunkRatio() -> Double {
+        __swift_bridge__$OcrQualityThresholds$min_reliable_language_chunk_ratio(ptr)
     }
 }
 extension OcrQualityThresholds: Vectorizable {
@@ -19587,6 +19771,10 @@ extension PageContentRef {
     public func sheetName() -> Optional<RustString> {
         { let val = __swift_bridge__$PageContent$sheet_name(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
     }
+
+    public func ocrConfidence() -> Optional<PageOcrConfidence> {
+        { let val = __swift_bridge__$PageContent$ocr_confidence(ptr); if val != nil { return PageOcrConfidence(ptr: val!) } else { return nil } }()
+    }
 }
 extension PageContent: Vectorizable {
     public static func vecOfSelfNew() -> UnsafeMutableRawPointer {
@@ -19915,6 +20103,99 @@ extension PageInfo: Vectorizable {
 
     public static func vecOfSelfLen(vecPtr: UnsafeMutableRawPointer) -> UInt {
         __swift_bridge__$Vec_PageInfo$len(vecPtr)
+    }
+}
+
+
+public class PageOcrConfidence: PageOcrConfidenceRefMut {
+    public var isOwned: Bool = true
+
+    public override init(ptr: UnsafeMutableRawPointer) {
+        super.init(ptr: ptr)
+    }
+
+    deinit {
+        if isOwned {
+            __swift_bridge__$PageOcrConfidence$_free(ptr)
+        }
+    }
+}
+extension PageOcrConfidence {
+    public convenience init<GenericIntoRustString: IntoRustString>(_ score: Optional<Double>, _ word_count: UInt32, _ backend: GenericIntoRustString) {
+        self.init(ptr: __swift_bridge__$PageOcrConfidence$new(score.intoFfiRepr(), word_count, { let rustString = backend.intoRustString(); rustString.isOwned = false; return rustString.ptr }()))
+    }
+}
+public class PageOcrConfidenceRefMut: PageOcrConfidenceRef {
+    public override init(ptr: UnsafeMutableRawPointer) {
+        super.init(ptr: ptr)
+    }
+}
+public class PageOcrConfidenceRef {
+    public var ptr: UnsafeMutableRawPointer
+
+    public init(ptr: UnsafeMutableRawPointer) {
+        self.ptr = ptr
+    }
+}
+extension PageOcrConfidenceRef {
+    public func score() -> Optional<Double> {
+        __swift_bridge__$PageOcrConfidence$score(ptr).intoSwiftRepr()
+    }
+
+    public func wordCount() -> UInt32 {
+        __swift_bridge__$PageOcrConfidence$word_count(ptr)
+    }
+
+    public func backend() -> RustString {
+        RustString(ptr: __swift_bridge__$PageOcrConfidence$backend(ptr))
+    }
+}
+extension PageOcrConfidence: Vectorizable {
+    public static func vecOfSelfNew() -> UnsafeMutableRawPointer {
+        __swift_bridge__$Vec_PageOcrConfidence$new()
+    }
+
+    public static func vecOfSelfFree(vecPtr: UnsafeMutableRawPointer) {
+        __swift_bridge__$Vec_PageOcrConfidence$drop(vecPtr)
+    }
+
+    public static func vecOfSelfPush(vecPtr: UnsafeMutableRawPointer, value: PageOcrConfidence) {
+        __swift_bridge__$Vec_PageOcrConfidence$push(vecPtr, {value.isOwned = false; return value.ptr;}())
+    }
+
+    public static func vecOfSelfPop(vecPtr: UnsafeMutableRawPointer) -> Optional<Self> {
+        let pointer = __swift_bridge__$Vec_PageOcrConfidence$pop(vecPtr)
+        if pointer == nil {
+            return nil
+        } else {
+            return (PageOcrConfidence(ptr: pointer!) as! Self)
+        }
+    }
+
+    public static func vecOfSelfGet(vecPtr: UnsafeMutableRawPointer, index: UInt) -> Optional<PageOcrConfidenceRef> {
+        let pointer = __swift_bridge__$Vec_PageOcrConfidence$get(vecPtr, index)
+        if pointer == nil {
+            return nil
+        } else {
+            return PageOcrConfidenceRef(ptr: pointer!)
+        }
+    }
+
+    public static func vecOfSelfGetMut(vecPtr: UnsafeMutableRawPointer, index: UInt) -> Optional<PageOcrConfidenceRefMut> {
+        let pointer = __swift_bridge__$Vec_PageOcrConfidence$get_mut(vecPtr, index)
+        if pointer == nil {
+            return nil
+        } else {
+            return PageOcrConfidenceRefMut(ptr: pointer!)
+        }
+    }
+
+    public static func vecOfSelfAsPtr(vecPtr: UnsafeMutableRawPointer) -> UnsafePointer<PageOcrConfidenceRef> {
+        UnsafePointer<PageOcrConfidenceRef>(OpaquePointer(__swift_bridge__$Vec_PageOcrConfidence$as_ptr(vecPtr)))
+    }
+
+    public static func vecOfSelfLen(vecPtr: UnsafeMutableRawPointer) -> UInt {
+        __swift_bridge__$Vec_PageOcrConfidence$len(vecPtr)
     }
 }
 
@@ -20792,6 +21073,14 @@ extension PdfMetadataRef {
 
     public func scannedPages() -> RustString {
         RustString(ptr: __swift_bridge__$PdfMetadata$scanned_pages(ptr))
+    }
+
+    public func fabricatedTextPages() -> RustString {
+        RustString(ptr: __swift_bridge__$PdfMetadata$fabricated_text_pages(ptr))
+    }
+
+    public func implausibleTextPages() -> RustString {
+        RustString(ptr: __swift_bridge__$PdfMetadata$implausible_text_pages(ptr))
     }
 
     public func layoutGatedPages() -> RustString {
@@ -23698,8 +23987,8 @@ public class ServerConfig: ServerConfigRefMut {
     }
 }
 extension ServerConfig {
-    public convenience init<GenericIntoRustString: IntoRustString>(_ host: GenericIntoRustString, _ port: UInt16, _ cors_origins: RustVec<GenericIntoRustString>, _ max_request_body_bytes: UInt, _ max_multipart_field_bytes: UInt) {
-        self.init(ptr: __swift_bridge__$ServerConfig$new({ let rustString = host.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), port, { let val = cors_origins; val.isOwned = false; return val.ptr }(), max_request_body_bytes, max_multipart_field_bytes))
+    public convenience init<GenericIntoRustString: IntoRustString>(_ host: GenericIntoRustString, _ port: UInt16, _ cors_origins: RustVec<GenericIntoRustString>, _ max_request_body_bytes: UInt, _ max_multipart_field_bytes: UInt, _ job_timeout_secs: UInt64) {
+        self.init(ptr: __swift_bridge__$ServerConfig$new({ let rustString = host.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), port, { let val = cors_origins; val.isOwned = false; return val.ptr }(), max_request_body_bytes, max_multipart_field_bytes, job_timeout_secs))
     }
 }
 public class ServerConfigRefMut: ServerConfigRef {
@@ -23733,6 +24022,10 @@ extension ServerConfigRef {
 
     public func maxMultipartFieldBytes() -> UInt {
         __swift_bridge__$ServerConfig$max_multipart_field_bytes(ptr)
+    }
+
+    public func jobTimeoutSecs() -> UInt64 {
+        __swift_bridge__$ServerConfig$job_timeout_secs(ptr)
     }
 }
 extension ServerConfig: Vectorizable {
@@ -24872,6 +25165,10 @@ extension TableRef {
         { let val = __swift_bridge__$Table$table_id(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
     }
 
+    public func cellStyles() -> RustVec<RustString> {
+        RustVec(ptr: __swift_bridge__$Table$cell_styles(ptr))
+    }
+
     public func columns() -> RustString {
         RustString(ptr: __swift_bridge__$Table$columns(ptr))
     }
@@ -25019,6 +25316,103 @@ extension TableCell: Vectorizable {
 
     public static func vecOfSelfLen(vecPtr: UnsafeMutableRawPointer) -> UInt {
         __swift_bridge__$Vec_TableCell$len(vecPtr)
+    }
+}
+
+
+public class TableCellStyle: TableCellStyleRefMut {
+    public var isOwned: Bool = true
+
+    public override init(ptr: UnsafeMutableRawPointer) {
+        super.init(ptr: ptr)
+    }
+
+    deinit {
+        if isOwned {
+            __swift_bridge__$TableCellStyle$_free(ptr)
+        }
+    }
+}
+extension TableCellStyle {
+    public convenience init<GenericIntoRustString: IntoRustString>(_ row: UInt32, _ col: UInt32, _ heading_level: Optional<UInt8>, _ style_name: Optional<GenericIntoRustString>) {
+        self.init(ptr: __swift_bridge__$TableCellStyle$new(row, col, heading_level.intoFfiRepr(), { if let rustString = optionalStringIntoRustString(style_name) { rustString.isOwned = false; return rustString.ptr } else { return nil } }()))
+    }
+}
+public class TableCellStyleRefMut: TableCellStyleRef {
+    public override init(ptr: UnsafeMutableRawPointer) {
+        super.init(ptr: ptr)
+    }
+}
+public class TableCellStyleRef {
+    public var ptr: UnsafeMutableRawPointer
+
+    public init(ptr: UnsafeMutableRawPointer) {
+        self.ptr = ptr
+    }
+}
+extension TableCellStyleRef {
+    public func row() -> UInt32 {
+        __swift_bridge__$TableCellStyle$row(ptr)
+    }
+
+    public func col() -> UInt32 {
+        __swift_bridge__$TableCellStyle$col(ptr)
+    }
+
+    public func headingLevel() -> Optional<UInt8> {
+        __swift_bridge__$TableCellStyle$heading_level(ptr).intoSwiftRepr()
+    }
+
+    public func styleName() -> Optional<RustString> {
+        { let val = __swift_bridge__$TableCellStyle$style_name(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
+    }
+}
+extension TableCellStyle: Vectorizable {
+    public static func vecOfSelfNew() -> UnsafeMutableRawPointer {
+        __swift_bridge__$Vec_TableCellStyle$new()
+    }
+
+    public static func vecOfSelfFree(vecPtr: UnsafeMutableRawPointer) {
+        __swift_bridge__$Vec_TableCellStyle$drop(vecPtr)
+    }
+
+    public static func vecOfSelfPush(vecPtr: UnsafeMutableRawPointer, value: TableCellStyle) {
+        __swift_bridge__$Vec_TableCellStyle$push(vecPtr, {value.isOwned = false; return value.ptr;}())
+    }
+
+    public static func vecOfSelfPop(vecPtr: UnsafeMutableRawPointer) -> Optional<Self> {
+        let pointer = __swift_bridge__$Vec_TableCellStyle$pop(vecPtr)
+        if pointer == nil {
+            return nil
+        } else {
+            return (TableCellStyle(ptr: pointer!) as! Self)
+        }
+    }
+
+    public static func vecOfSelfGet(vecPtr: UnsafeMutableRawPointer, index: UInt) -> Optional<TableCellStyleRef> {
+        let pointer = __swift_bridge__$Vec_TableCellStyle$get(vecPtr, index)
+        if pointer == nil {
+            return nil
+        } else {
+            return TableCellStyleRef(ptr: pointer!)
+        }
+    }
+
+    public static func vecOfSelfGetMut(vecPtr: UnsafeMutableRawPointer, index: UInt) -> Optional<TableCellStyleRefMut> {
+        let pointer = __swift_bridge__$Vec_TableCellStyle$get_mut(vecPtr, index)
+        if pointer == nil {
+            return nil
+        } else {
+            return TableCellStyleRefMut(ptr: pointer!)
+        }
+    }
+
+    public static func vecOfSelfAsPtr(vecPtr: UnsafeMutableRawPointer) -> UnsafePointer<TableCellStyleRef> {
+        UnsafePointer<TableCellStyleRef>(OpaquePointer(__swift_bridge__$Vec_TableCellStyle$as_ptr(vecPtr)))
+    }
+
+    public static func vecOfSelfLen(vecPtr: UnsafeMutableRawPointer) -> UInt {
+        __swift_bridge__$Vec_TableCellStyle$len(vecPtr)
     }
 }
 
@@ -25218,8 +25612,8 @@ public class TesseractConfig: TesseractConfigRefMut {
     }
 }
 extension TesseractConfig {
-    public convenience init<GenericIntoRustString: IntoRustString>(_ language: RustVec<GenericIntoRustString>, _ psm: Int32, _ output_format: GenericIntoRustString, _ oem: Int32, _ min_confidence: Double, _ preprocessing: Optional<ImagePreprocessingConfig>, _ enable_table_detection: Bool, _ table_min_confidence: Double, _ table_column_threshold: Int32, _ table_row_threshold_ratio: Double, _ use_cache: Bool, _ classify_use_pre_adapted_templates: Bool, _ language_model_ngram_on: Bool, _ tessedit_dont_blkrej_good_wds: Bool, _ tessedit_dont_rowrej_good_wds: Bool, _ tessedit_enable_dict_correction: Bool, _ tessedit_char_whitelist: GenericIntoRustString, _ tessedit_char_blacklist: GenericIntoRustString, _ tessedit_use_primary_params_model: Bool, _ textord_space_size_is_variable: Bool, _ thresholding_method: Bool) {
-        self.init(ptr: __swift_bridge__$TesseractConfig$new({ let val = language; val.isOwned = false; return val.ptr }(), psm, { let rustString = output_format.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), oem, min_confidence, { if let val = preprocessing { val.isOwned = false; return val.ptr } else { return nil } }(), enable_table_detection, table_min_confidence, table_column_threshold, table_row_threshold_ratio, use_cache, classify_use_pre_adapted_templates, language_model_ngram_on, tessedit_dont_blkrej_good_wds, tessedit_dont_rowrej_good_wds, tessedit_enable_dict_correction, { let rustString = tessedit_char_whitelist.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), { let rustString = tessedit_char_blacklist.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), tessedit_use_primary_params_model, textord_space_size_is_variable, thresholding_method))
+    public convenience init<GenericIntoRustString: IntoRustString>(_ language: RustVec<GenericIntoRustString>, _ psm: Optional<Int32>, _ output_format: GenericIntoRustString, _ oem: Int32, _ min_confidence: Double, _ preprocessing: Optional<ImagePreprocessingConfig>, _ enable_table_detection: Bool, _ table_min_confidence: Double, _ table_column_threshold: Int32, _ table_row_threshold_ratio: Double, _ use_cache: Bool, _ classify_use_pre_adapted_templates: Bool, _ language_model_ngram_on: Bool, _ tessedit_dont_blkrej_good_wds: Bool, _ tessedit_dont_rowrej_good_wds: Bool, _ tessedit_enable_dict_correction: Bool, _ tessedit_char_whitelist: GenericIntoRustString, _ tessedit_char_blacklist: GenericIntoRustString, _ tessedit_use_primary_params_model: Bool, _ textord_space_size_is_variable: Bool, _ thresholding_method: Int32) {
+        self.init(ptr: __swift_bridge__$TesseractConfig$new({ let val = language; val.isOwned = false; return val.ptr }(), psm.intoFfiRepr(), { let rustString = output_format.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), oem, min_confidence, { if let val = preprocessing { val.isOwned = false; return val.ptr } else { return nil } }(), enable_table_detection, table_min_confidence, table_column_threshold, table_row_threshold_ratio, use_cache, classify_use_pre_adapted_templates, language_model_ngram_on, tessedit_dont_blkrej_good_wds, tessedit_dont_rowrej_good_wds, tessedit_enable_dict_correction, { let rustString = tessedit_char_whitelist.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), { let rustString = tessedit_char_blacklist.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), tessedit_use_primary_params_model, textord_space_size_is_variable, thresholding_method))
     }
 }
 public class TesseractConfigRefMut: TesseractConfigRef {
@@ -25239,8 +25633,8 @@ extension TesseractConfigRef {
         RustVec(ptr: __swift_bridge__$TesseractConfig$language(ptr))
     }
 
-    public func psm() -> Int32 {
-        __swift_bridge__$TesseractConfig$psm(ptr)
+    public func psm() -> Optional<Int32> {
+        __swift_bridge__$TesseractConfig$psm(ptr).intoSwiftRepr()
     }
 
     public func outputFormat() -> RustString {
@@ -25315,7 +25709,7 @@ extension TesseractConfigRef {
         __swift_bridge__$TesseractConfig$textord_space_size_is_variable(ptr)
     }
 
-    public func thresholdingMethod() -> Bool {
+    public func thresholdingMethod() -> Int32 {
         __swift_bridge__$TesseractConfig$thresholding_method(ptr)
     }
 }
@@ -27877,6 +28271,86 @@ extension CallMode: Vectorizable {
 
     public static func vecOfSelfLen(vecPtr: UnsafeMutableRawPointer) -> UInt {
         __swift_bridge__$Vec_CallMode$len(vecPtr)
+    }
+}
+
+
+public class CandleDeepseekOcrDtype: CandleDeepseekOcrDtypeRefMut {
+    public var isOwned: Bool = true
+
+    public override init(ptr: UnsafeMutableRawPointer) {
+        super.init(ptr: ptr)
+    }
+
+    deinit {
+        if isOwned {
+            __swift_bridge__$CandleDeepseekOcrDtype$_free(ptr)
+        }
+    }
+}
+public class CandleDeepseekOcrDtypeRefMut: CandleDeepseekOcrDtypeRef {
+    public override init(ptr: UnsafeMutableRawPointer) {
+        super.init(ptr: ptr)
+    }
+}
+public class CandleDeepseekOcrDtypeRef {
+    public var ptr: UnsafeMutableRawPointer
+
+    public init(ptr: UnsafeMutableRawPointer) {
+        self.ptr = ptr
+    }
+}
+extension CandleDeepseekOcrDtypeRef {
+    public func to_string() -> RustString {
+        RustString(ptr: __swift_bridge__$CandleDeepseekOcrDtype$to_string(ptr))
+    }
+}
+extension CandleDeepseekOcrDtype: Vectorizable {
+    public static func vecOfSelfNew() -> UnsafeMutableRawPointer {
+        __swift_bridge__$Vec_CandleDeepseekOcrDtype$new()
+    }
+
+    public static func vecOfSelfFree(vecPtr: UnsafeMutableRawPointer) {
+        __swift_bridge__$Vec_CandleDeepseekOcrDtype$drop(vecPtr)
+    }
+
+    public static func vecOfSelfPush(vecPtr: UnsafeMutableRawPointer, value: CandleDeepseekOcrDtype) {
+        __swift_bridge__$Vec_CandleDeepseekOcrDtype$push(vecPtr, {value.isOwned = false; return value.ptr;}())
+    }
+
+    public static func vecOfSelfPop(vecPtr: UnsafeMutableRawPointer) -> Optional<Self> {
+        let pointer = __swift_bridge__$Vec_CandleDeepseekOcrDtype$pop(vecPtr)
+        if pointer == nil {
+            return nil
+        } else {
+            return (CandleDeepseekOcrDtype(ptr: pointer!) as! Self)
+        }
+    }
+
+    public static func vecOfSelfGet(vecPtr: UnsafeMutableRawPointer, index: UInt) -> Optional<CandleDeepseekOcrDtypeRef> {
+        let pointer = __swift_bridge__$Vec_CandleDeepseekOcrDtype$get(vecPtr, index)
+        if pointer == nil {
+            return nil
+        } else {
+            return CandleDeepseekOcrDtypeRef(ptr: pointer!)
+        }
+    }
+
+    public static func vecOfSelfGetMut(vecPtr: UnsafeMutableRawPointer, index: UInt) -> Optional<CandleDeepseekOcrDtypeRefMut> {
+        let pointer = __swift_bridge__$Vec_CandleDeepseekOcrDtype$get_mut(vecPtr, index)
+        if pointer == nil {
+            return nil
+        } else {
+            return CandleDeepseekOcrDtypeRefMut(ptr: pointer!)
+        }
+    }
+
+    public static func vecOfSelfAsPtr(vecPtr: UnsafeMutableRawPointer) -> UnsafePointer<CandleDeepseekOcrDtypeRef> {
+        UnsafePointer<CandleDeepseekOcrDtypeRef>(OpaquePointer(__swift_bridge__$Vec_CandleDeepseekOcrDtype$as_ptr(vecPtr)))
+    }
+
+    public static func vecOfSelfLen(vecPtr: UnsafeMutableRawPointer) -> UInt {
+        __swift_bridge__$Vec_CandleDeepseekOcrDtype$len(vecPtr)
     }
 }
 

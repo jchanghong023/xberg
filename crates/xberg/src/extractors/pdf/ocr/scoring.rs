@@ -67,6 +67,14 @@ pub struct OcrFallbackDecision {
     /// independently of any per-page analysis. When this is true the gate routes to
     /// `RunFallback` (full OCR) regardless of whether `failing_pages` is populated.
     pub whole_doc_failure: bool,
+    /// Set when `fallback` was forced by the font-mapping *provenance* signal
+    /// (`MappingProvenance::Fallback`, issue #1667) rather than by a text-shape heuristic.
+    ///
+    /// The native text on those pages is known to be a fabricated mapping — structurally
+    /// clean-looking, semantically wrong — so a caller must not let a "keeping the native
+    /// text loses nothing" guard (the destructive-OCR information-loss check) veto the OCR
+    /// replacement: the text being kept is exactly the garbage #1667 exists to drop.
+    pub fabricated_provenance: bool,
 }
 /// Which branch the OCR skip gate selects, given pre-rendered doc presence,
 /// text statistics, and the per-page fallback decision.
@@ -276,6 +284,7 @@ pub(super) fn evaluate_native_text_for_ocr_with_garbage_threshold(
             fallback: true,
             failing_pages: Vec::new(),
             whole_doc_failure: true,
+            fabricated_provenance: false,
         };
     }
 
@@ -333,6 +342,7 @@ pub(super) fn evaluate_native_text_for_ocr_with_garbage_threshold(
         fallback,
         failing_pages: Vec::new(),
         whole_doc_failure: fallback,
+        fabricated_provenance: false,
     }
 }
 /// Normalize structural Markdown markers out of OCR text **for scoring only**.
@@ -604,6 +614,311 @@ pub(super) fn repaired_marker_line(line: &str, kind: &LineMarkerKind) -> String 
     out.push_str(rest);
     out
 }
+/// Minimum digit count a bare integer must have before it is treated as a grouped value by
+/// [`repair_ocr_numeric_tokens`]'s separator rule (GH#1789). Below this, a 1-3 digit number is
+/// too common as a small quantity, a percentage, or a short id to safely re-punctuate. ~keep
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+const NUMERIC_REPAIR_MIN_SEPARATOR_DIGITS: usize = 4;
+/// Maximum digit count the separator rule will re-punctuate. Above this the token is more
+/// likely an account or reference number than a currency amount, and grouping it would assert
+/// a scale ("hundred million") the source never claimed. ~keep
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+const NUMERIC_REPAIR_MAX_SEPARATOR_DIGITS: usize = 9;
+/// Digits after the decimal point the period rule requires before treating a misread comma as
+/// restored. Financial schedules in this corpus group in exactly three digits (`7,812`); a
+/// different fraction length (`7.81`) is a real decimal, not an OCR miss. ~keep
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+const NUMERIC_REPAIR_GROUP_WIDTH: usize = 3;
+/// Maximum digits before the decimal point the period rule will treat as the misread leading
+/// group of a grouped number (`7.812` -> `7,812`, `812.812` -> `812,812`). Four or more digits
+/// before the point is already an ordinary decimal (`1234.5`), not a split thousands group.
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+const NUMERIC_REPAIR_PERIOD_LEAD_DIGITS: usize = 3;
+/// Maximum digits the join rule's second (already-grouped) token may carry before its comma
+/// (`2 2,411` -> `22,411`, capturing `2,411`). A three-or-more digit leading group would make
+/// the "lone digit" on its own a implausible split -- a real 3-digit group does not usually
+/// tear a single leading digit off across a rendering gap.
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+const NUMERIC_REPAIR_JOIN_LEAD_DIGITS: usize = 2;
+/// `true` if `ch` is a character that, immediately adjacent to a digit run, means the run is
+/// already part of a larger token (a longer number, a decimal, an identifier) and must not be
+/// treated as a repair candidate on its own. Shared by every rule in
+/// [`repair_ocr_numeric_tokens`] as the baseline "already inside a word" boundary; individual
+/// rules layer additional forbidden neighbors on top (see each rule's own comment).
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+fn numeric_repair_blocks_word_boundary(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_' || ch == '.' || ch == ','
+}
+/// Group a base-10 digit string with `NUMERIC_REPAIR_GROUP_WIDTH`-digit thousands separators
+/// (`"1172"` -> `"1,172"`). Leading zeros are dropped, matching the reference implementation's
+/// `int(...)` round trip: a token is a magnitude here, not a preserved digit sequence.
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+fn numeric_repair_group_digits(digits: &str) -> String {
+    let normalized = digits.parse::<u64>().map(|value| value.to_string()).unwrap_or_default();
+    let bytes = normalized.as_bytes();
+    let mut out = String::with_capacity(bytes.len() + bytes.len() / NUMERIC_REPAIR_GROUP_WIDTH);
+    for (index, byte) in bytes.iter().enumerate() {
+        if index > 0 && (bytes.len() - index) % NUMERIC_REPAIR_GROUP_WIDTH == 0 {
+            out.push(',');
+        }
+        out.push(*byte as char);
+    }
+    out
+}
+/// Attempt the join rule (`repair.py`'s `J`) at `chars[start]`: a lone digit, a single literal
+/// space, and a `\d{1,2},\d{3}` group join into one number (`"2 2,411"` -> `"22,411"`).
+///
+/// Returns the number of input characters consumed and the replacement text, or `None` if no
+/// match starts here. The lone digit must not itself sit inside a larger token (checked by the
+/// caller via [`numeric_repair_blocks_word_boundary`] on the preceding character), and the
+/// matched group must not be immediately followed by another digit -- otherwise `"2 22,411"`
+/// would wrongly absorb only part of a longer run.
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+fn numeric_repair_match_join(chars: &[char], start: usize) -> Option<(usize, String)> {
+    let lone_digit = *chars.get(start)?;
+    if !lone_digit.is_ascii_digit() || chars.get(start + 1) != Some(&' ') {
+        return None;
+    }
+    let group_start = start + 2;
+    let mut lead_digits = 0usize;
+    while lead_digits < NUMERIC_REPAIR_JOIN_LEAD_DIGITS
+        && chars.get(group_start + lead_digits).is_some_and(char::is_ascii_digit)
+    {
+        lead_digits += 1;
+    }
+    for lead_len in (1..=lead_digits).rev() {
+        let comma_at = group_start + lead_len;
+        if chars.get(comma_at) != Some(&',') {
+            continue;
+        }
+        let tail_start = comma_at + 1;
+        let tail_end = tail_start + NUMERIC_REPAIR_GROUP_WIDTH;
+        if tail_end > chars.len() || !chars[tail_start..tail_end].iter().all(char::is_ascii_digit) {
+            continue;
+        }
+        if chars.get(tail_end).is_some_and(char::is_ascii_digit) {
+            continue;
+        }
+        let joined: String = chars[group_start..tail_end].iter().collect();
+        let mut replacement = String::with_capacity(1 + joined.len());
+        replacement.push(lone_digit);
+        replacement.push_str(&joined);
+        return Some((tail_end - start, replacement));
+    }
+    None
+}
+/// Attempt the period rule (`repair.py`'s `P`) at `chars[start]`: a 1-3 digit leading group,
+/// optionally prefixed by `(` and/or `$`, followed by a period and exactly
+/// `NUMERIC_REPAIR_GROUP_WIDTH` digits, is a comma the OCR engine misread as a period
+/// (`"7.812"` -> `"7,812"`). A trailing digit, `%`, `.`, or `,` means this is actually a longer
+/// decimal or percentage, not a grouped amount, and is left alone.
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+fn numeric_repair_match_period(chars: &[char], start: usize) -> Option<(usize, String)> {
+    let mut lead_start = start;
+    if chars.get(lead_start) == Some(&'(') {
+        lead_start += 1;
+    }
+    if chars.get(lead_start) == Some(&'$') {
+        lead_start += 1;
+    }
+    let mut lead_digits = 0usize;
+    while lead_digits < NUMERIC_REPAIR_PERIOD_LEAD_DIGITS
+        && chars.get(lead_start + lead_digits).is_some_and(char::is_ascii_digit)
+    {
+        lead_digits += 1;
+    }
+    for lead_len in (1..=lead_digits).rev() {
+        let dot_at = lead_start + lead_len;
+        if chars.get(dot_at) != Some(&'.') {
+            continue;
+        }
+        let frac_start = dot_at + 1;
+        let frac_end = frac_start + NUMERIC_REPAIR_GROUP_WIDTH;
+        if frac_end > chars.len() || !chars[frac_start..frac_end].iter().all(char::is_ascii_digit) {
+            continue;
+        }
+        let blocked_after = chars
+            .get(frac_end)
+            .is_some_and(|c| c.is_ascii_digit() || matches!(c, '%' | '.' | ','));
+        if blocked_after {
+            continue;
+        }
+        let prefix: String = chars[start..dot_at].iter().collect();
+        let fraction: String = chars[frac_start..frac_end].iter().collect();
+        let mut replacement = String::with_capacity(prefix.len() + 1 + fraction.len());
+        replacement.push_str(&prefix);
+        replacement.push(',');
+        replacement.push_str(&fraction);
+        return Some((frac_end - start, replacement));
+    }
+    None
+}
+/// Attempt the separator rule (`repair.py`'s `S`) at `chars[start]`: a bare `NUMERIC_REPAIR_MIN
+/// _SEPARATOR_DIGITS`-to-`NUMERIC_REPAIR_MAX_SEPARATOR_DIGITS`-digit integer, optionally
+/// parenthesized, gets thousands separators (`"1172"` -> `"1,172"`). Never applied directly
+/// after a `FY` header token (`"FY 2025"` stays a year), which the generic word-boundary check
+/// alone would not catch because the character right before the digits is a space, not a word
+/// character.
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+fn numeric_repair_match_separator(chars: &[char], start: usize) -> Option<(usize, String)> {
+    if start >= 3 && chars[start - 3] == 'F' && chars[start - 2] == 'Y' && chars[start - 1] == ' ' {
+        return None;
+    }
+    let has_open = chars.get(start) == Some(&'(');
+    let digits_start = if has_open { start + 1 } else { start };
+    let mut digit_count = 0usize;
+    while digit_count < NUMERIC_REPAIR_MAX_SEPARATOR_DIGITS
+        && chars.get(digits_start + digit_count).is_some_and(char::is_ascii_digit)
+    {
+        digit_count += 1;
+    }
+    if digit_count < NUMERIC_REPAIR_MIN_SEPARATOR_DIGITS {
+        return None;
+    }
+    let digits_end = digits_start + digit_count;
+    let has_close = chars.get(digits_end) == Some(&')');
+    let after = if has_close { digits_end + 1 } else { digits_end };
+    let blocked_after = chars
+        .get(after)
+        .is_some_and(|&c| numeric_repair_blocks_word_boundary(c) || matches!(c, '%' | '-' | '/'));
+    if blocked_after {
+        return None;
+    }
+    let digits: String = chars[digits_start..digits_end].iter().collect();
+    let mut replacement = String::new();
+    if has_open {
+        replacement.push('(');
+    }
+    replacement.push_str(&numeric_repair_group_digits(&digits));
+    if has_close {
+        replacement.push(')');
+    }
+    Some((after - start, replacement))
+}
+/// Run one repair rule over `chars` left to right, calling `matcher` at every position whose
+/// preceding character does not already block a match. Shared driver for the three
+/// [`repair_ocr_numeric_tokens`] rules, which differ only in `matcher` and in which characters
+/// additionally block the position on the left (`extra_left_block`).
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+fn numeric_repair_apply_rule(
+    text: &str,
+    extra_left_block: impl Fn(char) -> bool,
+    matcher: impl Fn(&[char], usize) -> Option<(usize, String)>,
+) -> (String, bool) {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut changed = false;
+    let mut index = 0usize;
+    while index < chars.len() {
+        let left_blocked =
+            index > 0 && (numeric_repair_blocks_word_boundary(chars[index - 1]) || extra_left_block(chars[index - 1]));
+        if !left_blocked && let Some((consumed, replacement)) = matcher(&chars, index) {
+            out.push_str(&replacement);
+            index += consumed;
+            changed = true;
+            continue;
+        }
+        out.push(chars[index]);
+        index += 1;
+    }
+    (out, changed)
+}
+/// Repair OCR tokens that are clearly numeric but were mis-recognized in one of three shapes
+/// Tesseract reliably produces on financial tables (GH#1789): a dropped thousands separator
+/// (`"1172"` for `"1,172"`), a decimal-point misread of a grouping comma (`"7.812"` for
+/// `"7,812"`), and a single number split at a rendering gap into two tokens (`"2 2,411"` for
+/// `"22,411"`). The digits Tesseract reads are correct; only the punctuation is wrong, so this
+/// is a punctuation repair, never a digit correction.
+///
+/// This is deliberately **not** wired in unconditionally the way [`repair_ocr_list_markers`]
+/// is: `[ocr] numeric_repair = true` gates every call site (see
+/// `OcrConfig::numeric_repair`, default `false`). The list-marker repairs above are safe
+/// unconditionally because every ambiguous case is resolved by looking at neighboring list
+/// markers on the same page; this repair has no equivalent column-level context available at
+/// the point OCR text comes back as a flat string; `"1.234,56"` and `"1,234.56"` both mean the
+/// same number and it cannot tell which convention a given page used. Each rule keeps its
+/// pattern deliberately narrow (see the per-rule doc comments), and the issue's own measurement
+/// -- 165 repaired tokens across 33 OCR runs with zero corruptions -- is evidence for those
+/// specific rules on that specific corpus, not a proof that no locale or corpus can defeat
+/// them. Until this can consult table/column context to infer the locale in play, it stays
+/// opt-in.
+///
+/// Applied in the same order as the reference implementation: join, then period, then
+/// separator, so a split grouped number is reassembled before either punctuation rule looks at
+/// it.
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+pub(crate) fn repair_ocr_numeric_tokens(text: &str) -> std::borrow::Cow<'_, str> {
+    let (joined, join_changed) = numeric_repair_apply_rule(text, |_| false, numeric_repair_match_join);
+    let (period_fixed, period_changed) = numeric_repair_apply_rule(&joined, |_| false, numeric_repair_match_period);
+    let (separated, separator_changed) = numeric_repair_apply_rule(
+        &period_fixed,
+        |c: char| matches!(c, '-' | '/'),
+        numeric_repair_match_separator,
+    );
+    if join_changed || period_changed || separator_changed {
+        std::borrow::Cow::Owned(separated)
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
+/// (fork) Apply [`repair_ocr_numeric_tokens`] to every string representation an
+/// `ExtractedDocument` carries: the flat `content`, the hOCR element texts, the table cells
+/// and each table's `markdown`, and the prebuilt OCR elements that the fork's OCR layout grid
+/// fence (`rendering/ocr_layout.rs`) renders from. Missing any one of them leaves the same
+/// number repaired in one output surface and unrepaired in another. Mirrors
+/// `extractors::image::apply_numeric_repair_to_standalone_image_ocr`, which does the same for
+/// the standalone-image route's already-destructured fields.
+#[cfg(feature = "ocr")]
+pub(crate) fn repair_extracted_document_numbers(doc: &mut crate::types::ExtractedDocument, content_is_prose: bool) {
+    if content_is_prose && let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(&doc.content) {
+        doc.content = repaired;
+    }
+    if let Some(internal_doc) = doc.ocr_internal_document.as_mut() {
+        for element in &mut internal_doc.elements {
+            if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(&element.text) {
+                element.text = repaired;
+            }
+        }
+    }
+    for table in doc.tables.iter_mut() {
+        for row in &mut table.cells {
+            for cell in row {
+                if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(cell) {
+                    *cell = repaired;
+                }
+            }
+        }
+        if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(&table.markdown) {
+            table.markdown = repaired;
+        }
+    }
+    for ocr_element in doc.ocr_elements.iter_mut().flatten() {
+        if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(&ocr_element.text) {
+            ocr_element.text = repaired;
+        }
+    }
+}
+
+/// Whether an OCR run configured this way returns prose that [`repair_ocr_numeric_tokens`] may
+/// be applied to, rather than markup it would corrupt.
+///
+/// `TesseractConfig::output_format` selects the renderer inside the backend (`ocr::processor::
+/// execution`'s `raw_content` match): `"hocr"` returns hOCR HTML and `"tsv"` returns Tesseract's
+/// tab-separated word table. Both carry pixel coordinates as bare space- or tab-delimited
+/// integers, which is exactly the shape the separator rule re-punctuates -- `bbox 1234 567`
+/// becomes `bbox 1,234 567`, and at the default 300 dpi a Letter page is 2550x3300 px, so
+/// four-digit coordinates are the norm rather than an edge case (GH#1836). An allowlist, not a
+/// denylist, so a renderer added later defaults to "not repairable" instead of being silently
+/// corrupted. `None` is repairable because `TesseractConfig::default` renders `"markdown"`. ~keep
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+pub(crate) fn ocr_content_is_repairable_prose(ocr_config: &crate::core::config::OcrConfig) -> bool {
+    match ocr_config.tesseract_config.as_ref() {
+        Some(tesseract_config) => matches!(tesseract_config.output_format.as_str(), "text" | "markdown"),
+        None => true,
+    }
+}
+
 /// The backend-native-scale confidence floor a page's confidence must clear, or `false` if
 /// this backend's confidence cannot be used as a calibrated diagnostic at all.
 ///
@@ -659,13 +974,57 @@ pub(super) fn ocr_recognition_noise_decision(
 /// Written by `perform_ocr` from `api.mean_text_conf()`. Backends that do not report it
 /// (and Tesseract itself, when it read nothing) simply yield `None`.
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
-pub(super) fn mean_text_conf_of(
+pub(crate) fn mean_text_conf_of(
     metadata: &ahash::AHashMap<std::borrow::Cow<'_, str>, serde_json::Value>,
 ) -> Option<f64> {
     let value = metadata.get("mean_text_conf")?;
     let conf = value.as_f64().or_else(|| value.as_i64().map(|v| v as f64))?;
     // -1 is Tesseract's "no confidence available" sentinel.
     (conf >= 0.0).then_some(conf)
+}
+/// The number of OCR'd words a backend retained on a page, if it reported one.
+///
+/// Written into the same metadata map as `mean_text_conf` by
+/// `insert_retained_word_confidence_metadata` (`ocr::processor::execution`). Backends that
+/// never report it simply yield `None`, which callers read as "unknown", not as zero words.
+/// The `u64` is narrowed by saturation rather than cast, so an implausibly large count
+/// cannot silently wrap into a small one. ~keep
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+pub(crate) fn word_count_of(metadata: &ahash::AHashMap<std::borrow::Cow<'_, str>, serde_json::Value>) -> Option<u32> {
+    let count = metadata.get("word_count")?.as_u64()?;
+    Some(u32::try_from(count).unwrap_or(u32::MAX))
+}
+/// Build the page-level OCR confidence summary attached to [`crate::types::page::PageContent`].
+///
+/// Only [`crate::plugins::ConfidenceSemantics::Legibility`] yields a `score`: its raw value is
+/// normalized by `scale_max` into `0.0..=1.0` and clamped, mirroring [`confidence_gate_rejects`]'s
+/// normalization. A non-positive `scale_max` would divide into NaN/infinity, so it is guarded
+/// and treated the same as "no calibrated scale" rather than propagating a broken number.
+///
+/// `Uncalibrated` and `None` semantics, and a missing `raw_confidence` (no words were scored),
+/// all yield `score: None` -- but always with the real `word_count` and `backend` populated, so
+/// a caller can still see that the page WAS OCR'd and by whom even without a legibility number.
+/// `Some(0.0)` is never used as a substitute for "no data": zero confidence and no data are
+/// different facts, and collapsing them would make a genuinely illegible page indistinguishable
+/// from one nobody scored.
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+pub(crate) fn page_ocr_confidence(
+    semantics: crate::plugins::ConfidenceSemantics,
+    raw_confidence: Option<f64>,
+    word_count: u32,
+    backend: &str,
+) -> Option<crate::types::page::PageOcrConfidence> {
+    let score = match semantics {
+        crate::plugins::ConfidenceSemantics::Legibility { scale_max } if scale_max > 0.0 => {
+            raw_confidence.map(|raw| (raw / scale_max).clamp(0.0, 1.0))
+        }
+        _ => None,
+    };
+    Some(crate::types::page::PageOcrConfidence {
+        score,
+        word_count,
+        backend: backend.to_string(),
+    })
 }
 /// Statistics for judging an OCR result, scored over prose rather than Markdown scaffolding.
 ///
@@ -1042,4 +1401,71 @@ pub(crate) fn evaluate_per_page_ocr(
     }
     document_decision.failing_pages = failing_pages;
     document_decision
+}
+/// Union signal-flagged pages into a per-page OCR decision.
+///
+/// `NativeTextStats`' character-class checks cannot see either signal-agnostic failure mode
+/// this function is used for: a font whose `/Encoding` or `/ToUnicode` legitimately, from the
+/// §9.10.2 mapping cascade's perspective, resolves glyphs to the wrong-but-ordinary letters and
+/// punctuation produces text that is structurally indistinguishable from real prose — same
+/// alphanumeric ratio, same word-length distribution, same fragmentation, whether the wrong
+/// mapping came from a fallback echo (`MappingProvenance::Fallback`, issue #1667) or from a
+/// `/ToUnicode` CMap that resolves to the wrong-but-real letters (issue #1696's
+/// language/dictionary-plausibility signal). `flagged_pages` (1-indexed) is a fact from a
+/// signal orthogonal to text shape, not a guess about its shape, so it is unioned in
+/// regardless of what the structural heuristics concluded.
+///
+/// The tree already routed the provenance signal, just only under the opt-in
+/// `OcrStrategy::ScannedPages` (via `scanned_pages_to_ocr`, which already starts from
+/// `PdfMetadata.scanned_pages`); `OcrStrategy::Auto`, the default, never read it. This closes
+/// that gap for `Auto` without disturbing `ScannedPages`, whose own union already covers this
+/// list as a strict subset of the merged `scanned_pages` field.
+///
+/// A page index at or beyond `total_pages` is silently dropped rather than accepted into
+/// `failing_pages`: `total_pages` is the authoritative page count, so an out-of-range index is
+/// caller data corruption, not evidence of a real page needing OCR, and padding the failing-page
+/// set with it would let a caller's off-by-one inflate `whole_doc_failure`'s "every page failed"
+/// comparison against a page count the bad index was never part of. ~keep
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+pub(crate) fn apply_flagged_pages(
+    decision: &mut OcrFallbackDecision,
+    flagged_pages: &[u32],
+    has_boundaries: bool,
+    total_pages: Option<u32>,
+) {
+    if flagged_pages.is_empty() {
+        return;
+    }
+
+    if !has_boundaries {
+        // No boundaries to split mixed OCR by, so the whole document is the only
+        // unit the caller can act on -- matches the empty-native-text precedent above. ~keep
+        decision.fallback = true;
+        decision.whole_doc_failure = true;
+        return;
+    }
+
+    let in_range_pages: Vec<u32> = match total_pages {
+        Some(total) => flagged_pages.iter().copied().filter(|page| *page <= total).collect(),
+        None => flagged_pages.to_vec(),
+    };
+    if in_range_pages.is_empty() {
+        return;
+    }
+
+    decision.fallback = true;
+    decision.fabricated_provenance = true;
+
+    let mut pages = decision.failing_pages.clone();
+    pages.extend_from_slice(&in_range_pages);
+    pages.sort_unstable();
+    pages.dedup();
+
+    if let Some(total) = total_pages
+        && pages.len() as u32 >= total
+    {
+        decision.whole_doc_failure = true;
+    }
+
+    decision.failing_pages = pages;
 }

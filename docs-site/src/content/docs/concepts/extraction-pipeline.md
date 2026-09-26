@@ -85,8 +85,9 @@ extractor implementations, managed by the [plugin system](/concepts/plugin-syste
 
 If multiple extractors are registered for the same MIME type (for example, you registered a
 custom PDF extractor alongside the built-in one), the one with the higher `priority()` value
-is selected. All built-in extractors have a priority of 0, so any custom extractor with a
-priority above 0 takes precedence.
+is selected. Built-in extractors default to a priority of 50 (0-25 is reserved for
+fallback/low-quality extractors, 51-100 for premium or specialized ones), so a custom
+extractor needs a priority above 50 to take precedence over the built-in default.
 
 ```rust title="registry_lookup.rs"
 let registry = get_document_extractor_registry();
@@ -105,7 +106,7 @@ Each file format has a tailored extraction strategy:
 
 | Format                             | What happens                                                                                                                                                                                           |
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **PDF**                            | Text is extracted directly from the PDF text layer using xberg's native PDF engine (pure Rust). If the PDF contains embedded images (scanned pages, diagrams), those images are collected and passed to the OCR stage. |
+| **PDF**                            | Text is extracted directly from the PDF text layer using xberg's native PDF engine (pure Rust). If the PDF contains embedded images (scanned pages, diagrams), those images are collected and passed to the OCR stage. A page whose glyph mapping resolves to the wrong-but-real letters (so the text reads as no genuine language) is also routed to OCR automatically. |
 | **Excel / Spreadsheets**           | Each sheet is parsed individually using calamine. Cell values are assembled into structured Markdown tables, preserving column alignment.                                                              |
 | **Images** (JPEG, PNG, TIFF, etc.) | The image bytes are loaded into memory and forwarded directly to the OCR backend. There is no text layer to extract from an image.                                                                     |
 | **XML / Plain text**               | A streaming parser processes the file incrementally. This keeps memory usage constant even for multi-gigabyte files because the entire file is never loaded at once.                                   |
@@ -149,7 +150,7 @@ Xberg ships multiple OCR backends:
 
 | Backend       | Engine               | When to use it                                                                                                               |
 | ------------- | -------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| **Tesseract** | Native Rust bindings | Default. Fast, solid accuracy for Latin scripts. Good general-purpose choice.                                                |
+| **Tesseract** | Native Rust bindings | Fast, solid accuracy for Latin scripts. Good general-purpose choice.                                                |
 | **PaddleOCR** | ONNX Runtime         | Best accuracy for Chinese, Japanese, Korean (CJK) scripts. Runs natively without Python.                                     |
 | **Sceptre**   | ORT or tract         | EasyOCR Gen2 CRAFT and CRNN pipeline with structured line geometry and confidence.                                          |
 | **VLM OCR**   | liter-llm providers  | Best for handwriting, poor scans, and complex layouts. Requires a vision-capable model.                                      |
@@ -188,8 +189,10 @@ These two steps run after validation.
 cleanliness/readability score between 0.0 and 1.0. The score penalizes OCR artifacts, embedded script/style noise, and
 navigation chrome; it rewards sentence and paragraph structure, multiple paragraphs, and punctuation, with an
 optional metadata bonus. It is not a completeness or recall score: clean text can score highly even when other content
-was omitted. The result is stored in `result.quality_score`; inspect `result.processing_warnings` separately for known
-degraded or partial extraction.
+was omitted. When OCR ran and recognized at least 20 words, the score is additionally capped at the recognition
+confidence OCR itself reported for that text, so a page OCR had little confidence in cannot score as clean purely
+because the characters happened to be well formed. The result is stored in `result.quality_score`; inspect
+`result.processing_warnings` separately for known degraded or partial extraction.
 
 **Chunking** is also optional. When you provide a `ChunkingConfig`, the extracted text is split into overlapping fragments with configurable maximum size and overlap. Each chunk records its start and end offset relative to the original text.
 

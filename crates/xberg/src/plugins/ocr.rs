@@ -603,6 +603,148 @@ pub fn list_ocr_backends() -> crate::Result<Vec<String>> {
     Ok(registry.list())
 }
 
+/// A registered OCR backend's declared name and language capabilities.
+///
+/// Returned by [`list_ocr_backend_capabilities`]. See that function's documentation for the
+/// determinism guarantees and the important caveat about what an empty `supported_languages`
+/// means.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
+pub struct OcrBackendCapabilities {
+    /// The backend's registered name, as returned by [`list_ocr_backends`].
+    pub name: String,
+    /// The languages this backend declares support for, via
+    /// [`OcrBackend::supported_languages`].
+    ///
+    /// An empty list means the backend does not enumerate its languages — it is *not* a
+    /// statement that the backend supports no languages. [`OcrBackend::supported_languages`]
+    /// is a defaulted trait method that returns `vec![]`, and not every backend overrides it:
+    /// the VLM backend (`llm::vlm_ocr::VlmOcrBackend`) accepts every language via
+    /// `supports_language` while inheriting the empty default here. Use
+    /// [`ocr_backend_supports_language`] to decide whether one specific language is usable —
+    /// never infer "unsupported" from an empty list.
+    ///
+    /// The order of this list is preserved exactly as the backend reported it and is *not*
+    /// re-sorted. Tesseract's order comes from enumerating installed tessdata files; PaddleOCR's
+    /// comes from its own `SUPPORTED_LANGUAGES` constant. Re-sorting would disagree with the
+    /// precedence each backend's own `supports_language` implementation uses internally.
+    pub supported_languages: Vec<String>,
+}
+
+/// List every registered OCR backend's name alongside its declared supported languages.
+///
+/// This is the capability-enumeration counterpart to [`list_ocr_backends`]: where that function
+/// exposes only backend names, this exposes each backend's `supported_languages()` too, so a
+/// consumer (for example, a job-acceptance gate) does not need to hardcode a second list of
+/// backend languages.
+///
+/// # Determinism
+///
+/// The returned vector is sorted by `name`, regardless of registration order or the order
+/// reported by the underlying registry. `supported_languages` within each entry is **not**
+/// sorted — see [`OcrBackendCapabilities::supported_languages`] for why.
+///
+/// # Cost
+///
+/// Calling this is not free for every backend. In particular, `TesseractBackend`'s
+/// `supported_languages()` allocates a Tesseract API and initializes it against the same
+/// tessdata directory a real OCR job resolves (`resolve_tessdata_path`), the first time it
+/// is called, to enumerate installed tessdata languages; subsequent calls are served from a
+/// cache.
+///
+/// # Errors
+///
+/// Returns an error only if the registry lock cannot be acquired in the current environment.
+///
+/// # Example
+///
+/// ```rust
+/// use xberg::plugins::list_ocr_backend_capabilities;
+///
+/// # tokio_test::block_on(async {
+/// for capability in list_ocr_backend_capabilities()? {
+///     println!("{}: {:?}", capability.name, capability.supported_languages);
+/// }
+/// # Ok::<(), xberg::XbergError>(())
+/// # });
+/// ```
+pub fn list_ocr_backend_capabilities() -> crate::Result<Vec<OcrBackendCapabilities>> {
+    use crate::plugins::registry::get_ocr_backend_registry;
+
+    let registry = get_ocr_backend_registry();
+    let registry = registry.read();
+
+    Ok(capabilities_from_snapshot(registry.registered_snapshot()))
+}
+
+/// Pure mapping from a registry snapshot to sorted capability records.
+///
+/// Split out from [`list_ocr_backend_capabilities`] so tests can exercise the mapping and the
+/// sort-by-name contract with local mock backends, without mutating the process-global OCR
+/// registry (which other test modules also read and write concurrently).
+fn capabilities_from_snapshot(registered: Vec<(String, Arc<dyn OcrBackend>)>) -> Vec<OcrBackendCapabilities> {
+    let mut capabilities: Vec<OcrBackendCapabilities> = registered
+        .into_iter()
+        .map(|(name, backend)| OcrBackendCapabilities {
+            name,
+            supported_languages: backend.supported_languages(),
+        })
+        .collect();
+    capabilities.sort_unstable_by(|left, right| left.name.cmp(&right.name));
+    capabilities
+}
+
+/// Check whether a specific registered OCR backend supports a language.
+///
+/// Delegates to the named backend's own [`OcrBackend::supports_language`], which is the correct
+/// per-language decision — do not infer support (or its absence) from whether
+/// [`list_ocr_backend_capabilities`] reports an empty `supported_languages` list for that
+/// backend, since an empty list can mean "does not enumerate" rather than "supports nothing"
+/// (see [`OcrBackendCapabilities::supported_languages`]).
+///
+/// # Arguments
+///
+/// * `backend` - Name of a registered OCR backend, as returned by [`list_ocr_backends`]. Lookup
+///   is case-insensitive and resolves the same `paddleocr` alias as backend dispatch.
+/// * `language` - Language code to check (e.g. `"eng"`, `"deu"`).
+///
+/// # Errors
+///
+/// Returns an error if no backend with that name (or alias) is registered.
+///
+/// # Example
+///
+/// ```rust
+/// use xberg::plugins::ocr_backend_supports_language;
+///
+/// # tokio_test::block_on(async {
+/// let supported = ocr_backend_supports_language("tesseract", "eng")?;
+/// # Ok::<(), xberg::XbergError>(())
+/// # });
+/// ```
+pub fn ocr_backend_supports_language(backend: &str, language: &str) -> crate::Result<bool> {
+    use crate::plugins::registry::get_ocr_backend_registry;
+
+    let registry = get_ocr_backend_registry();
+    let registry = registry.read();
+    let registered = registry.registered_snapshot();
+
+    let canonical = crate::plugins::registry::canonical_ocr_backend_name(backend);
+
+    registered
+        .iter()
+        .find(|(name, _)| name.as_str() == backend)
+        .or_else(|| registered.iter().find(|(name, _)| name.as_str() == canonical.as_str()))
+        .map(|(_, instance)| instance.supports_language(language))
+        .ok_or_else(|| crate::XbergError::Plugin {
+            message: format!(
+                "OCR backend '{backend}' not registered. Available backends: {:?}",
+                registered.iter().map(|(name, _)| name.as_str()).collect::<Vec<_>>()
+            ),
+            plugin_name: backend.to_string(),
+        })
+}
+
 /// Clear all OCR backends from the global registry.
 ///
 /// Removes all OCR backends and calls their `shutdown()` methods.
@@ -664,375 +806,4 @@ pub(crate) fn ensure_ocr_backends_initialized() {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::borrow::Cow;
-
-    struct MockOcrBackend {
-        languages: Vec<String>,
-    }
-
-    impl Plugin for MockOcrBackend {
-        fn name(&self) -> &str {
-            "mock-ocr"
-        }
-
-        fn version(&self) -> String {
-            "1.0.0".to_string()
-        }
-
-        fn initialize(&self) -> Result<()> {
-            Ok(())
-        }
-
-        fn shutdown(&self) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl OcrBackend for MockOcrBackend {
-        async fn process_image(&self, _image_bytes: &[u8], _config: &OcrConfig) -> Result<ExtractedDocument> {
-            Ok(ExtractedDocument {
-                content: "Mocked OCR text".to_string(),
-                mime_type: Cow::Borrowed("text/plain"),
-                ..Default::default()
-            })
-        }
-
-        fn supports_language(&self, lang: &str) -> bool {
-            self.languages.iter().any(|l| l == lang)
-        }
-
-        fn backend_type(&self) -> OcrBackendType {
-            OcrBackendType::Custom
-        }
-
-        fn supported_languages(&self) -> Vec<String> {
-            self.languages.clone()
-        }
-    }
-
-    #[tokio::test]
-    async fn test_ocr_backend_process_image() {
-        let backend = MockOcrBackend {
-            languages: vec!["eng".to_string(), "deu".to_string()],
-        };
-
-        let config = OcrConfig {
-            backend: "mock".to_string(),
-            language: vec!["eng".to_string()],
-            ..Default::default()
-        };
-
-        let result = backend.process_image(b"fake image data", &config).await.unwrap();
-        assert_eq!(result.content, "Mocked OCR text");
-        assert_eq!(result.mime_type, "text/plain");
-    }
-
-    #[tokio::test]
-    async fn test_ocr_backend_process_image_owned_default_impl_is_object_safe() {
-        let backend: Arc<dyn OcrBackend> = Arc::new(MockOcrBackend {
-            languages: vec!["eng".to_string()],
-        });
-
-        let result = backend
-            .process_image_owned(Arc::new(b"fake image data".to_vec()), &OcrConfig::default())
-            .await
-            .unwrap();
-
-        assert_eq!(result.content, "Mocked OCR text");
-        assert_eq!(result.mime_type, "text/plain");
-    }
-
-    #[test]
-    fn test_ocr_backend_supports_language() {
-        let backend = MockOcrBackend {
-            languages: vec!["eng".to_string(), "deu".to_string()],
-        };
-
-        assert!(backend.supports_language("eng"));
-        assert!(backend.supports_language("deu"));
-        assert!(!backend.supports_language("fra"));
-    }
-
-    #[test]
-    fn test_ocr_backend_type() {
-        let backend = MockOcrBackend {
-            languages: vec!["eng".to_string()],
-        };
-
-        assert_eq!(backend.backend_type(), OcrBackendType::Custom);
-    }
-
-    #[test]
-    fn test_ocr_backend_supported_languages() {
-        let backend = MockOcrBackend {
-            languages: vec!["eng".to_string(), "deu".to_string(), "fra".to_string()],
-        };
-
-        let supported = backend.supported_languages();
-        assert_eq!(supported.len(), 3);
-        assert!(supported.contains(&"eng".to_string()));
-        assert!(supported.contains(&"deu".to_string()));
-        assert!(supported.contains(&"fra".to_string()));
-    }
-
-    #[test]
-    fn test_ocr_backend_type_variants() {
-        assert_eq!(OcrBackendType::Tesseract, OcrBackendType::Tesseract);
-        assert_ne!(OcrBackendType::Tesseract, OcrBackendType::PaddleOCR);
-        assert_ne!(OcrBackendType::PaddleOCR, OcrBackendType::Custom);
-    }
-
-    #[test]
-    fn test_ocr_backend_type_debug() {
-        let backend_type = OcrBackendType::Tesseract;
-        let debug_str = format!("{:?}", backend_type);
-        assert!(debug_str.contains("Tesseract"));
-    }
-
-    #[test]
-    fn test_ocr_backend_type_clone() {
-        let backend_type = OcrBackendType::PaddleOCR;
-        let cloned = backend_type;
-        assert_eq!(backend_type, cloned);
-    }
-
-    #[test]
-    fn test_ocr_backend_default_table_detection() {
-        let backend = MockOcrBackend {
-            languages: vec!["eng".to_string()],
-        };
-        assert!(!backend.supports_table_detection());
-    }
-
-    /// Regression test for the sceptre confidence-gating failure: a backend that reports a
-    /// page-level confidence number without declaring `confidence_semantics` must default to
-    /// `Uncalibrated`, never to `Legibility`. Defaulting to `Legibility` would let the next
-    /// backend added to this codebase silently inherit Tesseract's gate threshold and repeat
-    /// the sceptre failure, which rejected all 16 pages of a document and emptied it.
-    #[test]
-    fn should_default_to_uncalibrated_for_a_backend_that_does_not_declare_semantics() {
-        let backend = MockOcrBackend {
-            languages: vec!["eng".to_string()],
-        };
-
-        assert_eq!(backend.confidence_semantics(), ConfidenceSemantics::Uncalibrated);
-    }
-
-    /// Gating code reaches a backend as `&dyn OcrBackend` out of the registry, never as a
-    /// concrete type, so the declared semantics must survive dynamic dispatch — including the
-    /// `scale_max` payload, which is what a caller divides by instead of a hardcoded 100.
-    #[test]
-    fn should_report_declared_semantics_through_a_trait_object() {
-        struct CalibratedBackend;
-
-        impl Plugin for CalibratedBackend {
-            fn name(&self) -> &str {
-                "calibrated"
-            }
-
-            fn version(&self) -> String {
-                "1.0.0".to_string()
-            }
-
-            fn initialize(&self) -> Result<()> {
-                Ok(())
-            }
-
-            fn shutdown(&self) -> Result<()> {
-                Ok(())
-            }
-        }
-
-        #[async_trait]
-        impl OcrBackend for CalibratedBackend {
-            async fn process_image(&self, _image_bytes: &[u8], _config: &OcrConfig) -> Result<ExtractedDocument> {
-                unreachable!("this backend exists only to declare confidence semantics")
-            }
-
-            fn backend_type(&self) -> OcrBackendType {
-                OcrBackendType::Custom
-            }
-
-            fn supports_language(&self, lang: &str) -> bool {
-                lang == "eng"
-            }
-
-            fn supported_languages(&self) -> Vec<String> {
-                vec!["eng".to_string()]
-            }
-
-            fn confidence_semantics(&self) -> ConfidenceSemantics {
-                ConfidenceSemantics::Legibility { scale_max: 255.0 }
-            }
-        }
-
-        let backend: &dyn OcrBackend = &CalibratedBackend;
-
-        match backend.confidence_semantics() {
-            ConfidenceSemantics::Legibility { scale_max } => assert_eq!(scale_max, 255.0),
-            other => panic!("expected the declared Legibility semantics, got {other:?}"),
-        }
-    }
-
-    /// Regression guard for the rotation-handling capability: a backend that does not declare
-    /// `page_orientation_handling` must default to `RequiresUpright`, never to `SelfCorrecting`.
-    /// Defaulting to `SelfCorrecting` would let a new backend that cannot self-correct silently
-    /// inherit Tesseract's guarantee and emit garbage the first time it is handed a rotated
-    /// raster, mirroring the sceptre confidence-gating failure above.
-    #[test]
-    fn should_default_to_requires_upright_for_a_backend_that_does_not_declare_orientation_handling() {
-        let backend = MockOcrBackend {
-            languages: vec!["eng".to_string()],
-        };
-
-        let dynamic: &dyn OcrBackend = &backend;
-        assert_eq!(
-            dynamic.page_orientation_handling(),
-            PageOrientationHandling::RequiresUpright
-        );
-    }
-
-    /// `process_image_file`'s default impl returns `Other("File-based OCR processing
-    /// requires the tokio-runtime feature")` without that feature, so this test can only
-    /// assert the real behaviour in a build that has it.
-    #[cfg(feature = "tokio-runtime")]
-    #[tokio::test]
-    async fn test_ocr_backend_process_image_file_default_impl() {
-        use std::io::Write;
-        use tempfile::NamedTempFile;
-
-        let backend = MockOcrBackend {
-            languages: vec!["eng".to_string()],
-        };
-
-        let mut temp_file = NamedTempFile::new().unwrap();
-        temp_file.write_all(b"fake image data").unwrap();
-        let path = temp_file.path();
-
-        let config = OcrConfig {
-            backend: "mock".to_string(),
-            language: vec!["eng".to_string()],
-            ..Default::default()
-        };
-
-        let result = backend.process_image_file(path, &config).await.unwrap();
-        assert_eq!(result.content, "Mocked OCR text");
-    }
-
-    #[test]
-    fn test_ocr_backend_plugin_interface() {
-        let backend = MockOcrBackend {
-            languages: vec!["eng".to_string()],
-        };
-
-        assert_eq!(backend.name(), "mock-ocr");
-        assert_eq!(backend.version(), "1.0.0");
-        assert!(backend.initialize().is_ok());
-        assert!(backend.shutdown().is_ok());
-    }
-
-    #[test]
-    fn test_ocr_backend_empty_languages() {
-        let backend = MockOcrBackend { languages: vec![] };
-
-        let supported = backend.supported_languages();
-        assert_eq!(supported.len(), 0);
-        assert!(!backend.supports_language("eng"));
-    }
-
-    #[tokio::test]
-    async fn test_ocr_backend_with_empty_image() {
-        let backend = MockOcrBackend {
-            languages: vec!["eng".to_string()],
-        };
-
-        let config = OcrConfig {
-            backend: "mock".to_string(),
-            language: vec!["eng".to_string()],
-            ..Default::default()
-        };
-
-        let result = backend.process_image(b"", &config).await;
-        assert!(result.is_ok());
-    }
-
-    struct OptionAwareBackend;
-
-    impl Plugin for OptionAwareBackend {
-        fn name(&self) -> &str {
-            "option-aware"
-        }
-
-        fn version(&self) -> String {
-            "1.0.0".to_string()
-        }
-
-        fn initialize(&self) -> Result<()> {
-            Ok(())
-        }
-
-        fn shutdown(&self) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    #[async_trait]
-    impl OcrBackend for OptionAwareBackend {
-        async fn process_image(&self, _image_bytes: &[u8], config: &OcrConfig) -> Result<ExtractedDocument> {
-            let mode = config
-                .backend_options
-                .as_ref()
-                .and_then(|v| v.get("mode"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("standard");
-
-            Ok(ExtractedDocument {
-                content: format!("mode={mode}"),
-                mime_type: Cow::Borrowed("text/plain"),
-                ..Default::default()
-            })
-        }
-
-        fn supports_language(&self, _: &str) -> bool {
-            true
-        }
-
-        fn backend_type(&self) -> OcrBackendType {
-            OcrBackendType::Custom
-        }
-    }
-
-    #[tokio::test]
-    async fn test_backend_reads_backend_options() {
-        let backend = OptionAwareBackend;
-
-        let config_with_options = OcrConfig {
-            backend_options: Some(serde_json::json!({"mode": "fast", "threshold": 0.8})),
-            ..Default::default()
-        };
-        let result = backend.process_image(b"img", &config_with_options).await.unwrap();
-        assert_eq!(result.content, "mode=fast");
-
-        let config_without_options = OcrConfig::default();
-        let result = backend.process_image(b"img", &config_without_options).await.unwrap();
-        assert_eq!(result.content, "mode=standard");
-    }
-
-    #[tokio::test]
-    async fn test_backend_options_unknown_keys_silently_ignored() {
-        let backend = OptionAwareBackend;
-
-        let config = OcrConfig {
-            backend_options: Some(serde_json::json!({
-                "unknown_key": "value",
-                "another_unknown": 42
-            })),
-            ..Default::default()
-        };
-        let result = backend.process_image(b"img", &config).await;
-        assert!(result.is_ok(), "unknown backend_options keys must not cause errors");
-    }
-}
+mod tests;

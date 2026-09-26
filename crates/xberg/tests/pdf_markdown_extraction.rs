@@ -80,7 +80,11 @@ fn test_pdf_markdown_vs_plain_has_more_structure() {
 
     let path = get_test_file_path("pdf/google_doc_document.pdf");
 
-    let plain_config = ExtractionConfig::default();
+    // fork 默认 Markdown 渲染（fork.md）：显式指定 Plain，保证本测试仍对比两种输出
+    let plain_config = ExtractionConfig {
+        output_format: OutputFormat::Plain,
+        ..Default::default()
+    };
     let plain_result = extract_uri_document_blocking(&path, None, &plain_config).expect("Plain extraction failed");
 
     let md_config = ExtractionConfig {

@@ -1,4 +1,5 @@
 use crate::ocr::error::OcrError;
+use crate::ocr::shaded_rows::normalize_shaded_rows;
 use crate::types::ImagePreprocessingConfig;
 use xberg_tesseract::Pix;
 
@@ -22,6 +23,15 @@ pub(crate) fn should_invert_for_polarity(mean_gray: f64, light_fraction: f64, fo
         || (mean_gray < DARK_BACKGROUND_MEAN_THRESHOLD && light_fraction >= MIN_LIGHT_PIXEL_FRACTION_FOR_INVERT)
 }
 
+/// Whether `normalize_shaded_rows` was asked for but cannot act.
+///
+/// ~keep A named predicate rather than an inline condition so the reporting path can be asserted
+/// without a real raster, and so the two facts it depends on -- the config combination and the
+/// `drop(gray)` in [`preprocess_pix`]'s non-binarized contrast arm -- stay visibly coupled.
+pub(crate) fn shaded_row_normalization_is_inert(config: &ImagePreprocessingConfig, binarization_enabled: bool) -> bool {
+    config.normalize_shaded_rows && !binarization_enabled && config.contrast_enhance
+}
+
 pub(crate) fn preprocess_pix(pix: Pix, config: &ImagePreprocessingConfig) -> Result<Pix, OcrError> {
     crate::core::config_validation::validate_image_preprocessing_config(config).map_err(|error| {
         if let crate::XbergError::Validation { message, .. } = error {
@@ -31,10 +41,30 @@ pub(crate) fn preprocess_pix(pix: Pix, config: &ImagePreprocessingConfig) -> Res
         }
     })?;
     let binarization_method = config.binarization_method.to_ascii_lowercase();
+    let binarization_enabled = !matches!(binarization_method.as_str(), "none" | "off");
 
     let gray = pix
         .to_grayscale()
         .map_err(preprocessing_error("convert to grayscale"))?;
+    // ~keep normalize_shaded_rows only touches `gray`; the `contrast_enhance` path with
+    // binarization disabled below reconverts from the original `pix` and does not see it
+    // (GH#1785 scope: the fix targets the binarized path, which is the config default).
+    // GH#1837: that combination made the option silently inert, so say so rather than letting a
+    // caller believe their request took effect. The work stays skipped -- running it would change
+    // the output of a config combination nothing has measured.
+    if shaded_row_normalization_is_inert(config, binarization_enabled) {
+        tracing::warn!(
+            binarization_method = %config.binarization_method,
+            "normalize_shaded_rows was requested but has no effect: with binarization disabled and \
+             contrast_enhance on, the non-binarized contrast path re-reads the original image and \
+             discards the per-band normalization"
+        );
+    }
+    let gray = if config.normalize_shaded_rows {
+        apply_optional(gray, "normalize shaded rows", normalize_shaded_rows)
+    } else {
+        gray
+    };
     let polarity_stats = gray
         .grayscale_stats(LIGHT_PIXEL_VALUE_THRESHOLD, POLARITY_SAMPLE_STRIDE)
         .ok();
@@ -43,7 +73,6 @@ pub(crate) fn preprocess_pix(pix: Pix, config: &ImagePreprocessingConfig) -> Res
         None => config.invert_colors,
     };
 
-    let binarization_enabled = !matches!(binarization_method.as_str(), "none" | "off");
     let mut processed = if binarization_enabled && should_invert {
         gray.invert().map_err(preprocessing_error("invert colors"))?
     } else if binarization_enabled {
@@ -107,13 +136,33 @@ fn binarize(pix: &Pix, method: &str) -> xberg_tesseract::Result<Pix> {
         "adaptive" if pix.width().min(pix.height()) >= ADAPTIVE_TILE_SIZE => {
             pix.adaptive_threshold(ADAPTIVE_TILE_SIZE, ADAPTIVE_TILE_SIZE)
         }
-        "adaptive" => pix.otsu_threshold(),
+        "adaptive" => {
+            tracing::warn!(
+                requested_binarization_method = "adaptive",
+                width = pix.width(),
+                height = pix.height(),
+                minimum_dimension = ADAPTIVE_TILE_SIZE,
+                fallback_binarization_method = "otsu",
+                "image too small for adaptive binarization; falling back to Otsu threshold"
+            );
+            pix.otsu_threshold()
+        }
         "sauvola" if pix.width().min(pix.height()) > SAUVOLA_WINDOW_HALF_SIZE * 2 + 2 => {
             let tile_columns = tile_count(pix.width());
             let tile_rows = tile_count(pix.height());
             pix.sauvola_threshold(SAUVOLA_WINDOW_HALF_SIZE, SAUVOLA_FACTOR, tile_columns, tile_rows)
         }
-        "sauvola" => pix.otsu_threshold(),
+        "sauvola" => {
+            tracing::warn!(
+                requested_binarization_method = "sauvola",
+                width = pix.width(),
+                height = pix.height(),
+                minimum_dimension = SAUVOLA_WINDOW_HALF_SIZE * 2 + 2,
+                fallback_binarization_method = "otsu",
+                "image too small for Sauvola binarization; falling back to Otsu threshold"
+            );
+            pix.otsu_threshold()
+        }
         _ => Err(xberg_tesseract::TesseractError::InvalidParameterError),
     }
 }
@@ -245,5 +294,237 @@ mod tests {
         let result = preprocess_pix(pix, &config);
 
         assert!(matches!(result, Err(OcrError::InvalidConfiguration(_))));
+    }
+
+    /// A `tracing` `Layer` that records every emitted event's level and formatted
+    /// `message` field, for GH#1785's silent-adaptive/Sauvola-fallback regression tests.
+    #[derive(Clone, Default)]
+    struct EventCapture {
+        events: std::sync::Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>,
+    }
+
+    impl<S> tracing_subscriber::Layer<S> for EventCapture
+    where
+        S: tracing::Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+            struct MessageVisitor(String);
+            impl tracing::field::Visit for MessageVisitor {
+                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                    if field.name() == "message" {
+                        self.0 = format!("{value:?}");
+                    }
+                }
+            }
+            let mut visitor = MessageVisitor(String::new());
+            event.record(&mut visitor);
+            self.events.lock().unwrap().push((*event.metadata().level(), visitor.0));
+        }
+    }
+
+    fn warn_messages(capture: &EventCapture) -> Vec<String> {
+        capture
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(level, _)| *level == tracing::Level::WARN)
+            .map(|(_, message)| message.clone())
+            .collect()
+    }
+
+    /// GH#1785: an image too small for `adaptive` binarization silently fell back to
+    /// Otsu with no observable signal, so a caller who asked for `adaptive` had no way
+    /// to tell their request was downgraded. `preprocessing.rs:107-121`'s fallback arm
+    /// must now emit a WARN naming both the requested and the fallback method.
+    #[test]
+    fn should_warn_when_adaptive_binarization_falls_back_to_otsu_for_a_small_image() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        let small_dimension = ADAPTIVE_TILE_SIZE - 1;
+        let config = ImagePreprocessingConfig {
+            deskew: false,
+            binarization_method: "adaptive".to_string(),
+            ..Default::default()
+        };
+        let pix = Pix::from_raw_rgb(
+            &vec![200u8; (small_dimension * small_dimension * 3) as usize],
+            small_dimension as u32,
+            small_dimension as u32,
+        )
+        .unwrap();
+
+        let result = tracing::subscriber::with_default(subscriber, || preprocess_pix(pix, &config));
+
+        assert!(result.is_ok(), "the fallback must still produce a usable image");
+        let messages = warn_messages(&capture);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("adaptive binarization") && message.contains("Otsu")),
+            "expected a WARN naming the adaptive-to-Otsu fallback, got: {messages:?}"
+        );
+    }
+
+    /// GH#1785: the same silent downgrade for `sauvola` on a small image.
+    #[test]
+    fn should_warn_when_sauvola_binarization_falls_back_to_otsu_for_a_small_image() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        let small_dimension = SAUVOLA_WINDOW_HALF_SIZE * 2 + 2;
+        let config = ImagePreprocessingConfig {
+            deskew: false,
+            binarization_method: "sauvola".to_string(),
+            ..Default::default()
+        };
+        let pix = Pix::from_raw_rgb(
+            &vec![200u8; (small_dimension * small_dimension * 3) as usize],
+            small_dimension as u32,
+            small_dimension as u32,
+        )
+        .unwrap();
+
+        let result = tracing::subscriber::with_default(subscriber, || preprocess_pix(pix, &config));
+
+        assert!(result.is_ok(), "the fallback must still produce a usable image");
+        let messages = warn_messages(&capture);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("Sauvola binarization") && message.contains("Otsu")),
+            "expected a WARN naming the Sauvola-to-Otsu fallback, got: {messages:?}"
+        );
+    }
+
+    /// Negative control for the two tests above: an image large enough for adaptive
+    /// binarization must NOT emit the fallback warning, proving the assertion is
+    /// actually sensitive to image size rather than passing unconditionally.
+    #[test]
+    fn should_not_warn_when_adaptive_binarization_succeeds_for_a_large_enough_image() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        let large_dimension = ADAPTIVE_TILE_SIZE * 4;
+        let config = ImagePreprocessingConfig {
+            deskew: false,
+            binarization_method: "adaptive".to_string(),
+            ..Default::default()
+        };
+        let pix = Pix::from_raw_rgb(
+            &vec![200u8; (large_dimension * large_dimension * 3) as usize],
+            large_dimension as u32,
+            large_dimension as u32,
+        )
+        .unwrap();
+
+        let result = tracing::subscriber::with_default(subscriber, || preprocess_pix(pix, &config));
+
+        assert!(result.is_ok());
+        let messages = warn_messages(&capture);
+        assert!(
+            !messages.iter().any(|message| message.contains("falling back to Otsu")),
+            "a large-enough image must not trigger the small-image fallback warning: {messages:?}"
+        );
+    }
+
+    /// GH#1837: `normalize_shaded_rows` is silently inert when binarization is off and
+    /// `contrast_enhance` is on -- `preprocess_pix`'s non-binarized contrast arm drops the
+    /// normalized grayscale and reconverts from the original `pix`. The option must say so rather
+    /// than letting a caller believe it took effect.
+    #[test]
+    fn should_warn_when_normalize_shaded_rows_cannot_act_on_the_non_binarized_contrast_path() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        let config = ImagePreprocessingConfig {
+            deskew: false,
+            binarization_method: "none".to_string(),
+            contrast_enhance: true,
+            normalize_shaded_rows: true,
+            ..Default::default()
+        };
+        let pix = Pix::from_raw_rgb(&vec![200u8; 64 * 64 * 3], 64, 64).unwrap();
+
+        let result = tracing::subscriber::with_default(subscriber, || preprocess_pix(pix, &config));
+
+        assert!(
+            result.is_ok(),
+            "the inert combination must still produce a usable image"
+        );
+        let messages = warn_messages(&capture);
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("normalize_shaded_rows") && message.contains("no effect")),
+            "expected a WARN naming the inert normalize_shaded_rows request, got: {messages:?}"
+        );
+    }
+
+    /// Negative control for the test above, so a WARN emitted unconditionally would be caught: the
+    /// same option on the default (Otsu) path does act, and must stay quiet.
+    #[test]
+    fn should_not_warn_when_normalize_shaded_rows_runs_on_the_binarized_path() {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let capture = EventCapture::default();
+        let subscriber = tracing_subscriber::registry().with(capture.clone());
+
+        let config = ImagePreprocessingConfig {
+            deskew: false,
+            normalize_shaded_rows: true,
+            ..Default::default()
+        };
+        let pix = Pix::from_raw_rgb(&vec![200u8; 64 * 64 * 3], 64, 64).unwrap();
+
+        let result = tracing::subscriber::with_default(subscriber, || preprocess_pix(pix, &config));
+
+        assert!(result.is_ok());
+        let messages = warn_messages(&capture);
+        assert!(
+            !messages.iter().any(|message| message.contains("normalize_shaded_rows")),
+            "the binarized path does apply the option and must not report it as inert: {messages:?}"
+        );
+    }
+
+    /// The predicate the WARN is driven by, across the four combinations that matter. Asserted
+    /// directly so the reporting condition is pinned independently of whether a given raster
+    /// happens to route through the arm in question.
+    #[test]
+    fn shaded_row_normalization_is_inert_only_without_binarization_and_with_contrast_enhance() {
+        let inert = ImagePreprocessingConfig {
+            binarization_method: "none".to_string(),
+            contrast_enhance: true,
+            normalize_shaded_rows: true,
+            ..Default::default()
+        };
+        assert!(shaded_row_normalization_is_inert(&inert, false));
+        // Binarized: the normalized grayscale survives into `processed`.
+        assert!(!shaded_row_normalization_is_inert(&inert, true));
+        // No contrast enhancement: the `should_invert`/passthrough arms keep `gray`.
+        assert!(!shaded_row_normalization_is_inert(
+            &ImagePreprocessingConfig {
+                contrast_enhance: false,
+                ..inert.clone()
+            },
+            false
+        ));
+        // Never requested at all: nothing to report.
+        assert!(!shaded_row_normalization_is_inert(
+            &ImagePreprocessingConfig {
+                normalize_shaded_rows: false,
+                ..inert
+            },
+            false
+        ));
     }
 }

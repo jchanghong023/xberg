@@ -61,10 +61,17 @@ fn should_return_pre_rendered_html_and_json_verbatim_instead_of_rendering_an_emp
 }
 
 /// The verbatim path is keyed on the format the plugin actually produced: pre-rendered
-/// plain text must not be passed off as HTML.
+/// plain text must not be passed off as HTML. The empty-rendering fallback (`~keep` in
+/// `derive.rs`) deliberately substitutes `pre_rendered_content` when the requested format
+/// renders to nothing, so the keying is pinned here with a real element tree — with
+/// elements present the HTML render is non-empty and a markdown pre-render must not
+/// replace it verbatim.
 #[test]
 fn should_still_render_html_when_pre_rendered_content_is_a_different_format() {
+    use xberg::types::internal::{ElementKind, InternalElement};
+
     let mut doc = InternalDocument::new("text/plain");
+    doc.push_element(InternalElement::text(ElementKind::Paragraph, PLUGIN_TEXT, 0));
     doc.pre_rendered_content = Some(PLUGIN_TEXT.to_string());
     doc.metadata.output_format = Some("markdown".to_string());
 

@@ -35,7 +35,10 @@ mod tests {
         let mut file = File::create(&file_path).unwrap();
         file.write_all(b"Hello, world!").unwrap();
 
-        let config = ExtractionConfig::default();
+        let config = ExtractionConfig {
+            output_format: crate::core::config::OutputFormat::Plain,
+            ..ExtractionConfig::default()
+        };
         let result = extract_file(&file_path, None, &config).await;
 
         assert!(result.is_ok());

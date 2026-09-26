@@ -20,6 +20,8 @@
 #![cfg(feature = "office")]
 
 use std::io::{Cursor, Write};
+// Used only by the `tokio-runtime`-gated test below. ~keep
+#[cfg(feature = "tokio-runtime")]
 use std::panic::{self, AssertUnwindSafe};
 use xberg::core::config::ExtractionConfig;
 use xberg::extractors::EpubExtractor;
@@ -166,6 +168,10 @@ fn patch_central_directory_uncompressed_size(buffer: &mut [u8], filename: &str, 
 /// `&text[4..5]` panics with:
 ///
 ///   byte index 5 is not a char boundary; it is inside 'é' (bytes 4..6) of `a xyééé`
+// `tokio::runtime::Runtime::new` needs tokio's `rt-multi-thread`, which the `office`
+// feature alone does not pull in, so an `office`-only build failed to compile this test
+// crate. The file's other tests are runtime-free; only this one needs the gate. ~keep
+#[cfg(feature = "tokio-runtime")]
 #[test]
 fn test_link_annotation_landing_mid_codepoint_does_not_panic() {
     let bytes = build_epub_with_chapter_body(r#"<p>a  x<a href="http://example.com/e">y</a>ééé</p>"#);
@@ -209,9 +215,10 @@ async fn test_ordinary_epub_extracts_exact_content() {
         .await
         .expect("a well-formed EPUB must still extract successfully");
 
+    // fork 默认 Markdown 渲染（fork.md）：段落渲染带尾换行；上游断言按 Plain 写
     assert_eq!(
         content(&document),
-        "Hello world.",
+        "Hello world.\n",
         "an ordinary chapter's extracted text must match exactly, not merely be non-empty"
     );
 }

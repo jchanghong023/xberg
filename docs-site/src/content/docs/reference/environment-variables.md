@@ -8,7 +8,7 @@ Configuration precedence in Xberg follows this order (highest to lowest):
 2. **Configuration Files** - TOML, YAML, or JSON config files
 3. **Defaults** - Built-in sensible defaults
 
-This document covers all XBERG\_\* environment variables for version 4.3.8.
+This document covers all XBERG\_\* environment variables.
 
 ## When to Use Environment Variables
 
@@ -197,7 +197,7 @@ supported.
 ### XBERG_OCR_BACKEND
 
 **Type**: `String`
-**Default**: `tesseract`
+**Default**: `paddle-ocr` when the `paddle-ocr` feature is compiled in, otherwise `tesseract`
 **Valid Values**: `tesseract`, `paddleocr`, `paddle-ocr`, `sceptre`, `vlm`
 
 OCR engine to use for text extraction from images and scanned documents.
@@ -336,16 +336,16 @@ export XBERG_CACHE_ENABLED=False
 ### XBERG_OUTPUT_FORMAT
 
 **Type**: `String`
-**Default**: `plain`
+**Default**: `markdown`
 **Valid Values**: `plain`, `markdown`, `djot`, `html`
 
 Controls the text content format of extraction results. Determines how extracted text is formatted in the result output.
 
 ```bash title="Output Format Options"
-# Plain text content only (default)
+# Plain text content only
 export XBERG_OUTPUT_FORMAT=plain
 
-# Markdown formatted output
+# Markdown formatted output (default)
 export XBERG_OUTPUT_FORMAT=markdown
 
 # Djot markup format

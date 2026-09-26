@@ -10,6 +10,11 @@
 //! - Uses system fonts as fallback when embedded fonts aren't available
 //! - Renders text using harfrust for shaping and tiny-skia for drawing glyph paths
 
+// TODO(xberg-io/xberg#1567): 4 cyclomatic-complexity and 28 size/complexity findings
+// in this file, currently excluded via the quality-debt baseline in alef.toml. Splitting
+// these needs compiler-in-the-loop verification, not a mechanical pass. Delete this
+// note and the file's baseline entry together once it goes green. Help wanted.
+
 use super::{create_fill_paint, guarded_fill_path};
 use crate::content::GraphicsState;
 use crate::content::operators::TextElement;
@@ -1200,14 +1205,20 @@ impl TextRasterizer {
         // Pre-resolve CIDs for Type0 fonts. Must use the decode's own
         // segmentation (`char_codes`, variable-width for UTF-8 CMaps) —
         // `TextCharIter` would segment UTF-8 codes differently and every
-        // `char_idx` lookup below would read the wrong CID/width. ~keep
+        // `char_idx` lookup below would read the wrong CID/width.
+        //
+        // GH #1631: a Type0 font maps character codes to CIDs through a
+        // CMap, and CIDs to width/glyph metrics through /W + /DW — two
+        // distinct steps. `char_codes` yields raw character codes; each one
+        // must go through `code_to_cid` before it is a CID. Skipping that
+        // step (using the raw code directly) is exactly the defect this
+        // fixes: it is only coincidentally correct for Identity-H/V, where
+        // CID == code by definition. ~keep
         let cids: Vec<u16> = if let Some(info) = font_info {
             if info.subtype == "Type0" {
                 char_codes(bytes, info)
                     .into_iter()
-                    // Codes past u16 (4-byte UTF-8 CMap codes) can't key the
-                    // u16 width cache; 0 falls back to /DW. ~keep
-                    .map(|code| u16::try_from(code).unwrap_or(0))
+                    .map(|code| info.code_to_cid(code))
                     .collect()
             } else {
                 Vec::new()
@@ -1581,35 +1592,44 @@ impl TextRasterizer {
             if gid == 0 && !char_at_pos.is_whitespace() {
                 dropped.record("no glyph id", u32::from(char_code), gid);
             }
-            if gid != 0 || char_at_pos.is_whitespace() {
-                if !char_at_pos.is_whitespace() {
-                    let mut pb = PathBuilder::new();
-                    let mut builder = SkiaOutlineBuilder(&mut pb);
-                    // Outlined once: `outline_glyph` appends to the builder,
-                    // so calling it twice would draw the glyph twice. ~keep
-                    let outlined = ttf_face.outline_glyph(GlyphId::from(gid), &mut builder).is_some();
-                    if !outlined {
-                        dropped.record("no outline", u32::from(char_code), gid);
-                    }
-                    if outlined {
-                        if let Some(path) = pb.finish() {
-                            let (rise_x, rise_y) = if wmode == 0 {
-                                (0.0, gs.text_rise)
-                            } else {
-                                (gs.text_rise, 0.0)
-                            };
-                            let px = (x_cursor + paint_origin_dx) * h_scale + rise_x;
-                            let py = y_cursor + paint_origin_dy + rise_y;
-                            let glyph_transform = combined_base.pre_translate(px, py).pre_scale(scale, scale);
-                            guarded_fill_path(
-                                pixmap,
-                                &path,
-                                paint,
-                                tiny_skia::FillRule::Winding,
-                                glyph_transform,
-                                clip_mask,
-                            );
-                        }
+            // GH#1632: paint decided by whether there is an outline to draw,
+            // NOT by what character the code is inferred to represent. For a
+            // byte-indexed font with no /Encoding that inference is the GID
+            // reverse-mapped through the font's own (1, 0) subtable and read as
+            // ASCII/Mac Roman -- private glyph ordering read as an encoding it
+            // never expressed. When it landed on whitespace (0x09-0x0D, 0x20,
+            // or 0xCA -> U+00A0) a perfectly good outline was discarded while
+            // the advance still ran. A genuine space needs no special case: its
+            // glyph has no outline, so `outline_glyph` returns None below. ~keep
+            if gid != 0 {
+                let mut pb = PathBuilder::new();
+                let mut builder = SkiaOutlineBuilder(&mut pb);
+                // Outlined once: `outline_glyph` appends to the builder,
+                // so calling it twice would draw the glyph twice. ~keep
+                let outlined = ttf_face.outline_glyph(GlyphId::from(gid), &mut builder).is_some();
+                // A genuine space legitimately has no outline; reporting it as
+                // dropped would bury the real misses in false positives. ~keep
+                if !outlined && !char_at_pos.is_whitespace() {
+                    dropped.record("no outline", u32::from(char_code), gid);
+                }
+                if outlined {
+                    if let Some(path) = pb.finish() {
+                        let (rise_x, rise_y) = if wmode == 0 {
+                            (0.0, gs.text_rise)
+                        } else {
+                            (gs.text_rise, 0.0)
+                        };
+                        let px = (x_cursor + paint_origin_dx) * h_scale + rise_x;
+                        let py = y_cursor + paint_origin_dy + rise_y;
+                        let glyph_transform = combined_base.pre_translate(px, py).pre_scale(scale, scale);
+                        guarded_fill_path(
+                            pixmap,
+                            &path,
+                            paint,
+                            tiny_skia::FillRule::Winding,
+                            glyph_transform,
+                            clip_mask,
+                        );
                     }
                 }
             }
@@ -1930,7 +1950,19 @@ fn measure_text_bytes(bytes: &[u8], gs: &GraphicsState, font_info: Option<&crate
         // It also reports each code's byte count, which the word-spacing
         // rule below needs. ~keep
         for (code, nbytes) in char_codes_with_len(bytes, font) {
-            let char_code = u16::try_from(code).unwrap_or(0);
+            // GH #1631: for a Type0 font `code` is a content-stream
+            // character code, not a CID — it must go through `code_to_cid`
+            // before it keys /W, /DW, or /W2, or a non-Identity
+            // predefined/embedded CMap gets the wrong metrics (this is the
+            // invisible/skipped-text twin of the same bug fixed in
+            // `render_unicode_text`'s `cids` array above). Simple (non-
+            // Type0) fonts have no CID step at all — the raw code IS the
+            // width-table key. ~keep
+            let char_code = if font.subtype == "Type0" {
+                font.code_to_cid(code)
+            } else {
+                u16::try_from(code).unwrap_or(0)
+            };
             // Per ISO 32000-1 §9.4.4 the advance formula differs by writing
             // mode:
             //   horizontal: tx = ((w0 * Tfs) + Tc + Tw) * Th
@@ -1943,7 +1975,11 @@ fn measure_text_bytes(bytes: &[u8], gs: &GraphicsState, font_info: Option<&crate
             // CMap must not take Tw. ~keep
             let word_space_eligible = nbytes == 1 && code == 0x20;
             if wmode == 0 {
-                let glyph_adv = font.get_glyph_width(char_code) * font_size / 1000.0;
+                // font_matrix_a converts /Widths glyph-space values to
+                // text-space units; standard fonts default to 0.001
+                // (equivalent to the old hardcoded /1000.0), but a Type 3
+                // font's own /FontMatrix[0] can differ (GH#1780). ~keep
+                let glyph_adv = font.get_glyph_width(char_code) * font_size * font.font_matrix_a;
                 advance += (glyph_adv + gs.char_space) * h_scale;
                 if word_space_eligible {
                     advance += gs.word_space * h_scale;
@@ -2046,7 +2082,6 @@ mod tests {
         const EXPECTED_MESSAGE: &str = "font 'redacted' painted nothing for 3 glyph(s) while advancing the cursor; \
             first was code 0x41 (glyph 7): no outline. The page renders with a gap that reads as whitespace \
             downstream. Reported once per font per page.";
-        let _ = crate::extractors::warnings::drain_global_warnings();
         let mut tally = GlyphDropTally::default();
         tally.record("no outline", 0x41, 7);
         tally.record("no glyph id", 0x42, 0);
@@ -2058,15 +2093,22 @@ mod tests {
                 rasterizer.report_drops(&tally, font_name);
             }
         });
-        let warnings = crate::extractors::warnings::drain_global_warnings();
-        assert_eq!(warnings.len(), 4);
-        for warning in &warnings {
-            assert_eq!(
-                warning.category,
-                crate::extractors::warnings::WarningCategory::GlyphDropped
-            );
-            assert_eq!(warning.message, EXPECTED_MESSAGE);
-        }
+        // The structured sink is process-wide and twelve other tests in this binary push into
+        // it, so neither draining it nor measuring its total length is safe from a test thread:
+        // a stranger's warning landing mid-window reads as one of ours, and draining steals
+        // warnings a peer is about to assert on. Count only records carrying this tally's own
+        // signature, and leave the sink untouched. ~keep
+        let mine = crate::extractors::warnings::snapshot_global_warnings()
+            .into_iter()
+            .filter(|warning| {
+                warning.category == crate::extractors::warnings::WarningCategory::GlyphDropped
+                    && warning.message == EXPECTED_MESSAGE
+            })
+            .count();
+        assert_eq!(
+            mine, 4,
+            "report_drops must push one structured warning per font name, with the redacted message"
+        );
         let rendered = format!("{events:?}");
         assert!(!rendered.contains(SECRET_FONT));
         assert_eq!(
@@ -2256,7 +2298,208 @@ mod tests {
             cid_vertical_metrics: None,
             cid_default_vertical_metrics: VerticalMetrics::SPEC_DEFAULT,
             cjk_substitution: None,
+            embedded_cid_map: None,
         }
+    }
+
+    /// Build a Type0/CIDFontType0 FontInfo reproducing the font dict of GH
+    /// #1631's reported document verbatim: `/BaseFont /MSungStd-Light-Acro`,
+    /// `/Encoding /UniCNS-UCS2-H`, `/CIDSystemInfo <</Registry (Adobe)
+    /// /Ordering (CNS1) /Supplement 3>>`, `/DW 1000`, and the exact `/W`
+    /// array from object 18 of that PDF (`sha256
+    /// ceb46d5e88e6...bfd12bfb5d0`, opaque id `e4ae9f871f`, corpus path
+    /// `test_documents/pdf/pdfa_045.pdf`). Not a synthetic approximation —
+    /// every width below was read out of the real PDF bytes. ~keep
+    fn make_uni_cns_ucs2_test_font() -> FontInfo {
+        let mut font = make_vertical_test_font();
+        font.base_font = "MSungStd-Light-Acro".to_string();
+        font.encoding = Encoding::Standard("UniCNS-UCS2-H".to_string());
+        font.wmode = 0;
+        font.cid_font_type = Some("CIDFontType0".to_string());
+        font.cid_to_gid_map = None;
+        font.cid_system_info = Some(crate::fonts::CIDSystemInfo {
+            registry: "Adobe".to_string(),
+            ordering: "CNS1".to_string(),
+            supplement: 3,
+        });
+        font.cid_default_width = 1000.0;
+        font.has_explicit_dw = true;
+        font.cid_widths = Some(HashMap::from([
+            (1, 250.0),
+            (2, 250.0),
+            (3, 408.0),
+            (4, 668.0),
+            (5, 490.0),
+            (6, 875.0),
+            (7, 698.0),
+            (8, 250.0),
+            (9, 240.0),
+            (10, 240.0),
+            (11, 417.0),
+            (12, 667.0),
+            (13, 250.0),
+            (14, 313.0),
+            (15, 250.0),
+            (16, 520.0),
+            (17, 500.0),
+            (18, 500.0),
+            (19, 500.0),
+            (20, 500.0),
+            (21, 500.0),
+            (22, 500.0),
+            (23, 500.0),
+            (24, 500.0),
+            (25, 500.0),
+            (26, 500.0),
+            (27, 250.0),
+            (28, 250.0),
+            (29, 667.0),
+            (30, 667.0),
+            (31, 667.0),
+            (32, 396.0),
+            (33, 921.0),
+            (34, 677.0),
+            (35, 615.0),
+            (36, 719.0),
+            (37, 760.0),
+            (38, 625.0),
+            (39, 552.0),
+            (40, 771.0),
+            (41, 802.0),
+            (42, 354.0),
+            (43, 354.0),
+            (44, 781.0),
+            (45, 604.0),
+            (46, 927.0),
+            (47, 750.0),
+            (48, 823.0),
+            (49, 563.0),
+            (50, 823.0),
+            (51, 729.0),
+            (52, 542.0),
+            (53, 698.0),
+            (54, 771.0),
+            (55, 729.0),
+            (56, 948.0),
+            (57, 771.0),
+            (58, 677.0),
+            (59, 635.0),
+            (60, 344.0),
+            (61, 520.0),
+            (62, 344.0),
+            (63, 469.0),
+            (64, 500.0),
+            (65, 250.0),
+            (66, 469.0),
+            (67, 521.0),
+            (68, 427.0),
+            (69, 521.0),
+            (70, 438.0),
+            (71, 271.0),
+            (72, 469.0),
+            (73, 531.0),
+            (74, 250.0),
+            (75, 250.0),
+            (76, 458.0),
+            (77, 240.0),
+            (78, 802.0),
+            (79, 531.0),
+            (80, 500.0),
+            (81, 521.0),
+            (82, 521.0),
+            (83, 365.0),
+            (84, 333.0),
+            (85, 292.0),
+            (86, 521.0),
+            (87, 458.0),
+            (88, 677.0),
+            (89, 479.0),
+            (90, 458.0),
+            (91, 427.0),
+            (92, 480.0),
+            (93, 496.0),
+            (94, 480.0),
+            (95, 667.0),
+        ]));
+        font
+    }
+
+    /// GH #1631 regression: the reported document's `UniCNS-UCS2-H` Type0
+    /// font must translate content-stream character codes to CIDs before
+    /// looking up `/W`. `<0054 0068 0065>` is `"The"` under UCS-2: 'T'
+    /// (U+0054) is CID 53 (width 698), 'h' (U+0068) is CID 73 (width 531),
+    /// 'e' (U+0065) is CID 70 (width 438) — sum 1667/1000 em. At the
+    /// document's 18pt font size that is `1667 * 18 / 1000 = 30.006`pt.
+    ///
+    /// The pre-fix (code-as-CID) computation looks up the codes themselves
+    /// as CIDs: 0x54=84 (width 333, coincidentally a valid CID — CID 84 IS
+    /// in the table), 0x68=104 and 0x65=101 (neither is a valid CID in this
+    /// table, so both fall back to `/DW`=1000) — sum 2333/1000 em, `2333 *
+    /// 18 / 1000 = 41.994`pt. That is the exact ~42pt/~30pt split GH #1631
+    /// reports. ~keep
+    #[test]
+    fn measure_text_bytes_predefined_cmap_resolves_code_to_cid_not_the_raw_code() {
+        let font = make_uni_cns_ucs2_test_font();
+        let mut gs = GraphicsState::new();
+        gs.font_size = 18.0;
+
+        let advance = measure_text_bytes(b"\x00T\x00h\x00e", &gs, Some(&font));
+
+        assert!(
+            (advance - 30.006).abs() < 0.01,
+            "expected the CID-correct ~30.0pt advance for \"The\" under UniCNS-UCS2-H, got {advance}"
+        );
+        assert!(
+            (advance - 41.994).abs() > 1.0,
+            "advance must NOT match the pre-fix code-as-CID ~42.0pt result, got {advance}"
+        );
+    }
+
+    /// GH #1631 regression, `/DW`-fallback half: `\x00a` is 'a' (U+0061),
+    /// CID 66 under Adobe-CNS1, width 469/1000 em from the real `/W` array
+    /// — NOT the `/DW 1000` fallback the pre-fix code (using raw code 0x61
+    /// as the CID, which this document's `/W` array does not cover) would
+    /// have produced. At 18pt: correct = `469 * 18 / 1000 = 8.442`pt;
+    /// pre-fix = `1000 * 18 / 1000 = 18.0`pt. ~keep
+    #[test]
+    fn measure_text_bytes_predefined_cmap_pins_the_dw_fallback_half_of_the_bug() {
+        let font = make_uni_cns_ucs2_test_font();
+        let mut gs = GraphicsState::new();
+        gs.font_size = 18.0;
+
+        let advance = measure_text_bytes(b"\x00a", &gs, Some(&font));
+
+        assert!(
+            (advance - 8.442).abs() < 0.01,
+            "expected the CID-correct ~8.442pt advance ('a' = CID 66, width 469/1000 em), got {advance}"
+        );
+        assert!(
+            (advance - 18.0).abs() > 1.0,
+            "advance must NOT match the pre-fix /DW-fallback ~18.0pt result, got {advance}"
+        );
+    }
+
+    /// Identity-H/V non-regression: CID == code is the common case (it is
+    /// presumably why GH #1631 went unnoticed for so long) and must be
+    /// completely unaffected by routing codes through `code_to_cid`. Two
+    /// horizontal Identity-H CIDs `<0001 0002>` at font size 12, DW 1000 ⇒
+    /// `(1000 + 1000) * 12 / 1000 = 24.0`.
+    #[test]
+    fn measure_text_bytes_identity_h_is_unaffected_by_code_to_cid() {
+        let mut font = make_vertical_test_font();
+        font.wmode = 0;
+
+        let mut gs = GraphicsState::new();
+        gs.font_size = 12.0;
+        gs.text_wmode = 0;
+
+        let bytes: &[u8] = &[0x00, 0x01, 0x00, 0x02];
+        let advance = measure_text_bytes(bytes, &gs, Some(&font));
+
+        assert!(
+            (advance - 24.0).abs() < 0.01,
+            "Identity-H advance must be unchanged: expected 24.0, got {advance}"
+        );
     }
 
     /// `measure_text_bytes` must return |w1y * font_size / 1000| per glyph

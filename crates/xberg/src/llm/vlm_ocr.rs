@@ -135,12 +135,17 @@ impl OcrBackend for VlmOcrBackend {
             );
         };
 
-        if let Err(e) = vlm_config.validate() {
+        // `LlmConfig::validate` only range-checks sampling parameters; it never inspects
+        // credentials. Building the client is what runs liter-llm's provider validation --
+        // it performs no network I/O but does reject e.g. a `bedrock/` model with neither
+        // `BedrockConfig` credentials nor `AWS_ACCESS_KEY_ID`. Probing with `validate` alone
+        // reported an unconfigured provider as a pass. ~keep
+        if let Err(e) = super::client::create_client(vlm_config) {
             return DoctorCheck::fail("ocr.vlm", format!("{e}"));
         }
         DoctorCheck::skip(
             "ocr.vlm",
-            "configuration is valid; endpoint reachability and authentication were not checked",
+            "configuration and credentials are valid; endpoint reachability was not checked",
         )
     }
 }

@@ -97,11 +97,17 @@ async fn extract_file_uri_accepts_localhost_host() {
         .unwrap();
 
     let config = ExtractionConfig::default();
+    // Build the RFC 8089 shape for both platforms: a Windows drive path needs the
+    // leading slash and forward separators (`file://localhost/C:/...`), otherwise
+    // the drive colon turns the host into `localhostc` plus a garbage port.
+    let path_str = path.display().to_string();
+    let uri = if path_str.starts_with('/') {
+        format!("file://localhost{path_str}")
+    } else {
+        format!("file://localhost/{}", path_str.replace('\\', "/"))
+    };
     let output = crate::engine::Engine::new_default()
-        .extract(
-            ExtractInput::from_uri(format!("file://localhost{}", path.display())),
-            &config,
-        )
+        .extract(ExtractInput::from_uri(uri), &config)
         .await
         .unwrap();
 
@@ -336,7 +342,10 @@ async fn batch_scheduler_restores_public_result_order_after_prioritizing() {
     }
 
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(2) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(2),
+            max_concurrent_ocr: None,
+        }),
         max_concurrent_extractions: Some(2),
         ..Default::default()
     };
@@ -436,7 +445,10 @@ async fn bounded_batch_scheduler_preserves_completion_and_error_indices() {
 #[cfg(layout_detection)]
 fn engine_batch_execution_plan_matches_layout_aware_resolution() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(4) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(4),
+            max_concurrent_ocr: None,
+        }),
         ..Default::default()
     };
     let non_layout = resolve_engine_batch_execution_plan_for(&config, LayoutBatchWorkload::None, 8);
@@ -461,7 +473,10 @@ fn engine_batch_execution_plan_matches_layout_aware_resolution() {
 #[test]
 fn engine_batch_base_config_applies_plan_budget_once() {
     let base = Arc::new(ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: None,
+        }),
         ..Default::default()
     });
 
@@ -474,6 +489,33 @@ fn engine_batch_base_config_applies_plan_budget_once() {
 
     let reused = resolve_batch_base_config(&adjusted, 2);
     assert!(Arc::ptr_eq(&adjusted, &reused));
+}
+
+/// Only the thread budget is divided across batch workers. `max_concurrent_ocr`
+/// is a bound on host memory, which every worker shares, so dividing it would be
+/// wrong and dropping it silently returns the caller to the automatic limit --
+/// the exact setting they reached for `max_concurrent_ocr` to escape.
+#[test]
+fn engine_batch_base_config_carries_the_configured_recognition_limit() {
+    let base = Arc::new(ExtractionConfig {
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: Some(3),
+        }),
+        ..Default::default()
+    });
+
+    let adjusted = resolve_batch_base_config(&base, 2);
+    let concurrency = adjusted
+        .concurrency
+        .as_ref()
+        .expect("batch config keeps a concurrency block");
+    assert_eq!(concurrency.max_threads, Some(2), "the thread budget is the divided one");
+    assert_eq!(
+        concurrency.max_concurrent_ocr,
+        Some(3),
+        "the caller's recognition limit survives the budget rewrite"
+    );
 }
 
 /// Regression test for task #709: `resolve_input_config` is the single choke point
@@ -564,6 +606,66 @@ fn resolve_batch_input_config_installs_a_cancel_token_when_a_timeout_is_configur
     );
 }
 
+/// The per-input companion to `engine_batch_base_config_carries_the_configured_recognition_limit`.
+/// Both resolvers rewrite the concurrency block when the batch divides the thread
+/// budget, and `resolve_batch_input_config` is the one every batch item goes
+/// through, so a caller's `max_concurrent_ocr` has to survive the rewrite here
+/// too. Dropping it returns recognition to the automatic limit, which is the
+/// setting the caller reached for the field to escape.
+#[test]
+fn resolve_batch_input_config_carries_the_configured_recognition_limit() {
+    let base = Arc::new(ExtractionConfig {
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: Some(3),
+        }),
+        ..Default::default()
+    });
+    let input = ExtractInput::from_bytes(b"hello".to_vec(), "text/plain", None);
+
+    let resolved = resolve_batch_input_config(&input, &base, 2);
+
+    let concurrency = resolved
+        .concurrency
+        .as_ref()
+        .expect("batch config keeps a concurrency block");
+    assert_eq!(concurrency.max_threads, Some(2), "the thread budget is the divided one");
+    assert_eq!(
+        concurrency.max_concurrent_ocr,
+        Some(3),
+        "the caller's recognition limit survives the budget rewrite"
+    );
+}
+
+/// An input that carries its own overrides takes the clone-and-merge path rather
+/// than the `Arc::clone` fast path, and the budget rewrite then runs on the merged
+/// config. `FileExtractionConfig` has no concurrency block of its own, so the
+/// base's recognition limit is the one that must come out the far side.
+#[test]
+fn resolve_batch_input_config_carries_the_recognition_limit_through_a_file_override() {
+    let base = Arc::new(ExtractionConfig {
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: Some(3),
+        }),
+        ..Default::default()
+    });
+    let mut input = ExtractInput::from_bytes(b"hello".to_vec(), "text/plain", None);
+    input.config = Some(crate::core::config::FileExtractionConfig {
+        force_ocr: Some(true),
+        ..Default::default()
+    });
+
+    let resolved = resolve_batch_input_config(&input, &base, 2);
+
+    assert!(resolved.force_ocr, "the per-input override is applied");
+    assert_eq!(
+        resolved.concurrency.as_ref().and_then(|c| c.max_concurrent_ocr),
+        Some(3),
+        "the recognition limit survives the override merge and the budget rewrite"
+    );
+}
+
 #[test]
 fn engine_batch_execution_plan_clamps_explicit_zero_to_one() {
     let config = ExtractionConfig {
@@ -580,7 +682,10 @@ fn engine_batch_execution_plan_clamps_explicit_zero_to_one() {
 #[test]
 fn engine_batch_execution_plan_without_layout_respects_input_count() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(4) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(4),
+            max_concurrent_ocr: None,
+        }),
         ..Default::default()
     };
     let inputs = vec![ExtractInput::default()];
@@ -592,7 +697,10 @@ fn engine_batch_execution_plan_without_layout_respects_input_count() {
 #[test]
 fn engine_batch_classifies_all_markdown_pdfs_for_single_layout_worker() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: None,
+        }),
         layout: Some(Default::default()),
         use_layout_for_markdown: true,
         disable_ocr: true,
@@ -610,7 +718,10 @@ fn engine_batch_classifies_all_markdown_pdfs_for_single_layout_worker() {
 #[test]
 fn engine_batch_classifies_disabled_layout_as_none_when_ocr_is_disabled() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: None,
+        }),
         layout: Some(Default::default()),
         use_layout_for_markdown: false,
         disable_ocr: true,
@@ -626,7 +737,10 @@ fn engine_batch_classifies_disabled_layout_as_none_when_ocr_is_disabled() {
 #[test]
 fn engine_batch_classifies_partial_input_layout_override_as_mixed() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: None,
+        }),
         use_layout_for_markdown: true,
         disable_ocr: true,
         ..Default::default()
@@ -655,7 +769,10 @@ fn engine_batch_classifies_partial_input_layout_override_as_mixed() {
 #[test]
 fn engine_batch_classifies_ocr_capable_layout_as_mixed() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: None,
+        }),
         layout: Some(Default::default()),
         use_layout_for_markdown: false,
         disable_ocr: false,
@@ -671,7 +788,10 @@ fn engine_batch_classifies_ocr_capable_layout_as_mixed() {
 #[test]
 fn engine_batch_classifies_ordinary_batch_as_non_layout() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: None,
+        }),
         ..Default::default()
     };
     let inputs = vec![ExtractInput::from_uri("document.txt"); 4];
@@ -684,7 +804,10 @@ fn engine_batch_classifies_ordinary_batch_as_non_layout() {
 #[test]
 fn engine_batch_plan_ignores_shared_url_count_and_layout_overrides() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(8) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(8),
+            max_concurrent_ocr: None,
+        }),
         ..Default::default()
     };
     let shared = ExtractInput {
@@ -711,7 +834,10 @@ fn engine_batch_plan_ignores_shared_url_count_and_layout_overrides() {
 #[test]
 fn engine_batch_concurrency_detects_per_input_layout_override() {
     let config = ExtractionConfig {
-        concurrency: Some(crate::core::config::ConcurrencyConfig { max_threads: Some(4) }),
+        concurrency: Some(crate::core::config::ConcurrencyConfig {
+            max_threads: Some(4),
+            max_concurrent_ocr: None,
+        }),
         ..Default::default()
     };
     let inputs = vec![ExtractInput {
@@ -742,6 +868,7 @@ async fn url_markdown_page_runs_through_pipeline_and_preserves_source_mime() {
         "alpha beta gamma delta epsilon zeta eta theta".to_string(),
         true,
         "text/html; charset=utf-8",
+        "",
         links,
         &config,
     )
@@ -749,7 +876,7 @@ async fn url_markdown_page_runs_through_pipeline_and_preserves_source_mime() {
     .unwrap();
 
     assert_eq!(result.mime_type, "text/html");
-    assert_eq!(result.metadata.output_format.as_deref(), Some("plain"));
+    assert_eq!(result.metadata.output_format.as_deref(), Some("markdown"));
     assert_eq!(result.uris.as_ref().map(Vec::len), Some(1));
 }
 
@@ -760,6 +887,7 @@ async fn url_page_rejects_untrusted_content_type_as_public_mime() {
         "safe content".to_string(),
         true,
         "text/html\r\nx-injected: value",
+        "",
         Vec::new(),
         &ExtractionConfig::default(),
     )
@@ -767,6 +895,55 @@ async fn url_page_rejects_untrusted_content_type_as_public_mime() {
     .unwrap();
 
     assert_eq!(result.mime_type, "text/html");
+}
+
+/// GH CI E2E `test_metadata_access`: a crawled page is restamped `text/html`, so
+/// `metadata.format.html` must be populated even though the extraction itself ran over
+/// crawlberg's pre-rendered markdown and never touched the HTML extractor.
+#[cfg(all(feature = "url-ingestion", feature = "html"))]
+#[tokio::test]
+async fn url_html_page_recovers_format_metadata_from_source_html_when_content_is_markdown() {
+    let source_html = "<html><head><title>Simple Table Test</title></head><body><h1>Heading</h1></body></html>";
+
+    let result = run_url_page_pipeline(
+        "# Heading\n\nalpha beta gamma".to_string(),
+        true,
+        "text/html",
+        source_html,
+        Vec::new(),
+        &ExtractionConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(result.mime_type, "text/html");
+    let Some(crate::types::FormatMetadata::Html(html_metadata)) = result.metadata.format else {
+        panic!("expected FormatMetadata::Html; got {:?}", result.metadata.format);
+    };
+    assert_eq!(html_metadata.title.as_deref(), Some("Simple Table Test"));
+}
+
+/// Negative control for the test above: with no source HTML to recover from, the format field
+/// stays `None` rather than being invented.
+#[cfg(all(feature = "url-ingestion", feature = "html"))]
+#[tokio::test]
+async fn url_page_without_source_html_leaves_format_metadata_unset() {
+    let result = run_url_page_pipeline(
+        "alpha beta gamma".to_string(),
+        true,
+        "text/html",
+        "",
+        Vec::new(),
+        &ExtractionConfig::default(),
+    )
+    .await
+    .unwrap();
+
+    assert!(
+        result.metadata.format.is_none(),
+        "format must stay None with no HTML to read; got {:?}",
+        result.metadata.format
+    );
 }
 
 #[cfg(feature = "tree-sitter")]

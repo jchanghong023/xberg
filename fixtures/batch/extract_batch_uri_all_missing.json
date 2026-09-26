@@ -25,6 +25,16 @@
 	"assertions": [
 		{
 			"type": "not_error"
+		},
+		{
+			"type": "equals",
+			"field": "summary.results",
+			"value": 0
+		},
+		{
+			"type": "equals",
+			"field": "summary.errors",
+			"value": 2
 		}
 	]
 }

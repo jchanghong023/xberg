@@ -43,17 +43,38 @@ use initialization::{builtin_registration_error, initialize_processor_cache_for_
 
 const CAPTIONING_PROCESSOR_NAME: &str = "captioning";
 const BUILTIN_REGISTRATION_SOURCE: &str = "builtin_registration";
+// `pub(crate)` so `pdf::native::images` can reference this SAME constant when deciding, before
+// any per-image decode, whether a full-page image will end up excluded here anyway (GH#1732) --
+// the two checks must use one number, never two independently-maintained literals. ~keep
 #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
-const FULL_PAGE_IMAGE_AREA_RATIO: f64 = 0.85;
+pub(crate) const FULL_PAGE_IMAGE_AREA_RATIO: f64 = 0.85;
 
 type PostProcessorHandle = std::sync::Arc<dyn crate::plugins::PostProcessor>;
+
+/// Where [`run_pipeline_impl`] reads its post-processor registry, cache and registration gate
+/// from. Production code always uses `Global`; `Isolated` exists only so a test that mutates a
+/// registry and asserts on the outcome of that mutation can give itself a private
+/// `initialization::ProcessorRegistryState` instead of racing every other extraction in the
+/// binary against the process-wide statics (#1749). ~keep
+enum ProcessorSource {
+    Global,
+    #[cfg(all(test, feature = "tokio-runtime"))]
+    Isolated(std::sync::Arc<initialization::ProcessorRegistryState>),
+}
 
 #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
 fn image_ocr_positions(doc: &InternalDocument) -> Vec<usize> {
     doc.images
         .iter()
         .enumerate()
-        .filter_map(|(position, image)| (!should_skip_pdf_image_ocr(doc, image)).then_some(position))
+        .filter_map(|(position, image)| {
+            // An extractor that already recognized the image (standalone
+            // images, PDF inline images with `ocr_inline_images`) has supplied
+            // the result the fence renders; recognizing it again would compare
+            // two independent runs whose noise differs line by line and print
+            // both readings.
+            (!should_skip_pdf_image_ocr(doc, image) && image.ocr_result.is_none()).then_some(position)
+        })
         .collect()
 }
 
@@ -89,6 +110,58 @@ fn should_skip_pdf_image_ocr(doc: &InternalDocument, image: &crate::types::Extra
 
     let image_area = (bounding_box.x1 - bounding_box.x0).abs() * (bounding_box.y1 - bounding_box.y0).abs();
     image_area / (page_width * page_height) >= FULL_PAGE_IMAGE_AREA_RATIO
+}
+
+/// Whether `ExtractedDocument.images` must survive past embedded-image OCR (GH#1703).
+///
+/// `needs_image_data`/`runs_ocr_on_embedded_images` (GH#1662) are the READ gate: they make a
+/// container read an embedded image's bytes so OCR has something to decode. This is the WRITE
+/// gate, asked once rendering (which folds `ExtractedImage.ocr_result.content` into `content`
+/// for every `ElementKind::Image`, `doc.rs`'s render_plain/render_markdown/etc.) has already
+/// consumed those bytes: it widens `wants_own_bytes_in_result` (extract_images/captioning/
+/// qr_codes) with the two other ways the same bytes end up wanted in the output rather than
+/// merely read for OCR input — `pdf_options.ocr_inline_images` (the OCR'd images ARE the
+/// requested result, see `test_ocr_inline_images_enters_decompression_path`) and
+/// `images.include_page_rasters` (per-page OCR renders live in this same `Vec`). Without this,
+/// every OCR'd container returned every embedded image's raw bytes regardless of `images`,
+/// because the GH#1662 read gate has no matching write-side gate of its own. ~keep
+fn should_retain_images_after_ocr(config: &ExtractionConfig) -> bool {
+    if config.wants_own_bytes_in_result() {
+        return true;
+    }
+    #[cfg(feature = "pdf")]
+    if config
+        .pdf_options
+        .as_ref()
+        .is_some_and(|options| options.ocr_inline_images)
+    {
+        return true;
+    }
+    config.images.as_ref().is_some_and(|images| images.include_page_rasters)
+}
+
+/// Drop `result.images` once OCR has consumed the bytes and rendering has folded any
+/// per-image OCR text into `content` (GH#1703), keeping `PageContent::image_indices`
+/// consistent with the now-empty `images` collection they index into. Returns how many
+/// images were dropped so `DocumentCounts::images` (documented as always populated, even
+/// when the collection itself is not returned) can still report them.
+///
+/// Must run AFTER `derive_extraction_result`, not before: that call is what renders
+/// `content` from `doc.elements` + `doc.images` in the first place (`render_plain`,
+/// `render_markdown`, …), reading `ExtractedImage.ocr_result` off each `ElementKind::Image`
+/// element as it goes. Clearing the bytes any earlier would silently drop that OCR text
+/// along with the raw image data instead of just the bytes GH#1703 is about. Chunk-level
+/// `image_indices` need no matching cleanup: `execute_chunking` only populates them from
+/// `result.images.is_some()`, so setting `images` to `None` here already keeps chunks
+/// consistent by construction. ~keep
+fn drop_ocr_only_images(result: &mut ExtractedDocument) -> usize {
+    let dropped = result.images.take().map_or(0, |images| images.len());
+    if let Some(ref mut pages) = result.pages {
+        for page in pages.iter_mut() {
+            page.image_indices.clear();
+        }
+    }
+    dropped
 }
 
 #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
@@ -318,9 +391,39 @@ async fn run_captioning_prepass(
     )
 ))]
 #[cfg_attr(alef, alef(skip))]
-pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) -> Result<ExtractedDocument> {
+// (fork) perf-tracing：后处理管线整体 span（图片 OCR、后处理器、chunking、输出渲染都在其中）。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(
+        target = "perf",
+        name = "pipeline",
+        skip_all,
+        fields(elements = doc.elements.len())
+    )
+)]
+pub async fn run_pipeline(doc: InternalDocument, config: &ExtractionConfig) -> Result<ExtractedDocument> {
+    run_pipeline_impl(doc, config, ProcessorSource::Global).await
+}
+
+/// Isolated-registry counterpart of [`run_pipeline`] for the #1749 tests described on
+/// [`ProcessorSource`]: identical behavior, except the post-processing stage reads `state`
+/// instead of the process-wide registry, cache and registration gate.
+#[cfg(all(test, feature = "tokio-runtime"))]
+async fn run_pipeline_with_isolated_registry(
+    doc: InternalDocument,
+    config: &ExtractionConfig,
+    state: std::sync::Arc<initialization::ProcessorRegistryState>,
+) -> Result<ExtractedDocument> {
+    run_pipeline_impl(doc, config, ProcessorSource::Isolated(state)).await
+}
+
+async fn run_pipeline_impl(
+    mut doc: InternalDocument,
+    config: &ExtractionConfig,
+    processor_source: ProcessorSource,
+) -> Result<ExtractedDocument> {
     doc.ocr_text_only = config.images.as_ref().map(|i| i.ocr_text_only).unwrap_or(false);
-    doc.append_ocr_text = config.images.as_ref().map(|i| i.append_ocr_text).unwrap_or(false);
+    doc.append_ocr_text = config.images.as_ref().map(|i| i.append_ocr_text).unwrap_or(true);
     doc.escape_markdown = config.escape_markdown;
     doc.include_watermarks = config
         .content_filter
@@ -336,10 +439,12 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
         page_markers::inject_page_marker_elements(&mut doc, &format);
     }
 
+    // Calls `runs_ocr_on_embedded_images` rather than re-deriving it: `needs_image_data`
+    // (the READ gate a container consults before it reads an embedded image's bytes at all)
+    // is defined in terms of this same method, and the two being separately-written copies
+    // is exactly how GH#1662 happened. Do not inline the condition back. ~keep
     #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
-    let image_ocr_enabled = config.images.as_ref().map(|i| i.run_ocr_on_images).unwrap_or(true);
-    #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
-    if image_ocr_enabled && config.ocr.is_some() && !doc.images.is_empty() {
+    if config.runs_ocr_on_embedded_images() && !doc.images.is_empty() {
         let image_positions = image_ocr_positions(&doc);
         // Clone only selected images so skipped entries keep their positions and a
         // batch-level OCR failure cannot discard the original extracted images.
@@ -376,8 +481,15 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
     let pp_config = config.postprocessor.as_ref();
     let postprocessing_enabled = pp_config.is_none_or(|processor_config| processor_config.enabled);
     let processor_stages = if postprocessing_enabled {
-        let processor_stages = initialize_processor_cache_for_async_pipeline().await?;
-        push_builtin_registration_warning(&mut doc, builtin_registration_error());
+        let processor_stages = match &processor_source {
+            ProcessorSource::Global => {
+                let snapshot = initialize_processor_cache_for_async_pipeline().await?;
+                push_builtin_registration_warning(&mut doc, builtin_registration_error());
+                snapshot
+            }
+            #[cfg(all(test, feature = "tokio-runtime"))]
+            ProcessorSource::Isolated(state) => initialization::processor_snapshot_from_state(state).await?,
+        };
         Some(processor_stages)
     } else {
         None
@@ -432,6 +544,10 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
         }
     };
 
+    // Before the element-tree snapshot AND derivation: the opted-out entries must be
+    // absent from `internal_document` too, or ElementBased consumers still see them.
+    drop_opted_out_images(&mut doc, config);
+
     let doc_for_elements = if config.result_format == crate::types::ResultFormat::ElementBased {
         Some(doc.clone())
     } else {
@@ -441,28 +557,89 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
     let mut result =
         crate::extraction::derive::derive_extraction_result(doc, include_structure, config.output_format.clone());
     result.internal_document = doc_for_elements;
-    captioning_carry_over.apply(&mut result);
+
+    // GH#1662 reads embedded-image bytes so OCR has something to decode; rendering above
+    // (inside `derive_extraction_result`) has already folded any resulting OCR text into
+    // `content`. GH#1703: drop the bytes themselves now unless the caller actually wanted
+    // them (see `should_retain_images_after_ocr`). Gated on `runs_ocr_on_embedded_images`:
+    // GH#1703 is about bytes GH#1662's OCR read gate pulled in, not about images a
+    // container populates for reasons that have nothing to do with OCR (markdown inline
+    // data-URI images, Jupyter output/attachment images, ODT/DOCX/PPTX embedded pictures
+    // read for their own sake). Dropping unconditionally here regressed all of those --
+    // `images` came back `None` even though no OCR ever ran. ~keep
+    let images_dropped_after_ocr = if config.runs_ocr_on_embedded_images() && !should_retain_images_after_ocr(config) {
+        drop_ocr_only_images(&mut result)
+    } else {
+        0
+    };
 
     // #286: record the text the preserved element tree stands for, so the divergence check
     // below can tell whether post-processing has since made the tree a stale second copy of
     // the document text. See `discard_diverged_internal_document`.
     let internal_document_source_content = result.internal_document.is_some().then(|| result.content.clone());
 
+    // The styled prerender is part of the rendering the snapshot stands for: assigning it
+    // after the snapshot made `discard_diverged_formatted_content` read it as "a processor
+    // rewrote the rendering", so a content-only rewrite (a post-processor, the captioning
+    // carry-over) was silently overwritten by HTML rendered before that rewrite — and the
+    // sync pipeline, which assigns it before its snapshot, disagreed. ~keep
     #[cfg(feature = "html")]
     if let Some(html) = styled_html_prerender {
         result.formatted_content = Some(html);
     }
 
     // #331: same idea for the rendered output format, which `apply_output_format` swaps into
-    // `content` at the very end. See `discard_diverged_formatted_content`.
+    // `content` at the very end. See `discard_diverged_formatted_content`. Snapshotted before
+    // the captioning carry-over applies: the carry-over is itself a content rewrite by a
+    // processor, so the rendering made from the pre-rewrite text is stale the moment the
+    // rewrite lands and must be discarded like any other post-processing divergence — under
+    // the Markdown default it would otherwise overwrite the authored content at the final
+    // swap.
     let formatted_content_source = result
         .formatted_content
         .as_ref()
         .map(|formatted| (result.content.clone(), formatted.clone()));
 
+    captioning_carry_over.apply(&mut result);
+
+    #[cfg(feature = "image-encode")]
+    let mut image_format_renames: Vec<(u32, String, String)> = Vec::new();
     #[cfg(feature = "image-encode")]
     if let Some(ref image_cfg) = config.images {
-        apply_output_format_pass_with_security_limits(&mut result, image_cfg, config.security_limits.as_ref());
+        #[cfg(feature = "tokio-runtime")]
+        {
+            // The re-encode loop is CPU/GDI-bound; on the async pipeline it runs on the
+            // blocking pool so a large rasterization cannot stall a runtime worker.
+            image_format_renames =
+                apply_output_format_pass_offload(&mut result, image_cfg, config.security_limits.as_ref()).await?;
+        }
+        #[cfg(not(feature = "tokio-runtime"))]
+        {
+            image_format_renames =
+                apply_output_format_pass_with_security_limits(&mut result, image_cfg, config.security_limits.as_ref());
+        }
+    }
+
+    // The pass rewrote `image_N.ext` references in `content`/`formatted_content`; the
+    // snapshots above predate it, so bring their clones onto the same state before the
+    // divergence checks compare them.
+    #[cfg(feature = "image-encode")]
+    let (formatted_content_source, internal_document_source_content) = rewrite_snapshot_image_extensions(
+        formatted_content_source,
+        internal_document_source_content,
+        &image_format_renames,
+    );
+
+    // The preserved element tree predates the pass too: its `RawBlock` texts embed
+    // `image_N.old` references (embedded sub-document merges) and its own `images`
+    // copy still carries the pre-rename formats. The snapshot rewrite above keeps
+    // `discard_diverged_internal_document` from dropping the tree, so the tree itself
+    // has to be brought onto the renamed state — `transform_extraction_result_to_elements`
+    // and the blanket renderer both read it and would hand out references the written
+    // files no longer match.
+    #[cfg(feature = "image-encode")]
+    if let Some(tree) = result.internal_document.as_mut() {
+        rewrite_tree_image_extensions(tree, &image_format_renames);
     }
 
     if let Some(ref image_cfg) = config.images {
@@ -570,13 +747,14 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
     // ordering note on this function's doc comment (#213).
     execute_chunking(&mut result, config, chunker_heading_source.as_deref())?;
 
-    populate_document_counts(&mut result);
+    populate_document_counts(&mut result, images_dropped_after_ocr);
 
     #[cfg(feature = "heuristics")]
     {
-        use crate::heuristics::confidence::{ConfidenceSignals, ConfidenceWeights, SchemaCompliance, score_confidence};
+        use crate::heuristics::confidence::{ConfidenceSignals, ConfidenceWeights, score_confidence};
         let text_coverage = measure_text_coverage(&result);
-        let signals = ConfidenceSignals::from_extraction_result(&result, SchemaCompliance::AllValid, text_coverage);
+        let schema_compliance = structured_extraction_compliance(config, &result);
+        let signals = ConfidenceSignals::from_extraction_result(&result, schema_compliance, text_coverage);
         result.extraction_confidence = Some(score_confidence(signals, ConfidenceWeights::default()));
     }
 
@@ -620,7 +798,7 @@ pub async fn run_pipeline(mut doc: InternalDocument, config: &ExtractionConfig) 
 #[cfg_attr(alef, alef(skip))]
 pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -> Result<ExtractedDocument> {
     doc.ocr_text_only = config.images.as_ref().map(|i| i.ocr_text_only).unwrap_or(false);
-    doc.append_ocr_text = config.images.as_ref().map(|i| i.append_ocr_text).unwrap_or(false);
+    doc.append_ocr_text = config.images.as_ref().map(|i| i.append_ocr_text).unwrap_or(true);
     doc.escape_markdown = config.escape_markdown;
     doc.include_watermarks = config
         .content_filter
@@ -684,6 +862,8 @@ pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -
         }
     };
 
+    // Same ordering as `run_pipeline`: drop before the element-tree snapshot.
+    drop_opted_out_images(&mut doc, config);
     let doc_for_elements = if config.result_format == crate::types::ResultFormat::ElementBased {
         Some(doc.clone())
     } else {
@@ -692,6 +872,14 @@ pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -
     let include_structure = config.include_document_structure;
     let mut result =
         crate::extraction::derive::derive_extraction_result(doc, include_structure, config.output_format.clone());
+
+    // GH#1703: mirror `run_pipeline` -- rendering above has consumed the OCR text, so the bytes
+    // read only for embedded-image OCR (GH#1662) go unless the caller asked for images. ~keep
+    let images_dropped_after_ocr = if should_retain_images_after_ocr(config) {
+        0
+    } else {
+        drop_ocr_only_images(&mut result)
+    };
     result.internal_document = doc_for_elements;
 
     // #286: mirrors `run_pipeline` — see `discard_diverged_internal_document`.
@@ -710,8 +898,27 @@ pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -
         .map(|formatted| (result.content.clone(), formatted.clone()));
 
     #[cfg(feature = "image-encode")]
-    if let Some(ref image_cfg) = config.images {
-        apply_output_format_pass_with_security_limits(&mut result, image_cfg, config.security_limits.as_ref());
+    let image_format_renames = if let Some(ref image_cfg) = config.images {
+        apply_output_format_pass_with_security_limits(&mut result, image_cfg, config.security_limits.as_ref())
+    } else {
+        Vec::new()
+    };
+
+    // Mirrors `run_pipeline`: the pass rewrote `image_N.ext` references in
+    // `content`/`formatted_content`, so the snapshots above get the same rewrite before the
+    // divergence checks compare them.
+    #[cfg(feature = "image-encode")]
+    let (formatted_content_source, internal_document_source_content) = rewrite_snapshot_image_extensions(
+        formatted_content_source,
+        internal_document_source_content,
+        &image_format_renames,
+    );
+
+    // Mirrors `run_pipeline`: the preserved element tree needs the same rename
+    // rewrite or ElementBased consumers read pre-rename references.
+    #[cfg(feature = "image-encode")]
+    if let Some(tree) = result.internal_document.as_mut() {
+        rewrite_tree_image_extensions(tree, &image_format_renames);
     }
 
     if let Some(ref image_cfg) = config.images {
@@ -732,13 +939,14 @@ pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -
     // ordering note on `run_pipeline`'s doc comment (#213).
     execute_chunking(&mut result, config, chunker_heading_source.as_deref())?;
 
-    populate_document_counts(&mut result);
+    populate_document_counts(&mut result, images_dropped_after_ocr);
 
     #[cfg(feature = "heuristics")]
     {
-        use crate::heuristics::confidence::{ConfidenceSignals, ConfidenceWeights, SchemaCompliance, score_confidence};
+        use crate::heuristics::confidence::{ConfidenceSignals, ConfidenceWeights, score_confidence};
         let text_coverage = measure_text_coverage(&result);
-        let signals = ConfidenceSignals::from_extraction_result(&result, SchemaCompliance::AllValid, text_coverage);
+        let schema_compliance = structured_extraction_compliance(config, &result);
+        let signals = ConfidenceSignals::from_extraction_result(&result, schema_compliance, text_coverage);
         result.extraction_confidence = Some(score_confidence(signals, ConfidenceWeights::default()));
     }
 
@@ -752,7 +960,7 @@ pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -
 /// extraction is disabled; it falls back to the materialized `pages` length and
 /// finally `0` for inputs that are not page-addressable (plain text, etc.).
 /// Table and image counts are the lengths of the already-populated collections.
-fn populate_document_counts(result: &mut ExtractedDocument) {
+fn populate_document_counts(result: &mut ExtractedDocument, images_dropped_after_ocr: usize) {
     let pages = result
         .metadata
         .pages
@@ -764,8 +972,31 @@ fn populate_document_counts(result: &mut ExtractedDocument) {
     result.counts = crate::types::DocumentCounts {
         pages,
         tables: result.tables.len(),
-        images: result.images.as_ref().map_or(0, Vec::len),
+        images: result.images.as_ref().map_or(images_dropped_after_ocr, Vec::len),
     };
+}
+
+/// Determine the [`SchemaCompliance`](crate::heuristics::confidence::SchemaCompliance) signal
+/// to feed into confidence scoring for a completed pipeline run (GH#1624).
+///
+/// Reuses the existing three variants instead of adding a fourth: `AllValid` covers both "no
+/// schema was requested" (nothing to violate) and "the requested schema produced output";
+/// `AllInvalid` covers every case where structured extraction was requested but the pipeline
+/// still has no `structured_output` -- an LLM failure, the `liter-llm` feature being absent, or
+/// wasm's unsupported-stage warning all leave that field `None`. Before this fix the pipeline
+/// passed `AllValid` unconditionally, so a failed or skipped structured extraction scored as
+/// if it had fully validated. ~keep
+#[cfg(feature = "heuristics")]
+fn structured_extraction_compliance(
+    config: &ExtractionConfig,
+    result: &ExtractedDocument,
+) -> crate::heuristics::confidence::SchemaCompliance {
+    use crate::heuristics::confidence::SchemaCompliance;
+    if config.structured_extraction.is_some() && result.structured_output.is_none() {
+        SchemaCompliance::AllInvalid
+    } else {
+        SchemaCompliance::AllValid
+    }
 }
 
 /// Measure the fraction of pages with usable (non-blank) text, for
@@ -809,48 +1040,311 @@ fn measure_text_coverage(result: &ExtractedDocument) -> f32 {
 fn apply_output_format_pass(
     result: &mut ExtractedDocument,
     config: &crate::core::config::extraction::ImageExtractionConfig,
-) {
-    apply_output_format_pass_with_security_limits(result, config, None);
+) -> Vec<(u32, String, String)> {
+    apply_output_format_pass_with_security_limits(result, config, None)
 }
 
-#[cfg(feature = "image-encode")]
+/// Drop `result.images`-to-be when the caller opted out of image output, BEFORE
+/// derivation. OCR, captioning and QR reading pull embedded-image bytes into the
+/// entries (that is `needs_image_data`'s OCR disjunct, GH#1662) and have already
+/// consumed them by this point; an opted-out caller must then see an empty list
+/// everywhere — `images`, `pages[].image_indices`, chunk indices — so the entries
+/// are removed from the document before any of those are derived. This is the
+/// same boundary `wants_own_bytes_in_result` draws for standalone images, and
+/// regression #796's `extract_images = false` → empty `images` contract.
+/// `pdf_options.ocr_inline_images = true` is an explicit ask to surface inline
+/// images and keeps them.
+fn drop_opted_out_images(doc: &mut crate::types::internal::InternalDocument, config: &ExtractionConfig) {
+    #[cfg(feature = "pdf")]
+    let inline_ocr_forced = config
+        .pdf_options
+        .as_ref()
+        .is_some_and(|options| options.ocr_inline_images);
+    #[cfg(not(feature = "pdf"))]
+    let inline_ocr_forced = false;
+    if !config.wants_own_bytes_in_result() && !inline_ocr_forced {
+        doc.images.clear();
+    }
+}
+
+#[cfg(all(feature = "image-encode", any(not(feature = "tokio-runtime"), test)))]
 fn apply_output_format_pass_with_security_limits(
     result: &mut ExtractedDocument,
     config: &crate::core::config::extraction::ImageExtractionConfig,
     security_limits: Option<&crate::extractors::security::SecurityLimits>,
-) {
+) -> Vec<(u32, String, String)> {
     use crate::core::config::extraction::ImageOutputFormat;
-    use crate::core::image_encode::re_encode;
 
-    #[cfg(not(feature = "svg"))]
-    if matches!(config.output_format, ImageOutputFormat::Native) {
-        return;
-    }
+    // `Native` skips the pass entirely — except metafiles, which convert to PNG
+    // even under `Native` (no Markdown preview renders `.emf`/`.wmf` refs), and
+    // (svg feature) SVGs pending sanitization.
     #[cfg(feature = "svg")]
-    if matches!(config.output_format, ImageOutputFormat::Native) && !config.svg.sanitize {
-        return;
+    let svg_sanitizing = config.svg.sanitize;
+    #[cfg(not(feature = "svg"))]
+    let svg_sanitizing = false;
+    if matches!(config.output_format, ImageOutputFormat::Native)
+        && !svg_sanitizing
+        && !result.images.as_ref().is_some_and(|images| {
+            images
+                .iter()
+                .any(|image| crate::core::image_encode::is_metafile_format(&image.format))
+        })
+    {
+        return Vec::new();
     }
 
-    let target = config.output_format;
+    // Inline (blocking) variant used by the sync pipeline, whose caller thread already
+    // expects blocking work, and by the tests. The async pipeline awaits
+    // `apply_output_format_pass_offload`, which runs the same loop on the blocking pool
+    // instead of a runtime worker. The renames are returned so the caller can bring the
+    // #331/#286 snapshots (taken before this pass) onto the same extension state — see
+    // [`rewrite_snapshot_image_extensions`].
     let default_security_limits = crate::extractors::security::SecurityLimits::default();
     let security_limits = security_limits.unwrap_or(&default_security_limits);
-    for image in result.images.iter_mut().flatten() {
-        match re_encode(
-            image,
-            target,
-            security_limits,
-            #[cfg(feature = "svg")]
-            &config.svg,
-        ) {
-            Ok(_) => {}
-            Err(warning) => {
-                result.processing_warnings.push(crate::types::ProcessingWarning {
-                    source: std::borrow::Cow::Borrowed("image_encoder"),
-                    message: std::borrow::Cow::Owned(warning.to_string()),
-                });
+    let mut format_renames = Vec::new();
+    if let Some(images) = result.images.take() {
+        let (images, renames, warnings) =
+            crate::core::image_encode::re_encode_images(images, config.output_format, security_limits, config);
+        result.images = Some(images);
+        result.processing_warnings.extend(warnings);
+        rewrite_all_content_image_extensions(result, &renames);
+        format_renames = renames;
+    }
+    format_renames
+}
+
+/// The inline pass `apply_output_format_pass_with_security_limits`, for the async pipeline:
+/// the per-image re-encode loop (decoding plus the GDI rasterization a Windows metafile goes
+/// through, which plays the metafile back record by record) runs inside `spawn_blocking` — a
+/// complex EMF can occupy its thread for seconds, and on the async side that would stall a
+/// runtime worker. The boundary mirrors `image_ocr`'s metafile rasterization. The
+/// `image_N.ext` string rewrites stay on the async side: they are cheap and need `&mut result`.
+///
+/// Behavior (early returns, warnings, renames, rewrites) is identical to the sync pass; the
+/// only failure mode added is a re-encode task panic, which the sync path would have
+/// propagated as the panic itself. The renames are returned so the caller can bring the
+/// #331/#286 snapshots (taken before this pass) onto the same extension state — see
+/// [`rewrite_snapshot_image_extensions`].
+#[cfg(all(feature = "image-encode", feature = "tokio-runtime"))]
+async fn apply_output_format_pass_offload(
+    result: &mut ExtractedDocument,
+    config: &crate::core::config::extraction::ImageExtractionConfig,
+    security_limits: Option<&crate::extractors::security::SecurityLimits>,
+) -> crate::Result<Vec<(u32, String, String)>> {
+    use crate::core::config::extraction::ImageOutputFormat;
+
+    // Same skip rule as the sync pass: `Native` is a no-op unless metafiles
+    // (always PNG-converted) or sanitized SVGs are present.
+    #[cfg(feature = "svg")]
+    let svg_sanitizing = config.svg.sanitize;
+    #[cfg(not(feature = "svg"))]
+    let svg_sanitizing = false;
+    if matches!(config.output_format, ImageOutputFormat::Native)
+        && !svg_sanitizing
+        && !result.images.as_ref().is_some_and(|images| {
+            images
+                .iter()
+                .any(|image| crate::core::image_encode::is_metafile_format(&image.format))
+        })
+    {
+        return Ok(Vec::new());
+    }
+
+    let mut format_renames = Vec::new();
+    if let Some(images) = result.images.take() {
+        let target = config.output_format;
+        let image_config = config.clone();
+        let limits = security_limits.cloned().unwrap_or_default();
+        let (images, renames, warnings) = tokio::task::spawn_blocking(move || {
+            crate::core::image_encode::re_encode_images(images, target, &limits, &image_config)
+        })
+        .await
+        .map_err(|error| crate::XbergError::ImageProcessing {
+            message: format!("image re-encode task panicked: {error}"),
+            source: None,
+        })?;
+        result.images = Some(images);
+        result.processing_warnings.extend(warnings);
+        rewrite_all_content_image_extensions(result, &renames);
+        format_renames = renames;
+    }
+    Ok(format_renames)
+}
+
+/// Bring the #331/#286 snapshots onto the extension state the re-encode pass left behind.
+///
+/// Both snapshots (`formatted_content_source`'s two strings and
+/// `internal_document_source_content`) are clones taken *before* the pass, while the pass
+/// rewrote `image_N.ext` references in `result.content`/`result.formatted_content` to follow
+/// the files it renamed on disk. Without applying the same rewrite to the snapshot clones, a
+/// pure extension change made `formatted_content` differ from its snapshot — the divergence
+/// check read that as "a processor rewrote the rendering", kept a stale pre-carry-over
+/// rendering, and `apply_output_format` then overwrote the post-processed text with it — and
+/// made `content` differ from the element-tree snapshot, dropping a tree nothing had
+/// diverged from. With the rewrite, the comparisons are like for like again: only a real
+/// post-pass change to either surface still counts as divergence. Empty renames leave the
+/// clones untouched (`rewrite_content_image_extensions` early-returns).
+#[cfg(feature = "image-encode")]
+fn rewrite_snapshot_image_extensions(
+    mut formatted_content_source: Option<(String, String)>,
+    mut internal_document_source_content: Option<String>,
+    format_renames: &[(u32, String, String)],
+) -> (Option<(String, String)>, Option<String>) {
+    if let Some((source_content, source_formatted)) = formatted_content_source.as_mut() {
+        rewrite_content_image_extensions(source_content, format_renames);
+        rewrite_content_image_extensions(source_formatted, format_renames);
+    }
+    if let Some(source_content) = internal_document_source_content.as_mut() {
+        rewrite_content_image_extensions(source_content, format_renames);
+    }
+    (formatted_content_source, internal_document_source_content)
+}
+
+/// Bring the preserved element tree onto the same extension state as the
+/// re-encode pass: rewrite `image_N.old` references in every element text and
+/// prebuilt page content, and swap the renamed formats in the tree's own
+/// `images` copy. Mirrors [`rewrite_snapshot_image_extensions`] for the tree
+/// the snapshots exist to keep alive.
+#[cfg(feature = "image-encode")]
+fn rewrite_tree_image_extensions(
+    tree: &mut crate::types::internal::InternalDocument,
+    format_renames: &[(u32, String, String)],
+) {
+    if format_renames.is_empty() {
+        return;
+    }
+    for element in tree.elements.iter_mut() {
+        rewrite_content_image_extensions(&mut element.text, format_renames);
+    }
+    if let Some(pages) = tree.prebuilt_pages.as_mut() {
+        for page in pages.iter_mut() {
+            rewrite_content_image_extensions(&mut page.content, format_renames);
+        }
+    }
+    for image in tree.images.iter_mut() {
+        if let Some((_, _old_format, new_format)) = format_renames
+            .iter()
+            .find(|(renamed, old_format, _)| *renamed == image.image_index && *old_format == image.format)
+        {
+            image.format = new_format.clone().into();
+        }
+    }
+}
+
+/// Rewrite `image_N.oldext` references in every pre-rendered content surface after a
+/// re-encode pass renamed the files on disk: the main content, the pre-rendered
+/// `formatted_content` (swapped into `content` by `apply_output_format` at the very end),
+/// and the per-page content (rendered before this pass and never touched afterwards).
+#[cfg(feature = "image-encode")]
+fn rewrite_all_content_image_extensions(result: &mut ExtractedDocument, format_renames: &[(u32, String, String)]) {
+    rewrite_content_image_extensions(&mut result.content, format_renames);
+    if let Some(formatted) = result.formatted_content.as_mut() {
+        rewrite_content_image_extensions(formatted, format_renames);
+    }
+    if let Some(pages) = result.pages.as_mut() {
+        for page in pages.iter_mut() {
+            rewrite_content_image_extensions(&mut page.content, format_renames);
+        }
+    }
+}
+
+/// Replace `image_N.oldext` URLs in pre-rendered content after a re-encode rename.
+///
+/// Fenced lines are literal text — a listing that shows the very references, or OCR
+/// text that merely looks like one — so the rewrite stops at their boundaries, the
+/// same contract as the CLI's `prefix_image_refs` and the acceptance judge. Only the
+/// reference of an image that actually changed format is rewritten: a sibling image
+/// whose re-encode failed keeps its old extension on disk, so its reference must keep
+/// it too. Walks on UTF-8 char boundaries via `find`; never indexes the string by raw
+/// byte offset (Chinese content makes unaligned slices panic).
+fn rewrite_content_image_extensions(content: &mut String, format_renames: &[(u32, String, String)]) {
+    if format_renames.is_empty() || content.is_empty() {
+        return;
+    }
+    let mut result = String::with_capacity(content.len());
+    let mut fence = crate::extraction::markdown_utils::FenceTracker::default();
+    for line in content.split_inclusive('\n') {
+        let terminator = if line.ends_with('\n') { "\n" } else { "" };
+        let line_body = line.strip_suffix('\n').unwrap_or(line);
+        let had_cr = line_body.strip_suffix('\r').is_some();
+        let body = line_body.strip_suffix('\r').unwrap_or(line_body);
+        if fence.fenced(body) {
+            // Fenced lines stay literal — except a line that is exactly an image
+            // marker. The Markdown path's `lift_image_markers_out_of_fences` runs
+            // after this pass and promotes exactly such lines out of their fence
+            // into live references, so a rename that skipped them here would leave
+            // the promoted line pointing at a file that no longer exists. The
+            // whole-line shape (the same predicate the lifter applies to a fence's
+            // first line) keeps the carve-out from touching listings that merely
+            // contain a marker mid-text. The carve-out is a deliberate superset of
+            // the lift's reach — any fence language, any position — because the
+            // marker's target file exists under the new name either way.
+            let marker_line =
+                body.trim_start().starts_with("![") && body.contains("](") && body.trim_end().ends_with(')');
+            if marker_line {
+                result.push_str(&rewrite_image_refs_on_unfenced_text(body, format_renames));
+                if had_cr {
+                    result.push('\r');
+                }
+                result.push_str(terminator);
+            } else {
+                result.push_str(line);
+            }
+        } else {
+            result.push_str(&rewrite_image_refs_on_unfenced_text(body, format_renames));
+            // The replacement sees the line's own characters only; a CRLF ending keeps its `\r`.
+            if had_cr {
+                result.push('\r');
+            }
+            result.push_str(terminator);
+        }
+    }
+    *content = result;
+}
+
+/// The rewrite itself, applied to one fence-free stretch. A reference never spans a
+/// line break (`image_` + digits + `.ext` holds no whitespace), so per-line splitting
+/// cannot cut a match.
+fn rewrite_image_refs_on_unfenced_text(content: &str, format_renames: &[(u32, String, String)]) -> String {
+    let mut result = String::with_capacity(content.len());
+    let mut rest = content;
+    while let Some(pos) = rest.find("image_") {
+        result.push_str(&rest[..pos]);
+        let after_prefix = &rest[pos + "image_".len()..];
+        let digit_len = after_prefix.bytes().take_while(u8::is_ascii_digit).count();
+        let after_digits = &after_prefix[digit_len..];
+        // The renderers bake `image_<image_index>.<format>` from the image's `image_index`
+        // field — the same number the CLI names the written file by — so the digits are the
+        // lookup key the rename was recorded under. The vector position can differ from the
+        // field when staging dropped unreferenced images, so it must not be the key.
+        let replacement = if digit_len > 0 {
+            let index = after_prefix[..digit_len].parse::<u32>().ok();
+            index.and_then(|index| {
+                format_renames.iter().find(|(renamed, old_format, _)| {
+                    *renamed == index && after_digits.starts_with(&format!(".{old_format}"))
+                })
+            })
+        } else {
+            None
+        };
+        match replacement {
+            Some((_, old_format, new_format)) => {
+                result.push_str("image_");
+                result.push_str(&after_prefix[..digit_len]);
+                result.push('.');
+                result.push_str(new_format);
+                rest = &after_digits[old_format.len() + 1..];
+            }
+            None => {
+                // Keep the literal `image_` + digits; continue after the prefix we already consumed.
+                result.push_str("image_");
+                result.push_str(&after_prefix[..digit_len]);
+                rest = after_digits;
             }
         }
     }
+    result.push_str(rest);
+    result
 }
 
 /// Populate `ExtractedImage::data_base64` when the caller opts in via
@@ -1053,7 +1547,7 @@ fn append_embedded_image_ocr_text(doc: &mut InternalDocument) {
 }
 
 /// Returns `true` if `text` is exactly a markdown image reference (`![alt](url)`).
-fn is_markdown_image_reference(text: &str) -> bool {
+pub(crate) fn is_markdown_image_reference(text: &str) -> bool {
     let t = text.trim();
     if !t.starts_with("![") {
         return false;
@@ -1106,6 +1600,7 @@ mod issue_214_text_coverage_tests {
             speaker_notes: None,
             section_name: None,
             sheet_name: None,
+            ocr_confidence: None,
         }
     }
 

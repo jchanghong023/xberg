@@ -10,7 +10,7 @@
 //! - **Format flexibility**: Support text, markdown, djot, and structured output formats
 //! - **Table detection support**: Enable table reconstruction from element geometry
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
 fn deserialize_quadrilateral_points<'de, D>(deserializer: D) -> Result<Vec<OcrPoint>, D::Error>
@@ -28,7 +28,7 @@ where
 }
 
 /// A point in OCR raster pixel coordinates.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct OcrPoint {
     /// Horizontal coordinate.
     pub x: u32,
@@ -43,15 +43,8 @@ enum OcrPointWire {
     Named { x: u32, y: u32 },
 }
 
-impl Serialize for OcrPoint {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (self.x, self.y).serialize(serializer)
-    }
-}
-
+// ~keep Deserialize stays hand-written (not derived) so a legacy positional `[x, y]` array from
+// pre-migration callers still parses; only Serialize now emits the named object.
 impl<'de> Deserialize<'de> for OcrPoint {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -67,13 +60,13 @@ impl<'de> Deserialize<'de> for OcrPoint {
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for OcrPoint {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        use utoipa::openapi::schema::{ArrayBuilder, ArrayItems, Object, Type};
+        use utoipa::openapi::schema::{Object, ObjectBuilder, Type};
 
-        ArrayBuilder::new()
-            .items(ArrayItems::False)
-            .prefix_items([Object::with_type(Type::Integer), Object::with_type(Type::Integer)])
-            .min_items(Some(2))
-            .max_items(Some(2))
+        ObjectBuilder::new()
+            .property("x", Object::with_type(Type::Integer))
+            .required("x")
+            .property("y", Object::with_type(Type::Integer))
+            .required("y")
             .into()
     }
 }
@@ -625,48 +618,80 @@ mod binding_value_serde_tests {
 
     #[cfg(feature = "api")]
     #[test]
-    fn should_describe_ocr_point_as_legacy_array_schema() {
+    fn should_describe_ocr_point_as_named_object_schema() {
         let schema =
             serde_json::to_value(<OcrPoint as utoipa::PartialSchema>::schema()).expect("schema must serialize");
-        assert_eq!(schema["type"], "array");
-        assert_eq!(schema["minItems"], 2);
-        assert_eq!(schema["maxItems"], 2);
-        assert_eq!(schema["items"], false);
-        assert_eq!(schema["prefixItems"].as_array().map(Vec::len), Some(2));
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["x"]["type"], "integer");
+        assert_eq!(schema["properties"]["y"]["type"], "integer");
+        let required = schema["required"].as_array().expect("schema must have required fields");
+        assert_eq!(required.len(), 2);
+        assert!(required.contains(&json!("x")));
+        assert!(required.contains(&json!("y")));
     }
 
     #[test]
-    fn should_accept_both_ocr_point_wire_shapes_and_serialize_as_legacy_tuple() {
+    fn should_still_accept_legacy_positional_array_for_ocr_point() {
         let legacy = json!([10, 20]);
-        let positional: OcrPoint = serde_json::from_value(legacy.clone()).expect("legacy OCR point must deserialize");
+        let positional: OcrPoint = serde_json::from_value(legacy).expect("legacy OCR point must deserialize");
+
+        assert_eq!(positional, OcrPoint { x: 10, y: 20 });
+    }
+
+    #[test]
+    fn should_serialize_ocr_point_as_named_object() {
         let named: OcrPoint =
             serde_json::from_value(json!({"x": 10, "y": 20})).expect("named OCR point must deserialize");
 
-        assert_eq!(named, positional);
-        assert_eq!(
-            serde_json::to_value(positional).expect("OCR point must serialize"),
-            legacy
-        );
+        assert_eq!(named, OcrPoint { x: 10, y: 20 });
         assert_eq!(
             serde_json::to_value(named).expect("named OCR point must serialize"),
-            legacy
+            json!({"x": 10, "y": 20})
         );
     }
 
     #[test]
-    fn should_preserve_legacy_quadrilateral_point_tuple_wire_format() {
+    fn should_still_accept_legacy_positional_array_for_quadrilateral_points() {
         let legacy = json!({
             "type": "quadrilateral",
             "points": [[10, 20], [100, 22], [98, 70], [8, 68]]
         });
-        let geometry: OcrBoundingGeometry =
-            serde_json::from_value(legacy.clone()).expect("legacy geometry must deserialize");
+        let geometry: OcrBoundingGeometry = serde_json::from_value(legacy).expect("legacy geometry must deserialize");
         let OcrBoundingGeometry::Quadrilateral { points } = &geometry else {
             panic!("expected quadrilateral geometry");
         };
 
         assert_eq!(points[0], OcrPoint { x: 10, y: 20 });
-        assert_eq!(serde_json::to_value(geometry).expect("geometry must serialize"), legacy);
+        assert_eq!(points[1], OcrPoint { x: 100, y: 22 });
+        assert_eq!(points[2], OcrPoint { x: 98, y: 70 });
+        assert_eq!(points[3], OcrPoint { x: 8, y: 68 });
+    }
+
+    #[test]
+    fn should_serialize_quadrilateral_points_as_named_objects() {
+        let geometry: OcrBoundingGeometry = serde_json::from_value(json!({
+            "type": "quadrilateral",
+            "points": [
+                {"x": 10, "y": 20},
+                {"x": 100, "y": 22},
+                {"x": 98, "y": 70},
+                {"x": 8, "y": 68}
+            ]
+        }))
+        .expect("named geometry must deserialize");
+
+        assert_eq!(
+            serde_json::to_value(geometry).expect("geometry must serialize"),
+            json!({
+                "type": "quadrilateral",
+                "points": [
+                    {"x": 10, "y": 20},
+                    {"x": 100, "y": 22},
+                    {"x": 98, "y": 70},
+                    {"x": 8, "y": 68}
+                ]
+            })
+        );
     }
 
     #[test]

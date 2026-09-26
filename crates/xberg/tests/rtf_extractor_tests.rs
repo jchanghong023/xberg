@@ -115,8 +115,9 @@ async fn test_rtf_ansicpg1251_extraction() {
     let extraction = result.expect("Operation failed");
 
     assert_eq!(extraction.mime_type, "application/rtf");
+    // fork 默认 Markdown 渲染（fork.md）：`!` 会被转义为 `\!`
     assert!(
-        extraction.content.contains("Привет, мир!"),
+        extraction.content.contains("Привет, мир!") || extraction.content.contains("Привет, мир\\!"),
         "Should decode CP1251 hex escapes as Cyrillic text (found: {})",
         extraction.content
     );

@@ -20,6 +20,11 @@ struct HandoffRaceProcessor {
     shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     executed_after_shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     mutation_error: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    // #1749: the reentrant mutation attempted from inside `process` below must land on the
+    // *same* isolated registry `run_pipeline_with_isolated_registry` is snapshotting from, not
+    // the process-wide global -- so the processor carries a handle to it instead of reaching
+    // for `crate::plugins::unregister_post_processor`. ~keep
+    state: std::sync::Arc<initialization::ProcessorRegistryState>,
 }
 
 #[cfg(feature = "tokio-runtime")]
@@ -43,7 +48,9 @@ impl crate::plugins::Plugin for HandoffRaceProcessor {
 impl crate::plugins::PostProcessor for HandoffRaceProcessor {
     async fn process(&self, _: &mut crate::types::ExtractedDocument, _: &ExtractionConfig) -> Result<()> {
         if let Some(error_slot) = &self.mutation_error {
-            let error = crate::plugins::unregister_post_processor("handoff-race")
+            let error = self
+                .state
+                .unregister("handoff-race")
                 .expect_err("lifecycle mutation during processing must be rejected");
             *error_slot.lock().unwrap() = Some(error.to_string());
         }
@@ -116,8 +123,70 @@ fn summarization_test_config() -> ExtractionConfig {
 
 #[cfg(feature = "summarization")]
 fn restore_builtin_summarization() {
-    crate::plugins::unregister_post_processor("summarization").unwrap();
-    crate::plugins::processor::builtin::summarization::register().unwrap();
+    retry_while_registry_in_use(|| crate::plugins::unregister_post_processor("summarization"));
+    retry_while_registry_in_use(crate::plugins::processor::builtin::summarization::register);
+}
+
+/// Maximum attempts before a lifecycle mutation is treated as genuinely stuck.
+///
+/// Carries `retry_while_registry_in_use`'s own cfg: without it the constants outlive the only
+/// function that reads them on any feature set that compiles it out, and `-D warnings` turns
+/// that into a hard error on the narrow no-ORT legs while every wide-feature leg stays green.
+/// #1749 narrowed this from `any(summarization, tokio-runtime)`: the `tokio-runtime`-only
+/// callers (the pipeline lifecycle-gate tests) now use an isolated `ProcessorRegistryState`
+/// instead, so `tokio-runtime` alone no longer has a caller left -- this must track exactly the
+/// feature combinations the remaining call sites below require, or a `pdf,ocr`-only leg (which
+/// enables `tokio-runtime` via `ocr` but none of these) is dead code again under `-D warnings`. ~keep
+#[cfg(any(
+    feature = "summarization",
+    all(feature = "captioning", feature = "redaction", feature = "chunking"),
+    all(feature = "captioning", feature = "tree-sitter")
+))]
+const REGISTRY_MUTATION_ATTEMPTS: usize = 100;
+
+/// Delay between attempts, long enough for a concurrent extraction to drop its snapshot lease.
+#[cfg(any(
+    feature = "summarization",
+    all(feature = "captioning", feature = "redaction", feature = "chunking"),
+    all(feature = "captioning", feature = "tree-sitter")
+))]
+const REGISTRY_MUTATION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Retry a post-processor lifecycle mutation while the registry reports it is in use.
+///
+/// `with_registration_update` refuses a mutation whenever a snapshot lease is live, and the
+/// documented contract (`initialization.rs`) is that this failure is *retryable* -- so
+/// `.unwrap()`ing it asserts an exclusivity this binary cannot provide. `#[serial]` only orders a
+/// test against the crate's other `#[serial]` tests, while dozens of non-serial tests here run
+/// real extractions and hold that lease. Honour the contract instead of racing it. ~keep
+#[cfg(any(
+    feature = "summarization",
+    all(feature = "captioning", feature = "redaction", feature = "chunking"),
+    all(feature = "captioning", feature = "tree-sitter")
+))]
+fn retry_while_registry_in_use<T>(mut mutation: impl FnMut() -> crate::Result<T>) -> T {
+    for _ in 0..REGISTRY_MUTATION_ATTEMPTS {
+        match mutation() {
+            Ok(value) => return value,
+            Err(crate::XbergError::Other(message)) if message.contains("retry the lifecycle mutation") => {
+                std::thread::sleep(REGISTRY_MUTATION_RETRY_DELAY);
+            }
+            Err(error) => panic!("post-processor lifecycle mutation failed: {error}"),
+        }
+    }
+    panic!("post-processor registry still in use by a concurrent extraction after retrying");
+}
+
+/// Run a lifecycle mutation whose *intended* outcome is an error, retrying only the busy-registry
+/// refusal so a concurrent extraction cannot satisfy an `is_err()` assertion for the wrong reason. ~keep
+#[cfg(feature = "summarization")]
+fn registry_mutation_outcome<T>(mut mutation: impl FnMut() -> crate::Result<T>) -> crate::Result<T> {
+    retry_while_registry_in_use(|| match mutation() {
+        Err(crate::XbergError::Other(message)) if message.contains("retry the lifecycle mutation") => {
+            Err(crate::XbergError::Other(message))
+        }
+        outcome => Ok(outcome),
+    })
 }
 
 /// Build an `InternalDocument` with a single paragraph element for pipeline tests.
@@ -166,11 +235,146 @@ async fn test_run_pipeline_basic() {
             enabled: false,
             ..Default::default()
         }),
+        // This test is about pipeline ordering, not the renderer: the default Markdown output
+        // would append the renderer's trailing newline to the element text. ~keep
+        output_format: crate::core::config::OutputFormat::Plain,
         ..Default::default()
     };
 
     let processed = run_pipeline(doc, &config).await.unwrap();
     assert_eq!(processed.content, "test");
+}
+
+/// Build a minimal `StructuredExtractionConfig` pointed at a closed local port so the LLM
+/// call (when `liter-llm` is compiled in) fails fast without touching the network, and the
+/// non-`liter-llm` build takes its "requires the 'liter-llm' feature" warning branch instead.
+/// Either way `structured_output` stays `None` -- the case GH#1624 is about. ~keep
+#[cfg(feature = "heuristics")]
+fn make_failing_structured_extraction_config() -> crate::core::config::llm::StructuredExtractionConfig {
+    crate::core::config::llm::StructuredExtractionConfig {
+        schema: serde_json::json!({"type": "object"}),
+        schema_name: crate::core::config::llm::StructuredExtractionConfig::default_schema_name(),
+        schema_description: None,
+        strict: false,
+        prompt: None,
+        llm: crate::core::config::llm::LlmConfig {
+            model: "openai/gpt-4o-mini".to_string(),
+            base_url: Some("http://127.0.0.1:1/v1".to_string()),
+            timeout_secs: Some(1),
+            max_retries: Some(0),
+            ..Default::default()
+        },
+    }
+}
+
+#[tokio::test]
+#[serial]
+#[cfg(feature = "heuristics")]
+async fn test_requested_structured_extraction_without_output_does_not_score_schema_all_valid() {
+    let doc = make_doc("Ordinary paragraph with enough text for coverage.", "text/plain");
+    let config = ExtractionConfig {
+        structured_extraction: Some(make_failing_structured_extraction_config()),
+        ..Default::default()
+    };
+
+    let processed = run_pipeline(doc, &config).await.unwrap();
+
+    assert!(
+        processed.structured_output.is_none(),
+        "the LLM call must not succeed against a closed local port"
+    );
+    let confidence = processed
+        .extraction_confidence
+        .expect("the heuristics feature must populate extraction_confidence");
+    assert_eq!(
+        confidence.schema_compliance,
+        crate::heuristics::confidence::SchemaCompliance::AllInvalid,
+        "GH#1624: a requested-but-unproduced structured_output must not score as AllValid"
+    );
+    assert_eq!(
+        confidence.combined, 0.6,
+        "text_coverage 1.0 folds the OCR weight in (0.6) but the schema weight must drop out"
+    );
+}
+
+#[tokio::test]
+#[serial]
+#[cfg(feature = "heuristics")]
+async fn test_ordinary_extraction_without_structured_config_keeps_full_schema_score() {
+    let doc = make_doc("Ordinary paragraph with enough text for coverage.", "text/plain");
+    let config = ExtractionConfig::default();
+
+    let processed = run_pipeline(doc, &config).await.unwrap();
+
+    let confidence = processed
+        .extraction_confidence
+        .expect("the heuristics feature must populate extraction_confidence");
+    assert_eq!(
+        confidence.schema_compliance,
+        crate::heuristics::confidence::SchemaCompliance::AllValid,
+        "structured extraction was never requested, so nothing failed validation"
+    );
+    assert_eq!(
+        confidence.combined, 1.0,
+        "an ordinary extraction with no structured config must not lose confidence score"
+    );
+}
+
+#[test]
+#[cfg(feature = "heuristics")]
+fn schema_compliance_helper_scores_failure_strictly_below_otherwise_identical_success() {
+    use crate::heuristics::confidence::{ConfidenceSignals, ConfidenceWeights, SchemaCompliance, score_confidence};
+
+    let requested_config = ExtractionConfig {
+        structured_extraction: Some(make_failing_structured_extraction_config()),
+        ..Default::default()
+    };
+    let succeeded = ExtractedDocument {
+        structured_output: Some(serde_json::json!({"title": "ok"})),
+        ..Default::default()
+    };
+    let failed = ExtractedDocument {
+        structured_output: None,
+        ..Default::default()
+    };
+
+    let success_compliance = structured_extraction_compliance(&requested_config, &succeeded);
+    let failure_compliance = structured_extraction_compliance(&requested_config, &failed);
+    assert_eq!(success_compliance, SchemaCompliance::AllValid);
+    assert_eq!(failure_compliance, SchemaCompliance::AllInvalid);
+
+    let weights = ConfidenceWeights::default();
+    let text_coverage = 0.8_f32;
+    let ocr_aggregate = Some(0.7_f32);
+    let success_confidence = score_confidence(
+        ConfidenceSignals {
+            text_coverage,
+            ocr_aggregate,
+            schema_compliance: success_compliance,
+        },
+        weights,
+    );
+    let failure_confidence = score_confidence(
+        ConfidenceSignals {
+            text_coverage,
+            ocr_aggregate,
+            schema_compliance: failure_compliance,
+        },
+        weights,
+    );
+
+    let expected_success: f32 =
+        text_coverage * weights.text_coverage + 0.7 * weights.ocr_aggregate + 1.0 * weights.schema_compliance;
+    let expected_failure: f32 =
+        text_coverage * weights.text_coverage + 0.7 * weights.ocr_aggregate + 0.0 * weights.schema_compliance;
+    assert_eq!(success_confidence.combined, expected_success);
+    assert_eq!(failure_confidence.combined, expected_failure);
+    assert!(
+        failure_confidence.combined < success_confidence.combined,
+        "a failed structured extraction ({}) must score strictly below an otherwise identical successful one ({})",
+        failure_confidence.combined,
+        success_confidence.combined
+    );
 }
 
 #[tokio::test]
@@ -193,7 +397,7 @@ async fn test_pipeline_with_quality_processing() {
 #[cfg(all(feature = "quality", feature = "summarization"))]
 async fn builtin_processors_recover_after_public_registry_clear() {
     initialization::initialize_features();
-    crate::plugins::clear_post_processors().unwrap();
+    retry_while_registry_in_use(crate::plugins::clear_post_processors);
 
     let doc = make_doc(
         "The first paragraph explains the problem. The second paragraph provides enough text for a summary.",
@@ -209,7 +413,7 @@ async fn builtin_processors_recover_after_public_registry_clear() {
     assert!(processed.quality_score.is_some());
     assert!(processed.summary.is_some());
 
-    crate::plugins::unregister_post_processor("summarization").unwrap();
+    retry_while_registry_in_use(|| crate::plugins::unregister_post_processor("summarization"));
     let doc = make_doc(
         "The first paragraph explains the problem. The second paragraph provides enough text for a summary.",
         "text/plain",
@@ -226,8 +430,8 @@ async fn builtin_processors_recover_after_public_registry_clear() {
 #[serial]
 #[cfg(all(feature = "quality", feature = "summarization"))]
 async fn unregister_remains_effective_during_pending_builtin_recovery() {
-    crate::plugins::clear_post_processors().unwrap();
-    crate::plugins::unregister_post_processor("summarization").unwrap();
+    retry_while_registry_in_use(crate::plugins::clear_post_processors);
+    retry_while_registry_in_use(|| crate::plugins::unregister_post_processor("summarization"));
 
     let config = ExtractionConfig {
         enable_quality_processing: true,
@@ -250,18 +454,29 @@ async fn unregister_remains_effective_during_pending_builtin_recovery() {
     assert!(processed.summary.is_none());
 }
 
+// #1749: this test races the module's registration gate against a real pipeline run
+// deliberately, so it needs its own isolated `ProcessorRegistryState` rather than the
+// process-wide registry -- `#[serial]` only ordered it against the crate's other `#[serial]`
+// tests, never against the dozens of non-serial tests elsewhere in this binary that hold a
+// `ProcessorSnapshotLease` on the global state while running a real extraction. When one of
+// those happened to be active at the instant this test's `with_gate` call sampled the lease
+// count, the call was rejected before its closure ever ran, and `started_sender` was dropped
+// unsent -- `started_receiver.recv().unwrap()` then panicked on a disconnected channel. An
+// isolated registry has no such unrelated activity to race. ~keep
 #[tokio::test(flavor = "current_thread")]
-#[serial]
 #[cfg(feature = "tokio-runtime")]
 async fn lifecycle_wait_keeps_async_runtime_schedulable() {
+    use std::sync::Arc;
     use std::sync::mpsc;
     use std::time::Duration;
 
-    initialization::initialize_processor_cache().unwrap();
+    let state = Arc::new(initialization::ProcessorRegistryState::new_isolated());
+    state.ensure_cache_current().unwrap();
     let (started_sender, started_receiver) = mpsc::channel();
     let (release_sender, release_receiver) = mpsc::channel();
+    let update_state = Arc::clone(&state);
     let update_thread = std::thread::spawn(move || {
-        with_post_processor_suppressed("async-runtime-test", || {
+        update_state.with_gate(|| {
             started_sender.send(()).unwrap();
             Ok::<_, crate::XbergError>(release_receiver.recv().unwrap())
         })
@@ -279,7 +494,7 @@ async fn lifecycle_wait_keeps_async_runtime_schedulable() {
     };
     let config = ExtractionConfig::default();
     let (pipeline_result, ()) = tokio::join!(
-        run_pipeline(make_doc("test", "text/plain"), &config),
+        run_pipeline_with_isolated_registry(make_doc("test", "text/plain"), &config, Arc::clone(&state)),
         release_from_async
     );
 
@@ -289,25 +504,32 @@ async fn lifecycle_wait_keeps_async_runtime_schedulable() {
     assert_eq!(release_source, "async");
 }
 
+// #1749: isolated for the same reason as `lifecycle_wait_keeps_async_runtime_schedulable` --
+// the `unregister` below deliberately runs while this test's own pipeline is parked mid-snapshot
+// and must succeed unconditionally (not merely "eventually"), which only an isolated registry
+// with no unrelated concurrent activity can guarantee. ~keep
 #[test]
-#[serial]
 #[cfg(feature = "tokio-runtime")]
 fn processor_handoff_rejects_a_snapshot_after_concurrent_shutdown() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, mpsc};
 
+    let state = Arc::new(initialization::ProcessorRegistryState::new_isolated());
     let shutdown = Arc::new(AtomicBool::new(false));
     let executed_after_shutdown = Arc::new(AtomicBool::new(false));
-    crate::plugins::register_post_processor(Arc::new(HandoffRaceProcessor {
-        shutdown: Arc::clone(&shutdown),
-        executed_after_shutdown: Arc::clone(&executed_after_shutdown),
-        mutation_error: None,
-    }))
-    .unwrap();
-    initialization::initialize_processor_cache().unwrap();
+    state
+        .register(Arc::new(HandoffRaceProcessor {
+            shutdown: Arc::clone(&shutdown),
+            executed_after_shutdown: Arc::clone(&executed_after_shutdown),
+            mutation_error: None,
+            state: Arc::clone(&state),
+        }))
+        .unwrap();
+    state.ensure_cache_current().unwrap();
 
     let (snapshot_sender, snapshot_receiver) = mpsc::channel();
     let (resume_sender, resume_receiver) = mpsc::channel();
+    let pipeline_state = Arc::clone(&state);
     let pipeline_thread = std::thread::spawn(move || {
         initialization::test_support::set_before_processor_snapshot_hook(Box::new(move || {
             snapshot_sender.send(()).unwrap();
@@ -317,13 +539,14 @@ fn processor_handoff_rejects_a_snapshot_after_concurrent_shutdown() {
             .enable_all()
             .build()
             .unwrap()
-            .block_on(run_pipeline(
+            .block_on(run_pipeline_with_isolated_registry(
                 make_doc("test", "text/plain"),
                 &ExtractionConfig::default(),
+                pipeline_state,
             ))
     });
     snapshot_receiver.recv().unwrap();
-    crate::plugins::unregister_post_processor("handoff-race").unwrap();
+    state.unregister("handoff-race").unwrap();
     assert!(shutdown.load(Ordering::SeqCst));
     resume_sender.send(()).unwrap();
     pipeline_thread.join().unwrap().unwrap();
@@ -331,25 +554,31 @@ fn processor_handoff_rejects_a_snapshot_after_concurrent_shutdown() {
     assert!(!executed_after_shutdown.load(Ordering::SeqCst));
 }
 
+// #1749: isolated for the same reason as the two tests above -- `concurrent_unregister` must be
+// driven by this test's own synchronization (the "after registration update began" hook), not by
+// an accident of unrelated concurrent activity on a shared registry. ~keep
 #[test]
-#[serial]
 #[cfg(feature = "tokio-runtime")]
 fn processor_handoff_lease_rejects_shutdown_until_pipeline_finishes() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, mpsc};
 
+    let state = Arc::new(initialization::ProcessorRegistryState::new_isolated());
     let shutdown = Arc::new(AtomicBool::new(false));
     let executed_after_shutdown = Arc::new(AtomicBool::new(false));
-    crate::plugins::register_post_processor(Arc::new(HandoffRaceProcessor {
-        shutdown: Arc::clone(&shutdown),
-        executed_after_shutdown: Arc::clone(&executed_after_shutdown),
-        mutation_error: None,
-    }))
-    .unwrap();
-    initialization::initialize_processor_cache().unwrap();
+    state
+        .register(Arc::new(HandoffRaceProcessor {
+            shutdown: Arc::clone(&shutdown),
+            executed_after_shutdown: Arc::clone(&executed_after_shutdown),
+            mutation_error: None,
+            state: Arc::clone(&state),
+        }))
+        .unwrap();
+    state.ensure_cache_current().unwrap();
 
     let (handoff_sender, handoff_receiver) = mpsc::channel();
     let (pipeline_resume_sender, pipeline_resume_receiver) = mpsc::channel();
+    let pipeline_state = Arc::clone(&state);
     let pipeline_thread = std::thread::spawn(move || {
         initialization::test_support::set_after_processor_snapshot_validated_hook(Box::new(move || {
             handoff_sender.send(()).unwrap();
@@ -359,57 +588,67 @@ fn processor_handoff_lease_rejects_shutdown_until_pipeline_finishes() {
             .enable_all()
             .build()
             .unwrap()
-            .block_on(run_pipeline(
+            .block_on(run_pipeline_with_isolated_registry(
                 make_doc("test", "text/plain"),
                 &ExtractionConfig::default(),
+                pipeline_state,
             ))
     });
     handoff_receiver.recv().unwrap();
 
     let (mutation_sender, mutation_receiver) = mpsc::channel();
+    let unregister_state = Arc::clone(&state);
     let unregister_thread = std::thread::spawn(move || {
         initialization::test_support::set_after_registration_update_began_hook(Box::new(move || {
             mutation_sender.send(()).unwrap();
         }));
-        crate::plugins::unregister_post_processor("handoff-race")
+        unregister_state.unregister("handoff-race")
     });
     mutation_receiver.recv().unwrap();
     assert!(!shutdown.load(Ordering::SeqCst));
     pipeline_resume_sender.send(()).unwrap();
     pipeline_thread.join().unwrap().unwrap();
     let concurrent_unregister = unregister_thread.join().unwrap();
-    crate::plugins::unregister_post_processor("handoff-race").unwrap();
+    state.unregister("handoff-race").unwrap();
 
     assert!(concurrent_unregister.is_err());
     assert!(shutdown.load(Ordering::SeqCst));
     assert!(!executed_after_shutdown.load(Ordering::SeqCst));
 }
 
+// #1749: isolated for the same reason as the three tests above. This test used to need the
+// `retry_while_registry_in_use` dance documented below just to get its own setup registered
+// without racing an unrelated concurrent extraction's lease; an isolated registry has no such
+// lease to race, so the registration below always succeeds on the first try.
 #[test]
-#[serial]
 #[cfg(feature = "tokio-runtime")]
 fn reentrant_lifecycle_mutation_returns_in_use_error_without_deadlock() {
     use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::Duration;
 
+    let state = Arc::new(initialization::ProcessorRegistryState::new_isolated());
     let mutation_error = Arc::new(Mutex::new(None));
     let thread_error = Arc::clone(&mutation_error);
-    let (result_sender, result_receiver) = mpsc::channel();
-    let pipeline_thread = std::thread::spawn(move || {
-        crate::plugins::register_post_processor(Arc::new(HandoffRaceProcessor {
+    state
+        .register(Arc::new(HandoffRaceProcessor {
             shutdown: Arc::new(AtomicBool::new(false)),
             executed_after_shutdown: Arc::new(AtomicBool::new(false)),
-            mutation_error: Some(thread_error),
+            mutation_error: Some(Arc::clone(&thread_error)),
+            state: Arc::clone(&state),
         }))
         .unwrap();
+    let (result_sender, result_receiver) = mpsc::channel();
+    let pipeline_state = Arc::clone(&state);
+    let pipeline_thread = std::thread::spawn(move || {
         let pipeline_result = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
-            .block_on(run_pipeline(
+            .block_on(run_pipeline_with_isolated_registry(
                 make_doc("test", "text/plain"),
                 &ExtractionConfig::default(),
+                pipeline_state,
             ));
         result_sender.send(pipeline_result).unwrap();
     });
@@ -418,7 +657,6 @@ fn reentrant_lifecycle_mutation_returns_in_use_error_without_deadlock() {
         .recv_timeout(Duration::from_millis(250))
         .expect("reentrant lifecycle mutation must not deadlock the pipeline");
     pipeline_thread.join().unwrap();
-    crate::plugins::unregister_post_processor("handoff-race").unwrap();
 
     pipeline_result.unwrap();
     let error = mutation_error.lock().unwrap().clone().unwrap();
@@ -429,15 +667,16 @@ fn reentrant_lifecycle_mutation_returns_in_use_error_without_deadlock() {
 #[serial]
 #[cfg(feature = "summarization")]
 async fn failed_explicit_builtin_registration_preserves_suppression() {
-    crate::plugins::clear_post_processors().unwrap();
-    crate::plugins::unregister_post_processor("summarization").unwrap();
-    let registration =
+    retry_while_registry_in_use(crate::plugins::clear_post_processors);
+    retry_while_registry_in_use(|| crate::plugins::unregister_post_processor("summarization"));
+    let registration = registry_mutation_outcome(|| {
         crate::plugins::register_post_processor(std::sync::Arc::new(SummarizationLifecycleTestProcessor {
             priority: 90,
             fail_initialize: true,
             fail_shutdown: false,
             marker: None,
-        }));
+        }))
+    });
 
     let processed = run_pipeline(
         make_doc("Enough content exists to create a summary.", "text/plain"),
@@ -446,7 +685,8 @@ async fn failed_explicit_builtin_registration_preserves_suppression() {
     .await;
     restore_builtin_summarization();
 
-    assert!(registration.is_err());
+    let registration_error = registration.expect_err("initialize failure must reject the registration");
+    assert!(registration_error.to_string().contains("test initialization failure"));
     assert!(processed.unwrap().summary.is_none());
 }
 
@@ -454,22 +694,24 @@ async fn failed_explicit_builtin_registration_preserves_suppression() {
 #[serial]
 #[cfg(feature = "summarization")]
 async fn failed_builtin_replacement_triggers_automatic_recovery() {
-    crate::plugins::clear_post_processors().unwrap();
+    retry_while_registry_in_use(crate::plugins::clear_post_processors);
     initialization::initialize_processor_cache().unwrap();
-    crate::plugins::register_post_processor(std::sync::Arc::new(SummarizationLifecycleTestProcessor {
-        priority: 90,
-        fail_initialize: false,
-        fail_shutdown: true,
-        marker: None,
-    }))
-    .unwrap();
-    let replacement =
+    retry_while_registry_in_use(|| {
+        crate::plugins::register_post_processor(std::sync::Arc::new(SummarizationLifecycleTestProcessor {
+            priority: 90,
+            fail_initialize: false,
+            fail_shutdown: true,
+            marker: None,
+        }))
+    });
+    let replacement = registry_mutation_outcome(|| {
         crate::plugins::register_post_processor(std::sync::Arc::new(SummarizationLifecycleTestProcessor {
             priority: 91,
             fail_initialize: false,
             fail_shutdown: false,
             marker: None,
-        }));
+        }))
+    });
 
     let processed = run_pipeline(
         make_doc("Enough content exists to create a summary.", "text/plain"),
@@ -478,7 +720,8 @@ async fn failed_builtin_replacement_triggers_automatic_recovery() {
     .await;
     restore_builtin_summarization();
 
-    assert!(replacement.is_err());
+    let replacement_error = replacement.expect_err("shutdown failure must reject the replacement");
+    assert!(replacement_error.to_string().contains("test shutdown failure"));
     assert!(processed.unwrap().summary.is_some());
 }
 
@@ -493,8 +736,8 @@ async fn bootstrap_preserves_custom_processor_with_builtin_name() {
             fail_shutdown: false,
             marker: Some("custom-summarization"),
         });
-    crate::plugins::clear_post_processors().unwrap();
-    crate::plugins::register_post_processor(std::sync::Arc::clone(&custom)).unwrap();
+    retry_while_registry_in_use(crate::plugins::clear_post_processors);
+    retry_while_registry_in_use(|| crate::plugins::register_post_processor(std::sync::Arc::clone(&custom)));
 
     let processed = run_pipeline(make_doc("test", "text/plain"), &ExtractionConfig::default()).await;
     let registered = crate::plugins::registry::get_post_processor_registry()
@@ -519,7 +762,7 @@ async fn bootstrap_preserves_custom_processor_with_builtin_name() {
 fn concurrent_builtin_recovery_waits_for_complete_registration() {
     const CALLER_COUNT: usize = 8;
 
-    crate::plugins::clear_post_processors().unwrap();
+    retry_while_registry_in_use(crate::plugins::clear_post_processors);
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(CALLER_COUNT));
     let callers = (0..CALLER_COUNT)
         .map(|_| {
@@ -1328,7 +1571,7 @@ async fn captioning_prepass_keeps_redaction_and_chunks_consistent() {
     }
 
     initialization::initialize_features();
-    crate::plugins::processor::builtin::redaction::register().unwrap();
+    retry_while_registry_in_use(crate::plugins::processor::builtin::redaction::register);
     let registry = crate::plugins::registry::get_post_processor_registry();
     registry.write().register(Arc::new(StubCaptioningProcessor)).unwrap();
     clear_processor_cache().unwrap();
@@ -1371,7 +1614,7 @@ async fn captioning_prepass_keeps_redaction_and_chunks_consistent() {
 
     let processed = run_pipeline(doc, &config).await;
 
-    crate::plugins::processor::builtin::captioning::register().unwrap();
+    retry_while_registry_in_use(crate::plugins::processor::builtin::captioning::register);
     clear_processor_cache().unwrap();
 
     let processed = processed.unwrap();
@@ -1529,7 +1772,7 @@ async fn captioning_prepass_preserves_full_code_intelligence_scratch_payload() {
     let processed = run_pipeline(doc, &config).await.unwrap();
 
     // Restore the real captioning processor for subsequent tests in this module.
-    crate::plugins::processor::builtin::captioning::register().unwrap();
+    retry_while_registry_in_use(crate::plugins::processor::builtin::captioning::register);
     clear_processor_cache().unwrap();
 
     assert_eq!(
@@ -1643,6 +1886,9 @@ async fn test_nfc_normalization_decomposes_to_composed() {
 async fn test_nfc_normalization_idempotent_on_ascii() {
     let doc = make_doc("Hello, world! 123", "text/plain");
     let config = ExtractionConfig {
+        // The subject is NFC normalization, not Markdown rendering; keep the
+        // content comparison in plain text.
+        output_format: OutputFormat::Plain,
         postprocessor: Some(crate::core::config::PostProcessorConfig {
             enabled: false,
             ..Default::default()
@@ -1662,6 +1908,9 @@ async fn test_nfc_normalization_applies_to_page_content() {
     doc.mime_type = "text/plain".to_string();
     doc.push_element(InternalElement::text(ElementKind::Paragraph, "re\u{0301}sume\u{0301}", 0).with_page(1));
     let config = ExtractionConfig {
+        // Plain rendering keeps the page-content comparison exact; Markdown is the
+        // library default and would append a trailing newline.
+        output_format: OutputFormat::Plain,
         postprocessor: Some(crate::core::config::PostProcessorConfig {
             enabled: false,
             ..Default::default()
@@ -1932,6 +2181,43 @@ mod full_page_image_ocr_tests {
         assert!(image_ocr_positions(&document).is_empty());
     }
 
+    /// An extractor that already recognized an image (standalone images hand
+    /// their whole-image OCR result to the fence via `ExtractedImage::ocr_result`)
+    /// must not have that image recognized a second time: two runs produce two
+    /// readings whose noise differs, and both end up in the output.
+    #[test]
+    fn should_skip_images_that_already_carry_an_ocr_result() {
+        let mut document = pdf_document();
+        document.images = vec![
+            image(
+                0,
+                1,
+                BoundingBox {
+                    x0: 10.0,
+                    y0: 10.0,
+                    x1: 40.0,
+                    y1: 40.0,
+                },
+            ),
+            {
+                let mut recognized = image(
+                    1,
+                    1,
+                    BoundingBox {
+                        x0: 10.0,
+                        y0: 10.0,
+                        x1: 40.0,
+                        y1: 40.0,
+                    },
+                );
+                recognized.ocr_result = Some(Box::new(crate::types::ExtractedDocument::default()));
+                recognized
+            },
+        ];
+
+        assert_eq!(image_ocr_positions(&document), vec![0]);
+    }
+
     #[test]
     fn should_not_apply_pdf_deduplication_to_other_formats() {
         let mut document = pdf_document();
@@ -2051,6 +2337,38 @@ mod output_format_pass_tests {
         );
     }
 
+    /// Under `output_format = Native` the pass runs whenever a metafile is
+    /// present (metafiles always convert to PNG); the sibling raster image is
+    /// left untouched. The emf bytes here are not playable, so the expected
+    /// outcome is a warning plus an untouched entry — what matters is that the
+    /// pass did not skip on `Native`.
+    #[test]
+    fn native_target_runs_the_pass_for_metafiles() {
+        let png = make_png_bytes();
+        let mut result = ExtractedDocument {
+            images: Some(vec![
+                make_image(Bytes::from_static(&[0x01, 0x00, 0x00, 0x00]), "emf"),
+                make_image(png.clone(), "png"),
+            ]),
+            ..Default::default()
+        };
+
+        let cfg = ImageExtractionConfig {
+            output_format: ImageOutputFormat::Native,
+            ..Default::default()
+        };
+
+        apply_output_format_pass(&mut result, &cfg);
+
+        let images = result.images.as_ref().expect("images must be present");
+        assert_eq!(images[0].format.as_ref(), "emf", "undrawable metafile stays untouched");
+        assert_eq!(images[1].data, png, "Native leaves raster bytes untouched");
+        assert!(
+            !result.processing_warnings.is_empty(),
+            "the pass must run under Native when a metafile is present (warning proves it)"
+        );
+    }
+
     /// With the `svg` feature: an SVG image is rasterized to the target format
     /// (PNG here) via `resvg`/`usvg`.  No warning is pushed — the encode succeeds.
     #[cfg(feature = "svg")]
@@ -2134,6 +2452,44 @@ mod output_format_pass_tests {
             result.processing_warnings[0]
                 .message
                 .contains("security_limits.max_content_size")
+        );
+    }
+
+    /// The rename a re-encode produces is keyed by the image's `image_index` field — the
+    /// number the renderers bake into `image_N.ext` and the CLI names the written file by —
+    /// not by the vector position: staging can drop unreferenced images, leaving the
+    /// positions dense while the field has gaps (here vector position 0 carries
+    /// `image_index` 7). A position-keyed rename rewrote nothing the document referenced,
+    /// or another image's reference outright.
+    #[test]
+    fn rename_keys_come_from_the_image_index_field_not_the_position() {
+        let mut jpeg = make_image(make_jpeg_bytes(), "jpeg");
+        jpeg.image_index = 7;
+        let mut already_png = make_image(make_png_bytes(), "png");
+        already_png.image_index = 12;
+        let mut result = ExtractedDocument {
+            images: Some(vec![jpeg, already_png]),
+            ..Default::default()
+        };
+
+        let cfg = ImageExtractionConfig {
+            output_format: ImageOutputFormat::Png,
+            ..Default::default()
+        };
+
+        let renames = apply_output_format_pass_with_security_limits(&mut result, &cfg, None);
+
+        assert_eq!(
+            renames,
+            vec![(7u32, "jpeg".to_string(), "png".to_string())],
+            "the only format change is jpeg→png, keyed by image_index 7 — not the position 0"
+        );
+
+        let mut content = String::from("![](image_7.jpeg) and ![](image_0.jpeg)");
+        super::rewrite_content_image_extensions(&mut content, &renames);
+        assert_eq!(
+            content, "![](image_7.png) and ![](image_0.jpeg)",
+            "the keyed reference follows the rename; a position-shaped number no image carries stays"
         );
     }
 }
@@ -2222,47 +2578,19 @@ mod data_base64_pass_tests {
     }
 }
 
-#[tokio::test]
-#[serial]
-async fn test_pdf_run_fallback_not_suppressed_without_images_config() {
-    use crate::core::config::ImageExtractionConfig;
-
-    let default_no_images = crate::core::config::ExtractionConfig::default();
-    assert!(
-        default_no_images.images.is_none(),
-        "baseline: default config has no images section"
-    );
-
-    let skip_fallback = default_no_images
-        .images
-        .as_ref()
-        .map(|i| i.run_ocr_on_images)
-        .unwrap_or(false);
-    assert!(
-        !skip_fallback,
-        "RunFallback must NOT be suppressed when config.images is None"
-    );
-
-    let with_images_opted_in = crate::core::config::ExtractionConfig {
-        images: Some(ImageExtractionConfig {
-            run_ocr_on_images: true,
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-    let skip_fallback_opted_in = with_images_opted_in
-        .images
-        .as_ref()
-        .map(|i| i.run_ocr_on_images)
-        .unwrap_or(false);
-    assert!(
-        skip_fallback_opted_in,
-        "RunFallback must be suppressed when images.run_ocr_on_images=true"
-    );
-}
+// #1576: `images.run_ocr_on_images` (per-extracted-image OCR) is a different setting from
+// document-level page OCR. A test here used to re-derive the buggy suppression logic inline
+// (`config.images.map(|i| i.run_ocr_on_images).unwrap_or(false)`) and assert that
+// `run_ocr_on_images=true` suppressed `RunFallback` -- that assertion WAS the bug, not the
+// contract. `extractors/pdf/mod.rs`'s `OcrGateOutcome::RunFallback` arm no longer reads
+// `config.images` at all, so there is nothing left to unit-test at that granularity; the
+// regression coverage is an end-to-end extraction in
+// `extractors::pdf::tests::images_config_does_not_suppress_scanned_page_ocr`. Left as a plain
+// comment, not a doc comment: it documents a removed test, not the module below it. ~keep
 
 mod document_counts {
     use super::super::populate_document_counts;
+    use crate::types::internal::InternalDocument;
     use crate::types::page::{PageContent, PageStructure, PageUnitType};
     use crate::types::{ExtractedDocument, ExtractedImage, Metadata, Table};
 
@@ -2288,6 +2616,7 @@ mod document_counts {
             speaker_notes: None,
             section_name: None,
             sheet_name: None,
+            ocr_confidence: None,
         }
     }
 
@@ -2303,7 +2632,7 @@ mod document_counts {
             pages: None,
             ..Default::default()
         };
-        populate_document_counts(&mut result);
+        populate_document_counts(&mut result, 0);
         assert_eq!(result.counts.pages, 5, "pages must read metadata.total_count");
         assert_eq!(result.counts.tables, 2);
         assert_eq!(result.counts.images, 1);
@@ -2316,7 +2645,7 @@ mod document_counts {
             pages: Some(vec![page(1), page(2), page(3)]),
             ..Default::default()
         };
-        populate_document_counts(&mut result);
+        populate_document_counts(&mut result, 0);
         assert_eq!(result.counts.pages, 3);
         assert_eq!(result.counts.tables, 0);
         assert_eq!(result.counts.images, 0);
@@ -2328,7 +2657,7 @@ mod document_counts {
             content: "plain text".to_string(),
             ..Default::default()
         };
-        populate_document_counts(&mut result);
+        populate_document_counts(&mut result, 0);
         assert_eq!(result.counts.pages, 0);
         assert_eq!(result.counts.tables, 0);
         assert_eq!(result.counts.images, 0);
@@ -2344,7 +2673,296 @@ mod document_counts {
             pages: Some(vec![page(1), page(2)]),
             ..Default::default()
         };
-        populate_document_counts(&mut result);
+        populate_document_counts(&mut result, 0);
         assert_eq!(result.counts.pages, 2);
     }
+
+    /// After EMF→PNG re-encode, pre-rendered Markdown URLs must be rewritten — outside
+    /// fences. Must not panic on multi-byte (Chinese) content — only touch `image_N.ext`.
+    #[test]
+    fn rewrite_content_image_extensions_updates_urls_without_utf8_panic() {
+        let mut content = String::from("Atpg 后仿真历险记\n\n![](image_0.emf)\n\n见 image_12.emf 与 image_3.png\n");
+        super::rewrite_content_image_extensions(
+            &mut content,
+            &[
+                (0, "emf".to_string(), "png".to_string()),
+                (12, "emf".to_string(), "png".to_string()),
+            ],
+        );
+        assert!(
+            content.contains("![](image_0.png)"),
+            "emf URL must become png; got: {content}"
+        );
+        assert!(
+            content.contains("image_12.png"),
+            "emf URL mid-text must become png; got: {content}"
+        );
+        assert!(
+            content.contains("image_3.png"),
+            "already-png URL must stay; got: {content}"
+        );
+        assert!(!content.contains(".emf"), "no emf refs left; got: {content}");
+        assert!(content.contains("Atpg 后仿真历险记"), "Chinese text preserved");
+    }
+
+    /// A fenced line is literal text — a listing showing the very references, or OCR
+    /// text that merely looks like one — so the rewrite must leave it verbatim and
+    /// still rewrite the reference outside.
+    #[test]
+    fn rewrite_content_image_extensions_skips_code_fences() {
+        let mut content = String::from("见 ![](image_0.emf)\n\n```text\nsee ![](image_0.emf) below\n```\n");
+        super::rewrite_content_image_extensions(&mut content, &[(0, "emf".to_string(), "png".to_string())]);
+        assert!(
+            content.starts_with("见 ![](image_0.png)\n\n"),
+            "the unfenced reference must follow the rename; got: {content:?}"
+        );
+        assert!(
+            content.contains("```text\nsee ![](image_0.emf) below\n```"),
+            "the fenced literal is text, not a reference; got: {content:?}"
+        );
+    }
+
+    /// A fenced line that is EXACTLY an image marker is the shape the Markdown
+    /// path's lift promotes into a live reference after this pass — the rename
+    /// must reach it, or the promoted line points at the pre-rename file. A
+    /// marker embedded in longer listing text stays literal.
+    #[test]
+    fn rewrite_content_image_extensions_rewrites_a_whole_line_marker_inside_a_fence() {
+        let mut content = String::from("```text\n![](image_0.emf)\n```\nsee ![](image_0.emf)\n");
+        super::rewrite_content_image_extensions(&mut content, &[(0, "emf".to_string(), "png".to_string())]);
+        assert!(
+            content.contains("```text\n![](image_0.png)\n```"),
+            "the whole-line marker inside the fence follows the rename: {content:?}"
+        );
+        assert!(
+            content.ends_with("see ![](image_0.png)\n"),
+            "the unfenced reference follows the rename too: {content:?}"
+        );
+    }
+
+    /// Only the reference of an image that actually changed format may be rewritten.
+    /// A sibling image of the same old format whose re-encode failed keeps the old
+    /// extension on disk, so a pattern-global rewrite would point its URL at a file
+    /// that does not exist.
+    #[test]
+    fn rewrite_content_image_extensions_leaves_failed_siblings_alone() {
+        let mut content = String::from("![](image_0.emf)\n中间文字\n\n![](image_7.emf)\n");
+        // Image 0 re-encoded to PNG; image 7 failed and stays `.emf` on disk.
+        super::rewrite_content_image_extensions(&mut content, &[(0, "emf".to_string(), "png".to_string())]);
+        assert!(
+            content.contains("![](image_0.png)"),
+            "the renamed image's URL must follow the new file; got: {content}"
+        );
+        assert!(
+            content.contains("![](image_7.emf)"),
+            "the failed image still exists as .emf, so its URL must stay; got: {content}"
+        );
+    }
+
+    /// An index that was never renamed keeps its extension even when the old format
+    /// matches — the digits are the lookup key, not the suffix.
+    #[test]
+    fn rewrite_content_image_extensions_requires_the_recorded_index() {
+        let mut content = String::from("正文 image_5.emf 结尾\n\nimage_9.emf 尾部\n");
+        super::rewrite_content_image_extensions(&mut content, &[(3, "emf".to_string(), "png".to_string())]);
+        assert!(
+            content.contains("image_5.emf") && content.contains("image_9.emf"),
+            "unrenamed indices must keep their extension; got: {content}"
+        );
+    }
+
+    /// The PPTX content path bakes a picture's placeholder into the code block around it. Left
+    /// there, the reference is inside a fence, where no markdown reader fetches or draws it.
+    #[test]
+    fn image_marker_is_lifted_out_of_the_fence_around_it() {
+        let mut content = String::from("前言\n\n```text\n![](image_3.png)\n-flag value\n-other value\n```\n\n后记\n");
+        crate::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(
+            content, "前言\n\n![](image_3.png)\n\n```text\n-flag value\n-other value\n```\n\n后记\n",
+            "the marker must be its own paragraph and the fence must keep the listing"
+        );
+    }
+
+    /// A picture with no recognized text leaves a fence holding nothing but the marker: the
+    /// whole fence goes away instead of leaving an unopened closing line behind.
+    #[test]
+    fn a_fence_holding_only_the_marker_loses_the_whole_fence() {
+        let mut content = String::from("前言\n```text\n![](image_7.emf)\n```\n后记\n");
+        crate::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(content, "前言\n![](image_7.emf)\n\n后记\n");
+    }
+
+    /// Code that merely starts with an image-looking line is still code: only a fence whose
+    /// body opens with a real markdown image reference is rewritten.
+    #[test]
+    fn a_fence_whose_first_line_is_not_a_marker_is_untouched() {
+        let source = String::from("```text\n![bracketed](not a reference\nprint(1)\n```\n");
+        let mut content = source.clone();
+        crate::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut content);
+        assert_eq!(content, source);
+    }
+
+    /// An extension rename in the encode pass must not defeat the #331/#286 divergence
+    /// checks: the snapshots predate the pass, so `rewrite_snapshot_image_extensions` brings
+    /// their clones onto the same `image_N.ext` state the live surfaces were rewritten to.
+    /// With that in place, a carry-over that rewrote only the body text still leaves
+    /// `formatted_content` equal to its snapshot — stale — so the pre-rendering is dropped
+    /// instead of overwriting the post-processed text; and a content that moved only by the
+    /// extension change keeps the element tree.
+    #[cfg(feature = "image-encode")]
+    #[test]
+    fn extension_renames_do_not_mask_a_stale_pre_rendering() {
+        let formatted_source = Some((
+            "body ![](image_0.emf) end".to_string(),
+            "rendered ![](image_0.emf) end".to_string(),
+        ));
+        let tree_source = Some("tree ![](image_0.emf) end".to_string());
+        let renames = vec![(0u32, "emf".to_string(), "png".to_string())];
+
+        let (formatted_source, tree_source) =
+            super::rewrite_snapshot_image_extensions(formatted_source, tree_source, &renames);
+        assert_eq!(
+            formatted_source.as_ref().map(|(a, b)| (a.as_str(), b.as_str())),
+            Some(("body ![](image_0.png) end", "rendered ![](image_0.png) end")),
+            "the snapshot clones follow the rename like the live surfaces do"
+        );
+
+        // After the pass (extension rewritten on both surfaces) plus a carry-over that
+        // rewrote only the body: the rendering did not move, so it is stale and dropped.
+        let mut result = crate::types::ExtractedDocument {
+            content: "body ![](image_0.png) end\n\ncarried caption".to_string(),
+            formatted_content: Some("rendered ![](image_0.png) end".to_string()),
+            ..Default::default()
+        };
+        super::discard_diverged_formatted_content(&mut result, formatted_source.as_ref());
+        assert!(
+            result.formatted_content.is_none(),
+            "the rendering predates the carried caption and must be dropped, not swapped in"
+        );
+
+        // A content that moved only by the extension change keeps the element tree (#286):
+        // it still stands for the text.
+        let mut tree_result = crate::types::ExtractedDocument {
+            content: "tree ![](image_0.png) end".to_string(),
+            internal_document: Some(InternalDocument::new("test")),
+            ..Default::default()
+        };
+        super::discard_diverged_internal_document(&mut tree_result, tree_source.as_deref());
+        assert!(
+            tree_result.internal_document.is_some(),
+            "an extension-only change is not divergence; the element tree must survive"
+        );
+    }
+}
+
+/// `drop_opted_out_images`: an opted-out caller must get an empty `doc.images`
+/// before derivation (regression #796's contract), while captioning — like image
+/// extraction — legitimately needs the entries, and an explicit
+/// `pdf_options.ocr_inline_images` ask keeps them too.
+#[test]
+fn opted_out_images_are_dropped_before_derivation() {
+    use crate::core::config::ImageExtractionConfig;
+    use crate::types::internal::{ElementKind, InternalElement};
+
+    let mut doc = crate::types::internal::InternalDocument::new("pdf");
+    doc.push_element(InternalElement::text(ElementKind::Paragraph, "body", 0));
+    doc.images.push(crate::types::ExtractedImage {
+        data: bytes::Bytes::from_static(b"png-bytes"),
+        format: Cow::Borrowed("png"),
+        ..Default::default()
+    });
+
+    super::drop_opted_out_images(&mut doc, &Default::default());
+    assert!(
+        !doc.images.is_empty(),
+        "default config asks for image extraction: entries stay"
+    );
+
+    let config = ExtractionConfig {
+        images: Some(ImageExtractionConfig {
+            extract_images: false,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    super::drop_opted_out_images(&mut doc, &config);
+    assert!(
+        doc.images.is_empty(),
+        "opted-out extraction must drop the entries (regression #796)"
+    );
+
+    let captioning = ExtractionConfig {
+        images: Some(ImageExtractionConfig {
+            extract_images: false,
+            ..Default::default()
+        }),
+        captioning: Some(crate::core::config::captioning::CaptioningConfig {
+            llm: Default::default(),
+            prompt: None,
+            min_image_area: crate::core::config::captioning::CaptioningConfig::default_min_image_area(),
+        }),
+        ..Default::default()
+    };
+    super::drop_opted_out_images(&mut doc, &captioning);
+    // (entries were already dropped above; re-populate to prove the captioning keep)
+    doc.images.push(crate::types::ExtractedImage {
+        data: bytes::Bytes::from_static(b"png-bytes"),
+        format: Cow::Borrowed("png"),
+        ..Default::default()
+    });
+    super::drop_opted_out_images(&mut doc, &captioning);
+    assert!(
+        !doc.images.is_empty(),
+        "captioning consumes the entries: the drop must not apply"
+    );
+
+    #[cfg(feature = "pdf")]
+    {
+        let inline_ocr = ExtractionConfig {
+            images: Some(ImageExtractionConfig {
+                extract_images: false,
+                ..Default::default()
+            }),
+            pdf_options: Some(crate::core::config::PdfConfig {
+                ocr_inline_images: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        super::drop_opted_out_images(&mut doc, &inline_ocr);
+        assert!(
+            !doc.images.is_empty(),
+            "an explicit ocr_inline_images ask keeps the entries in the result"
+        );
+    }
+}
+
+/// GH#1662, GH#1752: `ExtractionConfig::runs_ocr_on_embedded_images` must be the ONLY
+/// expression of "do embedded images get OCR'd". This module used to re-derive it from
+/// `images.run_ocr_on_images` and `ocr.is_some()`, while `needs_image_data` -- the READ gate a
+/// container consults before it reads an embedded image's bytes at all -- was defined against
+/// the method. The two copies drifted, a container attached an image with an empty buffer, and
+/// the OCR path reported `Could not determine image format` on the zero bytes. A comment did
+/// not prevent that, so assert the structural property: no executable line of this module
+/// mentions `run_ocr_on_images` at all, and the method is still called. ~keep
+#[test]
+fn embedded_image_ocr_gate_has_no_second_copy() {
+    const PIPELINE_SOURCE: &str = include_str!("mod.rs");
+
+    let rederived: Vec<(usize, &str)> = PIPELINE_SOURCE
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim_start().starts_with("//") && line.contains("run_ocr_on_images"))
+        .map(|(index, line)| (index + 1, line.trim()))
+        .collect();
+    assert!(
+        rederived.is_empty(),
+        "core/pipeline/mod.rs must call ExtractionConfig::runs_ocr_on_embedded_images() rather than \
+         re-deriving the embedded-image OCR gate (GH#1662); found {rederived:?}"
+    );
+
+    assert!(
+        PIPELINE_SOURCE.contains("config.runs_ocr_on_embedded_images()"),
+        "core/pipeline/mod.rs must still gate embedded-image OCR on runs_ocr_on_embedded_images()"
+    );
 }

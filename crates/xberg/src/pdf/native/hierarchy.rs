@@ -248,7 +248,16 @@ fn apply_xy_cut_if_column_aware(
     if order != xberg_native_pdf::document::ReadingOrder::ColumnAware {
         return;
     }
-    let context = ReadingOrderContext::new().with_page(page_index as u32);
+    // The gutter is what lets the XY-cut's heading-run pre-pass tell a heading
+    // opening the other column apart from a second `Tj` segment of the same
+    // heading line; without it the pre-pass is inert on this path and a
+    // wrapped heading is welded to the other column's opening line
+    // (xberg-io/xberg#1757). This ordering reaches the markdown lens, so it
+    // has to carry the gutter like every other XY-cut entry point. ~keep
+    let mut context = ReadingOrderContext::new().with_page(page_index as u32);
+    if let Some(gutter_x) = xberg_native_pdf::pipeline::reading_order::detect_column_gutter(spans.as_slice()) {
+        context = context.with_column_gutter(gutter_x);
+    }
     match XYCutStrategy::new().apply(spans.clone(), &context) {
         Ok(ordered) => *spans = ordered.into_iter().map(|item| item.span).collect(),
         Err(error) => tracing::debug!(
@@ -559,8 +568,48 @@ fn normalize_script_span(
 /// # Returns
 ///
 /// Vector of `SegmentData` objects with font metrics for hierarchy detection.
-pub(crate) fn extract_segments_from_page(doc: &mut NativeDocument, page_index: usize) -> Result<Vec<SegmentData>> {
-    extract_segments_from_page_inner(doc, page_index, &HashMap::new())
+pub(crate) fn extract_segments_from_page(
+    doc: &mut NativeDocument,
+    page_index: usize,
+    excluded_layers: &std::collections::HashSet<String>,
+) -> Result<Vec<SegmentData>> {
+    extract_segments_from_page_inner(doc, page_index, &HashMap::new(), excluded_layers)
+}
+
+/// Page text for segment extraction, honouring default-off optional-content layers.
+///
+/// The heading segments become the document's text (via `pre_rendered_doc` in
+/// `extractors/pdf/extraction.rs`), so text under a `/OCProperties/D/OFF` layer must be
+/// excluded here exactly as it is in the text path (`pdf/native/text.rs`,
+/// `page_text_with_options_excluding_layers`) — otherwise a layered PDF leaks its hidden
+/// copy of the page through the heading-segment path even though the text path filtered it
+/// (issue #67). An empty set is byte-identical to the unfiltered call.
+fn page_text_with_options_excluding_layers(
+    doc: &NativeDocument,
+    page_index: usize,
+    excluded_layers: &std::collections::HashSet<String>,
+) -> xberg_native_pdf::error::Result<xberg_native_pdf::layout::PageText> {
+    let reading_order = xberg_native_pdf::document::ReadingOrder::TopToBottom;
+    if excluded_layers.is_empty() {
+        return doc.doc.extract_page_text_with_options(page_index, reading_order);
+    }
+
+    let spans = doc.doc.extract_spans_filtered_with_reading_order(
+        page_index,
+        reading_order,
+        excluded_layers.clone(),
+        Default::default(),
+    )?;
+    let chars: Vec<xberg_native_pdf::layout::TextChar> = spans.iter().flat_map(|s| s.to_chars()).collect();
+    // GH#1653: the page extent is (urx - llx, ury - lly), not the raw upper-right corner.
+    let (llx, lly, urx, ury) = doc.doc.get_page_media_box(page_index)?;
+
+    Ok(xberg_native_pdf::layout::PageText {
+        spans,
+        chars,
+        page_width: urx - llx,
+        page_height: ury - lly,
+    })
 }
 
 /// Inner implementation of per-page segment extraction.
@@ -571,11 +620,9 @@ fn extract_segments_from_page_inner(
     doc: &mut NativeDocument,
     page_index: usize,
     mcid_roles: &HashMap<u32, Option<u8>>,
+    excluded_layers: &std::collections::HashSet<String>,
 ) -> Result<Vec<SegmentData>> {
-    let mut page_text_data = match doc
-        .doc
-        .extract_page_text_with_options(page_index, xberg_native_pdf::document::ReadingOrder::TopToBottom)
-    {
+    let mut page_text_data = match page_text_with_options_excluding_layers(doc, page_index, excluded_layers) {
         Ok(data) => data,
         Err(e) => {
             tracing::debug!(
@@ -681,7 +728,10 @@ fn dedupe_redrawn_segments(segments: Vec<SegmentData>) -> Vec<SegmentData> {
 ///
 /// Returns `(segments, used_structure_tree)`. When `used_structure_tree` is true,
 /// the caller should skip font-size clustering and use the pre-assigned roles.
-fn extract_segments_with_structure_tree(doc: &mut NativeDocument) -> Result<(Vec<Vec<SegmentData>>, bool)> {
+fn extract_segments_with_structure_tree(
+    doc: &mut NativeDocument,
+    excluded_layers: &std::collections::HashSet<String>,
+) -> Result<(Vec<Vec<SegmentData>>, bool)> {
     let mark_info = match doc.doc.mark_info() {
         Ok(mi) => mi,
         Err(e) => {
@@ -745,7 +795,7 @@ fn extract_segments_with_structure_tree(doc: &mut NativeDocument) -> Result<(Vec
             })
             .unwrap_or_default();
 
-        let segments = extract_segments_from_page_inner(doc, page_idx, &mcid_roles)?;
+        let segments = extract_segments_from_page_inner(doc, page_idx, &mcid_roles, excluded_layers)?;
         total_role_assigned += segments.iter().filter(|s| s.assigned_role.is_some()).count();
         all_pages.push(segments);
     }
@@ -776,7 +826,10 @@ fn extract_segments_with_structure_tree(doc: &mut NativeDocument) -> Result<(Vec
 ///
 /// Tuple of (per-page segment vectors, structure-tree-used flag).
 pub(crate) fn extract_all_segments(doc: &mut NativeDocument) -> Result<(Vec<Vec<SegmentData>>, bool)> {
-    let (tree_segments, used_tree) = extract_segments_with_structure_tree(doc)?;
+    // Issue #67: default-off optional-content layers are excluded here too, because these
+    // segments become the document text (see `page_text_with_options_excluding_layers`).
+    let excluded_layers = xberg_native_pdf::optional_content::compute_default_off_ocgs(&doc.doc);
+    let (tree_segments, used_tree) = extract_segments_with_structure_tree(doc, &excluded_layers)?;
     if used_tree && !tree_segments.is_empty() {
         return Ok((tree_segments, true));
     }
@@ -788,7 +841,7 @@ pub(crate) fn extract_all_segments(doc: &mut NativeDocument) -> Result<(Vec<Vec<
     let mut all_pages: Vec<Vec<SegmentData>> = Vec::with_capacity(page_count);
 
     for page_idx in 0..page_count {
-        let segments = extract_segments_from_page(doc, page_idx)?;
+        let segments = extract_segments_from_page(doc, page_idx, &excluded_layers)?;
         all_pages.push(segments);
     }
 

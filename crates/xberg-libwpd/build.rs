@@ -164,7 +164,13 @@ mod build_libwpd {
     /// dev builds, so the debug zlib (`-MDd`) would trip LNK2038 RuntimeLibrary
     /// mismatches; the debug dir is only a last-resort fallback.
     fn link_zlib() {
-        if !targeting_windows() {
+        // ~keep The vcpkg probe below is MSVC-only. `x64-windows-static-md` is MSVC-toolchain
+        // output, and handing an MSVC archive to the GNU/MinGW linker fails with repeated
+        // `corrupt .drectve at end of def file` and `ld returned 5` -- the Ruby gem's Windows
+        // leg builds against RubyInstaller's UCRT/MinGW ABI, so it took that path and could not
+        // link. Every non-MSVC target links the static zlib `libz-sys` already builds from
+        // source for the target, the same one whose headers `DEP_Z_INCLUDE` supplies below.
+        if !targeting_windows() || target_env() != "msvc" {
             println!("cargo:rustc-link-lib=static=z");
             return;
         }
@@ -242,17 +248,17 @@ mod build_libwpd {
         fs::write(&path, patched).unwrap_or_else(|error| panic!("writing {path:?}: {error}"));
     }
 
-    pub fn build() {
-        let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
-
+    /// Extract and patch the vendored librevenge/libwpd/boost archives into `out_dir`,
+    /// returning `(librevenge_root, libwpd_root, boost_root)`. ~keep
+    fn extract_sources(out_dir: &Path) -> (PathBuf, PathBuf, PathBuf) {
         let rev = extract(
-            &out_dir,
+            out_dir,
             "librevenge-0.0.6.tar.gz",
             Some(LIBREVENGE_SHA256),
             &format!("librevenge-{LIBREVENGE_VERSION}"),
         );
         let wpd = extract(
-            &out_dir,
+            out_dir,
             "libwpd-0.10.3.tar.gz",
             Some(LIBWPD_SHA256),
             &format!("libwpd-{LIBWPD_VERSION}"),
@@ -263,7 +269,13 @@ mod build_libwpd {
         // layout `bcp` produces, so the include root is the extracted `boost`
         // dir itself (headers live one level below it, at
         // `boost/boost/version.hpp`).
-        let boost = extract(&out_dir, "boost-subset.tar.gz", Some(BOOST_SUBSET_SHA256), "boost");
+        let boost = extract(out_dir, "boost-subset.tar.gz", Some(BOOST_SUBSET_SHA256), "boost");
+        (rev, wpd, boost)
+    }
+
+    pub fn build() {
+        let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR is set by cargo"));
+        let (rev, wpd, boost) = extract_sources(&out_dir);
 
         let mut build = cc::Build::new();
         build

@@ -7,6 +7,20 @@ use crate::plugins::OcrBackend;
 use ahash::AHashMap;
 use std::sync::Arc;
 
+/// Resolves a caller-supplied backend name to its registered spelling.
+///
+/// Public capability queries and internal dispatch must agree on what `"PaddleOCR"`
+/// means; two copies of this mapping would let them drift, so both go through here.
+/// Ungated on purpose — `OcrBackendRegistry::get` is gated behind the OCR features
+/// while the public `ocr_backend_supports_language` is not. ~keep
+pub(crate) fn canonical_ocr_backend_name(name: &str) -> String {
+    let normalized = name.to_ascii_lowercase();
+    match normalized.as_str() {
+        "paddleocr" => "paddle-ocr".to_string(),
+        _ => normalized,
+    }
+}
+
 pub(crate) fn builtin_ocr_backend_names() -> Vec<&'static str> {
     let mut names = vec![
         #[cfg(any(feature = "ocr", feature = "ocr-wasm"))]
@@ -102,6 +116,13 @@ impl OcrBackendRegistry {
     /// by the self-healing initialization path so a registry emptied via
     /// [`clear`](Self::clear) can be re-seeded with the defaults.
     pub fn register_defaults(&mut self) {
+        self.register_default_engine_backends();
+        self.register_default_candle_backends();
+    }
+
+    /// Register the built-in non-Candle backends: Tesseract (native and WASM),
+    /// PaddleOCR, Sceptre, and the VLM backend.
+    fn register_default_engine_backends(&mut self) {
         #[cfg(feature = "ocr")]
         {
             use crate::ocr::tesseract_backend::TesseractBackend;
@@ -172,7 +193,11 @@ impl OcrBackendRegistry {
                 tracing::warn!("Failed to register VLM OCR backend: {e}");
             });
         }
+    }
 
+    /// Register the built-in Candle-backed backends: TrOCR, PaddleOCR-VL,
+    /// GLM-OCR, and DeepSeek-OCR.
+    fn register_default_candle_backends(&mut self) {
         #[cfg(feature = "candle-trocr")]
         {
             use crate::candle_ocr::TrocrBackend;
@@ -282,12 +307,8 @@ impl OcrBackendRegistry {
             return Ok(Arc::clone(backend));
         }
 
-        let normalized = name.to_ascii_lowercase();
-        let canonical = match normalized.as_str() {
-            "paddleocr" => "paddle-ocr",
-            _ => normalized.as_str(),
-        };
-        self.backends.get(canonical).cloned().ok_or_else(|| {
+        let canonical = canonical_ocr_backend_name(name);
+        self.backends.get(canonical.as_str()).cloned().ok_or_else(|| {
             tracing::error!(
                 backend = name,
                 available = ?self.backends.keys().collect::<Vec<_>>(),

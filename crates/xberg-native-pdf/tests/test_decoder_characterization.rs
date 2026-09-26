@@ -465,7 +465,11 @@ mod render_parity {
     /// hide the race.
     static SINK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn glyph_drop_warnings_for(pdf: Vec<u8>, needle: &str) -> Vec<String> {
+    /// No font-name filter: `report_drops` renders the name as the literal
+    /// `redacted`, so matching a drop warning against the fixture's font name
+    /// never fires. The `SINK` lock plus the drain-before-render below is what
+    /// makes the drained warnings attributable to this render. ~keep
+    fn glyph_drop_warnings_for(pdf: Vec<u8>) -> Vec<String> {
         let _sink = SINK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let doc = PdfDocument::from_bytes(pdf).expect("fixture parses");
         let _ = drain_global_warnings();
@@ -474,7 +478,6 @@ mod render_parity {
             .into_iter()
             .filter(|w| w.category == WarningCategory::GlyphDropped)
             .map(|w| w.message)
-            .filter(|m| m.contains(needle))
             .collect()
     }
 
@@ -487,7 +490,7 @@ mod render_parity {
             ("unicode-cmap", simple_truetype_pdf(CmapKind::WindowsUnicode, "ABC")),
             ("type0-identity", type0_identity_pdf()),
         ] {
-            let warnings = glyph_drop_warnings_for(pdf, "CharBox");
+            let warnings = glyph_drop_warnings_for(pdf);
             assert!(warnings.is_empty(), "{label}: unexpected drop warnings: {warnings:?}");
         }
     }
@@ -496,7 +499,7 @@ mod render_parity {
     /// layer (test above) and surfaces as exactly one drop warning here.
     #[test]
     fn subset_missing_glyph_raises_one_drop_warning() {
-        let warnings = glyph_drop_warnings_for(subset_missing_glyph_pdf(), "AAAAAA+CharBox");
+        let warnings = glyph_drop_warnings_for(subset_missing_glyph_pdf());
         assert_eq!(warnings.len(), 1, "expected one drop warning: {warnings:?}");
         assert!(
             warnings[0].contains("0x42"),

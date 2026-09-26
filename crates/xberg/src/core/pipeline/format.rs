@@ -27,6 +27,11 @@ use std::borrow::Cow;
 /// * `result` - The extraction result to modify
 /// * `output_format` - The desired output format
 #[cfg_attr(alef, alef(skip))]
+// (fork) perf-tracing：输出格式化/渲染阶段 span。
+#[cfg_attr(
+    feature = "perf-tracing",
+    tracing::instrument(target = "perf", name = "render_output", skip_all)
+)]
 pub fn apply_output_format(result: ExtractedDocument, output_format: OutputFormat) -> ExtractedDocument {
     let mut result = result;
 
@@ -58,6 +63,23 @@ pub fn apply_output_format(result: ExtractedDocument, output_format: OutputForma
 
     if let Some(formatted) = result.formatted_content.take() {
         result.content = formatted;
+    }
+    // A picture's placeholder can arrive inside the code block drawn around it — the pptx
+    // content builder writes both into one block, so the picture comes out as
+    // `![](image_7.png)` *inside* a fence, a path no markdown reader fetches. Lifting it
+    // here covers every extractor, since this is the last step they all pass through — but
+    // only on the Markdown path. The lift is a Markdown-syntax repair (it splits the fence,
+    // hoists the marker and re-opens the fence); in every other output format
+    // (HTML/Plain/Djot/DocTags/Custom/Json) a line-start ```text is literal text — say, a
+    // markdown tutorial rendered to HTML — and rewriting it would silently corrupt the
+    // output.
+    if matches!(output_format, OutputFormat::Markdown) {
+        crate::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut result.content);
+        if let Some(pages) = result.pages.as_mut() {
+            for page in pages.iter_mut() {
+                crate::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut page.content);
+            }
+        }
     }
     result
 }
@@ -262,5 +284,102 @@ mod tests {
         let result = apply_output_format(result, OutputFormat::Djot);
 
         assert_eq!(result.metadata.output_format, Some("djot".to_string()));
+    }
+
+    /// The exact shape the pptx content builder emits: a ```text fence whose first
+    /// body line is an image marker. Source documents can also contain this shape
+    /// literally (a markdown tutorial, for instance), so only the Markdown output
+    /// path may rewrite it — every other format must pass it through verbatim.
+    const FENCED_MARKER: &str = "```text\n![](image_1.png)\n```\n";
+    /// What the lift produces: the marker hoisted out of the (removed) fence.
+    const LIFTED_MARKER: &str = "![](image_1.png)\n\n";
+
+    fn page(page_number: u32, content: &str) -> crate::types::PageContent {
+        crate::types::PageContent {
+            page_number,
+            content: content.to_string(),
+            tables: Vec::new(),
+            image_indices: Vec::new(),
+            image_preprocessing: None,
+            hierarchy: None,
+            is_blank: None,
+            layout_regions: None,
+            speaker_notes: None,
+            section_name: None,
+            sheet_name: None,
+            ocr_confidence: None,
+        }
+    }
+
+    /// Plain output preserves the literal ```text fence: it is source text here,
+    /// not a Markdown fence needing repair.
+    #[test]
+    fn test_apply_output_format_plain_leaves_fenced_marker_verbatim() {
+        let result = ExtractedDocument {
+            content: FENCED_MARKER.to_string(),
+            mime_type: Cow::Borrowed("text/plain"),
+            ..Default::default()
+        };
+
+        let result = apply_output_format(result, OutputFormat::Plain);
+
+        assert_eq!(result.content, FENCED_MARKER);
+    }
+
+    #[test]
+    fn test_apply_output_format_html_leaves_fenced_marker_verbatim() {
+        let result = ExtractedDocument {
+            content: FENCED_MARKER.to_string(),
+            mime_type: Cow::Borrowed("text/plain"),
+            ..Default::default()
+        };
+
+        let result = apply_output_format(result, OutputFormat::Html);
+
+        assert_eq!(result.content, FENCED_MARKER);
+    }
+
+    #[test]
+    fn test_apply_output_format_djot_leaves_fenced_marker_verbatim() {
+        let result = ExtractedDocument {
+            content: FENCED_MARKER.to_string(),
+            mime_type: Cow::Borrowed("text/plain"),
+            ..Default::default()
+        };
+
+        let result = apply_output_format(result, OutputFormat::Djot);
+
+        assert_eq!(result.content, FENCED_MARKER);
+    }
+
+    /// Markdown output is the one format the lift exists for: the marker leaves
+    /// the fence so a markdown reader can actually fetch the image.
+    #[test]
+    fn test_apply_output_format_markdown_lifts_fenced_marker() {
+        let result = ExtractedDocument {
+            content: FENCED_MARKER.to_string(),
+            mime_type: Cow::Borrowed("text/plain"),
+            ..Default::default()
+        };
+
+        let result = apply_output_format(result, OutputFormat::Markdown);
+
+        assert_eq!(result.content, LIFTED_MARKER);
+    }
+
+    /// The lift must reach per-page content too, and only on the Markdown path.
+    #[test]
+    fn test_apply_output_format_markdown_lifts_marker_inside_page_content() {
+        let result = ExtractedDocument {
+            content: "body text".to_string(),
+            mime_type: Cow::Borrowed("text/plain"),
+            pages: Some(vec![page(1, FENCED_MARKER)]),
+            ..Default::default()
+        };
+
+        let result = apply_output_format(result, OutputFormat::Markdown);
+
+        assert_eq!(result.pages.as_ref().unwrap()[0].content, LIFTED_MARKER);
+        assert_eq!(result.content, "body text");
     }
 }

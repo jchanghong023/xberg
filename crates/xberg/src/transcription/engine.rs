@@ -57,6 +57,14 @@ const WHISPER_N_FFT: usize = 400;
 const WHISPER_HOP_LENGTH: usize = 160;
 /// Maximum number of output tokens produced per chunk (Whisper canonical).
 const WHISPER_MAX_TOKENS: usize = 448;
+
+/// (fork) 并发推理的分块 worker 上限：Whisper tiny 单实例内存小，收益主要受核数约束，
+/// 8 路已能填满常见的 32 线程预算（与 PaddleOCR 引擎槽位同数量级）。
+const WHISPER_MAX_PARALLEL_CHUNKS: usize = 8;
+/// RMS below which a chunk counts as silence (1e-4 ≈ -80 dBFS; speech sits two
+/// orders of magnitude above it). Silence drives Whisper into a repetition loop,
+/// so a chunk without signal is skipped instead of hallucinated.
+const SILENCE_RMS_THRESHOLD: f32 = 1e-4;
 /// Milliseconds represented by one increment of a Whisper timestamp token ID.
 ///
 /// Whisper's timestamp vocabulary is a contiguous run of IDs starting at
@@ -250,6 +258,15 @@ pub fn parse_timestamped_segments(token_ids: &[u32], timestamp_begin_id: u32) ->
     segments
 }
 
+/// Root-mean-square level of a PCM chunk, used to recognise silence before the
+/// chunk is handed to the model.
+fn chunk_rms(samples: &[f32]) -> f32 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+}
+
 /// Build an ONNX Runtime session from a model file path.
 ///
 /// Uses the same builder configuration as `reranking/mod.rs`:
@@ -300,6 +317,11 @@ impl WhisperEngine {
     /// Builds three ONNX sessions and resolves special-token IDs from the
     /// bundled tokenizer. This is a blocking, CPU-heavy operation — callers
     /// on an async runtime should wrap it in `tokio::task::spawn_blocking`.
+    // (fork) perf-tracing：Whisper 模型加载（音视频冷启动的大头）。
+    #[cfg_attr(
+        feature = "perf-tracing",
+        tracing::instrument(target = "perf", name = "whisper_model_load", skip_all)
+    )]
     pub fn load(paths: &WhisperModelPaths) -> Result<Self, TranscriptionError> {
         tracing::debug!(
             encoder = ?paths.encoder,
@@ -410,6 +432,16 @@ impl WhisperEngine {
     /// exactly one segment spanning the chunk's full duration (there is no
     /// finer-grained timing available without `<|x.xx|>` tokens in the
     /// decoder output).
+    // (fork) perf-tracing：Whisper 推理 span（一次调用 = 一份音频整体，内部按 30s 分块）。
+    #[cfg_attr(
+        feature = "perf-tracing",
+        tracing::instrument(
+            target = "perf",
+            name = "whisper_transcribe",
+            skip_all,
+            fields(samples = pcm.samples.len())
+        )
+    )]
     pub fn transcribe_segments(
         &self,
         pcm: &PcmAudio,
@@ -423,31 +455,85 @@ impl WhisperEngine {
         let lang = language.unwrap_or("en");
         let ms_per_sample = 1000_f64 / pcm.sample_rate_hz.max(1) as f64;
 
+        // (fork, perf) 各分块完全独立：无跨块上下文，段时间戳由块内相对时间加上块偏移
+        // 换算为绝对时间。perf 实测长音视频的耗时几乎全部在顺序分块推理上（17 分钟音频
+        // 101s），因此并发跑分块、按块序号还原顺序——输出与顺序版逐条一致；失败时返回
+        // 最低失败块序号的错误，与顺序版「跑到第一处失败即返回」语义一致。
+        let chunk_count = pcm.samples.len().div_ceil(WHISPER_CHUNK_SAMPLES);
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .clamp(1, WHISPER_MAX_PARALLEL_CHUNKS)
+            .min(chunk_count);
+
         let mut segments: Vec<(u32, u32, String)> = Vec::new();
-        let mut offset = 0_usize;
 
-        loop {
-            let remaining = pcm.samples.len() - offset;
-            if remaining == 0 {
-                break;
+        if workers <= 1 {
+            let mut offset = 0_usize;
+            loop {
+                let remaining = pcm.samples.len() - offset;
+                if remaining == 0 {
+                    break;
+                }
+
+                let chunk_end = (offset + WHISPER_CHUNK_SAMPLES).min(pcm.samples.len());
+                let chunk = &pcm.samples[offset..chunk_end];
+                let chunk_offset_ms = (offset as f64 * ms_per_sample) as u32;
+                let chunk_duration_ms = ((chunk_end - offset) as f64 * ms_per_sample) as u32;
+
+                let chunk_segments = self.transcribe_chunk(chunk, lang, timestamps, chunk_duration_ms)?;
+                for (start_ms, end_ms, text) in chunk_segments {
+                    if text.is_empty() {
+                        continue;
+                    }
+                    segments.push((chunk_offset_ms + start_ms, chunk_offset_ms + end_ms, text));
+                }
+
+                offset += WHISPER_CHUNK_SAMPLES;
+                if offset >= pcm.samples.len() {
+                    break;
+                }
             }
+            return Ok(segments);
+        }
 
-            let chunk_end = (offset + WHISPER_CHUNK_SAMPLES).min(pcm.samples.len());
-            let chunk = &pcm.samples[offset..chunk_end];
-            let chunk_offset_ms = (offset as f64 * ms_per_sample) as u32;
-            let chunk_duration_ms = ((chunk_end - offset) as f64 * ms_per_sample) as u32;
+        type ChunkResult = Result<Vec<(u32, u32, String)>, TranscriptionError>;
+        let results: std::sync::Mutex<Vec<Option<ChunkResult>>> =
+            std::sync::Mutex::new((0..chunk_count).map(|_| None).collect());
+        let next_chunk = std::sync::atomic::AtomicUsize::new(0);
 
-            let chunk_segments = self.transcribe_chunk(chunk, lang, timestamps, chunk_duration_ms)?;
+        std::thread::scope(|scope| {
+            for _ in 0..workers {
+                scope.spawn(|| {
+                    loop {
+                        let index = next_chunk.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if index >= chunk_count {
+                            break;
+                        }
+                        let start = index * WHISPER_CHUNK_SAMPLES;
+                        let end = (start + WHISPER_CHUNK_SAMPLES).min(pcm.samples.len());
+                        let chunk = &pcm.samples[start..end];
+                        let chunk_duration_ms = ((end - start) as f64 * ms_per_sample) as u32;
+                        let result = self.transcribe_chunk(chunk, lang, timestamps, chunk_duration_ms);
+                        results.lock().expect("chunk result slots mutex poisoned")[index] = Some(result);
+                    }
+                });
+            }
+        });
+
+        for (index, slot) in results
+            .into_inner()
+            .expect("chunk result slots mutex poisoned")
+            .into_iter()
+            .enumerate()
+        {
+            let chunk_segments = slot.expect("every chunk must have a result after the worker scope joins")?;
+            let chunk_offset_ms = (index * WHISPER_CHUNK_SAMPLES) as f64 * ms_per_sample;
             for (start_ms, end_ms, text) in chunk_segments {
                 if text.is_empty() {
                     continue;
                 }
-                segments.push((chunk_offset_ms + start_ms, chunk_offset_ms + end_ms, text));
-            }
-
-            offset += WHISPER_CHUNK_SAMPLES;
-            if offset >= pcm.samples.len() {
-                break;
+                segments.push((chunk_offset_ms as u32 + start_ms, chunk_offset_ms as u32 + end_ms, text));
             }
         }
 
@@ -471,6 +557,13 @@ impl WhisperEngine {
         timestamps: bool,
         chunk_duration_ms: u32,
     ) -> Result<Vec<(u32, u32, String)>, TranscriptionError> {
+        // A chunk carrying no signal -- the padded tail of a recording, a pause --
+        // sends Whisper into a repetition loop that runs to the token cap and
+        // returns a wall of hallucinated text. Skipping it loses nothing.
+        if chunk.is_empty() || chunk_rms(chunk) < SILENCE_RMS_THRESHOLD {
+            return Ok(Vec::new());
+        }
+
         let padded = if chunk.len() == WHISPER_CHUNK_SAMPLES {
             chunk.to_vec()
         } else {
@@ -713,7 +806,17 @@ impl WhisperEngine {
 
         let dwp_wants_enc_hs = dwp_input_names.iter().any(|n| n.contains("encoder_hidden_states"));
 
-        for _ in 1..WHISPER_MAX_TOKENS {
+        // A chunk that never emits `<|endoftext|>` (near-silence, or a language
+        // hint that does not match the audio) runs until this cap. The cap must
+        // respect the model's positional capacity: Whisper accepts
+        // WHISPER_MAX_TOKENS positions *including* the prompt, and the export
+        // rejects a call whose incoming cache already holds that many — one
+        // step past it fails inside the graph with a Reshape error rather than
+        // returning. 30 s of Chinese speech transcribed under an English hint
+        // was enough to reach it and abort the whole extraction.
+        let max_iterations = WHISPER_MAX_TOKENS.saturating_sub(prompt_len);
+
+        for _ in 1..=max_iterations {
             let last_token = *generated.last().expect("generated is non-empty; qed");
 
             let last_id_arr = Array2::from_shape_vec((1, 1), vec![last_token as i64])
@@ -757,17 +860,32 @@ impl WhisperEngine {
             }
             generated.push(next_token);
 
-            let new_decoder_kvs: Vec<(String, Value)> = step_outputs
-                .into_iter()
-                .filter(|(name, _)| *name != dwp_logits_output_name)
-                .map(|(name, val)| {
-                    let input_name = name.replacen("present", "past_key_values", 1);
-                    (input_name, val)
-                })
-                .collect();
+            // Split the with-past outputs exactly like step 0 splits the step-0
+            // outputs, so the loop never pushes the same input name twice (the
+            // cross-attention caches appear under both `decoder_kvs` and
+            // `encoder_kvs` otherwise) and never re-clones the constant encoder
+            // caches on every step. Note this is hygiene, not the fix for the
+            // long-generation abort: the cap below is what prevents that, and
+            // bisecting showed the split alone leaves the Reshape error in place.
+            let mut new_decoder_kvs: Vec<(String, Value)> = Vec::new();
+            let mut new_encoder_kvs: Vec<(String, Value)> = Vec::new();
+            for (name, val) in step_outputs {
+                if name == dwp_logits_output_name {
+                    continue;
+                }
+                let input_name = name.replacen("present", "past_key_values", 1);
+                if input_name.contains(".encoder.") {
+                    new_encoder_kvs.push((input_name, val));
+                } else {
+                    new_decoder_kvs.push((input_name, val));
+                }
+            }
 
             if !new_decoder_kvs.is_empty() {
                 decoder_kvs = new_decoder_kvs;
+            }
+            if !new_encoder_kvs.is_empty() {
+                encoder_kvs = new_encoder_kvs;
             }
         }
 

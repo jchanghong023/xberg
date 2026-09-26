@@ -23,7 +23,7 @@ thread_local! {
     /// Buffer for `xberg_native_pdf`'s `tracing::warn!` records emitted while a render
     /// call made by this thread is in flight. `None` when no render call is
     /// currently capturing (the default, and the state between calls).
-    static ENGINE_LOG_CAPTURE: RefCell<Option<Vec<String>>> = const { RefCell::new(None) };
+    static ENGINE_LOG_CAPTURE: RefCell<Option<Vec<EngineWarning>>> = const { RefCell::new(None) };
     /// Deduped warnings drained from completed render calls on this thread,
     /// awaiting collection by [`take_xberg_native_pdf_render_warnings`].
     static ENGINE_PENDING_WARNINGS: RefCell<Vec<ProcessingWarning>> = const { RefCell::new(Vec::new()) };
@@ -44,8 +44,10 @@ static ENGINE_CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
 ///
 /// `xberg_native_pdf`'s rasterizer can silently drop a glyph — no font resolves for
 /// the current run (`text_rasterizer.rs`: "No font found for '{}'..."),
-/// parsing an embedded font fails (`page_renderer.rs`: "Failed to parse font
-/// '{}'..."), the CJK predefined-CIDFont substitution face is unavailable, or
+/// parsing an embedded font fails (`page_renderer.rs`'s `load_resources` logs the
+/// sanitized static message "rendering text with fallback font data", carrying the
+/// actual diagnosis in structured tracing fields instead), the CJK predefined-CIDFont
+/// substitution face is unavailable, or
 /// direct CID/CFF glyph-outline rendering errors mid-run. In every one of
 /// those cases `xberg_native_pdf` still returns `Ok(RenderedImage { .. })` — the
 /// page just has a gap where the glyph should be, with the text-space cursor
@@ -121,19 +123,33 @@ impl EngineWarningCapture {
 /// Both are implemented so either form is captured. Same pattern as the
 /// `MessageVisitor` already used for tracing-capture tests elsewhere in this
 /// crate (`tests/gpu_acceleration.rs`).
+///
+/// The `operation` field is captured beside the message: it names what the engine was
+/// doing, which is what decides how the warning is worded (GH#1794). ~keep
 #[derive(Default)]
-struct MessageVisitor(String);
+struct MessageVisitor(EngineWarning);
+
+/// One captured engine warning: its message and the engine's `operation` field, if any.
+#[derive(Debug, Default)]
+struct EngineWarning {
+    message: String,
+    operation: Option<String>,
+}
 
 impl tracing::field::Visit for MessageVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            self.0 = format!("{value:?}");
+        match field.name() {
+            "message" => self.0.message = format!("{value:?}"),
+            "operation" => self.0.operation = Some(format!("{value:?}")),
+            _ => {}
         }
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if field.name() == "message" {
-            self.0 = value.to_string();
+        match field.name() {
+            "message" => self.0.message = value.to_string(),
+            "operation" => self.0.operation = Some(value.to_string()),
+            _ => {}
         }
     }
 }
@@ -257,26 +273,16 @@ pub fn install_pdf_render_diagnostics() -> bool {
     ENGINE_CAPTURE_ACTIVE.load(Ordering::Acquire)
 }
 
+/// Engine `operation`s whose warning means glyph ink is missing from the render: a
+/// dropped glyph, a font that could not be found or loaded for rendering, and the CJK
+/// substitution face being unavailable. Every other engine warning (a Type 3 glyph-name
+/// fallback while loading a font, an embedded font replaced by a system font, a shading
+/// or mask skipped) keeps its own cause and is not reported as missing ink (GH#1794). ~keep
+const GLYPH_INK_LOSS_OPERATIONS: [&str; 4] = ["render_glyph", "resolve_font", "load_render_font", "load_cjk_fallback"];
+
 /// Turn one captured `xberg_native_pdf` log line into a `(page, message)`
 /// [`ProcessingWarning`], naming the page so a multi-page document does not
 /// read as "somewhere in this PDF, something happened".
-/// Whether a captured engine warning actually means glyph ink went missing.
-///
-/// Everything this sink captures used to be wrapped as a glyph drop unconditionally. That was
-/// invisible while the capture was broken (#697) because nothing was ever wrapped, but the
-/// engine also emits warnings about situations it handled correctly, and telling a user that
-/// "glyph ink is missing" when the text rendered fine is worse than saying nothing.
-///
-/// The engine hands us a formatted string and no structured kind, so this has to match on the
-/// message. It is deliberately an EXCLUDE-list, not an include-list: an unrecognised warning is
-/// still reported as a glyph drop, so a new failure mode is over-reported rather than silently
-/// swallowed -- the failure direction #697 already cost us once.
-fn indicates_dropped_glyph_ink(cause: &str) -> bool {
-    // "No font provided for N bytes, using Latin-1 fallback (PDF spec compliant)" -- the text
-    // is rendered via the fallback, so there is no missing ink to warn about.
-    !cause.contains("PDF spec compliant")
-}
-
 fn glyph_drop_warning(page_index: usize, cause: &str) -> ProcessingWarning {
     warning(
         PDF_RENDER_WARNING_SOURCE,
@@ -313,6 +319,33 @@ fn image_render_failure_warning(page_index: usize, cause: &str) -> ProcessingWar
     )
 }
 
+fn render_notice_warning(page_index: usize, cause: &str) -> ProcessingWarning {
+    warning(
+        PDF_RENDER_WARNING_SOURCE,
+        format!(
+            "Page {} rendering logged a warning and continued: {cause}",
+            page_index + 1
+        ),
+    )
+}
+
+/// Word one captured engine warning by what it reports: a whole image left blank,
+/// glyph ink missing, or any other warning passed through with its own cause.
+fn classify_engine_warning(page_index: usize, captured: &EngineWarning) -> ProcessingWarning {
+    let cause = captured.message.as_str();
+    if indicates_unrenderable_image(cause) {
+        image_render_failure_warning(page_index, cause)
+    } else if captured
+        .operation
+        .as_deref()
+        .is_some_and(|operation| GLYPH_INK_LOSS_OPERATIONS.contains(&operation))
+    {
+        glyph_drop_warning(page_index, cause)
+    } else {
+        render_notice_warning(page_index, cause)
+    }
+}
+
 /// Render a page while capturing any `xberg_native_pdf` render-degradation warnings it
 /// logs during the call — dropped glyphs and unrenderable image XObjects alike — deduping
 /// them into [`ENGINE_PENDING_WARNINGS`] for later collection via
@@ -334,13 +367,14 @@ fn render_page_capturing_glyph_drops(
     if !captured.is_empty() {
         ENGINE_PENDING_WARNINGS.with(|pending| {
             let mut pending = pending.borrow_mut();
-            for cause in captured.iter().filter(|cause| indicates_dropped_glyph_ink(cause)) {
-                let processing_warning = if indicates_unrenderable_image(cause) {
-                    image_render_failure_warning(page_index, cause)
-                } else {
-                    glyph_drop_warning(page_index, cause)
-                };
-                push_warning_deduped(&mut pending, processing_warning);
+            // GH#1548: this used to also filter out any cause containing "PDF spec compliant",
+            // to exclude the Latin-1-fallback message. That message now stays below the
+            // capture threshold (TRACE, gated on <= WARN by `EngineWarningCapture::interested`)
+            // so it can never reach here, and the substring match was a trap for whoever next
+            // wrote a genuinely actionable warning that happened to share the phrase. Every
+            // captured cause is classified below instead of pre-filtered. ~keep
+            for engine_warning in captured.iter() {
+                push_warning_deduped(&mut pending, classify_engine_warning(page_index, engine_warning));
             }
         });
     }
@@ -379,6 +413,69 @@ fn render_page_capturing_glyph_drops(
 /// no longer silently lost.
 pub fn take_xberg_native_pdf_render_warnings() -> Vec<ProcessingWarning> {
     ENGINE_PENDING_WARNINGS.with(|pending| std::mem::take(&mut *pending.borrow_mut()))
+}
+
+/// Deposit warnings drained on another thread into *this* thread's pending buffer, so a later
+/// [`take_xberg_native_pdf_render_warnings`] here returns them.
+///
+/// [`ENGINE_PENDING_WARNINGS`] is thread-local, so a render performed on a worker thread fills
+/// that worker's buffer and the extracting thread's drain never sees it. The layout route
+/// already handles this by draining inside its own `spawn_blocking` closure and threading the
+/// result back (#353); the rayon-parallel `force_ocr` and `force_ocr_pages` render paths had no
+/// equivalent, so on a multi-core host every page of a multi-page document lost its render
+/// warnings -- missing glyph ink, a blank image, a fallback font -- while a single-page document
+/// kept them, because rayon runs an unsplit batch on the calling thread (#1847).
+///
+/// Deduped on arrival, matching the per-thread drain's own behaviour: the same engine
+/// diagnostic raised on several pages is one warning to the caller. ~keep
+/// Render `page_indices` across the rayon pool, keeping each page's render warnings.
+///
+/// The per-page drain has to happen on the worker that rendered, because
+/// [`ENGINE_PENDING_WARNINGS`] is thread-local; the collected set is then deposited into the
+/// calling thread's buffer, where the extractor's own drain finds it. Lives here rather than at
+/// the two call sites so the thread-affinity rule is stated once, next to the buffer it is about
+/// (xberg-io/xberg#1847). ~keep
+#[cfg(all(
+    feature = "pdf",
+    any(feature = "ocr", feature = "ocr-pipeline"),
+    feature = "tokio-runtime",
+    not(target_arch = "wasm32")
+))]
+pub(crate) fn par_render_pages_collecting_warnings<T: Send>(
+    page_indices: Vec<usize>,
+    render: impl Fn(usize) -> crate::Result<T> + Sync + Send,
+) -> crate::Result<Vec<T>> {
+    use rayon::prelude::*;
+
+    let collected: std::sync::Mutex<Vec<ProcessingWarning>> = std::sync::Mutex::default();
+    let rendered: crate::Result<Vec<T>> = page_indices
+        .into_par_iter()
+        .map(|page_index| {
+            let page = render(page_index);
+            let warnings = take_xberg_native_pdf_render_warnings();
+            if !warnings.is_empty()
+                && let Ok(mut collected) = collected.lock()
+            {
+                collected.extend(warnings);
+            }
+            page
+        })
+        .collect();
+    absorb_render_warnings(collected.into_inner().unwrap_or_default());
+    rendered
+}
+
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(crate) fn absorb_render_warnings(warnings: Vec<ProcessingWarning>) {
+    if warnings.is_empty() {
+        return;
+    }
+    ENGINE_PENDING_WARNINGS.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        for warning in warnings {
+            crate::core::diagnostics::push_warning_deduped(&mut pending, warning);
+        }
+    });
 }
 
 /// Reasonable max pixel dimension (on either axis) for a rendered page before we
@@ -599,12 +696,13 @@ pub(crate) fn get_page_rotations(doc: &xberg_native_pdf::PdfDocument, page_count
 
 /// Prefer the document-taking form wherever a `PdfDocument` is already open — three call
 /// sites were re-parsing the same bytes a second time purely to read `/Rotate`. This exists
-/// for the two routes that genuinely have no document in scope, and it opens one so the
-/// extra parse is at least explicit at the call site rather than hidden inside the lookup.
+/// for the markdown-layout reuse gate, which genuinely has no document in scope, and it opens
+/// one so the extra parse is at least explicit at the call site rather than hidden inside the
+/// lookup.
 ///
 /// Returns all-zero rotations if the document cannot be opened: this is a rendering hint,
 /// and a document that will not open fails for better reasons elsewhere.
-#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "layout-detection"))]
 pub(crate) fn get_page_rotations_from_bytes(content: &[u8], page_count: usize) -> Vec<u32> {
     match xberg_native_pdf::PdfDocument::from_bytes(content.to_vec()) {
         Ok(doc) => get_page_rotations(&doc, page_count),
@@ -996,6 +1094,88 @@ pub(crate) fn build_minimal_pdf_with_mediabox(w: f32, h: f32) -> Vec<u8> {
     buf
 }
 
+/// Build a single-page PDF whose page is `page_pt` (width, height) points, painted with one
+/// unfiltered 8-bit grayscale image of `image_px` (width, height) pixels, scaled to cover
+/// `coverage` of the page area (centred), plus `text_lines` lines of native Helvetica text
+/// of about 25 glyphs each. `coverage = 1.0` is a scan: the raster's density is
+/// `image width / (page width / 72)` dots per inch. With few text lines an inset raster is a
+/// scan with a stamp; with many it is a figure on a text page.
+// GH#1835: every caller of this fixture builder lives behind the OCR or layout-detection
+// feature sets, so `all(test, pdf)` left it unused on a `pdf`-only test build. ~keep
+#[cfg(all(
+    test,
+    feature = "pdf",
+    any(feature = "ocr", feature = "ocr-pipeline", feature = "layout-detection")
+))]
+pub(crate) fn build_full_page_raster_pdf(
+    page_pt: (f32, f32),
+    image_px: (u32, u32),
+    coverage: f32,
+    text_lines: usize,
+) -> Vec<u8> {
+    let (page_w, page_h) = page_pt;
+    let (image_w, image_h) = image_px;
+    let pixels = vec![0x40u8; (image_w * image_h) as usize];
+    let scale = coverage.sqrt();
+    let (w, h) = (page_w * scale, page_h * scale);
+    let (x, y) = ((page_w - w) / 2.0, (page_h - h) / 2.0);
+    let mut content = format!("q {w} 0 0 {h} {x} {y} cm /Im0 Do Q\n");
+    for line in 0..text_lines {
+        let baseline = page_h - 12.0 - line as f32 * 3.0;
+        content.push_str(&format!(
+            "BT /F1 4 Tf 2 {baseline} Td (Line {line} of the native text.) Tj ET\n"
+        ));
+    }
+
+    let mut buf = Vec::<u8>::new();
+    buf.extend_from_slice(b"%PDF-1.4\n");
+    let mut offsets = Vec::new();
+
+    offsets.push(buf.len());
+    buf.extend_from_slice(b"1 0 obj\n<</Type /Catalog /Pages 2 0 R>>\nendobj\n");
+    offsets.push(buf.len());
+    buf.extend_from_slice(b"2 0 obj\n<</Type /Pages /Kids [3 0 R] /Count 1>>\nendobj\n");
+    offsets.push(buf.len());
+    buf.extend_from_slice(
+        format!(
+            "3 0 obj\n<</Type /Page /MediaBox [0 0 {page_w} {page_h}] /Parent 2 0 R \
+             /Contents 4 0 R /Resources <</XObject <</Im0 5 0 R>> \
+             /Font <</F1 <</Type /Font /Subtype /Type1 /BaseFont /Helvetica>> >> >> >>\nendobj\n"
+        )
+        .as_bytes(),
+    );
+    offsets.push(buf.len());
+    buf.extend_from_slice(
+        format!(
+            "4 0 obj\n<</Length {}>>\nstream\n{content}\nendstream\nendobj\n",
+            content.len()
+        )
+        .as_bytes(),
+    );
+    offsets.push(buf.len());
+    buf.extend_from_slice(
+        format!(
+            "5 0 obj\n<</Type /XObject /Subtype /Image /Width {image_w} /Height {image_h} \
+             /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {}>>\nstream\n",
+            pixels.len()
+        )
+        .as_bytes(),
+    );
+    buf.extend_from_slice(&pixels);
+    buf.extend_from_slice(b"\nendstream\nendobj\n");
+
+    let xref_offset = buf.len();
+    let total_objs = offsets.len() + 1;
+    buf.extend_from_slice(format!("xref\n0 {total_objs}\n").as_bytes());
+    buf.extend_from_slice(b"0000000000 65535 f \n");
+    for offset in &offsets {
+        buf.extend_from_slice(format!("{offset:010} 00000 n \n").as_bytes());
+    }
+    buf.extend_from_slice(format!("trailer\n<</Size {total_objs} /Root 1 0 R>>\n").as_bytes());
+    buf.extend_from_slice(format!("startxref\n{xref_offset}\n%%EOF\n").as_bytes());
+    buf
+}
+
 /// Build a single-page PDF embedding a synthetic Type 1C (CFF) font whose
 /// dot-bearing glyphs carry the deprecated `dotsection` operator, mirroring
 /// Adobe's Type 1 to Type 2 converter output that surfaced the bug. The font
@@ -1103,9 +1283,10 @@ mod tests {
 
     /// The raster's own pixel width is the only honest record of the resolution a page was
     /// rendered at, because `render_page_with_safeguards` throws `choose_safe_dpi`'s effective
-    /// value away. A Letter page rendered at the OCR route's requested 150 DPI is 1275px wide,
-    /// and that must read back as 150 — not as the 72 the preprocessor assumes when nobody
-    /// tells it otherwise.
+    /// value away. A Letter page rendered at an arbitrary requested 150 DPI (any DPI works;
+    /// the actual default the PDF OCR route requests is `effective_pdf_render_dpi`, #1577) is
+    /// 1275px wide, and that must read back as 150 — not as the 72 the preprocessor assumes
+    /// when nobody tells it otherwise.
     #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
     #[test]
     fn should_derive_render_dpi_from_raster_width_and_mediabox() {
@@ -1509,6 +1690,162 @@ mod tests {
         assert!(
             !is_pdf_engine_target("xberg::extractors::pdf"),
             "xberg's own records must not be captured"
+        );
+    }
+
+    /// GH#1548: `render_page_capturing_glyph_drops` used to exclude any captured cause
+    /// containing the literal substring "PDF spec compliant" -- originally meant only to skip
+    /// the Latin-1-fallback message, which is now emitted at TRACE and never reaches this
+    /// capture at all (see `EngineWarningCapture::interested`, gated on `<= Level::WARN`).
+    /// A genuine WARN-level engine event whose text incidentally shares that phrase must still
+    /// surface as a `ProcessingWarning` rather than being silently dropped by a substring trap.
+    #[test]
+    fn genuine_warning_sharing_the_old_substring_is_not_silently_excluded() {
+        assert!(
+            install_pdf_render_diagnostics(),
+            "no other component should own the tracing dispatcher in this test binary"
+        );
+        let _ = take_xberg_native_pdf_render_warnings();
+
+        let result = render_page_capturing_glyph_drops(0, || {
+            tracing::warn!(
+                target: "xberg_native_pdf::fonts",
+                "a genuine problem that happens to mention PDF spec compliant wording"
+            );
+            Ok(xberg_native_pdf::rendering::RenderedImage {
+                data: vec![0u8; 4],
+                width: 1,
+                height: 1,
+                format: xberg_native_pdf::rendering::ImageFormat::RawRgba8,
+            })
+        });
+        assert!(result.is_ok(), "capturing a warning must not change the render outcome");
+
+        let warnings = take_xberg_native_pdf_render_warnings();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "a captured WARN-level engine event must be reported even when its text incidentally \
+             contains the retired Latin-1-fallback substring; got: {warnings:?}"
+        );
+    }
+
+    fn blank_render() -> std::result::Result<xberg_native_pdf::rendering::RenderedImage, xberg_native_pdf::Error> {
+        Ok(xberg_native_pdf::rendering::RenderedImage {
+            data: vec![0u8; 4],
+            width: 1,
+            height: 1,
+            format: xberg_native_pdf::rendering::ImageFormat::RawRgba8,
+        })
+    }
+
+    /// GH#1794: only an engine warning about a glyph the render could not paint is
+    /// reported as missing glyph ink. A font-load notice keeps its own cause.
+    #[test]
+    fn only_a_dropped_glyph_is_reported_as_missing_glyph_ink() {
+        assert!(
+            install_pdf_render_diagnostics(),
+            "no other component should own the tracing dispatcher in this test binary"
+        );
+        let _ = take_xberg_native_pdf_render_warnings();
+
+        let result = render_page_capturing_glyph_drops(0, || {
+            tracing::warn!(
+                target: "xberg_native_pdf::fonts",
+                operation = "load_font",
+                error_code = "type3_font",
+                "using Type 3 glyph-name fallback"
+            );
+            tracing::warn!(
+                target: "xberg_native_pdf::fonts",
+                operation = "render_glyph",
+                error_code = "glyph_dropped",
+                "glyph rendering omitted content"
+            );
+            blank_render()
+        });
+        assert!(result.is_ok(), "capturing a warning must not change the render outcome");
+
+        let warnings = take_xberg_native_pdf_render_warnings();
+        assert_eq!(warnings.len(), 2, "both warnings are reported; got: {warnings:?}");
+        let notice = warnings
+            .iter()
+            .find(|w| w.message.contains("using Type 3 glyph-name fallback"))
+            .expect("the font-load notice is reported with its cause");
+        assert!(
+            !notice.message.contains("glyph ink is missing"),
+            "a font-load notice drops no glyph, got: {}",
+            notice.message
+        );
+        assert!(notice.message.starts_with("Page 1 "), "got: {}", notice.message);
+        let dropped = warnings
+            .iter()
+            .find(|w| w.message.contains("glyph rendering omitted content"))
+            .expect("the dropped glyph is reported");
+        assert!(
+            dropped.message.contains("glyph ink is missing"),
+            "a dropped glyph is missing ink, got: {}",
+            dropped.message
+        );
+    }
+
+    /// An `operation` recorded as a Display value (`operation = %value`) reaches the
+    /// visitor through `record_debug`, not `record_str`, and must classify the same way.
+    #[test]
+    fn a_display_valued_operation_is_classified_like_a_string_one() {
+        assert!(
+            install_pdf_render_diagnostics(),
+            "no other component should own the tracing dispatcher in this test binary"
+        );
+        let _ = take_xberg_native_pdf_render_warnings();
+
+        let operation = "render_glyph";
+        let result = render_page_capturing_glyph_drops(0, || {
+            tracing::warn!(
+                target: "xberg_native_pdf::fonts",
+                operation = %operation,
+                "glyph rendering omitted content"
+            );
+            blank_render()
+        });
+        assert!(result.is_ok(), "capturing a warning must not change the render outcome");
+
+        let warnings = take_xberg_native_pdf_render_warnings();
+        assert_eq!(warnings.len(), 1, "the warning is reported; got: {warnings:?}");
+        assert!(
+            warnings[0].message.contains("glyph ink is missing"),
+            "a dropped glyph is missing ink, got: {}",
+            warnings[0].message
+        );
+    }
+
+    /// The engine end to end: a page set in a Type 3 font logs the glyph-name fallback
+    /// while loading the font, and every glyph still renders, so no warning may say the
+    /// ink is missing.
+    #[test]
+    fn a_type3_font_page_reports_no_missing_glyph_ink() {
+        assert!(
+            install_pdf_render_diagnostics(),
+            "no other component should own the tracing dispatcher in this test binary"
+        );
+        let _ = take_xberg_native_pdf_render_warnings();
+
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/pdf/regressions/type3/gh1782-2-readable-lines.pdf");
+        let pdf = std::fs::read(&path).expect("read the Type 3 fixture");
+        let png = render_pdf_page_to_png(&pdf, 0, Some(72), None).expect("the Type 3 page renders");
+        assert!(!png.is_empty());
+
+        let warnings = take_xberg_native_pdf_render_warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.message.contains("using Type 3 glyph-name fallback")),
+            "the fixture must log the Type 3 notice for this test to mean anything; got: {warnings:?}"
+        );
+        assert!(
+            warnings.iter().all(|w| !w.message.contains("glyph ink is missing")),
+            "no glyph was dropped, so no warning may report missing ink; got: {warnings:?}"
         );
     }
 }

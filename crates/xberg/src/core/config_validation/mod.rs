@@ -35,6 +35,11 @@ pub(crate) use sections::{
     validate_chunking_params, validate_confidence, validate_csv_delimiter, validate_dpi, validate_language_code,
     validate_ocr_backend, validate_token_reduction_level, validate_vlm_backend_config,
 };
+// Re-exported only for `ocr::validation`, which is itself `#[cfg(feature = "ocr")]`. Without the
+// same gate the re-export is an unused import on every narrow leg, and CI builds with
+// `-D warnings`. ~keep
+#[cfg(feature = "ocr")]
+pub(crate) use sections::TESSERACT_LANGUAGE_CODES;
 
 // `layout_wastes_plain_output` is `pub`, not `pub(crate)`, unlike its siblings above: it backs
 // a CLI-level warning (`xberg-cli`'s `ExtractionOverrides::apply`), a downstream crate that
@@ -43,7 +48,10 @@ pub use sections::layout_wastes_plain_output;
 
 #[cfg(test)]
 pub(crate) use sections::validate_binarization_method;
-pub(crate) use sections::{validate_image_preprocessing_config, validate_tesseract_oem, validate_tesseract_psm};
+pub(crate) use sections::{
+    validate_image_preprocessing_config, validate_tesseract_oem, validate_tesseract_psm,
+    validate_tesseract_thresholding_method,
+};
 
 // `validate_output_format` stays `#[cfg(test)]`-only, and correctly so: both
 // `ExtractionConfig::output_format` and `OcrConfig::output_format` are the strongly-typed
@@ -212,9 +220,24 @@ mod tests {
 
     #[test]
     fn test_validate_tesseract_psm_valid() {
-        for psm in 0..=13 {
+        for psm in 1..=13 {
             assert!(validate_tesseract_psm(psm).is_ok(), "PSM {} should be valid", psm);
         }
+    }
+
+    #[test]
+    fn should_reject_tesseract_psm_zero_because_osd_only_recognises_no_text() {
+        let error = validate_tesseract_psm(0).expect_err("PSM 0 is OSD-only and recognises no text");
+        let message = error.to_string();
+        assert!(
+            message.contains('0'),
+            "message should name the rejected value: {message}"
+        );
+        assert!(
+            message.contains("orientation"),
+            "message should say why PSM 0 cannot work: {message}"
+        );
+        assert!(message.contains('3'), "message should point at a usable PSM: {message}");
     }
 
     #[test]
@@ -236,6 +259,24 @@ mod tests {
         assert!(validate_tesseract_oem(-1).is_err());
         assert!(validate_tesseract_oem(4).is_err());
         assert!(validate_tesseract_oem(10).is_err());
+    }
+
+    #[test]
+    fn test_validate_tesseract_thresholding_method_valid() {
+        for thresholding_method in 0..=2 {
+            assert!(
+                validate_tesseract_thresholding_method(thresholding_method).is_ok(),
+                "thresholding_method {} should be valid",
+                thresholding_method
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_tesseract_thresholding_method_invalid() {
+        assert!(validate_tesseract_thresholding_method(-1).is_err());
+        assert!(validate_tesseract_thresholding_method(3).is_err());
+        assert!(validate_tesseract_thresholding_method(100).is_err());
     }
 
     #[test]

@@ -17,7 +17,7 @@ pub use embedding::EmbeddingBackendRegistry;
 pub use extractor::DocumentExtractorRegistry;
 pub(crate) use extractor::RegisteredDocumentExtractor;
 pub use ocr::OcrBackendRegistry;
-pub(crate) use ocr::builtin_ocr_backend_names;
+pub(crate) use ocr::{builtin_ocr_backend_names, canonical_ocr_backend_name};
 pub use processor::PostProcessorRegistry;
 pub use renderer::RendererRegistry;
 pub use reranker::RerankerBackendRegistry;
@@ -97,6 +97,40 @@ pub fn get_ocr_backend_registry() -> Arc<RwLock<OcrBackendRegistry>> {
     OCR_BACKEND_REGISTRY.clone()
 }
 
+/// Whether the OCR backend an AUTOMATIC trigger would use is actually registered.
+///
+/// `ocr-pipeline` can be enabled with no backend at all -- `ocr` implies
+/// `ocr-pipeline`, not the reverse -- and a host application can clear the registry at
+/// runtime. In such a build an automatic trigger has nothing to run, and attempting it
+/// turned an ordinary extraction that never requested OCR into a hard `Plugin` error
+/// naming a backend the caller never chose.
+///
+/// EXPLICIT requests deliberately do not consult this. `force_ocr`, `force_ocr_pages`,
+/// `ocr_inline_images` and a caller-supplied `ocr` config all asked for something this
+/// build cannot do, and must be told so rather than silently given native text. The
+/// `ocr_*` opt-ins on `ExtractionConfig` (GH#1752) are automatic triggers for this
+/// purpose: they name a behaviour, not a backend, so they consult this like any other.
+///
+/// A configured pipeline resolves each of its own stage backends internally, so this
+/// reports available for it and leaves that route's behaviour unchanged. See GH#1610. ~keep
+///
+/// Lives here rather than in `extractors/pdf` because the PDF page routes and the
+/// container embedded-image route (`extraction::image_ocr`) must answer this one
+/// question the same way. ~keep
+#[cfg(all(
+    feature = "ocr-pipeline",
+    any(feature = "pdf", all(feature = "ocr", feature = "tokio-runtime"))
+))]
+pub(crate) fn automatic_ocr_backend_is_registered() -> bool {
+    let ocr_config = crate::core::config::OcrConfig::default();
+    if ocr_config.pipeline.is_some() {
+        return true;
+    }
+    let registry = get_ocr_backend_registry();
+    let registry = registry.read();
+    registry.get(&ocr_config.backend).is_ok()
+}
+
 /// Get the global embedding backend registry.
 #[cfg_attr(alef, alef(skip))]
 pub fn get_embedding_backend_registry() -> Arc<RwLock<EmbeddingBackendRegistry>> {
@@ -173,6 +207,37 @@ pub(crate) mod test_support {
     /// fail. Either way, guard holders must therefore either register everything a concurrent
     /// unguarded consumer could need, or (better) avoid mutating the global registry at all and
     /// use a local `DocumentExtractorRegistry::new()` (or equivalent) instead.
+    /// Maximum attempts before a registry clear is treated as genuinely stuck.
+    ///
+    /// 250 × 20 ms = 5 s: the whole-suite run (7 000+ tests, default test threads =
+    /// logical cores) can have enough overlapping extraction leases to starve a 2 s
+    /// window — observed as guard-acquisition panics under full-suite load, not as a
+    /// stuck registry. Matches the clear retry window of the keyword-recovery test in
+    /// `core::pipeline::initialization`.
+    const REGISTRY_CLEAR_ATTEMPTS: usize = 250;
+
+    /// Delay between attempts, long enough for a concurrent extraction to drop its snapshot lease.
+    const REGISTRY_CLEAR_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(20);
+
+    /// Run a registry clear, retrying while it reports the registry is in use.
+    ///
+    /// `with_registration_update` refuses a lifecycle mutation whenever a processor snapshot lease
+    /// is live, and documents that refusal as *retryable*. These guards serialize only against each
+    /// other, so they cannot assume exclusivity: any non-`#[serial]` test in this binary may be
+    /// mid-extraction and holding a lease. `.expect()`ing the refusal turned that ordinary race
+    /// into a teardown failure attributed to whichever unrelated test happened to be running. ~keep
+    fn retry_registry_clear(clear: impl Fn() -> crate::Result<()>) -> crate::Result<()> {
+        for _ in 0..REGISTRY_CLEAR_ATTEMPTS {
+            match clear() {
+                Err(crate::XbergError::Other(message)) if message.contains("retry the lifecycle mutation") => {
+                    std::thread::sleep(REGISTRY_CLEAR_RETRY_DELAY);
+                }
+                other => return other,
+            }
+        }
+        clear()
+    }
+
     macro_rules! registry_guard {
         ($guard:ident, $lock:ident, $clear:path, $what:literal) => {
             /// Holds this registry's lock for the lifetime of a test and leaves the registry
@@ -187,7 +252,7 @@ pub(crate) mod test_support {
                     // `()`, so there is no inconsistent state to protect against and recovering
                     // is correct.
                     let lock = $lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-                    $clear().expect(concat!($what, " registry setup must succeed"));
+                    retry_registry_clear($clear).expect(concat!($what, " registry setup must succeed"));
                     Self(lock)
                 }
             }
@@ -196,7 +261,13 @@ pub(crate) mod test_support {
                 fn drop(&mut self) {
                     // Runs before the inner `MutexGuard` field is dropped, so teardown still
                     // holds the lock and cannot race the next test's setup.
-                    let cleared = $clear();
+                    // While already unwinding, take a single attempt: the retry's sleeps would
+                    // only delay the real failure that is being reported. ~keep
+                    let cleared = if std::thread::panicking() {
+                        $clear()
+                    } else {
+                        retry_registry_clear($clear)
+                    };
                     // Panicking inside `drop` while the thread is already unwinding aborts the
                     // process and hides the assertion failure that caused it, so only surface a
                     // teardown error when the test itself passed.

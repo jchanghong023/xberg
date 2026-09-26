@@ -6,13 +6,13 @@ use crate::types::annotations::PdfAnnotation;
 use crate::types::internal::InternalDocument;
 
 use super::common::{annotation_display_text, annotation_type_label, escape_html_text};
-use super::comrak_bridge::build_comrak_ast;
+use super::comrak_bridge::{ImageBlockStyle, build_comrak_ast};
 use super::markdown::comrak_options;
 
 /// Render an `InternalDocument` to HTML5.
 pub(crate) fn render_html(doc: &InternalDocument) -> String {
     let arena = Arena::new();
-    let root = build_comrak_ast(doc, &arena);
+    let root = build_comrak_ast(doc, &arena, ImageBlockStyle::Node);
 
     let mut options = comrak_options();
     options.render.r#unsafe = true;

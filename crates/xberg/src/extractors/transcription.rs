@@ -12,7 +12,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::core::config::ExtractionConfig;
 use crate::plugins::{InternalDocumentExtractor, Plugin};
-use crate::transcription::decode::{PcmAudio, decode_audio_to_pcm};
+use crate::transcription::container::decode_to_pcm;
+use crate::transcription::decode::PcmAudio;
 use crate::transcription::engine::WhisperEngine;
 use crate::transcription::model::{WhisperModelPaths, ensure_whisper_model};
 use crate::transcription::tags::AudioTags;
@@ -126,6 +127,38 @@ where
     }
 }
 
+/// Runs `task` on the blocking pool while holding a permit from `semaphore`.
+///
+/// The permit is moved *into* the blocking closure rather than held by this future. A
+/// `spawn_blocking` task cannot be cancelled — dropping its `JoinHandle` detaches it and the
+/// closure still runs to completion — so a permit owned by the awaiting future is released the
+/// moment a caller times out or drops, while the Whisper inference it was bounding continues.
+/// `run_transcription_pipeline` is wrapped in [`apply_timeout`], so a `transcription.timeout_ms`
+/// expiry drops that future on a live, designed-in code path, not a hypothetical one. Repeated
+/// abandoned calls then exceed the configured concurrency and keep several models resident on
+/// the blocking pool (same defect as GH#1641, which fixed the reranker; this is the transcription
+/// half). Taking the semaphore as a parameter also gives the tests a locally-owned semaphore,
+/// since the global one's permit count is 1 on a small host. ~keep
+async fn transcribe_holding_permit<T, E, F>(semaphore: Arc<tokio::sync::Semaphore>, task: F) -> Result<T>
+where
+    F: FnOnce() -> std::result::Result<T, E> + Send + 'static,
+    T: Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
+    let permit = semaphore
+        .acquire_owned()
+        .await
+        .map_err(|e| XbergError::transcription(format!("semaphore closed: {e}")))?;
+
+    task::spawn_blocking(move || {
+        let _permit = permit;
+        task()
+    })
+    .await
+    .map_err(|e| XbergError::transcription(format!("whisper task panicked: {e}")))?
+    .map_err(|e| XbergError::transcription(format!("whisper inference failed: {e}")))
+}
+
 /// Decode audio, resolve/load the Whisper model, and run inference.
 ///
 /// This is the portion of transcription that [`TranscriptionExtractor::extract_content`]
@@ -139,8 +172,21 @@ async fn run_transcription_pipeline(
 ) -> Result<InternalDocument> {
     let bytes_owned = content.to_vec();
     let max_bytes_for_decode = tcfg.max_bytes;
+    let max_duration_for_decode = tcfg.max_duration_ms;
+    let timeout_for_decode = tcfg.timeout_ms;
+    let mime_owned = mime_type.to_string();
     let (pcm, tags): (PcmAudio, crate::transcription::tags::AudioTags) = task::spawn_blocking(move || {
-        let pcm = decode_audio_to_pcm(&bytes_owned, max_bytes_for_decode)?;
+        // ASF/WMV comes back through Media Foundation; everything else uses the
+        // built-in decoder unchanged. The limits travel with the call because this
+        // task outlives the extractor's timeout: a rescue decoder has to stop
+        // itself, the wrapper above can only stop waiting for it.
+        let pcm = decode_to_pcm(
+            &bytes_owned,
+            &mime_owned,
+            max_bytes_for_decode,
+            max_duration_for_decode,
+            timeout_for_decode,
+        )?;
         let tags = crate::transcription::tags::read_audio_tags(&bytes_owned);
         Ok::<_, XbergError>((pcm, tags))
     })
@@ -169,22 +215,15 @@ async fn run_transcription_pipeline(
 
     let engine = get_or_build_engine(&paths)?;
 
-    let _permit = TRANSCRIPTION_SEMAPHORE
-        .acquire()
-        .await
-        .map_err(|e| XbergError::transcription(format!("semaphore closed: {e}")))?;
-
     let pcm_clone = pcm.clone();
     let lang_clone = tcfg.language.clone();
     let timestamps = tcfg.timestamps;
     let engine_for_task = Arc::clone(&engine);
 
-    let segments = task::spawn_blocking(move || {
+    let segments = transcribe_holding_permit(TRANSCRIPTION_SEMAPHORE.clone(), move || {
         engine_for_task.transcribe_segments(&pcm_clone, lang_clone.as_deref(), timestamps)
     })
-    .await
-    .map_err(|e| XbergError::transcription(format!("whisper task panicked: {e}")))?
-    .map_err(|e| XbergError::transcription(format!("whisper inference failed: {e}")))?;
+    .await?;
 
     let mut doc = build_audio_document(tags, &pcm, mime_type);
     push_transcript_elements(&mut doc, &segments, tcfg.timestamps);
@@ -252,7 +291,9 @@ impl InternalDocumentExtractor for TranscriptionExtractor {
         // aliases core/mime.rs declares for the four canonical types beside them.
         // `validate_mime_type` accepts an alias verbatim and the registry looks extractors up
         // by exact string with no alias resolution, so an unclaimed alias is advertised as
-        // supported and then fails as UnsupportedFormat (#229).
+        // supported and then fails as UnsupportedFormat (#229). The ASF/WMV entries are the
+        // containers the built-in decoder cannot read; their audio track is decoded through
+        // Media Foundation instead (crate::transcription::container).
         &[
             "audio/mpeg",
             "audio/mp3",
@@ -264,6 +305,9 @@ impl InternalDocumentExtractor for TranscriptionExtractor {
             "video/mp4",
             "video/mpeg",
             "video/webm",
+            "video/x-ms-wmv",
+            "video/x-ms-asf",
+            "application/vnd.ms-asf",
         ]
     }
 
@@ -294,7 +338,13 @@ impl TranscriptionExtractor {
             )));
         }
 
-        let pcm = decode_audio_to_pcm(content, tcfg.max_bytes)?;
+        let pcm = decode_to_pcm(
+            content,
+            mime_type,
+            tcfg.max_bytes,
+            tcfg.max_duration_ms,
+            tcfg.timeout_ms,
+        )?;
         let tags = crate::transcription::tags::read_audio_tags(content);
 
         if let Some(max_d) = tcfg.max_duration_ms
@@ -349,6 +399,104 @@ fn build_audio_document(tags: AudioTags, pcm: &PcmAudio, mime_type: &str) -> Int
     doc.metadata.language = tags.language;
     doc.metadata.format = Some(FormatMetadata::Audio(audio_meta));
     doc
+}
+
+#[cfg(test)]
+mod permit_tests {
+    use super::*;
+    use std::future::Future;
+    use std::sync::Barrier;
+    use std::task::Poll;
+
+    #[tokio::test]
+    async fn permit_stays_with_the_blocking_task_when_the_waiter_is_cancelled() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let release = Arc::new(Barrier::new(2));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+
+        let mut waiter = Box::pin(transcribe_holding_permit(Arc::clone(&semaphore), {
+            let release = Arc::clone(&release);
+            move || -> std::result::Result<Vec<(u32, u32, String)>, String> {
+                let _ = started_tx.send(());
+                release.wait();
+                Ok(Vec::new())
+            }
+        }));
+
+        let first = std::future::poll_fn(|cx| Poll::Ready(Future::poll(waiter.as_mut(), cx))).await;
+        assert!(
+            first.is_pending(),
+            "the blocking task must still be running after the first poll"
+        );
+        started_rx.await.expect("the blocking task must have started");
+
+        drop(waiter);
+
+        // Observe first, release the barrier second, assert last. Asserting before the
+        // `release.wait()` below parks the blocking-pool thread on the barrier forever when the
+        // assertion fails, so the test binary never exits and the whole job dies on a timeout --
+        // which CI reports as `cancelled`, not as this failure. ~keep
+        let permit_withheld = Arc::clone(&semaphore).try_acquire_owned().is_err();
+
+        release.wait();
+
+        assert!(
+            permit_withheld,
+            "a cancelled waiter must not return the permit while its blocking task is still running"
+        );
+        let regained = tokio::time::timeout(std::time::Duration::from_secs(5), semaphore.acquire()).await;
+        assert!(
+            regained.is_ok(),
+            "the permit must return once the blocking task finishes"
+        );
+    }
+
+    #[tokio::test]
+    async fn permit_is_returned_after_a_completed_call() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+
+        let results = transcribe_holding_permit(
+            Arc::clone(&semaphore),
+            || -> std::result::Result<Vec<(u32, u32, String)>, String> { Ok(Vec::new()) },
+        )
+        .await
+        .expect("the task must succeed");
+
+        assert_eq!(results.len(), 0, "the stub task returns no segments");
+        assert_eq!(
+            semaphore.available_permits(),
+            1,
+            "a completed call must release its permit"
+        );
+    }
+
+    #[tokio::test]
+    async fn semaphore_closed_error_names_the_semaphore() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        semaphore.close();
+
+        let err = transcribe_holding_permit(semaphore, || -> std::result::Result<Vec<(u32, u32, String)>, String> {
+            Ok(Vec::new())
+        })
+        .await
+        .expect_err("a closed semaphore must be surfaced as an error");
+
+        assert!(err.to_string().contains("semaphore closed"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn inference_error_is_surfaced_separately_from_a_join_error() {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+
+        let err = transcribe_holding_permit(semaphore, || -> std::result::Result<Vec<(u32, u32, String)>, String> {
+            Err("decoder rejected the clip".to_string())
+        })
+        .await
+        .expect_err("the inner error must propagate");
+
+        assert!(err.to_string().contains("whisper inference failed"), "{err}");
+        assert!(err.to_string().contains("decoder rejected the clip"), "{err}");
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 <!--
 AI-RULEZ :: GENERATED FILE — DO NOT EDIT
-Content-Hash: blake3:fc2412f569929a95cf1b988c5c33aa4d064b52712f8d606de11eb58b3f5d86ff
-Source-Hash: blake3:a92a53795b15c1bfb0f4ee65d2ec8e7475ff291f9271b5bbf404957b82eb790a
+Content-Hash: blake3:cd55a9d089a4fe188a64803a05bf46b418949673c0b952c381eefdd2416457f5
+Source-Hash: blake3:c4a88d666902477ec013cc1f990f5678bb309ab3daeb18375f59c31549d99f9f
 Schema-Version: v1
 -->
 
@@ -75,6 +75,7 @@ xberg extract <path> [FLAGS]
 - `--msg-codepage <n>` — Windows codepage fallback for MSG files.
 - `--max-concurrent <n>` — Max parallel extractions in batch mode.
 - `--max-threads <n>` — Cap all internal thread pools.
+- `--max-concurrent-ocr <n>` — Set concurrent Tesseract recognition sessions, not capped by `--max-threads`.
 - `--cache-namespace <name>` — Cache namespace for tenant isolation.
 - `--cache-ttl-secs <n>` — Per-request cache TTL in seconds.
 

@@ -230,6 +230,11 @@ fn test_extraction_config_no_unknown_fields_in_default() {
         "force_ocr",
         "ocr_strategy",
         "disable_ocr",
+        // GH#1752 split three behaviours out of "is an `ocr` block present": each is an
+        // Option<bool> whose None reproduces the previous derived behaviour. ~keep
+        "ocr_near_empty_fallback",
+        "ocr_scanned_page_quality_gate",
+        "ocr_embedded_images",
         "chunking",
         "content_filter",
         "images",
@@ -256,9 +261,11 @@ fn test_extraction_config_no_unknown_fields_in_default() {
         "concurrency",
         "csv",
         "email",
+        "geojson",
         "layout",
         "max_archive_depth",
         "max_embedded_file_bytes",
+        "mime_detection_policy",
         "extraction_timeout_secs",
         "tree_sitter",
         "use_layout_for_markdown",
@@ -279,10 +286,24 @@ fn test_extraction_config_no_unknown_fields_in_default() {
 fn test_extraction_config_needs_image_processing() {
     let mut config = ExtractionConfig::default();
 
+    // Fork default: image extraction is ON when the `images` section is absent
+    // (fork.md), so the default config DOES need image processing. The negative
+    // case requires the explicit opt-out — including `run_ocr_on_images`, since
+    // embedded-image OCR is on by default too.
+    assert!(
+        config.needs_image_processing(),
+        "Fork default extracts images, so default config needs image processing"
+    );
+    config.images = Some(xberg::ImageExtractionConfig {
+        extract_images: false,
+        run_ocr_on_images: false,
+        ..Default::default()
+    });
     assert!(
         !config.needs_image_processing(),
-        "Default config should not need image processing"
+        "Full opt-out (extract_images and run_ocr_on_images both false) needs no processing"
     );
+    config.images = None;
 
     config.ocr = Some(xberg::OcrConfig {
         backend: "tesseract".to_string(),

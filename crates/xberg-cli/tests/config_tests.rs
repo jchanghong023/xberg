@@ -11,12 +11,12 @@
 #![allow(clippy::field_reassign_with_default)]
 
 #[test]
-fn test_output_format_flag_plain() {
+fn test_output_format_default_is_markdown() {
     let config = xberg::core::config::ExtractionConfig::default();
     assert_eq!(
         config.output_format,
-        xberg::core::config::OutputFormat::Plain,
-        "Default output format should be Plain"
+        xberg::core::config::OutputFormat::Markdown,
+        "Library default output format is Markdown; the CLI pins Plain in load_config"
     );
 }
 

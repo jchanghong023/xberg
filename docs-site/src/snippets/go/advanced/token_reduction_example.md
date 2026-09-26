@@ -15,7 +15,7 @@ func main() {
 		// TokenReductionOptions only exposes Mode and PreserveImportantWords; Markdown
 		// preservation is controlled by the reduction level's own defaults, not a separate flag.
 		TokenReduction: &xberg.TokenReductionOptions{
-			Mode: mode,
+			Mode: &mode,
 		},
 	}
 

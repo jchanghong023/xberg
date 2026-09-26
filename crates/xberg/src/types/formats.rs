@@ -1,7 +1,7 @@
 //! Format-specific extraction results and OCR configuration types.
 
 use bytes::Bytes;
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 
 use super::document_structure::DocumentStructure;
@@ -37,6 +37,24 @@ where
         _ => Err(Error::custom(
             "language must be a string (e.g., \"eng\") or an array of strings (e.g., [\"eng\", \"deu\"])",
         )),
+    }
+}
+
+/// Deserialize `thresholding_method`: an integer (`0`-`2`), or the legacy `bool` a pre-GH#1784
+/// config may send (`false` -> `0` Otsu, `true` -> `1` LeptonicaOtsu, its old "adaptive" doc).
+fn deserialize_thresholding_method<'de, D>(deserializer: D) -> Result<i32, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de::Error;
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Bool(false) => Ok(0),
+        serde_json::Value::Bool(true) => Ok(1),
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .and_then(|n| i32::try_from(n).ok())
+            .ok_or_else(|| Error::custom("thresholding_method must be an integer (0-2)")),
+        _ => Err(Error::custom("thresholding_method must be an integer (0-2) or a bool")),
     }
 }
 
@@ -125,7 +143,7 @@ pub struct TextExtractionResult {
 }
 
 /// A hyperlink discovered in a presentation slide.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PresentationHyperlink {
     /// Link destination.
     pub url: String,
@@ -144,15 +162,6 @@ enum PresentationHyperlinkWire {
     },
 }
 
-impl Serialize for PresentationHyperlink {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (&self.url, &self.label).serialize(serializer)
-    }
-}
-
 impl<'de> Deserialize<'de> for PresentationHyperlink {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -168,19 +177,17 @@ impl<'de> Deserialize<'de> for PresentationHyperlink {
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for PresentationHyperlink {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        use utoipa::openapi::schema::{ArrayBuilder, ArrayItems, Object, ObjectBuilder, Schema, SchemaType, Type};
+        use utoipa::openapi::schema::{Object, ObjectBuilder, SchemaType, Type};
 
         let nullable_string = ObjectBuilder::new()
             .schema_type(SchemaType::from_iter([Type::String, Type::Null]))
             .build();
-        ArrayBuilder::new()
-            .items(ArrayItems::False)
-            .prefix_items([
-                Schema::Object(Object::with_type(Type::String)),
-                Schema::Object(nullable_string),
-            ])
-            .min_items(Some(2))
-            .max_items(Some(2))
+
+        ObjectBuilder::new()
+            .property("url", Object::with_type(Type::String))
+            .required("url")
+            .property("label", nullable_string)
+            .required("label")
             .into()
     }
 }
@@ -386,6 +393,15 @@ pub struct OcrTableBoundingBox {
 #[serde(default, deny_unknown_fields)]
 pub struct ImagePreprocessingConfig {
     /// Target DPI for the image (300 is standard, 600 for small text).
+    ///
+    /// For a PDF page, this resamples the already-rendered raster; it does not make the page
+    /// re-render at a higher native resolution. A value above what
+    /// `image::preprocessing::calculate_target_dpi`'s memory/dimension clamp allows is
+    /// silently capped (GH#1786: 400 and 600 both clamped to the same ~372 on a Letter page
+    /// and produced byte-identical output), so upscaling interpolated pixels this way adds no
+    /// detail. To change the actual PDF render resolution, set `images.target_dpi` on
+    /// [`ExtractionConfig`](crate::core::config::ExtractionConfig) instead
+    /// (`image::dpi::effective_pdf_render_dpi`).
     pub target_dpi: i32,
 
     /// Auto-detect and correct image rotation.
@@ -407,6 +423,21 @@ pub struct ImagePreprocessingConfig {
 
     /// Invert colors (white text on black → black on white).
     pub invert_colors: bool,
+
+    /// Normalize shaded table rows (e.g. a subtotal row on a light or dark fill) before
+    /// binarization, so each shaded band is stretched to its own dark-text-on-white
+    /// polarity instead of being lost to a single whole-page threshold (GH#1785).
+    ///
+    /// This is a per-band step, not a replacement for `binarization_method`: no single
+    /// whole-page method recovers every fill color, and the per-band step itself can
+    /// regress a row style it does not fully model (e.g. a mid-grey fill with white
+    /// text), so it defaults to `false` rather than being enabled unconditionally.
+    ///
+    /// Has no effect when `binarization_method` is `"none"` or `"off"` **and** `contrast_enhance`
+    /// is `true`: that path re-reads the original image to apply background normalization and
+    /// sharpening, discarding the per-band result. A `WARN` is emitted when the option is
+    /// requested in that combination (GH#1837).
+    pub normalize_shaded_rows: bool,
 }
 
 impl Default for ImagePreprocessingConfig {
@@ -419,6 +450,7 @@ impl Default for ImagePreprocessingConfig {
             contrast_enhance: false,
             binarization_method: "otsu".to_string(),
             invert_colors: false,
+            normalize_shaded_rows: false,
         }
     }
 }
@@ -456,13 +488,32 @@ pub struct TesseractConfig {
     #[serde(deserialize_with = "deserialize_languages")]
     pub language: Vec<String>,
 
-    /// Page Segmentation Mode (0-13).
+    /// Page Segmentation Mode (1-13).
     ///
-    /// Common values:
-    /// - 3: Fully automatic page segmentation (native default)
-    /// - 6: Assume a single uniform block of text (WASM default — avoids layout-analysis hang)
+    /// PSM 0 is rejected: Tesseract's `PSM_OSD_ONLY` performs orientation and script
+    /// detection with no character recognition, so it cannot satisfy a text-extraction
+    /// request and previously yielded an empty document (GH#1586).
+    ///
+    /// `None` (the default) means the caller made no explicit choice: the extraction
+    /// pipeline applies its own context-appropriate PSM (whole-image PSM 11, vertical-
+    /// language PSM 5, layout-region PSM 6, or the sparse-text retry's PSM 3) exactly as
+    /// it would with no `TesseractConfig` at all — see issue #1573. Setting any other
+    /// field on this struct no longer changes that behaviour.
+    ///
+    /// A rendered PDF page (`force_ocr` / `force_ocr_pages` / scanned-page OCR) does **not**
+    /// currently get a context-appropriate default here: it falls through to the engine's
+    /// generic automatic-layout PSM (3) even though standalone image OCR of the same raster
+    /// would use PSM 11 (GH#1786). Measurements on this repository's own synthetic table
+    /// fixtures gave contradictory results across font/tessdata combinations (see GH#1786's
+    /// resolution notes) — table-heavy pages may benefit from setting `psm: 11` explicitly.
+    ///
+    /// Common explicit values:
+    /// - 3: Fully automatic page segmentation (native engine default)
+    /// - 6: Assume a single uniform block of text (WASM engine default — avoids
+    ///   layout-analysis hang)
     /// - 11: Sparse text with no particular order
-    pub psm: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub psm: Option<i32>,
 
     /// Output format ("text" or "markdown")
     pub output_format: String,
@@ -533,18 +584,21 @@ pub struct TesseractConfig {
     /// Variable-width space detection
     pub textord_space_size_is_variable: bool,
 
-    /// Use adaptive thresholding method
-    pub thresholding_method: bool,
+    /// Tesseract image-binarization method (0-2): 0 = Otsu (default), 1 = LeptonicaOtsu,
+    /// 2 = Sauvola. Sent to Tesseract's integer `thresholding_method` engine variable.
+    ///
+    /// GH#1784: used to be a `bool` sent as `"true"`/`"false"`, silently ignored by
+    /// Tesseract's integer parser. A config for the old field still deserializes: `false` ->
+    /// `0` (Otsu, the prior no-op), `true` -> `1` (LeptonicaOtsu, the old "adaptive" doc).
+    #[serde(deserialize_with = "deserialize_thresholding_method")]
+    pub thresholding_method: i32,
 }
 
 impl Default for TesseractConfig {
     fn default() -> Self {
         Self {
             language: vec!["eng".to_string()],
-            #[cfg(target_arch = "wasm32")]
-            psm: 6,
-            #[cfg(not(target_arch = "wasm32"))]
-            psm: 3,
+            psm: None,
             output_format: "markdown".to_string(),
             oem: 3,
             min_confidence: 0.0,
@@ -565,7 +619,7 @@ impl Default for TesseractConfig {
             tessedit_char_blacklist: String::new(),
             tessedit_use_primary_params_model: true,
             textord_space_size_is_variable: true,
-            thresholding_method: false,
+            thresholding_method: 0,
         }
     }
 }
@@ -574,7 +628,7 @@ impl Default for TesseractConfig {
 ///
 /// Tracks the transformations applied to an image during OCR preprocessing,
 /// including DPI normalization, resizing, and resampling.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct PixelDimensions {
     /// Width in pixels.
     pub width: usize,
@@ -587,15 +641,6 @@ pub struct PixelDimensions {
 enum PixelDimensionsWire {
     Positional((usize, usize)),
     Named { width: usize, height: usize },
-}
-
-impl Serialize for PixelDimensions {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (self.width, self.height).serialize(serializer)
-    }
 }
 
 impl<'de> Deserialize<'de> for PixelDimensions {
@@ -613,13 +658,13 @@ impl<'de> Deserialize<'de> for PixelDimensions {
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for PixelDimensions {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        use utoipa::openapi::schema::{ArrayBuilder, ArrayItems, Object, Type};
+        use utoipa::openapi::schema::{Object, ObjectBuilder, Type};
 
-        ArrayBuilder::new()
-            .items(ArrayItems::False)
-            .prefix_items([Object::with_type(Type::Integer), Object::with_type(Type::Integer)])
-            .min_items(Some(2))
-            .max_items(Some(2))
+        ObjectBuilder::new()
+            .property("width", Object::with_type(Type::Integer))
+            .required("width")
+            .property("height", Object::with_type(Type::Integer))
+            .required("height")
             .into()
     }
 }
@@ -640,7 +685,7 @@ impl From<PixelDimensions> for (usize, usize) {
 }
 
 /// Horizontal and vertical image resolution in dots per inch.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
 pub struct ImageDpi {
     /// Horizontal resolution.
     pub horizontal: f64,
@@ -653,15 +698,6 @@ pub struct ImageDpi {
 enum ImageDpiWire {
     Positional((f64, f64)),
     Named { horizontal: f64, vertical: f64 },
-}
-
-impl Serialize for ImageDpi {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        (self.horizontal, self.vertical).serialize(serializer)
-    }
 }
 
 impl<'de> Deserialize<'de> for ImageDpi {
@@ -679,13 +715,13 @@ impl<'de> Deserialize<'de> for ImageDpi {
 #[cfg(feature = "api")]
 impl utoipa::PartialSchema for ImageDpi {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        use utoipa::openapi::schema::{ArrayBuilder, ArrayItems, Object, Type};
+        use utoipa::openapi::schema::{Object, ObjectBuilder, Type};
 
-        ArrayBuilder::new()
-            .items(ArrayItems::False)
-            .prefix_items([Object::with_type(Type::Number), Object::with_type(Type::Number)])
-            .min_items(Some(2))
-            .max_items(Some(2))
+        ObjectBuilder::new()
+            .property("horizontal", Object::with_type(Type::Number))
+            .required("horizontal")
+            .property("vertical", Object::with_type(Type::Number))
+            .required("vertical")
             .into()
     }
 }
@@ -765,150 +801,4 @@ impl Default for ImageDpiConfig {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[cfg(feature = "api")]
-    fn assert_legacy_array_schema<T: utoipa::PartialSchema>(length: usize) {
-        let schema = serde_json::to_value(T::schema()).expect("schema must serialize");
-        assert_eq!(schema["type"], "array");
-        assert_eq!(schema["minItems"], length);
-        assert_eq!(schema["maxItems"], length);
-        assert_eq!(schema["items"], false);
-        assert_eq!(schema["prefixItems"].as_array().map(Vec::len), Some(length));
-    }
-
-    #[cfg(feature = "api")]
-    #[test]
-    fn should_describe_binding_dtos_as_legacy_array_schemas() {
-        assert_legacy_array_schema::<PresentationHyperlink>(2);
-        assert_legacy_array_schema::<PixelDimensions>(2);
-        assert_legacy_array_schema::<ImageDpi>(2);
-    }
-
-    #[test]
-    fn should_preserve_legacy_presentation_hyperlink_tuple_wire_format() {
-        let legacy = json!(["https://xberg.io", "Xberg"]);
-        let hyperlink: PresentationHyperlink =
-            serde_json::from_value(legacy.clone()).expect("legacy hyperlink must deserialize");
-        let named: PresentationHyperlink = serde_json::from_value(json!({
-            "url": "https://xberg.io",
-            "label": "Xberg"
-        }))
-        .expect("named hyperlink must deserialize");
-
-        assert_eq!(hyperlink.url, "https://xberg.io");
-        assert_eq!(hyperlink.label.as_deref(), Some("Xberg"));
-        assert_eq!(named, hyperlink);
-        assert_eq!(
-            serde_json::to_value(hyperlink).expect("hyperlink must serialize"),
-            legacy
-        );
-        assert_eq!(
-            serde_json::to_value(named).expect("named hyperlink must serialize"),
-            legacy
-        );
-    }
-
-    #[test]
-    fn should_preserve_missing_hyperlink_label_as_legacy_null() {
-        let legacy = json!(["https://xberg.io", null]);
-        let positional: PresentationHyperlink =
-            serde_json::from_value(legacy.clone()).expect("legacy null label must deserialize");
-        let named: PresentationHyperlink =
-            serde_json::from_value(json!({"url": "https://xberg.io"})).expect("omitted named label must deserialize");
-
-        assert_eq!(named, positional);
-        assert_eq!(
-            serde_json::to_value(positional).expect("hyperlink must serialize"),
-            legacy
-        );
-        assert_eq!(
-            serde_json::to_value(named).expect("named hyperlink must serialize"),
-            legacy
-        );
-    }
-
-    #[test]
-    fn should_preserve_legacy_preprocessing_tuple_wire_format() {
-        let legacy = json!({
-            "original_dimensions": [1200, 800],
-            "original_dpi": [72.0, 96.0],
-            "target_dpi": 300,
-            "scale_factor": 2.0,
-            "auto_adjusted": true,
-            "final_dpi": 288,
-            "new_dimensions": [2400, 1600],
-            "resample_method": "LANCZOS3",
-            "dimension_clamped": false,
-            "calculated_dpi": 288,
-            "skipped_resize": false,
-            "resize_error": null
-        });
-        let metadata: ImagePreprocessingMetadata =
-            serde_json::from_value(legacy.clone()).expect("legacy preprocessing metadata must deserialize");
-        let named_dimensions: PixelDimensions = serde_json::from_value(json!({"width": 1200, "height": 800}))
-            .expect("named pixel dimensions must deserialize");
-        let named_dpi: ImageDpi = serde_json::from_value(json!({"horizontal": 72.0, "vertical": 96.0}))
-            .expect("named image DPI must deserialize");
-
-        assert_eq!(
-            metadata.original_dimensions,
-            PixelDimensions {
-                width: 1200,
-                height: 800
-            }
-        );
-        assert_eq!(
-            metadata.original_dpi,
-            ImageDpi {
-                horizontal: 72.0,
-                vertical: 96.0
-            }
-        );
-        assert_eq!(
-            metadata.new_dimensions,
-            Some(PixelDimensions {
-                width: 2400,
-                height: 1600
-            })
-        );
-        assert_eq!(
-            serde_json::to_value(metadata).expect("preprocessing metadata must serialize"),
-            legacy
-        );
-        assert_eq!(
-            serde_json::to_value(named_dimensions).expect("named pixel dimensions must serialize"),
-            json!([1200, 800])
-        );
-        assert_eq!(
-            serde_json::to_value(named_dpi).expect("named image DPI must serialize"),
-            json!([72.0, 96.0])
-        );
-    }
-
-    /// This is the public-facing `TesseractConfig` (re-exported as `crate::types::
-    /// TesseractConfig`), not `crate::ocr::types::TesseractConfig` (the internal,
-    /// engine-facing struct with its own separate `Default` impl). The two defaults must
-    /// agree: `extractors::image::apply_default_tesseract_psm` and related call sites
-    /// construct *this* struct's default and convert it into the internal one, bypassing
-    /// the internal struct's own `Default` — so a stale value here silently overrides the
-    /// internal default for every standalone image OCR call, even after the internal
-    /// default is changed.
-    ///
-    /// Against the unfixed code this struct's `language_model_ngram_on` default is
-    /// `false`, disagreeing with `crate::ocr::types::TesseractConfig::default()`'s `true`
-    /// (see that struct's doc comment for why `true` is the deliberate, documented
-    /// default), so this assertion fails with `false` instead of `true`.
-    #[test]
-    fn test_tesseract_config_default_matches_internal_ngram_default() {
-        let config = TesseractConfig::default();
-
-        assert!(
-            config.language_model_ngram_on,
-            "public TesseractConfig::default() must match crate::ocr::types::TesseractConfig::default() \
-             for language_model_ngram_on (true), or standalone image OCR silently gets the stale value"
-        );
-    }
-}
+mod tests;

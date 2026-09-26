@@ -250,6 +250,11 @@ pub struct ExtractedDocument {
     /// retained. This is not a completeness or recall score: clean text can score
     /// highly even when an extractor omitted or rejected other content. Inspect
     /// `processing_warnings` separately for known degraded or partial extraction.
+    ///
+    /// When the text came from OCR and the result carries enough recognized words to
+    /// judge, this score is additionally capped by the mean OCR recognition confidence.
+    /// Text that looks clean but that OCR itself had little confidence in therefore
+    /// cannot score high. A native, non-OCR extraction is not capped.
     /// Previously stored in `metadata.additional["quality_score"]`.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
@@ -436,6 +441,15 @@ pub struct ExtractedDocument {
     #[allow(dead_code)]
     #[cfg_attr(alef, alef(skip))]
     pub(crate) ocr_internal_document: Option<super::internal::InternalDocument>,
+
+    /// Whether `ocr_internal_document` deliberately omits the paragraphs the
+    /// table rebuild claimed (the tesseract markdown path strips them once a
+    /// table owns those lines). A layout grid built from such a document would
+    /// render everything EXCEPT the tables, so the renderer must fall back to
+    /// `content` — the only source that still carries the table markdown.
+    #[serde(skip)]
+    #[cfg_attr(alef, alef(skip))]
+    pub(crate) internal_doc_excludes_tables: bool,
 
     /// The original `InternalDocument` from the extractor, preserved before derivation.
     ///

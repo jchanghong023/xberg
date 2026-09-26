@@ -68,8 +68,9 @@ pub fn merge_config_json(base: &ExtractionConfig, override_json: &str) -> Result
 /// runtime-injected values from `base` always survive the merge unchanged:
 ///
 /// - [`ExtractionConfig::cancel_token`] and [`ExtractionConfig::source_name`]
-/// - [`crate::core::config::OcrConfig::acceleration`] and
-///   [`crate::core::config::OcrConfig::tessdata_bytes`] (only when the merged
+/// - [`crate::core::config::OcrConfig::acceleration`],
+///   [`crate::core::config::OcrConfig::tessdata_bytes`], and
+///   [`crate::core::config::OcrConfig::security_limits`] (only when the merged
 ///   config still has an `ocr` section — an override that removes it entirely
 ///   has nothing to restore onto)
 /// - [`PostProcessorConfig::enabled_set`] and
@@ -81,6 +82,12 @@ fn restore_skipped_fields(base: &ExtractionConfig, merged: &mut ExtractionConfig
     if let (Some(base_ocr), Some(merged_ocr)) = (base.ocr.as_ref(), merged.ocr.as_mut()) {
         merged_ocr.acceleration = base_ocr.acceleration.clone();
         merged_ocr.tessdata_bytes = base_ocr.tessdata_bytes.clone();
+        // GH#1554: `security_limits` is `#[serde(skip)]` just like the two fields above, so
+        // the JSON round-trip drops it the same way. Defensive rather than an observed bug:
+        // dispatch-time injection (`ExtractionConfig::security_limits` -> `OcrConfig`) runs
+        // after any merge on every real call path today, so this only matters for a caller
+        // that sets `OcrConfig::security_limits` directly and then merges. ~keep
+        merged_ocr.security_limits = base_ocr.security_limits.clone();
     }
 
     if let (Some(base_pp), Some(merged_pp)) = (base.postprocessor.as_ref(), merged.postprocessor.as_mut()) {

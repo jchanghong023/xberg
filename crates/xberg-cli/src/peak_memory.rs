@@ -69,8 +69,34 @@ pub fn peak_memory_bytes() -> Option<u64> {
     Some(ru_maxrss_to_bytes(usage.ru_maxrss as i64))
 }
 
-/// Non-Unix platforms have no `getrusage`; report "unavailable" rather than guessing.
-#[cfg(not(unix))]
+/// Windows arm of [`peak_memory_bytes`]: the kernel-tracked peak working set from
+/// `GetProcessMemoryInfo` — the same whole-lifetime high-water-mark semantics as
+/// `ru_maxrss`, keeping the benchmark-harness comparison symmetric on this fork's
+/// only platform. (`ru_maxrss` counts resident pages; the peak working set is the
+/// closest Windows equivalent.)
+#[cfg(windows)]
+#[allow(unsafe_code)]
+pub fn peak_memory_bytes() -> Option<u64> {
+    use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    // `PROCESS_MEMORY_COUNTERS` is a C plain-old-data struct; zero-initializing it is
+    // always valid, and the call's return code is checked before the values are trusted.
+    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
+    let process = unsafe { GetCurrentProcess() };
+    let ok = unsafe {
+        GetProcessMemoryInfo(
+            process,
+            &mut counters,
+            std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+        )
+    };
+    (ok != 0).then_some(counters.PeakWorkingSetSize as u64)
+}
+
+/// Platforms with neither `getrusage` nor `GetProcessMemoryInfo`; report "unavailable"
+/// rather than guessing.
+#[cfg(not(any(unix, windows)))]
 pub fn peak_memory_bytes() -> Option<u64> {
     None
 }

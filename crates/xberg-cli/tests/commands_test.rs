@@ -479,8 +479,10 @@ fn batch_json_should_preserve_successes_and_report_every_extraction_error() {
         stderr.contains("input 1"),
         "stderr must attribute the first failed input index"
     );
+    // `write_batch_errors` renders the source with `{:?}`, so on Windows the path's
+    // backslashes come out escaped; match that rendering.
     assert!(
-        stderr.contains(invalid_one.to_str().unwrap()),
+        stderr.contains(&format!("{:?}", invalid_one.to_str().unwrap())),
         "stderr must attribute the first failed source"
     );
     assert!(
@@ -488,7 +490,7 @@ fn batch_json_should_preserve_successes_and_report_every_extraction_error() {
         "stderr must attribute the second failed input index"
     );
     assert!(
-        stderr.contains(invalid_two.to_str().unwrap()),
+        stderr.contains(&format!("{:?}", invalid_two.to_str().unwrap())),
         "stderr must attribute the second failed source"
     );
 }
@@ -529,8 +531,10 @@ fn batch_text_should_preserve_successes_and_report_every_extraction_error() {
         stderr.contains("input 1"),
         "stderr must attribute the first failed input index"
     );
+    // `write_batch_errors` renders the source with `{:?}`, so on Windows the path's
+    // backslashes come out escaped; match that rendering.
     assert!(
-        stderr.contains(invalid_one.to_str().unwrap()),
+        stderr.contains(&format!("{:?}", invalid_one.to_str().unwrap())),
         "stderr must attribute the first failed source"
     );
     assert!(
@@ -538,7 +542,7 @@ fn batch_text_should_preserve_successes_and_report_every_extraction_error() {
         "stderr must attribute the second failed input index"
     );
     assert!(
-        stderr.contains(invalid_two.to_str().unwrap()),
+        stderr.contains(&format!("{:?}", invalid_two.to_str().unwrap())),
         "stderr must attribute the second failed source"
     );
 }
@@ -578,8 +582,10 @@ fn batch_toon_should_preserve_successes_and_report_every_extraction_error() {
             "partial batch TOON must contain {expected:?}; got {stdout:?}"
         );
     }
+    // TOON serializes the source as a JSON string, so on Windows the path's
+    // backslashes come out escaped; match that rendering.
     assert!(
-        stdout.contains(invalid.to_str().unwrap()),
+        stdout.contains(&serde_json::to_string(invalid.to_str().unwrap()).unwrap()),
         "TOON error must retain source attribution"
     );
 }
@@ -625,6 +631,9 @@ fn test_batch_help() {
     assert!(stdout.contains("Batch extract from multiple documents"));
 }
 
+// The layout override flags (`--layout`, `--layout-confidence`, `--layout-table-model`) only
+// exist in a build that compiles `layout-detection`; the fork ships without it (fork.md: no
+// layout/table models), so both help-parity tests check them only when the feature is on.
 #[test]
 fn test_extract_help_shows_all_extraction_override_flags() {
     let output = Command::new(get_binary_path())
@@ -651,9 +660,6 @@ fn test_extract_help_shows_all_extraction_override_flags() {
         "--include-structure",
         "--quality",
         "--detect-language",
-        "--layout",
-        "--layout-confidence",
-        "--layout-table-model",
         "--acceleration",
         "--max-concurrent",
         "--max-threads",
@@ -673,6 +679,17 @@ fn test_extract_help_shows_all_extraction_override_flags() {
             flag,
             stdout
         );
+    }
+
+    if cfg!(feature = "layout-detection") {
+        for flag in ["--layout", "--layout-confidence", "--layout-table-model"] {
+            assert!(
+                stdout.contains(flag),
+                "Extract --help should show flag '{}', but it was not found in output:\n{}",
+                flag,
+                stdout
+            );
+        }
     }
 }
 
@@ -706,9 +723,6 @@ fn test_batch_has_same_extraction_flags_as_extract() {
         "--content-format",
         "--quality",
         "--detect-language",
-        "--layout",
-        "--layout-confidence",
-        "--layout-table-model",
         "--acceleration",
         "--max-concurrent",
         "--max-threads",
@@ -732,6 +746,19 @@ fn test_batch_has_same_extraction_flags_as_extract() {
             "Batch should have flag '{}' (parity with extract) but it's missing",
             flag
         );
+    }
+
+    if cfg!(feature = "layout-detection") {
+        for flag in ["--layout", "--layout-confidence", "--layout-table-model"] {
+            assert!(
+                extract_help.contains(flag),
+                "Extract should have flag '{flag}' but it's missing"
+            );
+            assert!(
+                batch_help.contains(flag),
+                "Batch should have flag '{flag}' but it's missing"
+            );
+        }
     }
 }
 

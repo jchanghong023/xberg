@@ -20,8 +20,10 @@ pub(crate) fn extract_metadata_from_native_document(
     content: &str,
     scanned_min_confidence: f64,
     ocr_quality_thresholds: &crate::core::config::OcrQualityThresholds,
+    provenance_counts: Option<&[(usize, usize)]>,
 ) -> Result<PdfExtractionMetadata> {
-    let pdf_specific = extract_pdf_specific_metadata(doc, scanned_min_confidence, ocr_quality_thresholds)?;
+    let pdf_specific =
+        extract_pdf_specific_metadata(doc, scanned_min_confidence, ocr_quality_thresholds, provenance_counts)?;
     let common = extract_common_metadata(doc)?;
 
     let page_structure = if let Some(boundaries) = page_boundaries {
@@ -48,6 +50,7 @@ fn extract_pdf_specific_metadata(
     doc: &mut NativeDocument,
     scanned_min_confidence: f64,
     ocr_quality_thresholds: &crate::core::config::OcrQualityThresholds,
+    provenance_counts: Option<&[(usize, usize)]>,
 ) -> Result<PdfMetadata> {
     let (major, minor) = doc.doc.version();
     let pdf_version = if major > 0 {
@@ -78,33 +81,12 @@ fn extract_pdf_specific_metadata(
 
     let producer = get_info_string(&mut doc.doc, "Producer");
 
-    // Advisory: a document we cannot grade reports no scan evidence. ~keep
-    let detection = crate::pdf::scan_detect::detect(&doc.doc);
-    let scanned_confidence = detection.as_ref().map(|d| d.confidence);
-    let mut scanned_pages: Option<Vec<u32>> = detection.as_ref().map(|d| {
-        d.scanned_page_indices(scanned_min_confidence as f32)
-            .into_iter()
-            .map(|index| index as u32 + 1)
-            .collect()
-    });
-
-    // A page whose text layer xberg_native_pdf could not read from the file (issue
-    // #1254) has low image coverage and is never selected by `detect` above, so
-    // it is unioned in separately here. ~keep
-    if ocr_quality_thresholds.enable_provenance_ocr_routing {
-        let fabricated_pages = crate::pdf::scan_detect::fabricated_provenance_page_indices(
-            &doc.doc,
-            ocr_quality_thresholds.min_provenance_fallback_ratio,
-            ocr_quality_thresholds.min_total_non_whitespace,
-        );
-        if !fabricated_pages.is_empty() {
-            let mut merged = scanned_pages.unwrap_or_default();
-            merged.extend(fabricated_pages.into_iter().map(|index| index as u32 + 1));
-            merged.sort_unstable();
-            merged.dedup();
-            scanned_pages = Some(merged);
-        }
-    }
+    let (scanned_confidence, scanned_pages, fabricated_text_pages) = ocr_routing_pages(
+        &doc.doc,
+        scanned_min_confidence,
+        ocr_quality_thresholds,
+        provenance_counts,
+    );
 
     Ok(PdfMetadata {
         pdf_version,
@@ -115,11 +97,77 @@ fn extract_pdf_specific_metadata(
         page_count: Some(page_count as u32),
         scanned_confidence,
         scanned_pages,
+        fabricated_text_pages,
+        // Filled by the extractor after the language-plausibility pass runs, not here:
+        // unlike `fabricated_text_pages`, this signal needs decoded page text and
+        // boundaries, which metadata extraction does not have (issue #1696). ~keep
+        implausible_text_pages: None,
         // Filled by the extractor after the layout pass runs, not here:
         // metadata extraction never runs the layout gate itself. ~keep
         layout_gated_pages: None,
         layout_gate_reasons: None,
     })
+}
+
+/// Compute the raster scan-confidence/page-list pair and the separate fabricated-mapping
+/// page list that the `Auto` OCR strategy consults (issue #1667).
+///
+/// A page whose text layer xberg_native_pdf could not read from the file (issue #1254) has
+/// low image coverage and is never selected by `scan_detect::detect`, so it is unioned into
+/// `scanned_pages` separately here. It is also kept separately in the returned
+/// `fabricated_text_pages` list (not just merged into `scanned_pages`): `scanned_pages` also
+/// carries raster-detected scans, which the `Auto` OCR strategy deliberately leaves native
+/// when they carry a good invisible-text sidecar (see `OcrStrategy::Auto`'s doc comment), so
+/// `Auto` must not treat every `scanned_pages` entry as a failure. A fabricated mapping is
+/// not a raster judgment call, though: it is a fact about how the text was derived, so `Auto`
+/// consults this list on its own regardless of `ocr_strategy` (issue #1667). ~keep
+fn ocr_routing_pages(
+    doc: &xberg_native_pdf::PdfDocument,
+    scanned_min_confidence: f64,
+    ocr_quality_thresholds: &crate::core::config::OcrQualityThresholds,
+    provenance_counts: Option<&[(usize, usize)]>,
+) -> (Option<f32>, Option<Vec<u32>>, Option<Vec<u32>>) {
+    // Advisory: a document we cannot grade reports no scan evidence. ~keep
+    let detection = crate::pdf::scan_detect::detect(doc);
+    let scanned_confidence = detection.as_ref().map(|d| d.confidence);
+    let mut scanned_pages: Option<Vec<u32>> = detection.as_ref().map(|d| {
+        d.scanned_page_indices(scanned_min_confidence as f32)
+            .into_iter()
+            .map(|index| index as u32 + 1)
+            .collect()
+    });
+
+    let mut fabricated_text_pages: Option<Vec<u32>> = None;
+    if ocr_quality_thresholds.enable_provenance_ocr_routing {
+        // The common case: the text pass already read every page's raw spans and handed us
+        // their fabricated-mapping counts, so no second per-page read is needed (issue
+        // #1744). `provenance_counts` is only `None` when the document excluded
+        // optional-content layers, in which case the text pass read filtered spans and
+        // provenance must fall back to reading the unfiltered spans itself.
+        let fabricated_pages = match provenance_counts {
+            Some(counts) => crate::pdf::scan_detect::fabricated_provenance_page_indices_from_counts(
+                counts,
+                ocr_quality_thresholds.min_provenance_fallback_ratio,
+                ocr_quality_thresholds.min_total_non_whitespace,
+            ),
+            None => crate::pdf::scan_detect::fabricated_provenance_page_indices(
+                doc,
+                ocr_quality_thresholds.min_provenance_fallback_ratio,
+                ocr_quality_thresholds.min_total_non_whitespace,
+            ),
+        };
+        let one_indexed: Vec<u32> = fabricated_pages.iter().map(|index| *index as u32 + 1).collect();
+        if !fabricated_pages.is_empty() {
+            let mut merged = scanned_pages.unwrap_or_default();
+            merged.extend(one_indexed.iter().copied());
+            merged.sort_unstable();
+            merged.dedup();
+            scanned_pages = Some(merged);
+        }
+        fabricated_text_pages = Some(one_indexed);
+    }
+
+    (scanned_confidence, scanned_pages, fabricated_text_pages)
 }
 
 /// Extract common document metadata (title, author, keywords, dates, creator)

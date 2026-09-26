@@ -115,6 +115,123 @@ impl AsRef<str> for InternalElementId {
     }
 }
 
+/// One OCR page's authoritative processed-raster coordinate frame (GH#1645).
+///
+/// Public `OcrElement` geometry stays in the OCR backend's own raster pixel space even
+/// after the rest of a page's document is normalized into PDF page points, and
+/// `Metadata::additional`'s document-wide `ocr_processed_image_width/height` pair cannot
+/// describe differently sized, preprocessed, or rotated pages. This record is the per-page
+/// authority a multi-page consumer joins to an `OcrElement` through the element's own
+/// `page_number`.
+///
+/// Crate-private and carried on [`InternalDocument::ocr_coordinate_frame`] with
+/// `#[serde(skip)]` so it never crosses the plugin-bridge JSON wire format or gets an alef
+/// binding DTO; it is folded into `Metadata::additional` under
+/// `ocr_metadata_keys::OCR_PAGE_COORDINATE_FRAMES_METADATA_KEY` once a page's document is
+/// final (`extractors::pdf::mod`).
+// Gated to match the only code that writes or reads it, in `extractors::pdf::ocr`.
+// Ungated, the `ocr`-without-`pdf` feature leg compiles the field with no writer and no
+// reader, which `-D warnings` rejects as dead_code — and CI builds that leg. ~keep
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+// `pub` + alef(skip), not `pub(crate)`: `InternalDocument` is a `pub` struct whose every
+// other field is `pub`, and struct-update syntax requires ALL fields to be visible at the
+// construction site. One `pub(crate)` field therefore breaks the 12 integration tests that
+// build one with `..Default::default()`, since those are separate crates. alef(skip)
+// keeps it out of the generated bindings, and `#[serde(skip)]` on the field keeps it off
+// the plugin-bridge wire. ~keep
+#[cfg_attr(alef, alef(skip))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct OcrPageCoordinateFrame {
+    /// 1-based page this frame describes.
+    pub page_number: u32,
+    /// Processed raster width in pixels.
+    pub width: u32,
+    /// Processed raster height in pixels.
+    pub height: u32,
+    /// Always `"pixel"`.
+    pub unit: &'static str,
+    /// Always `"top_left"`.
+    pub origin: &'static str,
+}
+
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+impl OcrPageCoordinateFrame {
+    /// `width`/`height` must already be known non-zero -- callers gate on that before
+    /// constructing one, so this never represents a degenerate/fabricated frame.
+    pub fn new(page_number: u32, width: u32, height: u32) -> Self {
+        Self {
+            page_number,
+            width,
+            height,
+            unit: "pixel",
+            origin: "top_left",
+        }
+    }
+}
+
+/// One PDF page's raw MediaBox coordinate frame (GH#1653 + GH#1654).
+///
+/// GH#1653: `origin_x`/`origin_y` are the MediaBox `llx`/`lly`, which can be non-zero and
+/// negative -- a consumer that assumes `(0, 0)` mis-places every geometry field the page
+/// reports. GH#1654: `clockwise_rotation` is the page `/Rotate`. Both gaps are one record,
+/// not two, because a consumer needs the origin and the rotation together to place a page's
+/// geometry in display space.
+///
+/// `width`/`height` are the MediaBox *extent* (`urx - llx`, `ury - lly`) and are deliberately
+/// NOT swapped for a 90/270 rotation: this describes raw PDF user space, the space
+/// `HierarchicalBlock.bbox` and other segment geometry actually live in
+/// (`pdf::structure::types`), not the displayed/rotated frame. This is the opposite of
+/// `OcrPageCoordinateFrame` above, which reports the already-rotated processed raster. ~keep
+#[cfg(feature = "pdf")]
+#[cfg_attr(alef, alef(skip))]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub(crate) struct PdfPageCoordinateFrame {
+    /// 1-based page this frame describes.
+    pub page_number: u32,
+    /// MediaBox `llx`.
+    pub origin_x: f32,
+    /// MediaBox `lly`.
+    pub origin_y: f32,
+    /// MediaBox extent: `urx - llx`. Not swapped for 90/270 rotation.
+    pub width: f32,
+    /// MediaBox extent: `ury - lly`. Not swapped for 90/270 rotation.
+    pub height: f32,
+    /// Always `"point"`.
+    pub unit: &'static str,
+    /// Always `"bottom_left"`.
+    pub origin: &'static str,
+    /// The page `/Rotate`, normalized to one of `{0, 90, 180, 270}`.
+    pub clockwise_rotation: i32,
+}
+
+#[cfg(feature = "pdf")]
+impl PdfPageCoordinateFrame {
+    /// Returns `None` for a MediaBox that does not yield a usable extent.
+    ///
+    /// A MediaBox is not guaranteed well-ordered -- the margin filter at this record's own
+    /// call site defensively takes `min`/`max` over the same y pair -- so an inverted or
+    /// degenerate box produces a zero or negative extent. Publishing that as an authoritative
+    /// frame is worse than publishing nothing, so the page is omitted instead, matching the
+    /// fail-closed convention `OcrPageCoordinateFrame` uses for invalid raster dimensions. ~keep
+    pub fn new(page_number: u32, llx: f32, lly: f32, urx: f32, ury: f32, clockwise_rotation: i32) -> Option<Self> {
+        let width = urx - llx;
+        let height = ury - lly;
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        Some(Self {
+            page_number,
+            origin_x: llx,
+            origin_y: lly,
+            width,
+            height,
+            unit: "point",
+            origin: "bottom_left",
+            clockwise_rotation,
+        })
+    }
+}
+
 #[cfg_attr(alef, alef(skip))]
 /// The internal flat document representation.
 ///
@@ -282,6 +399,16 @@ pub struct InternalDocument {
     /// pipeline from `ExtractionConfig::table_anchors`. Defaults to `false`.
     #[serde(skip)]
     pub table_anchors: bool,
+
+    /// This OCR page's authoritative processed-raster coordinate frame, captured before
+    /// the page-local metadata it comes from is discarded (GH#1645). `#[serde(skip)]` for
+    /// the same reason as the fields above -- it never crosses the plugin-bridge JSON wire
+    /// format -- and is folded into `Metadata::additional` once the page document is final
+    /// rather than becoming a new public binding type. `None` for every non-OCR document,
+    /// and for an OCR'd page whose render raster was degenerate (0x0).
+    #[serde(skip)]
+    #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+    pub ocr_coordinate_frame: Option<OcrPageCoordinateFrame>,
 }
 
 impl From<crate::types::extraction::ExtractedDocument> for InternalDocument {
@@ -368,6 +495,8 @@ impl InternalDocument {
             form_fields: Vec::new(),
             formulas: Vec::new(),
             recorded_formulas: Vec::new(),
+            #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+            ocr_coordinate_frame: None,
         }
     }
 
@@ -826,376 +955,4 @@ const _: () = {
 };
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_internal_element_id_deterministic() {
-        let id1 = InternalElementId::generate("heading", "Introduction", Some(1), 0);
-        let id2 = InternalElementId::generate("heading", "Introduction", Some(1), 0);
-        assert_eq!(id1, id2);
-    }
-
-    #[test]
-    fn test_internal_element_id_differs_by_index() {
-        let id1 = InternalElementId::generate("paragraph", "Same text", Some(1), 0);
-        let id2 = InternalElementId::generate("paragraph", "Same text", Some(1), 1);
-        assert_ne!(id1, id2);
-    }
-
-    #[test]
-    fn test_internal_element_id_format() {
-        let id = InternalElementId::generate("title", "Hello", None, 0);
-        assert!(id.as_str().starts_with("ie-"));
-        assert_eq!(id.as_str().len(), 3 + 12);
-    }
-
-    #[test]
-    fn test_element_kind_discriminant() {
-        assert_eq!(ElementKind::Title.discriminant(), "title");
-        assert_eq!(ElementKind::Heading { level: 2 }.discriminant(), "heading");
-        assert_eq!(ElementKind::ListStart { ordered: true }.discriminant(), "list_start");
-    }
-
-    #[test]
-    fn test_container_markers() {
-        assert!(ElementKind::ListStart { ordered: false }.is_container_start());
-        assert!(ElementKind::ListEnd.is_container_end());
-        assert!(!ElementKind::Paragraph.is_container_start());
-        assert_eq!(ElementKind::QuoteStart.matching_end(), Some(ElementKind::QuoteEnd));
-    }
-
-    #[test]
-    fn test_internal_document_push() {
-        let mut doc = InternalDocument::new("markdown");
-        let elem = InternalElement::text(ElementKind::Paragraph, "Hello world", 0);
-        let idx = doc.push_element(elem);
-        assert_eq!(idx, 0);
-        assert_eq!(doc.elements.len(), 1);
-        assert_eq!(doc.elements[0].text, "Hello world");
-    }
-
-    #[test]
-    fn public_attributes_preserve_explicit_empty_map() {
-        let mut element = InternalElement::text(ElementKind::Paragraph, "text", 0);
-        element.attributes = Some(AHashMap::new());
-
-        assert_eq!(element.public_attributes(), Some(std::collections::HashMap::new()));
-    }
-
-    #[cfg(all(feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
-    #[test]
-    fn public_attributes_hide_internal_image_ocr_suppression() {
-        let mut element = InternalElement::text(ElementKind::Image { image_index: 0 }, "", 0);
-        element.suppress_image_ocr_rendering();
-
-        assert!(element.public_attributes().is_none());
-        assert!(!element.should_render_image_ocr());
-    }
-
-    /// #### FAILS against unfixed code
-    /// `set_list_item_source_label`/`list_item_source_label` do not exist yet
-    /// on unfixed `InternalElement` -- this test does not compile without the
-    /// fix. Once the fix lands, it proves two things a bare
-    /// `ElementKind::ListItem { ordered: true }` cannot: the literal marker
-    /// text round-trips unchanged, and -- unlike the OCR-suppression
-    /// attribute -- it is NOT filtered out of `public_attributes()`, so it
-    /// reaches the public `DocumentStructure` tree via `DocumentNode::attributes`.
-    #[cfg(feature = "pdf")]
-    #[test]
-    fn list_item_source_label_round_trips_and_stays_public() {
-        let mut element = InternalElement::text(ElementKind::ListItem { ordered: false }, "General Provisions.", 1);
-        assert_eq!(element.list_item_source_label(), None);
-
-        element.set_list_item_source_label("B.");
-
-        assert_eq!(element.list_item_source_label(), Some("B."));
-        assert_eq!(
-            element.public_attributes(),
-            Some(std::collections::HashMap::from([(
-                "list_marker".to_string(),
-                "B.".to_string()
-            )]))
-        );
-    }
-
-    /// An empty label is a caller bug (e.g. a marker-strip that removed
-    /// nothing), not a real source marker -- `set_list_item_source_label`
-    /// must not manufacture a spurious attribute for it.
-    #[cfg(feature = "pdf")]
-    #[test]
-    fn list_item_source_label_ignores_an_empty_label() {
-        let mut element = InternalElement::text(ElementKind::ListItem { ordered: true }, "item text", 1);
-        element.set_list_item_source_label("");
-        assert_eq!(element.list_item_source_label(), None);
-        assert_eq!(element.attributes, None);
-    }
-
-    #[cfg(any(feature = "ocr", feature = "pdf", paddle_ocr, feature = "xml", feature = "office"))]
-    #[test]
-    fn test_internal_element_builder_pattern() {
-        let elem = InternalElement::text(ElementKind::Heading { level: 2 }, "Methods", 1)
-            .with_page(3)
-            .with_anchor("methods")
-            .with_layer(ContentLayer::Body);
-
-        assert_eq!(elem.text, "Methods");
-        assert_eq!(elem.page, Some(3));
-        assert_eq!(elem.anchor, Some("methods".to_string()));
-        assert_eq!(elem.depth, 1);
-    }
-
-    #[test]
-    fn test_relationship_kind_serde() {
-        let kind = RelationshipKind::FootnoteReference;
-        let json = serde_json::to_string(&kind).unwrap();
-        assert_eq!(json, "\"footnote_reference\"");
-
-        let parsed: RelationshipKind = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed, kind);
-    }
-
-    /// Verify that `InternalDocument` round-trips through serde JSON without loss.
-    ///
-    /// This is the primary correctness gate for foreign-language plugin support:
-    /// Python/TypeScript/Ruby implementations of `DocumentExtractor` construct
-    /// an `InternalDocument` as JSON and pass it across the FFI boundary.
-    #[test]
-    fn should_round_trip_through_serde_json() {
-        let mut doc = InternalDocument::new("pdf");
-        doc.mime_type = "application/pdf".to_string();
-
-        let title = InternalElement::text(ElementKind::Title, "Test Document", 0);
-        doc.push_element(title);
-
-        let heading = InternalElement::text(ElementKind::Heading { level: 2 }, "Introduction", 1);
-        doc.push_element(heading);
-
-        let para = InternalElement::text(ElementKind::Paragraph, "Body text here.", 1);
-        doc.push_element(para);
-
-        let list_start = InternalElement::text(ElementKind::ListStart { ordered: true }, "", 1);
-        doc.push_element(list_start);
-        let item = InternalElement::text(ElementKind::ListItem { ordered: true }, "First item", 2);
-        doc.push_element(item);
-        let list_end = InternalElement::text(ElementKind::ListEnd, "", 1);
-        doc.push_element(list_end);
-
-        let code = InternalElement::text(ElementKind::Code, "fn main() {}", 0);
-        doc.push_element(code);
-
-        let pb = InternalElement::text(ElementKind::PageBreak, "", 0);
-        doc.push_element(pb);
-
-        let img_elem = InternalElement::text(ElementKind::Image { image_index: 0 }, "", 0);
-        doc.push_element(img_elem);
-
-        let ocr = InternalElement::text(
-            ElementKind::OcrText {
-                level: OcrElementLevel::Word,
-            },
-            "scanned word",
-            0,
-        );
-        doc.push_element(ocr);
-
-        doc.push_relationship(Relationship {
-            source: 0,
-            target: RelationshipTarget::Index(2),
-            kind: RelationshipKind::FootnoteReference,
-        });
-        doc.push_relationship(Relationship {
-            source: 1,
-            target: RelationshipTarget::Key("introduction".to_string()),
-            kind: RelationshipKind::CrossReference,
-        });
-
-        let json = serde_json::to_string(&doc).expect("serialize InternalDocument");
-        let restored: InternalDocument = serde_json::from_str(&json).expect("deserialize InternalDocument");
-
-        assert_eq!(restored.source_format, doc.source_format);
-        assert_eq!(restored.mime_type, doc.mime_type);
-        assert_eq!(restored.elements.len(), doc.elements.len());
-        assert_eq!(restored.relationships.len(), doc.relationships.len());
-
-        assert_eq!(restored.elements[0].kind, ElementKind::Title);
-        assert_eq!(restored.elements[1].kind, ElementKind::Heading { level: 2 });
-        assert_eq!(restored.elements[4].kind, ElementKind::ListItem { ordered: true });
-        assert_eq!(restored.elements[8].kind, ElementKind::Image { image_index: 0 });
-        assert_eq!(
-            restored.elements[9].kind,
-            ElementKind::OcrText {
-                level: OcrElementLevel::Word
-            }
-        );
-
-        assert_eq!(restored.relationships[0].target, RelationshipTarget::Index(2));
-        assert_eq!(
-            restored.relationships[1].target,
-            RelationshipTarget::Key("introduction".to_string())
-        );
-
-        assert_eq!(restored.elements[0].id, doc.elements[0].id);
-
-        assert_eq!(restored.elements[0].layer, ContentLayer::Body);
-    }
-
-    /// Cover all 27 `ElementKind` variants through a serde JSON round-trip.
-    ///
-    /// Every variant must be constructed, serialised, and deserialised; the
-    /// `kind` field is then asserted on each restored element so that a missing
-    /// or mis-tagged variant surfaces immediately.
-    #[test]
-    fn should_cover_all_element_kind_variants() {
-        let mut doc = InternalDocument::new("test");
-
-        doc.push_element(InternalElement::text(ElementKind::Title, "T", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Title);
-
-        doc.push_element(InternalElement::text(ElementKind::Heading { level: 1 }, "H1", 1));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Heading { level: 1 });
-
-        doc.push_element(InternalElement::text(ElementKind::Paragraph, "P", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Paragraph);
-
-        doc.push_element(InternalElement::text(ElementKind::ListItem { ordered: false }, "li", 2));
-        assert_eq!(
-            doc.elements.last().unwrap().kind,
-            ElementKind::ListItem { ordered: false }
-        );
-
-        doc.push_element(InternalElement::text(ElementKind::Code, "x=1", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Code);
-
-        doc.push_element(InternalElement::text(ElementKind::Formula, "E=mc^2", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Formula);
-
-        doc.push_element(InternalElement::text(ElementKind::FootnoteDefinition, "note text", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::FootnoteDefinition);
-
-        doc.push_element(InternalElement::text(ElementKind::FootnoteRef, "1", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::FootnoteRef);
-
-        doc.push_element(InternalElement::text(ElementKind::Citation, "Smith 2020", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Citation);
-
-        doc.push_element(InternalElement::text(ElementKind::Slide { number: 3 }, "slide 3", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Slide { number: 3 });
-
-        doc.push_element(InternalElement::text(ElementKind::DefinitionTerm, "term", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::DefinitionTerm);
-
-        doc.push_element(InternalElement::text(ElementKind::DefinitionDescription, "desc", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::DefinitionDescription);
-
-        doc.push_element(InternalElement::text(ElementKind::Admonition, "Note:", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Admonition);
-
-        doc.push_element(InternalElement::text(ElementKind::RawBlock, "<raw/>", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::RawBlock);
-
-        doc.push_element(InternalElement::text(ElementKind::MetadataBlock, "---", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::MetadataBlock);
-
-        doc.push_element(InternalElement::text(ElementKind::ListStart { ordered: true }, "", 0));
-        assert_eq!(
-            doc.elements.last().unwrap().kind,
-            ElementKind::ListStart { ordered: true }
-        );
-
-        doc.push_element(InternalElement::text(ElementKind::ListEnd, "", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::ListEnd);
-
-        doc.push_element(InternalElement::text(ElementKind::QuoteStart, "", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::QuoteStart);
-
-        doc.push_element(InternalElement::text(ElementKind::QuoteEnd, "", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::QuoteEnd);
-
-        doc.push_element(InternalElement::text(ElementKind::GroupStart, "", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::GroupStart);
-
-        doc.push_element(InternalElement::text(ElementKind::GroupEnd, "", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::GroupEnd);
-
-        doc.push_element(InternalElement::text(ElementKind::Table { table_index: 0 }, "", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Table { table_index: 0 });
-
-        doc.push_element(InternalElement::text(ElementKind::Image { image_index: 1 }, "", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Image { image_index: 1 });
-
-        doc.push_element(InternalElement::text(ElementKind::PageBreak, "", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::PageBreak);
-
-        for level in [
-            OcrElementLevel::Word,
-            OcrElementLevel::Line,
-            OcrElementLevel::Block,
-            OcrElementLevel::Page,
-        ] {
-            doc.push_element(InternalElement::text(ElementKind::OcrText { level }, "ocr", 0));
-            assert_eq!(doc.elements.last().unwrap().kind, ElementKind::OcrText { level });
-        }
-
-        let json = serde_json::to_string(&doc).expect("serialize all-variant InternalDocument");
-        let restored: InternalDocument = serde_json::from_str(&json).expect("deserialize all-variant InternalDocument");
-
-        assert_eq!(restored.elements.len(), doc.elements.len());
-
-        assert_eq!(restored.elements[0].kind, ElementKind::Title);
-        assert_eq!(restored.elements[5].kind, ElementKind::Formula);
-        assert_eq!(restored.elements[9].kind, ElementKind::Slide { number: 3 });
-        assert_eq!(restored.elements[14].kind, ElementKind::MetadataBlock);
-        assert_eq!(restored.elements[16].kind, ElementKind::ListEnd);
-        assert_eq!(restored.elements[17].kind, ElementKind::QuoteStart);
-        assert_eq!(restored.elements[18].kind, ElementKind::QuoteEnd);
-        assert_eq!(restored.elements[19].kind, ElementKind::GroupStart);
-        assert_eq!(restored.elements[20].kind, ElementKind::GroupEnd);
-        assert_eq!(restored.elements[21].kind, ElementKind::Table { table_index: 0 });
-        assert_eq!(restored.elements[23].kind, ElementKind::PageBreak);
-        assert_eq!(
-            restored.elements[24].kind,
-            ElementKind::OcrText {
-                level: OcrElementLevel::Word
-            }
-        );
-        assert_eq!(
-            restored.elements[27].kind,
-            ElementKind::OcrText {
-                level: OcrElementLevel::Page
-            }
-        );
-    }
-
-    /// Verify that both `RelationshipTarget` variants survive a serde JSON
-    /// round-trip when carried inside a `Relationship`.
-    #[test]
-    fn should_round_trip_relationship_targets() {
-        let mut doc = InternalDocument::new("test");
-        doc.push_element(InternalElement::text(ElementKind::Paragraph, "source", 0));
-        doc.push_element(InternalElement::text(ElementKind::Paragraph, "target", 0));
-
-        doc.push_relationship(Relationship {
-            source: 0,
-            target: RelationshipTarget::Index(1),
-            kind: RelationshipKind::CrossReference,
-        });
-        doc.push_relationship(Relationship {
-            source: 0,
-            target: RelationshipTarget::Key("anchor-abc".to_string()),
-            kind: RelationshipKind::FootnoteReference,
-        });
-
-        let json = serde_json::to_string(&doc).expect("serialize RelationshipTarget variants");
-        let restored: InternalDocument = serde_json::from_str(&json).expect("deserialize RelationshipTarget variants");
-
-        assert_eq!(restored.relationships.len(), 2);
-        assert_eq!(restored.relationships[0].target, RelationshipTarget::Index(1));
-        assert_eq!(
-            restored.relationships[1].target,
-            RelationshipTarget::Key("anchor-abc".to_string())
-        );
-        assert_eq!(restored.relationships[0].kind, RelationshipKind::CrossReference);
-        assert_eq!(restored.relationships[1].kind, RelationshipKind::FootnoteReference);
-    }
-}
+mod tests;

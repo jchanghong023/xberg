@@ -39,6 +39,7 @@ fn make_test_font(name: &str, subtype: &str) -> xberg_native_pdf::fonts::FontInf
         cid_vertical_metrics: None,
         cid_default_vertical_metrics: xberg_native_pdf::fonts::VerticalMetrics::SPEC_DEFAULT,
         cjk_substitution: None,
+        embedded_cid_map: None,
         type0_unicode_memo: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     }
 }
@@ -192,7 +193,7 @@ fn test_brotli_decode_roundtrip() {
     }
 
     let decoder = BrotliDecoder;
-    let decoded = decoder.decode(&compressed).unwrap();
+    let decoded = decoder.decode(&compressed, 0).unwrap();
     assert_eq!(decoded, original.to_vec());
 }
 

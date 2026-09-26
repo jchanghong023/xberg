@@ -4,10 +4,12 @@
 //! chunk in sequence, and converts pixel-space detections to PDF
 //! coordinate–space [`PageLayoutResult`] values.
 //!
-//! Chunked rendering+detection keeps peak memory proportional to
-//! `LAYOUT_BATCH_CHUNK_SIZE` images plus the accumulated output images,
-//! rather than requiring the whole document's rasterised frames and the full
-//! ONNX batch tensor to be live simultaneously.
+//! Chunked rendering+detection keeps the inference working set proportional to
+//! `LAYOUT_BATCH_CHUNK_SIZE` images plus the ONNX batch tensor, rather than
+//! requiring the whole document's rasterised frames to be live simultaneously.
+//! Each chunk is charged against `max_content_size` on its own: the rasters of
+//! earlier chunks are already-assembled output, so charging them too would turn
+//! a byte limit into a page limit (GH#1721).
 //!
 //! The resulting images, page metadata, layout hints, and raw detections feed
 //! both native markdown structure recovery and OCR layout assembly.
@@ -265,12 +267,14 @@ async fn run_layout_for_pdf_pages_async(
     thread_budget: usize,
     gated_handling: GatedPageHandling,
     security_limits: &crate::extractors::security::SecurityLimits,
+    images_config: Option<&crate::core::config::ImageExtractionConfig>,
 ) -> Result<(LayoutAttempt<LayoutRunOutput>, Vec<crate::types::ProcessingWarning>)> {
     #[cfg(feature = "tokio-runtime")]
     {
         let owned_content = content.to_vec();
         let owned_config = layout_config.clone();
         let owned_limits = security_limits.clone();
+        let owned_images_config = images_config.cloned();
         let (result, glyph_drop_warnings) = tokio::task::spawn_blocking(move || {
             let execution_provider_overridden = crate::ort_discovery::execution_provider_override().is_some();
             let acceleration_override = rtdetr_acceleration_override(&owned_config, execution_provider_overridden);
@@ -285,6 +289,7 @@ async fn run_layout_for_pdf_pages_async(
                         thread_budget,
                         gated_handling,
                         &owned_limits,
+                        owned_images_config.as_ref(),
                     )
                 },
             )
@@ -298,32 +303,6 @@ async fn run_layout_for_pdf_pages_async(
         })
         .await
         .map_err(|error| XbergError::Other(format!("layout runner task failed: {error}")))?;
-        result.map(|attempt| (attempt, glyph_drop_warnings))
-    }
-
-    #[cfg(not(feature = "tokio-runtime"))]
-    {
-        let execution_provider_overridden = crate::ort_discovery::execution_provider_override().is_some();
-        let acceleration_override = rtdetr_acceleration_override(layout_config, execution_provider_overridden);
-        let result = run_layout_with_auto_cpu_retry(
-            layout_config,
-            execution_provider_overridden,
-            acceleration_override,
-            |attempt_config| {
-                run_layout_for_pdf_pages_with_security_limits(
-                    content,
-                    attempt_config,
-                    thread_budget,
-                    gated_handling,
-                    security_limits,
-                )
-            },
-        )
-        .map(merge_render_warning);
-        // No `spawn_blocking` here, so this already runs on the caller's own
-        // thread; draining here keeps both branches return warnings the same
-        // way regardless of which one compiled in.
-        let glyph_drop_warnings = crate::pdf::render::take_xberg_native_pdf_render_warnings();
         result.map(|attempt| (attempt, glyph_drop_warnings))
     }
 }
@@ -389,6 +368,20 @@ fn gate_selects_page(gate_decisions: Option<&[PageGateDecision]>, page_index: us
     gate_decisions.is_none_or(|decisions| decisions.get(page_index).is_none_or(|decision| decision.run_layout))
 }
 
+/// The two render-budget inputs that always travel together: the hard safety ceiling and the
+/// caller's DPI preferences. Bundled because threading #1577's `images_config` beside
+/// `security_limits` pushed these two signatures past clippy's argument limit, and because
+/// passing one without the other is never correct -- a caller that clamps dimensions must also
+/// honour the configured DPI, or the clamp is computed against a resolution nothing renders at.
+/// Only these two functions take it; the others that carry the same pair are still under the
+/// limit and were left alone. ~keep
+#[cfg(all(feature = "pdf", feature = "layout-detection"))]
+#[derive(Clone, Copy)]
+struct RenderBudget<'a> {
+    security_limits: &'a crate::extractors::security::SecurityLimits,
+    images_config: Option<&'a crate::core::config::ImageExtractionConfig>,
+}
+
 #[cfg(all(feature = "pdf", feature = "layout-detection"))]
 fn render_layout_chunk(
     doc: &xberg_native_pdf::PdfDocument,
@@ -397,7 +390,7 @@ fn render_layout_chunk(
     chunk_end: usize,
     gate_decisions: Option<&[PageGateDecision]>,
     gated_handling: GatedPageHandling,
-    security_limits: &crate::extractors::security::SecurityLimits,
+    budget: RenderBudget<'_>,
 ) -> Vec<RenderedLayoutPage> {
     (chunk_start..chunk_end)
         .map(|page_index| {
@@ -424,7 +417,7 @@ fn render_layout_chunk(
                     page_height_pts,
                     rotation,
                     normalize_for_ocr,
-                    security_limits,
+                    budget,
                 ) {
                     Ok(image) => (Some(image), None),
                     Err(reason) => (None, Some(reason)),
@@ -452,18 +445,40 @@ fn render_layout_page(
     page_height_pts: f32,
     rotation: u32,
     normalize_for_ocr: bool,
-    security_limits: &crate::extractors::security::SecurityLimits,
+    budget: RenderBudget<'_>,
 ) -> std::result::Result<image::RgbImage, String> {
-    let rendered = crate::pdf::render::render_page_with_safeguards(doc, page_index, 150).map_err(|error| {
-        tracing::warn!(
-            page = page_index + 1,
-            page_width_pts,
-            page_height_pts,
-            error = %error,
-            "layout runner: skipping page with render failure, returning empty detections"
-        );
-        format!("page {} failed to render: {error}", page_index + 1)
-    })?;
+    // The page's own MediaBox dimensions (pre-rotation, matching `get_page_dimensions_pt`),
+    // not the possibly-swapped `page_width_pts`/`page_height_pts` above, which flip for a
+    // 90/270-rotated page under `normalize_for_ocr == false` -- `effective_pdf_render_dpi`
+    // only needs an aspect-insensitive area budget from `max_image_dimension`.
+    let (media_width_pt, media_height_pt) = crate::pdf::render::get_page_dimensions_pt(doc, page_index);
+    // `normalize_for_ocr` marks this render as OCR input (see `GatedPageHandling`), so it
+    // must make the same scan-density render-DPI decision the non-layout OCR routes make via
+    // `crate::image::dpi::pdf_ocr_render_dpi` -- otherwise a scanned page renders at a
+    // different DPI depending on whether layout detection is on (#1828). The plain
+    // `effective_pdf_render_dpi` stays in place for the markdown-structure render, which is
+    // never OCR input and must not change. ~keep
+    let render_dpi = if normalize_for_ocr {
+        crate::image::dpi::pdf_ocr_render_dpi(doc, page_index, budget.images_config)
+    } else {
+        crate::image::dpi::effective_pdf_render_dpi(
+            budget.images_config,
+            f64::from(media_width_pt),
+            f64::from(media_height_pt),
+        )
+    };
+    let rendered = crate::pdf::render::render_page_with_safeguards(doc, page_index, render_dpi.max(1) as u32).map_err(
+        |error| {
+            tracing::warn!(
+                page = page_index + 1,
+                page_width_pts,
+                page_height_pts,
+                error = %error,
+                "layout runner: skipping page with render failure, returning empty detections"
+            );
+            format!("page {} failed to render: {error}", page_index + 1)
+        },
+    )?;
 
     let rendered_data = if normalize_for_ocr {
         crate::pdf::render::normalize_rendered_page_for_ocr_with_security_limits(
@@ -471,7 +486,7 @@ fn render_layout_page(
             rendered.width,
             rendered.height,
             rotation,
-            security_limits,
+            budget.security_limits,
         )
         .map(|(data, _, _)| data)
         .map_err(|error| {
@@ -487,8 +502,8 @@ fn render_layout_page(
         rendered.data
     };
 
-    crate::extraction::image_decode::decode_standard_rgb8_with_security_limits(&rendered_data, security_limits).map_err(
-        |error| {
+    crate::extraction::image_decode::decode_standard_rgb8_with_security_limits(&rendered_data, budget.security_limits)
+        .map_err(|error| {
             tracing::warn!(
                 page = page_index + 1,
                 page_width_pts,
@@ -497,8 +512,7 @@ fn render_layout_page(
                 "layout runner: skipping page (PNG decode failed), returning empty detections"
             );
             format!("page {} PNG decode failed: {error}", page_index + 1)
-        },
-    )
+        })
 }
 
 /// Whether a page joins the ONNX batch: it must both be gate-selected and
@@ -513,7 +527,6 @@ fn enters_inference_batch(page: &RenderedLayoutPage) -> bool {
 fn detect_layout_chunk(
     engine: &mut crate::layout::LayoutEngine,
     pages: &[RenderedLayoutPage],
-    retained_image_bytes: u64,
     security_limits: &crate::extractors::security::SecurityLimits,
 ) -> Result<Vec<Option<crate::layout::DetectionResult>>> {
     let rendered_positions: Vec<usize> = pages
@@ -531,17 +544,15 @@ fn detect_layout_chunk(
         .collect();
     let mut detections: Vec<Option<crate::layout::DetectionResult>> = (0..pages.len()).map(|_| None).collect();
     let (width, height) = all_chunk_images[0].dimensions();
+    // This chunk's own rasters only. The pages already assembled into the
+    // output are finished work, not part of the inference working set, so
+    // charging them here would make the budget a function of document length
+    // (GH#1721). Nothing caps the rasters this pass retains across a whole
+    // document by default: `max_content_size` bounds only the work in flight,
+    // and `max_pages`, which does bound the retained set, is `None` unless the
+    // caller sets it. ~keep
     let current_live_bytes =
-        pages
-            .iter()
-            .filter_map(|page| page.image.as_ref())
-            .try_fold(retained_image_bytes, |total, image| {
-                total
-                    .checked_add(u64::try_from(image.as_raw().len()).unwrap_or(u64::MAX))
-                    .ok_or_else(|| {
-                        crate::extraction::image_decode::image_dimension_error(width, height, u64::MAX, u64::MAX)
-                    })
-            })?;
+        crate::layout::engine::live_raster_bytes(pages.iter().filter_map(|page| page.image.as_ref()), width, height)?;
     let capacity = crate::layout::engine::layout_inference_batch_capacity(
         width,
         height,
@@ -657,6 +668,7 @@ pub(super) fn run_layout_for_pdf_pages(
         thread_budget,
         gated_handling,
         &crate::extractors::security::SecurityLimits::default(),
+        None,
     )
 }
 
@@ -667,6 +679,7 @@ fn run_layout_for_pdf_pages_with_security_limits(
     thread_budget: usize,
     gated_handling: GatedPageHandling,
     security_limits: &crate::extractors::security::SecurityLimits,
+    images_config: Option<&crate::core::config::ImageExtractionConfig>,
 ) -> Result<(LayoutRunOutput, Option<crate::types::ProcessingWarning>)> {
     let doc = xberg_native_pdf::PdfDocument::from_bytes(content.to_vec()).map_err(|e| XbergError::Parsing {
         message: format!("layout runner: failed to open PDF: {e}"),
@@ -726,7 +739,10 @@ fn run_layout_for_pdf_pages_with_security_limits(
             chunk_end,
             gate_decisions.as_deref(),
             gated_handling,
-            security_limits,
+            RenderBudget {
+                security_limits,
+                images_config,
+            },
         );
         let rendered = pages.iter().filter(|page| page.image.is_some()).count();
         render_failures.extend(pages.iter().filter_map(|page| page.render_failure.clone()));
@@ -739,19 +755,7 @@ fn run_layout_for_pdf_pages_with_security_limits(
             "layout runner: detecting chunk"
         );
 
-        let retained_image_bytes = all_images.iter().try_fold(0_u64, |total, image| {
-            total
-                .checked_add(u64::try_from(image.as_raw().len()).unwrap_or(u64::MAX))
-                .ok_or_else(|| {
-                    crate::extraction::image_decode::image_dimension_error(
-                        image.width(),
-                        image.height(),
-                        u64::MAX,
-                        u64::MAX,
-                    )
-                })
-        })?;
-        let detections = match detect_layout_chunk(&mut engine, &pages, retained_image_bytes, security_limits) {
+        let detections = match detect_layout_chunk(&mut engine, &pages, security_limits) {
             Ok(detections) => detections,
             Err(error) => {
                 crate::layout::return_engine(engine);
@@ -851,6 +855,7 @@ pub(super) async fn maybe_run_layout_for_markdown(
         thread_budget,
         GatedPageHandling::SkipRender,
         security_limits,
+        config.images.as_ref(),
     )
     .await;
 
@@ -938,6 +943,7 @@ pub(super) async fn run_layout_for_ocr(
     layout_config: &LayoutDetectionConfig,
     thread_budget: usize,
     security_limits: &crate::extractors::security::SecurityLimits,
+    images_config: Option<&crate::core::config::ImageExtractionConfig>,
 ) -> Result<(LayoutAttempt<LayoutRunOutput>, Vec<crate::types::ProcessingWarning>)> {
     // OCR consumes the layout pass's rasters as its input images, so gated
     // pages still render; only model inference is skipped for them.
@@ -947,6 +953,7 @@ pub(super) async fn run_layout_for_ocr(
         thread_budget,
         GatedPageHandling::RenderWithoutInference,
         security_limits,
+        images_config,
     )
     .await
 }
@@ -956,7 +963,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     use super::rtdetr_acceleration_override;
     use super::{
-        FAILED_RENDER_PLACEHOLDER_SIDE, GatedPageHandling, RenderedLayoutPage, assemble_layout_chunk,
+        FAILED_RENDER_PLACEHOLDER_SIDE, GatedPageHandling, RenderBudget, RenderedLayoutPage, assemble_layout_chunk,
         displayed_page_dimensions, gate_selects_page, render_failure_placeholder, render_layout_chunk,
         run_layout_with_auto_cpu_retry, validate_batch_cardinality,
     };
@@ -1545,7 +1552,10 @@ mod tests {
             1,
             Some(&decisions),
             GatedPageHandling::SkipRender,
-            &crate::extractors::security::SecurityLimits::default(),
+            RenderBudget {
+                security_limits: &crate::extractors::security::SecurityLimits::default(),
+                images_config: None,
+            },
         );
         assert!(skipped[0].image.is_none(), "gated page must not render");
         assert!(!skipped[0].run_inference);
@@ -1557,7 +1567,10 @@ mod tests {
             1,
             Some(&decisions),
             GatedPageHandling::RenderWithoutInference,
-            &crate::extractors::security::SecurityLimits::default(),
+            RenderBudget {
+                security_limits: &crate::extractors::security::SecurityLimits::default(),
+                images_config: None,
+            },
         );
         assert!(rendered[0].image.is_some(), "OCR-path gated page must still render");
         assert!(!rendered[0].run_inference, "gated page must stay out of the ONNX batch");
@@ -1584,7 +1597,10 @@ mod tests {
                 1,
                 None,
                 GatedPageHandling::RenderWithoutInference,
-                &crate::extractors::security::SecurityLimits::default(),
+                RenderBudget {
+                    security_limits: &crate::extractors::security::SecurityLimits::default(),
+                    images_config: None,
+                },
             );
             let layout = layout_pages
                 .pop()
@@ -1643,6 +1659,108 @@ mod tests {
         );
     }
 
+    /// A `page_count`-page PDF of blank US Letter pages. At the default 150 dpi
+    /// render resolution each page rasterises to 1275 × 1650 × 3 bytes, the page
+    /// size #1721's accumulation arithmetic is stated in.
+    fn blank_letter_pages_pdf(page_count: usize) -> Vec<u8> {
+        use lopdf::{Document, Object, Stream, dictionary};
+
+        let mut document = Document::with_version("1.5");
+        let pages_id = document.new_object_id();
+        let mut kids = Vec::with_capacity(page_count);
+        for _ in 0..page_count {
+            let content_id = document.add_object(Stream::new(dictionary! {}, Vec::new()));
+            let page_id = document.new_object_id();
+            document.objects.insert(
+                page_id,
+                Object::Dictionary(dictionary! {
+                    "Type" => "Page",
+                    "Parent" => pages_id,
+                    "MediaBox" => vec![0.into(), 0.into(), 612.into(), 792.into()],
+                    "Resources" => dictionary! {},
+                    "Contents" => content_id,
+                }),
+            );
+            kids.push(Object::Reference(page_id));
+        }
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => kids,
+                "Count" => page_count as i64,
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("fixture PDF must serialize");
+        bytes
+    }
+
+    /// Regression test for #1721.
+    ///
+    /// The inference budget is charged per chunk. Before this fix every raster
+    /// the pass had already assembled was charged as well, so the running total
+    /// crossed `max_content_size` partway through a long document, the whole
+    /// layout pass failed, and extraction finished with no layout hints and a
+    /// warning the caller could not tell from "the model found nothing".
+    ///
+    /// Thirteen Letter pages is the smallest fixture that crosses it at the
+    /// 100 MiB default: the second chunk charged the eight retained rasters
+    /// (50,490,000 B), its own five (31,556,250 B) and one model workspace
+    /// (24,576,000 B), for 106,622,250 B against 104,857,600 B. Twelve pages
+    /// stayed under, so a shorter fixture passes on the broken tree and proves
+    /// nothing.
+    #[test]
+    fn layout_completes_on_a_document_longer_than_the_retained_rasters_used_to_allow() {
+        use crate::core::config::layout::LayoutStrategy;
+
+        const PAGE_COUNT: usize = 13;
+        const LETTER_RASTER_AT_DEFAULT_DPI: (u32, u32) = (1_275, 1_650);
+        // The second chunk is what charges the first chunk's retained rasters, so a
+        // fixture at or below the chunk size cannot reach the defect at all.
+        const { assert!(PAGE_COUNT > super::LAYOUT_BATCH_CHUNK_SIZE) };
+
+        let bytes = blank_letter_pages_pdf(PAGE_COUNT);
+        let config = LayoutDetectionConfig {
+            strategy: LayoutStrategy::Always,
+            ..Default::default()
+        };
+
+        let (output, render_warning) =
+            super::run_layout_for_pdf_pages(&bytes, &config, 1, GatedPageHandling::SkipRender)
+                .expect("a thirteen-page document must complete the layout pass");
+
+        assert!(
+            render_warning.is_none(),
+            "every page of the fixture renders: {render_warning:?}"
+        );
+        let (images, _results, _hints, detections) = output
+            .data
+            .expect("layout data must survive a document longer than twelve pages");
+        assert_eq!(images.len(), PAGE_COUNT);
+        assert_eq!(detections.len(), PAGE_COUNT);
+        for (page_index, (image, detection)) in images.iter().zip(&detections).enumerate() {
+            assert_eq!(
+                image.dimensions(),
+                LETTER_RASTER_AT_DEFAULT_DPI,
+                "page {} must rasterise at the standard Letter size the budget arithmetic assumes",
+                page_index + 1
+            );
+            assert_eq!(
+                (detection.page_width, detection.page_height),
+                LETTER_RASTER_AT_DEFAULT_DPI,
+                "page {} must carry a detection result taken from its own raster, not a placeholder",
+                page_index + 1
+            );
+        }
+    }
+
     /// #196's combination step: a CPU-retry recovery warning and a
     /// page-render-failure warning firing on the same attempt must both
     /// survive `combine_layout_warnings`, concatenated rather than one
@@ -1671,8 +1789,10 @@ mod tests {
     /// than shared) because `run_layout_for_pdf_pages_async` is private to
     /// this crate and unreachable from that external integration test.
     /// `xberg_native_pdf`'s `PageRenderer::load_resources` requires every `/Font`
-    /// resource to resolve to a dictionary and logs `Failed to parse font ...`
-    /// then drops the glyph rather than failing the page.
+    /// resource to resolve to a dictionary and logs a sanitized static warning
+    /// ("rendering text with fallback font data", with the diagnosis carried in
+    /// structured tracing fields rather than the message -- see `page_renderer.rs`'s
+    /// `load_resources`) then drops the glyph rather than failing the page.
     #[cfg(feature = "tokio-runtime")]
     fn malformed_font_layout_fixture() -> Vec<u8> {
         use lopdf::{Document, Object, Stream, dictionary};
@@ -1761,6 +1881,7 @@ mod tests {
             1,
             GatedPageHandling::SkipRender,
             &crate::extractors::security::SecurityLimits::default(),
+            None,
         )
         .await
         .expect("malformed-font page must still render (and complete the layout pass) despite the glyph drop");
@@ -1788,8 +1909,9 @@ mod tests {
             warning.message
         );
         assert!(
-            warning.message.contains("Failed to parse font"),
-            "warning must carry xberg_native_pdf's own diagnosis of the cause, got: {}",
+            warning.message.contains("rendering text with fallback font data"),
+            "warning must carry xberg_native_pdf's sanitized static message; the actual \
+             diagnosis now lives in structured tracing fields, not the message, got: {}",
             warning.message
         );
 
@@ -1803,6 +1925,54 @@ mod tests {
             leaked_to_caller_thread.is_empty(),
             "glyph-drop warnings must come back through the spawn_blocking closure's return value, not leak into \
              (or vanish from) the caller thread's own thread-local buffer: {leaked_to_caller_thread:?}"
+        );
+    }
+
+    /// #1828: `render_layout_chunk`'s OCR-input render (`GatedPageHandling::RenderWithoutInference`,
+    /// i.e. `normalize_for_ocr`) must make the same scan-density render-DPI decision the
+    /// non-layout OCR routes make (`crate::image::dpi::pdf_ocr_render_dpi`), not the plain
+    /// `effective_pdf_render_dpi` the markdown-structure render (`SkipRender`) uses. A scan page
+    /// (one full-page 400x400px raster over a 100x100pt page, 288 dpi) renders its OCR input at
+    /// that density -- 400x400px, not the 150 dpi default's ~208x208px -- while the same page's
+    /// markdown-structure render is unaffected and still uses the 150 dpi default.
+    ///
+    /// Fails on unfixed code (plain `effective_pdf_render_dpi` for both handlings): the OCR
+    /// render comes back ~208x208, equal to the markdown-structure render, instead of 400x400.
+    #[test]
+    fn ocr_render_uses_scan_density_while_markdown_render_keeps_the_default() {
+        let scan_bytes = crate::pdf::render::build_full_page_raster_pdf((100.0, 100.0), (400, 400), 1.0, 0);
+        let doc = xberg_native_pdf::PdfDocument::from_bytes(scan_bytes).expect("fixture must open");
+        let page_rotations = vec![0u32];
+        let security_limits = crate::extractors::security::SecurityLimits::default();
+        let budget = RenderBudget {
+            security_limits: &security_limits,
+            images_config: None,
+        };
+
+        let ocr_pages = render_layout_chunk(
+            &doc,
+            &page_rotations,
+            0,
+            1,
+            None,
+            GatedPageHandling::RenderWithoutInference,
+            budget,
+        );
+        let ocr_image = ocr_pages[0].image.as_ref().expect("scan page must render");
+        assert_eq!(
+            (ocr_image.width(), ocr_image.height()),
+            (400, 400),
+            "OCR input for a scan page must render at the raster's own 288 dpi density, not the 150 dpi default"
+        );
+
+        let markdown_pages =
+            render_layout_chunk(&doc, &page_rotations, 0, 1, None, GatedPageHandling::SkipRender, budget);
+        let markdown_image = markdown_pages[0].image.as_ref().expect("scan page must render");
+        assert_eq!(
+            (markdown_image.width(), markdown_image.height()),
+            (209, 209),
+            "the markdown-structure render must be unaffected and keep the 150 dpi default \
+             (100pt * 150/72 rounds to 209px)"
         );
     }
 }

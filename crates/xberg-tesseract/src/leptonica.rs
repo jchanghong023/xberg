@@ -154,6 +154,12 @@ ffi_extern! {
     /// out of bounds).
     fn pixGetPixel(pix: *mut c_void, x: i32, y: i32, pval: *mut u32) -> i32;
 
+    /// Writes a single pixel value into a Pix.
+    ///
+    /// `val` is the raw pixel value (for 8 bpp images, the grayscale intensity
+    /// 0-255). Returns 0 on success, non-zero on error (e.g. `x`/`y` out of bounds).
+    fn pixSetPixel(pix: *mut c_void, x: i32, y: i32, val: u32) -> i32;
+
     /// Creates a Leptonica BOX with the given coordinates.
     fn boxCreate(x: i32, y: i32, w: i32, h: i32) -> *mut c_void;
 
@@ -269,6 +275,51 @@ impl Pix {
                 let word: u32 = (r << 24) | (g << 16) | (b << 8) | 0xFF;
                 unsafe {
                     *data_ptr.add(row * wpl + col) = word;
+                }
+            }
+        }
+
+        unsafe { pixSetResolution(pix_ptr, 300, 300) };
+
+        Ok(Pix { ptr: pix_ptr })
+    }
+
+    /// Creates an 8 bpp grayscale Leptonica Pix from a byte-per-pixel buffer.
+    ///
+    /// `data` must contain exactly `width * height` bytes, one grayscale sample
+    /// (0-255) per pixel in left-to-right, top-to-bottom order. Writes go through
+    /// `pixSetPixel` one pixel at a time (like [`Pix::grayscale_bytes`]'s reads),
+    /// rather than packing Leptonica's 8 bpp word layout directly, to avoid
+    /// depending on undocumented byte-packing order. The DPI is set to 300 x 300;
+    /// call [`Pix::set_resolution`] afterwards to match the source image.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TesseractError::InvalidImageData` if `data.len()` does not equal
+    /// `width * height`, if either dimension is zero, if Leptonica's `pixCreate`
+    /// returns null, or if any `pixSetPixel` call fails.
+    pub fn from_grayscale_bytes(data: &[u8], width: u32, height: u32) -> Result<Pix> {
+        let expected = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or(TesseractError::InvalidImageData)?;
+
+        if data.len() != expected || width == 0 || height == 0 {
+            return Err(TesseractError::InvalidImageData);
+        }
+
+        let pix_ptr = unsafe { pixCreate(width as i32, height as i32, 8) };
+        if pix_ptr.is_null() {
+            return Err(TesseractError::NullPointerError);
+        }
+
+        for row in 0..(height as i32) {
+            for col in 0..(width as i32) {
+                let value = data[(row as usize) * (width as usize) + col as usize] as u32;
+                let status = unsafe { pixSetPixel(pix_ptr, col, row, value) };
+                if status != 0 {
+                    let mut ptr = pix_ptr;
+                    unsafe { pixDestroy(&mut ptr) };
+                    return Err(TesseractError::InvalidImageData);
                 }
             }
         }
@@ -835,6 +886,38 @@ impl Pix {
         self.grayscale_stats(255, sample_stride).map(|(mean, _)| mean)
     }
 
+    /// Reads every pixel of an 8 bpp grayscale Pix into a byte-per-pixel buffer,
+    /// in left-to-right, top-to-bottom order.
+    ///
+    /// Unlike [`Pix::grayscale_stats`], this reads every pixel (no sampling
+    /// stride), because per-region operations such as shaded-row normalization
+    /// need the full-resolution raster, not a sampled estimate.
+    ///
+    /// # Errors
+    ///
+    /// Returns `TesseractError::OcrError` if the image is zero-sized or if
+    /// `pixGetPixel` fails on any pixel.
+    pub fn grayscale_bytes(&self) -> Result<Vec<u8>> {
+        let width = self.width();
+        let height = self.height();
+        if width <= 0 || height <= 0 {
+            return Err(TesseractError::OcrError);
+        }
+
+        let mut out = Vec::with_capacity((width as usize) * (height as usize));
+        for y in 0..height {
+            for x in 0..width {
+                let mut value: u32 = 0;
+                let status = unsafe { pixGetPixel(self.ptr, x, y, &mut value) };
+                if status != 0 {
+                    return Err(TesseractError::OcrError);
+                }
+                out.push(value as u8);
+            }
+        }
+        Ok(out)
+    }
+
     /// Returns the raw Leptonica `PIX *` pointer.
     ///
     /// Intended for passing this image to `TesseractAPI::set_image_2`.
@@ -902,249 +985,5 @@ impl Drop for Pix {
 
 #[cfg(test)]
 #[cfg(any(feature = "build-tesseract", feature = "build-tesseract-wasm"))]
-mod tests {
-    use super::*;
-
-    const TEST_X_RESOLUTION: i32 = 240;
-    const TEST_Y_RESOLUTION: i32 = 180;
-
-    fn make_rgb_pix(width: u32, height: u32, fill: u8) -> Pix {
-        let data = vec![fill; (width * height * 3) as usize];
-        Pix::from_raw_rgb(&data, width, height).expect("from_raw_rgb failed")
-    }
-
-    fn gray_pixel(pix: &Pix, x: i32, y: i32) -> f64 {
-        pix.clip_rectangle(x, y, 1, 1)
-            .expect("clip failed")
-            .mean_gray_value(1)
-            .expect("pixel read failed")
-    }
-
-    fn gray_fixture(width: u32, height: u32) -> Pix {
-        let mut data = Vec::with_capacity((width * height * 3) as usize);
-        for y in 0..height {
-            for x in 0..width {
-                let value = 48 + ((x * 160) / width) as u8;
-                let value = if (x + y * 17).is_multiple_of(53) { 255 } else { value };
-                data.extend_from_slice(&[value, value, value]);
-            }
-        }
-        make_gray_pix_with_resolution(&data, width, height)
-    }
-
-    fn make_gray_pix_with_resolution(data: &[u8], width: u32, height: u32) -> Pix {
-        let mut pix = Pix::from_raw_rgb(data, width, height)
-            .expect("from_raw_rgb failed")
-            .to_grayscale()
-            .expect("to_grayscale failed");
-        pix.set_resolution(TEST_X_RESOLUTION, TEST_Y_RESOLUTION)
-            .expect("set_resolution failed");
-        pix
-    }
-
-    #[test]
-    fn test_from_raw_rgb_dimensions() {
-        let pix = make_rgb_pix(16, 8, 200);
-        assert_eq!(pix.width(), 16);
-        assert_eq!(pix.height(), 8);
-        assert_eq!(pix.depth(), 32);
-    }
-
-    #[test]
-    fn test_from_raw_rgb_wrong_length() {
-        let data = vec![0u8; 10];
-        let err = Pix::from_raw_rgb(&data, 4, 4).unwrap_err();
-        assert!(matches!(err, TesseractError::InvalidImageData));
-    }
-
-    #[test]
-    fn test_from_raw_rgb_zero_dimensions() {
-        let err = Pix::from_raw_rgb(&[], 0, 4).unwrap_err();
-        assert!(matches!(err, TesseractError::InvalidImageData));
-
-        let err = Pix::from_raw_rgb(&[], 4, 0).unwrap_err();
-        assert!(matches!(err, TesseractError::InvalidImageData));
-    }
-
-    #[test]
-    fn test_as_ptr_is_non_null() {
-        let pix = make_rgb_pix(8, 8, 128);
-        assert!(!pix.as_ptr().is_null());
-    }
-
-    #[test]
-    fn test_to_grayscale() {
-        let pix = make_rgb_pix(32, 32, 150);
-        let gray = pix.to_grayscale().expect("to_grayscale failed");
-        assert_eq!(gray.width(), 32);
-        assert_eq!(gray.height(), 32);
-        assert_eq!(gray.depth(), 8);
-    }
-
-    #[test]
-    fn test_scale_up() {
-        let pix = make_rgb_pix(20, 10, 100);
-        let scaled = pix.scale(2.0, 2.0).expect("scale failed");
-        assert_eq!(scaled.width(), 40);
-        assert_eq!(scaled.height(), 20);
-    }
-
-    #[test]
-    fn test_unsharp_mask_returns_same_dimensions() {
-        let pix = make_rgb_pix(32, 32, 200);
-        let sharpened = pix.unsharp_mask(2, 0.4).expect("unsharp_mask failed");
-        assert_eq!(sharpened.width(), 32);
-        assert_eq!(sharpened.height(), 32);
-    }
-
-    #[test]
-    fn test_adaptive_threshold_produces_1bpp() {
-        let pix = make_rgb_pix(64, 64, 180);
-        let gray = pix.to_grayscale().expect("to_grayscale failed");
-        let binary = gray.adaptive_threshold(32, 32).expect("adaptive_threshold failed");
-        assert_eq!(binary.depth(), 1);
-    }
-
-    #[test]
-    fn median_filter_removes_single_pixel_noise_and_preserves_resolution() {
-        const WIDTH: u32 = 9;
-        const HEIGHT: u32 = 9;
-        let mut data = vec![200; (WIDTH * HEIGHT * 3) as usize];
-        let center = ((HEIGHT / 2 * WIDTH + WIDTH / 2) * 3) as usize;
-        data[center..center + 3].fill(0);
-        let gray = make_gray_pix_with_resolution(&data, WIDTH, HEIGHT);
-
-        let filtered = gray.median_filter(3, 3).expect("median_filter failed");
-
-        assert_eq!(gray_pixel(&filtered, 4, 4), 200.0);
-        assert_eq!(
-            filtered.get_resolution().unwrap(),
-            (TEST_X_RESOLUTION, TEST_Y_RESOLUTION)
-        );
-    }
-
-    #[test]
-    fn contrast_stretch_changes_dynamic_range_and_preserves_resolution() {
-        let width = 3;
-        let data = [50, 50, 50, 125, 125, 125, 200, 200, 200];
-        let gray = make_gray_pix_with_resolution(&data, width, 1);
-
-        let stretched = gray.contrast_stretch(1.0, 50, 200).expect("contrast_stretch failed");
-
-        assert_eq!(gray_pixel(&stretched, 0, 0), 0.0);
-        assert_eq!(gray_pixel(&stretched, 2, 0), 255.0);
-        assert_eq!(
-            stretched.get_resolution().unwrap(),
-            (TEST_X_RESOLUTION, TEST_Y_RESOLUTION)
-        );
-    }
-
-    #[test]
-    fn global_otsu_threshold_produces_binary_and_preserves_resolution() {
-        let gray = gray_fixture(96, 64);
-
-        let binary = gray.otsu_threshold().expect("otsu_threshold failed");
-
-        assert_eq!(binary.depth(), 1);
-        assert_eq!(binary.get_resolution().unwrap(), (TEST_X_RESOLUTION, TEST_Y_RESOLUTION));
-    }
-
-    #[test]
-    fn adaptive_otsu_threshold_produces_binary_and_preserves_resolution() {
-        let gray = gray_fixture(96, 64);
-
-        let binary = gray.adaptive_threshold(32, 32).expect("adaptive_threshold failed");
-
-        assert_eq!(binary.depth(), 1);
-        assert_eq!(binary.get_resolution().unwrap(), (TEST_X_RESOLUTION, TEST_Y_RESOLUTION));
-    }
-
-    #[test]
-    fn tiled_sauvola_threshold_produces_binary_and_preserves_resolution() {
-        let gray = gray_fixture(96, 64);
-
-        let binary = gray.sauvola_threshold(7, 0.35, 2, 2).expect("sauvola_threshold failed");
-
-        assert_eq!(binary.depth(), 1);
-        assert_eq!(binary.get_resolution().unwrap(), (TEST_X_RESOLUTION, TEST_Y_RESOLUTION));
-    }
-
-    #[test]
-    fn preprocessing_wrappers_reject_invalid_parameters_before_ffi() {
-        let rgb = make_rgb_pix(32, 32, 128);
-        let gray = rgb.to_grayscale().expect("to_grayscale failed");
-
-        assert!(matches!(
-            rgb.median_filter(3, 3),
-            Err(TesseractError::InvalidParameterError)
-        ));
-        assert!(matches!(
-            gray.median_filter(0, 3),
-            Err(TesseractError::InvalidParameterError)
-        ));
-        assert!(matches!(
-            gray.contrast_stretch(f32::NAN, 0, 255),
-            Err(TesseractError::InvalidParameterError)
-        ));
-        assert!(matches!(
-            gray.contrast_stretch(1.0, 200, 100),
-            Err(TesseractError::InvalidParameterError)
-        ));
-        assert!(matches!(
-            gray.adaptive_threshold(8, 32),
-            Err(TesseractError::InvalidParameterError)
-        ));
-        assert!(matches!(
-            gray.sauvola_threshold(1, 0.35, 1, 1),
-            Err(TesseractError::InvalidParameterError)
-        ));
-        assert!(matches!(
-            gray.sauvola_threshold(7, -0.1, 1, 1),
-            Err(TesseractError::InvalidParameterError)
-        ));
-        assert!(matches!(
-            gray.sauvola_threshold(7, 0.35, 0, 1),
-            Err(TesseractError::InvalidParameterError)
-        ));
-    }
-
-    #[test]
-    fn test_invert_flips_uniform_gray_value() {
-        let pix = make_rgb_pix(16, 16, 30);
-        let gray = pix.to_grayscale().expect("to_grayscale failed");
-        let inverted = gray.invert().expect("invert failed");
-
-        assert_eq!(inverted.width(), gray.width());
-        assert_eq!(inverted.height(), gray.height());
-        assert_eq!(inverted.depth(), 8);
-
-        let original_mean = gray.mean_gray_value(1).expect("mean_gray_value failed");
-        let inverted_mean = inverted.mean_gray_value(1).expect("mean_gray_value failed");
-        assert!((original_mean + inverted_mean - 255.0).abs() < 1.0);
-    }
-
-    #[test]
-    fn test_invert_twice_round_trips() {
-        let pix = make_rgb_pix(16, 16, 90);
-        let gray = pix.to_grayscale().expect("to_grayscale failed");
-
-        let once = gray.invert().expect("first invert failed");
-        let twice = once.invert().expect("second invert failed");
-
-        let original_mean = gray.mean_gray_value(1).expect("mean_gray_value failed");
-        let round_tripped_mean = twice.mean_gray_value(1).expect("mean_gray_value failed");
-        assert!((original_mean - round_tripped_mean).abs() < 1.0);
-    }
-
-    #[test]
-    fn test_mean_gray_value_light_vs_dark() {
-        let light = make_rgb_pix(8, 8, 220).to_grayscale().expect("to_grayscale failed");
-        let dark = make_rgb_pix(8, 8, 20).to_grayscale().expect("to_grayscale failed");
-
-        let light_mean = light.mean_gray_value(1).expect("mean_gray_value failed");
-        let dark_mean = dark.mean_gray_value(1).expect("mean_gray_value failed");
-
-        assert!(light_mean > 200.0, "light_mean was {light_mean}");
-        assert!(dark_mean < 40.0, "dark_mean was {dark_mean}");
-    }
-}
+#[path = "leptonica/tests.rs"]
+mod tests;

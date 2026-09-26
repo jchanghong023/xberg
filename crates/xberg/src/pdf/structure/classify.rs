@@ -1,8 +1,14 @@
 //! Heading classification for paragraphs using font-size clustering.
 
+// TODO(xberg-io/xberg#1567): 4 cyclomatic-complexity and 12 size/complexity findings
+// in this file, currently excluded via the quality-debt baseline in alef.toml. Splitting
+// these needs compiler-in-the-loop verification, not a mechanical pass. Delete this
+// note and the file's baseline entry together once it goes green. Help wanted.
+
 use super::constants::{
-    MAX_BOLD_HEADING_WORD_COUNT, MAX_HEADING_DISTANCE_MULTIPLIER, MAX_HEADING_WORD_COUNT, MIN_BLOCKS_FOR_FONT_HEADING,
-    MIN_HEADING_FONT_GAP, MIN_HEADING_FONT_RATIO,
+    MAX_BOLD_HEADING_WORD_COUNT, MAX_HEADING_DISTANCE_MULTIPLIER, MAX_HEADING_WORD_COUNT, MAX_TITLE_WORD_COUNT,
+    MIN_BLOCKS_FOR_FONT_HEADING, MIN_HEADING_FONT_GAP, MIN_HEADING_FONT_RATIO, MIN_TABULAR_NUMERIC_TOKENS,
+    TABULAR_NUMERIC_TOKEN_DIVISOR,
 };
 use super::regions::{looks_like_bare_url, looks_like_figure_label};
 use super::types::{LayoutHintClass, PdfParagraph};
@@ -136,6 +142,7 @@ pub(super) fn classify_paragraphs(paragraphs: &mut [PdfParagraph], heading_map: 
             && word_count <= MAX_HEADING_WORD_COUNT
             && !super::layout_classify::is_separator_text(&para_text)
             && !looks_like_bare_url(&para_text)
+            && !reads_as_body_content(&para_text, word_count)
         {
             para.heading_level = Some(level);
             continue;
@@ -445,7 +452,7 @@ fn is_numeric_prose_continuation(text: &str) -> bool {
 /// marked as code blocks. This handles code snippets that don't have explicit
 /// code block markers.
 fn detect_monospace_code_blocks(paragraphs: &mut [PdfParagraph]) {
-    if paragraphs.len() < 2 {
+    if paragraphs.is_empty() {
         return;
     }
 
@@ -461,6 +468,23 @@ fn detect_monospace_code_blocks(paragraphs: &mut [PdfParagraph]) {
         let is_all_monospace = !para.lines.is_empty() && para.lines.iter().all(|l| l.is_monospace);
 
         if !is_all_monospace {
+            i += 1;
+            continue;
+        }
+
+        // A lone paragraph that already carries two or more monospace lines is a
+        // complete multi-line code listing by itself — it does not need a consecutive
+        // monospace neighbor to qualify, unlike the one-monospace-line-per-paragraph
+        // case merged below (common when code line-leading splits each line into its
+        // own paragraph). This purely font-based signal cannot distinguish a genuine
+        // code listing from a document set entirely in a monospace face, or from a
+        // 2-line caption/table cell that happens to share that font — both are
+        // accepted, pre-existing limitations of this heuristic (unchanged by this
+        // addition, which only mirrors pipeline.rs's identical paragraph-level gate),
+        // not something overlooked here. ~keep
+        if para.lines.len() >= 2 {
+            paragraphs[i].is_code_block = true;
+            paragraphs[i].layout_class = Some(LayoutHintClass::Code);
             i += 1;
             continue;
         }
@@ -997,6 +1021,84 @@ fn infer_section_level(text: &str) -> u8 {
 /// A trailing ellipsis (`...` or the `…` glyph) is a truncation marker — common
 /// in headings and truncated titles ("Impaired Glucose Tolerance ...") — not a
 /// sentence terminator, so it does not disqualify a line from being a heading.
+/// Whether `text` reads as body content rather than a heading.
+///
+/// Two signals, both of which the heading gates previously lacked entirely.
+///
+/// A leading list bullet disqualifies outright: a heading is not a bullet. On the Intel SDM this
+/// alone accounts for 1231 blocks that were emitted as `# ` headings -- every one of them a
+/// sentence in a bulleted list, and 1199 of them ending in a full stop.
+///
+/// Beyond [`MAX_TITLE_WORD_COUNT`] words, a sentence shape disqualifies too: the block either closes
+/// a sentence or runs on past an interior one. The word floor is what keeps a genuine title that
+/// happens to end in a period ("TableFormer: Table Structure Understanding with Transformers.") --
+/// titles are short, and the prose that was being promoted is not. An interior boundary counts only
+/// when a capital follows it, so a decimal, an abbreviation or a numbered prefix does not trip it,
+/// and [`is_section_pattern`] keeps "ARTICLE IV." and "3.2. Methods" exactly as it does for the bold
+/// branch. GH#1599. ~keep
+///
+/// Past the same word floor, a run of bare numerals disqualifies as well: that is an OCR'd table
+/// flattened onto one line, which no sentence-shape test objects to. See
+/// [`reads_as_tabular_row`]. ~keep
+pub(super) fn reads_as_body_content(text: &str, word_count: usize) -> bool {
+    let trimmed = text.trim();
+    if trimmed.starts_with(super::list_marker::BULLET_GLYPHS) {
+        return true;
+    }
+    if is_section_pattern(trimmed) || word_count <= MAX_TITLE_WORD_COUNT {
+        return false;
+    }
+    ends_with_sentence_period(trimmed) || crosses_interior_sentence_boundary(trimmed) || reads_as_tabular_row(trimmed)
+}
+
+/// Whether one sentence ends inside `text` and another begins after it.
+///
+/// The separator is any whitespace, not a literal space. `pipeline::paragraph_text` joins a
+/// block's physical lines with `\n`, so on a scanned page the boundary that matters most -- a
+/// sentence ending at the end of a line -- arrives here as `".\nAttempted"`. A scan for `". A"`
+/// saw none of those, while the renderer went on to join the same lines with a space, so the
+/// emitted heading displayed the very boundary the gate could not see. Measured on GH#1599's
+/// reproducer: `"...county rd 12.\nAttempted alternate route via ridge trail - impassable"`, 18
+/// words, promoted to `##`.
+///
+/// A trailing ellipsis does not open a new sentence, for the reason
+/// [`ends_with_sentence_period`] documents at the end of a line -- it is a truncation marker, and
+/// a truncated title followed by a capitalised word is still a title. ~keep
+fn crosses_interior_sentence_boundary(text: &str) -> bool {
+    let mut previous_token_ends_sentence = false;
+    for token in text.split_whitespace() {
+        if previous_token_ends_sentence && token.chars().next().is_some_and(char::is_uppercase) {
+            return true;
+        }
+        previous_token_ends_sentence = ends_with_sentence_period(token);
+    }
+    false
+}
+
+/// Whether `text` reads as a table row flattened onto one line rather than a heading.
+///
+/// An OCR'd table reaches the heading gate as a single line of joined cells -- on GH#1599's
+/// reproducer, `"Samples Status\no 6 Complete\n02 6 Complete\n03 4 Partial\no7 0 N/A - blocked"`,
+/// promoted to `##`. Every sentence-shape signal is absent from it, because it is not a sentence;
+/// what it has instead is bare numerals, which a heading does not. A heading names something, a
+/// row carries counts.
+///
+/// Deliberately strict about what counts: every character of the token must be an ASCII digit, so
+/// `3.2`, `92%`, `B-114` and `o7` are all prose here. Both the count and the share must clear
+/// their thresholds, so a long title mentioning a couple of years stays a title. ~keep
+fn reads_as_tabular_row(text: &str) -> bool {
+    let mut token_count = 0usize;
+    let mut numeric_token_count = 0usize;
+    for token in text.split_whitespace() {
+        token_count += 1;
+        if !token.is_empty() && token.bytes().all(|byte| byte.is_ascii_digit()) {
+            numeric_token_count += 1;
+        }
+    }
+    numeric_token_count >= MIN_TABULAR_NUMERIC_TOKENS
+        && numeric_token_count * TABULAR_NUMERIC_TOKEN_DIVISOR >= token_count
+}
+
 pub(super) fn ends_with_sentence_period(text: &str) -> bool {
     let t = text.trim_end();
     t.ends_with('.') && !t.ends_with("..")
@@ -1030,8 +1132,24 @@ pub(super) fn is_section_pattern(text: &str) -> bool {
 ///
 /// A single-level number followed by mixed-case text ("1. Énumération") is a
 /// list item and returns `false`.
+///
+/// A heading may also put a keyword in front of its number -- "ARTIKEL 1.
+/// TOEPASSELIJKHEID", "Appendix 1 Product list", "Exhibit A PRODUCT LIST". That
+/// form is recognised by shape rather than by a keyword list; see
+/// [`section_keyword_prefix`]. Behind a keyword the remainder need only be
+/// capitalised, which is what keeps "Artikel 12 van de wet is van toepassing."
+/// classified as the prose it is. See #1608.
 pub(super) fn is_numbered_section_heading(text: &str) -> bool {
     let t = text.trim();
+    if is_bare_numbered_section_heading(t) {
+        return true;
+    }
+    section_keyword_prefix(t).is_some_and(is_keyword_numbered_section_heading)
+}
+
+/// The enumerator-first half of [`is_numbered_section_heading`]: the number,
+/// or the roman numeral, is the line's own first token.
+fn is_bare_numbered_section_heading(t: &str) -> bool {
     let bytes = t.as_bytes();
     if bytes.is_empty() {
         return false;
@@ -1081,6 +1199,95 @@ pub(super) fn is_numbered_section_heading(text: &str) -> bool {
             .chars()
             .filter(|c| c.is_alphabetic())
             .all(|c| c.is_uppercase())
+}
+
+/// A leading section keyword is a word, not a preposition. Without a floor,
+/// `Op 3 MAART` and `In 5 STAPPEN` read as section numbering, because an
+/// all-caps remainder satisfies every other term. See #1608. ~keep
+const MIN_SECTION_KEYWORD_CHARS: usize = 3;
+
+/// Split a leading section keyword (`ARTIKEL`, `Appendix`, `Annex`, `Chapter`,
+/// `Artículo`, ...) off `t` and return what follows it.
+///
+/// Deliberately NOT a keyword list: enumerating them is endless and
+/// language-bound, and measured on GH#1608's reproducer a list would still have
+/// missed two of the five shapes. What identifies the form is its shape -- one
+/// capitalised alphabetic word standing in front of an enumerator -- while the
+/// enumerator and the case of the remainder do the discriminating. See #1608. ~keep
+fn section_keyword_prefix(t: &str) -> Option<&str> {
+    if !t.chars().next()?.is_uppercase() {
+        return None;
+    }
+    let word_end = t.find(char::is_whitespace)?;
+    let word = &t[..word_end];
+    if !word.chars().all(char::is_alphabetic) || word.chars().count() < MIN_SECTION_KEYWORD_CHARS {
+        return None;
+    }
+    Some(t[word_end..].trim_start())
+}
+
+/// Whether `rest` -- a line with its leading section keyword removed -- reads as
+/// a numbered section heading.
+fn is_keyword_numbered_section_heading(rest: &str) -> bool {
+    let Some(after_enumerator) = section_enumerator_end(rest) else {
+        return false;
+    };
+    let remainder = rest[after_enumerator..].trim_start_matches(['.', ')']).trim_start();
+    // `Artikel 12 van de wet is van toepassing.` is prose and must stay prose;
+    // `Appendix 1 Product list` is a heading. Keyword and enumerator are the same
+    // shape in both, so the case of the first letter after the enumerator is the
+    // only thing separating them. A bare enumerator keeps the stricter all-caps
+    // rule -- there the keyword is not there to vouch for it. See #1608. ~keep
+    match remainder.chars().find(|c| c.is_alphabetic()) {
+        None => true,
+        Some(first) => first.is_uppercase(),
+    }
+}
+
+/// Byte offset just past a leading enumerator in `rest`: arabic digits with
+/// optional `.`-separated levels, a roman numeral, or a single uppercase letter.
+///
+/// The enumerator must be terminated by end of line, `.`, `)` or a space, so
+/// `Article 7a` and `Annex IVX` do not read as enumerated. The single-letter arm
+/// exists for `Exhibit A` / `Annex B`, and is reachable only behind a keyword --
+/// a bare `A.` is far more often a list marker than a section number. ~keep
+fn section_enumerator_end(rest: &str) -> Option<usize> {
+    let bytes = rest.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let terminated = |end: usize| matches!(bytes.get(end), None | Some(b'.' | b')' | b' '));
+
+    let mut end = 0usize;
+    loop {
+        let digit_len = bytes[end..]
+            .iter()
+            .position(|b| !b.is_ascii_digit())
+            .unwrap_or(bytes.len() - end);
+        if digit_len == 0 {
+            break;
+        }
+        end += digit_len;
+        if bytes.get(end) == Some(&b'.') && bytes.get(end + 1).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        } else {
+            break;
+        }
+    }
+    if end > 0 {
+        return terminated(end).then_some(end);
+    }
+
+    let roman_chars: &[u8] = b"IVXLCDM";
+    let roman_end = bytes
+        .iter()
+        .position(|b| !roman_chars.contains(b))
+        .unwrap_or(bytes.len());
+    if roman_end > 0 && terminated(roman_end) && is_valid_roman(&rest[..roman_end]) {
+        return Some(roman_end);
+    }
+
+    (bytes[0].is_ascii_uppercase() && terminated(1)).then_some(1)
 }
 
 /// Check if text starts with a section number pattern (e.g., "1 ", "2.1 ", "A.", "III.").
@@ -1300,8 +1507,24 @@ pub(super) fn is_body_size_bold_signal(para: &PdfParagraph, body_font_size: f32)
         && !super::layout_classify::is_separator_text(trimmed)
 }
 
+/// On typography alone a bold body-size line needs at least this many words to read
+/// as a heading -- shorter bold fragments are far more often emphasis, a label, or a
+/// run-in lead. See [`is_body_size_bold_heading_candidate`] for the exemption. ~keep
+const MIN_BOLD_HEADING_WORD_COUNT: usize = 3;
+
 pub(super) fn is_body_size_bold_heading_candidate(para: &PdfParagraph, body_font_size: f32) -> bool {
-    is_body_size_bold_signal(para, body_font_size) && para.word_count > 2
+    if !is_body_size_bold_signal(para, body_font_size) {
+        return false;
+    }
+    // A numbered section heading carries its own evidence and does not need to clear
+    // the word-count floor. Requiring three words silently excluded every two-word
+    // numbered title -- `3. PRIJZEN`, `1. INTRODUCTION` -- from heading promotion, so
+    // it stayed a plain bold paragraph and a RUN of them coalesced into a single bold
+    // line in the rendered output while the element stream still showed them apart.
+    // Measured on GH#1611: `ARTIKEL 1. TOEPASSELIJKHEID` (3 words) was promoted and
+    // `1. TOEPASSELIJKHEID` (2 words) was not, at identical font, weight and body
+    // size -- the keyword contributed nothing but the third word. See #1611. ~keep
+    para.word_count >= MIN_BOLD_HEADING_WORD_COUNT || is_numbered_section_heading(paragraph_plain_text(para).trim())
 }
 
 /// Preserve peer H2 sections when a sparse document repeats their font tier at
@@ -1401,7 +1624,7 @@ fn is_changelog_hierarchy_member(page: &[PdfParagraph], index: usize) -> bool {
 
 /// Merge consecutive H1 paragraphs at the same font size into a single heading.
 ///
-/// Split titles (e.g., "KAISUN HOLDINGS" on one line, "LIMITED" on the next)
+/// Split titles (e.g., "KAISUN HOLDINGS" on one line, "LIMITED on the next")
 /// often produce separate H1 paragraphs. When they share the same font size
 /// and look like grammatical continuations they should be a single heading.
 ///
@@ -1415,12 +1638,14 @@ fn merge_consecutive_h1s(page: &mut Vec<PdfParagraph>) {
             continue;
         }
         let base_fs = page[i].dominant_font_size;
+        let opener_run = chapter_opener_label(effective_text(&page[i]).trim());
         let mut run_end = i + 1;
         while run_end < page.len()
             && page[run_end].heading_level == Some(1)
             && page[run_end].layout_region_path == page[i].layout_region_path
             && (page[run_end].dominant_font_size - base_fs).abs() < 0.5
-            && looks_like_title_continuation(&page[run_end - 1], &page[run_end])
+            && (looks_like_title_continuation(&page[run_end - 1], &page[run_end])
+                || (opener_run && opener_chain_link(&page[run_end - 1], &page[run_end], run_end == i + 1)))
         {
             run_end += 1;
         }
@@ -1447,6 +1672,71 @@ fn merge_consecutive_h1s(page: &mut Vec<PdfParagraph>) {
     }
 }
 
+/// True when `prev` is a bare chapter-opener label ("Chapter 4", "Appendix A",
+/// "Part II") whose title continues on the following H1 line.
+///
+/// Tessent-style manuals print the opener as three same-size lines: the label
+/// ("Chapter 4"), the title wrapped over one or two lines ("Create Tessent
+/// Insertion Attributes Using" / "Liberty"). [`looks_like_title_continuation`]
+/// caps each side at 4 words, which refuses the 5-word title line and leaves
+/// "# Chapter 4" / "# Create Tessent Insertion Attributes Using" / "# Liberty"
+/// as three headings — no heading then contains "Chapter 4 <title>", so
+/// outline-derived assertions against the printed title all miss it. The relaxed
+/// link accepts up to 12 title words directly after a bare label (and up to the
+/// usual 4 between title lines deeper in the chain), and additionally demands
+/// vertical adjacency so an unrelated H1 further down the page is not absorbed.
+fn opener_chain_link(prev: &PdfParagraph, next: &PdfParagraph, first_link: bool) -> bool {
+    let next_text = effective_text(next);
+    if looks_like_standalone_heading_text(&next_text) {
+        return false;
+    }
+    let prev_text = effective_text(prev);
+    if prev_text.trim_end().ends_with(['.', '!', '?', ':']) {
+        return false;
+    }
+    let next_wc = next_text.split_whitespace().count();
+    // The link hanging directly off the bare label carries the (possibly long)
+    // wrapped title line; deeper links go back to the conservative 4-word cap
+    // so a run of separate headings cannot chain itself into one.
+    let max_words = if first_link { 12 } else { 4 };
+    if next_wc == 0 || next_wc > max_words {
+        return false;
+    }
+    heading_lines_vertically_adjacent(prev, next, 2.5)
+}
+
+/// `true` for a bare opener label: "Chapter 4", "Appendix A", "Part II" —
+/// exactly two words, a known label plus a single alphanumeric/roman token.
+fn chapter_opener_label(text: &str) -> bool {
+    let mut words = text.split_whitespace();
+    let first = words.next().unwrap_or("").to_ascii_lowercase();
+    if !matches!(first.as_str(), "chapter" | "appendix" | "part" | "section") {
+        return false;
+    }
+    let second = words.next().unwrap_or("");
+    if second.is_empty() || words.next().is_some() {
+        return false;
+    }
+    let alphanumeric = !second.is_empty() && second.chars().all(|c| c.is_ascii_alphanumeric());
+    alphanumeric || is_valid_roman(second)
+}
+
+/// Whether the boundary lines of two heading paragraphs stack within
+/// `max_multiple` line-heights — tight enough to be one printed title, too
+/// tight for two unrelated headings separated by body text. Refuses when
+/// either side lacks a usable baseline (geometry-free input stays conservative).
+fn heading_lines_vertically_adjacent(prev: &PdfParagraph, next: &PdfParagraph, max_multiple: f32) -> bool {
+    let (Some(prev_line), Some(next_line)) = (prev.lines.last(), next.lines.first()) else {
+        return false;
+    };
+    if prev_line.baseline_y == 0.0 || next_line.baseline_y == 0.0 {
+        return false;
+    }
+    let line_height = prev.dominant_font_size.max(next.dominant_font_size).max(1.0);
+    let gap = (prev_line.baseline_y - next_line.baseline_y).abs();
+    gap <= line_height * max_multiple
+}
+
 /// True when `next` looks like a grammatical continuation of `prev` (split title).
 ///
 /// Returns false for product-code-style lines ("HR 22", "HR 28/24") and numbered
@@ -1464,6 +1754,15 @@ fn looks_like_title_continuation(prev: &PdfParagraph, next: &PdfParagraph) -> bo
     }
     let prev_text = effective_text(prev);
     if prev_text.trim_end().ends_with(['.', '!', '?', ':']) {
+        return false;
+    }
+    // When both lines carry baseline geometry, a same-page H1 far below the
+    // previous one is a separate heading, not a wrapped title line — enforce
+    // the same adjacency cap the opener chain uses. Lines without geometry
+    // (baseline 0) keep the word-count-only decision.
+    let prev_geometry = prev.lines.last().map(|l| l.baseline_y != 0.0).unwrap_or(false);
+    let next_geometry = next.lines.first().map(|l| l.baseline_y != 0.0).unwrap_or(false);
+    if prev_geometry && next_geometry && !heading_lines_vertically_adjacent(prev, next, 2.5) {
         return false;
     }
     let prev_wc = prev_text.split_whitespace().count();
@@ -1511,39 +1810,75 @@ fn looks_like_standalone_heading_text(text: &str) -> bool {
     false
 }
 
-/// Detect paragraphs in page margins that repeat across pages.
+/// Detect paragraphs that repeat across pages (running headers, footers,
+/// metadata stamps, watermarks).
 ///
-/// Only considers paragraphs whose bounding box falls in the page margins
-/// (top 10%, bottom 10%, or narrow left/right strips). If the same text
-/// appears in the margins on >50% of pages, it's furniture (running headers,
-/// footers, metadata stamps, watermarks).
+/// Candidacy still requires the text to sit in the page margins (top 10% or
+/// bottom 10% — via the paragraph's bounding box)
+/// on either a majority of pages or a long run of consecutive pages (chapter
+/// running headers repeat only inside their own section, which can stay far
+/// below the majority bar). Once confirmed, removal is global: column-aware
+/// reading order frequently parks a copy mid-page, and a page whose paragraphs
+/// carry no bounding box would otherwise keep its copy forever. The first page
+/// carrying the text keeps its largest-font occurrence — the genuine chapter
+/// opening or section sidehead that shares its page with the smaller running
+/// header. An opening page that prints no head at all is kept too: a body-area
+/// copy on a page earlier than the text's first margin sighting predates the
+/// head itself, so it can only be the title the head quotes.
 ///
 /// `page_heights` provides the height of each page for margin calculation.
-pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>], page_heights: &[f32]) {
+///
+/// `strip_top_edges` / `strip_bottom_edges` carry `content_filter.include_headers` /
+/// `include_footers` (negated, same contract as [`crate::pdf::native::text::FurniturePermissions`]):
+/// a band the caller asked to keep does not count as a margin sighting, so a running
+/// header confined to it never builds a streak — mirroring how the flat-text pass zeroes
+/// that band's width under the same permissions.
+pub(super) fn mark_cross_page_repeating_text(
+    all_pages: &mut [Vec<PdfParagraph>],
+    page_heights: &[f32],
+    strip_top_edges: bool,
+    strip_bottom_edges: bool,
+) {
     if all_pages.len() < 4 {
         return;
     }
 
     let margin_frac = 0.10;
 
+    // Top/bottom-margin membership of a block bbox on `page_idx`'s page, shared by the
+    // collection pass below and the marking pass further down. Protected bands never
+    // match, keeping their sightings out of the streak counts.
+    //
+    // `block_bbox` is `(left, bottom, right, top)` in PDF bottom-up coordinates (the
+    // same convention `paragraph_position_ratios` inverts with `1.0 - y/page_h` and
+    // `adapters::pdf_block_bbox` produces for OCR pages): a HEADER has its TOP edge
+    // (`.3`) near the page top, a FOOTER its BOTTOM edge (`.1`) near the page bottom.
+    let in_page_margin = |bbox: (f32, f32, f32, f32), page_idx: usize| -> bool {
+        let page_h = page_heights.get(page_idx).copied().unwrap_or(792.0);
+        (strip_top_edges && bbox.3 > page_h * (1.0 - margin_frac))
+            || (strip_bottom_edges && bbox.1 < page_h * margin_frac)
+    };
+
     let mut text_page_count: ahash::AHashMap<String, usize> = ahash::AHashMap::new();
     let mut alphanum_to_exact: ahash::AHashMap<String, ahash::AHashSet<String>> = ahash::AHashMap::new();
     let mut first_seen_page: ahash::AHashMap<String, usize> = ahash::AHashMap::new();
+    // Longest run of CONSECUTIVE pages carrying the text in a margin. Chapter
+    // running headers repeat only inside their own section, which can stay far
+    // below the whole-document page share; the dense consecutive run is the
+    // signal that catches them (same rationale as the native PDF pass). The
+    // best run is kept, not the one ending at the last sighting: an isolated
+    // margin appearance after a dense section (or a page whose bbox is missing)
+    // would otherwise reset the run and bury the streak that matters.
+    let mut margin_streaks: ahash::AHashMap<String, (usize, usize, usize)> = ahash::AHashMap::new();
 
     for (page_idx, page) in all_pages.iter().enumerate() {
-        let page_h = page_heights.get(page_idx).copied().unwrap_or(792.0);
-        let top_margin_y = page_h * (1.0 - margin_frac);
-        let bottom_margin_y = page_h * margin_frac;
-
         let mut seen: ahash::AHashSet<String> = ahash::AHashSet::new();
         for para in page {
             if para.is_page_furniture {
                 continue;
             }
 
-            let in_margin = para
-                .block_bbox
-                .is_some_and(|(_, bottom, _, top)| top > top_margin_y || bottom < bottom_margin_y);
+            let in_margin = para.block_bbox.is_some_and(|bbox| in_page_margin(bbox, page_idx));
             if !in_margin {
                 continue;
             }
@@ -1567,9 +1902,18 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
             if seen.insert(alphanum_key.clone()) {
                 let count = text_page_count.entry(alphanum_key.clone()).or_insert(0);
                 if *count == 0 {
-                    first_seen_page.insert(alphanum_key, page_idx);
+                    first_seen_page.insert(alphanum_key.clone(), page_idx);
                 }
                 *count += 1;
+                let streak = match margin_streaks.get(&alphanum_key) {
+                    // Continues the run only when this is the immediately previous page.
+                    Some(&(last_index, run, best)) => {
+                        let run = if last_index + 1 == page_idx { run + 1 } else { 1 };
+                        (page_idx, run, best.max(run))
+                    }
+                    None => (page_idx, 1, 1),
+                };
+                margin_streaks.insert(alphanum_key.clone(), streak);
             }
         }
     }
@@ -1578,7 +1922,10 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
 
     let mut repeating: ahash::AHashSet<String> = ahash::AHashSet::new();
     for (alphanum_key, count) in &text_page_count {
-        if *count > threshold
+        let on_a_consecutive_run = margin_streaks
+            .get(alphanum_key)
+            .is_some_and(|&(_, _, best)| best >= crate::pdf::native::text::FURNITURE_MIN_CONSECUTIVE_PAGES);
+        if (*count > threshold || on_a_consecutive_run)
             && let Some(variants) = alphanum_to_exact.get(alphanum_key)
         {
             for v in variants {
@@ -1595,39 +1942,150 @@ pub(super) fn mark_cross_page_repeating_text(all_pages: &mut [Vec<PdfParagraph>]
         repeating_count = repeating.len(),
         threshold,
         total_pages = all_pages.len(),
+        repeating_sample = %repeating
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" | "),
         "cross-page margin repeating text detected"
     );
 
-    for (page_idx, page) in all_pages.iter_mut().enumerate() {
-        let page_h = page_heights.get(page_idx).copied().unwrap_or(792.0);
-        let top_margin_y = page_h * (1.0 - margin_frac);
-        let bottom_margin_y = page_h * margin_frac;
-
-        for para in page.iter_mut() {
-            if para.is_page_furniture {
-                continue;
-            }
-            let in_margin = para
-                .block_bbox
-                .is_some_and(|(_, bottom, _, top)| top > top_margin_y || bottom < bottom_margin_y);
-            if !in_margin {
-                continue;
-            }
-            let text = paragraph_plain_text(para);
-            let normalized = text.trim().to_lowercase();
-            if repeating.contains(&normalized) {
-                let alphanum_key: String = normalized.chars().filter(|c| c.is_alphanumeric()).collect();
-                if first_seen_page.get(&alphanum_key).copied() == Some(page_idx) {
-                    continue;
+    // A running header often shares its paragraph with the page folio
+    // ("RAM and ROM 220"), so its text no longer equals the registered
+    // furniture string. Tolerate exactly one trailing standalone number of at
+    // most four digits — folio range — before giving up on the match. "December
+    // 2017" itself always matches verbatim (the fallback is only consulted
+    // when the plain form missed), so real year-bearing prose is not stripped.
+    let matches_furniture = |normalized: &str| -> Option<&String> {
+        if let Some(variant) = repeating.get(normalized) {
+            return Some(variant);
+        }
+        // Split at the last whitespace char, not at `rfind() + 1`: a multibyte
+        // space (U+00A0, U+3000 — both survive the earlier repairs) would put the
+        // byte offset inside the character and panic the slice. The variant the
+        // folio tail matched is what the caller needs back: a paragraph carrying
+        // one ("RAM and ROM 3") keys differently from the variant itself.
+        match normalized.char_indices().rev().find(|&(_, c)| c.is_whitespace()) {
+            Some((boundary, whitespace)) => {
+                let tail = &normalized[boundary + whitespace.len_utf8()..];
+                if tail.len() <= 4 && tail.chars().all(|c| c.is_ascii_digit()) {
+                    repeating.get(normalized[..boundary].trim_end())
+                } else {
+                    None
                 }
-                tracing::trace!(
-                    text = %normalized.chars().take(60).collect::<String>(),
-                    was_heading = ?para.heading_level,
-                    "marking margin text as furniture"
-                );
-                para.is_page_furniture = true;
-                para.heading_level = None;
             }
+            None => None,
+        }
+    };
+
+    for (page_idx, page) in all_pages.iter_mut().enumerate() {
+        // Collect matching paragraphs first: removal is global (not
+        // margin-confined, mirroring the native pass's exact-match removal),
+        // and the first-seen page needs a font-size comparison across its
+        // duplicates before anything is marked. Each entry keeps the furniture
+        // variant it matched, so the marking pass below can look up that
+        // variant's first sighting even when the paragraph's own text differs
+        // from it by a folio tail.
+        let matching: Vec<(usize, String, String)> = page
+            .iter()
+            .enumerate()
+            .filter(|(_, para)| !para.is_page_furniture)
+            .filter_map(|(index, para)| {
+                let text = paragraph_plain_text(para);
+                let normalized = text.trim().to_lowercase();
+                matches_furniture(normalized.as_str()).map(|variant| (index, text, variant.clone()))
+            })
+            .collect();
+        if matching.is_empty() {
+            continue;
+        }
+
+        // On the page where a furniture string first appears, the genuine title
+        // (chapter opening, section sidehead) shares the page with smaller-font
+        // running headers carrying the same words. Keep only the largest-font
+        // copy *of that string*: comparing sizes across different furniture
+        // strings would let a large watermark copy rescue itself instead of the
+        // genuine title, leaving the title no surviving copy anywhere. A folio
+        // variant ("ram and rom 220") carries its own key, so it gets the same
+        // first-page keep only on the page where its own margin appearances
+        // were first registered; everywhere else it is furniture. The same
+        // largest also stays on any page whose non-furniture paragraphs would
+        // ALL be marked: marking the last body paragraph of a sparse page would
+        // trip `retain_page_furniture_safely`'s everything-is-furniture valve,
+        // which restores the very footers this pass removed.
+        let unmarked_total = page.iter().filter(|para| !para.is_page_furniture).count();
+        let marks_everything = matching.len() == unmarked_total;
+
+        let mut best_per_key: ahash::AHashMap<String, (f32, usize)> = ahash::AHashMap::new();
+        for &(index, ref text, _) in &matching {
+            let key: String = text
+                .trim()
+                .to_lowercase()
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .collect();
+            if first_seen_page.get(&key).copied() != Some(page_idx) {
+                continue;
+            }
+            let size = page[index].dominant_font_size;
+            match best_per_key.get(&key) {
+                Some(&(best_size, _)) if best_size >= size => {}
+                _ => {
+                    best_per_key.insert(key, (size, index));
+                }
+            }
+        }
+        let mut keep_indices: ahash::AHashSet<usize> = best_per_key.values().map(|&(_, index)| index).collect();
+        if marks_everything {
+            let mut best = (f32::NEG_INFINITY, 0usize);
+            for &(index, _, _) in &matching {
+                let size = page[index].dominant_font_size;
+                if size > best.0 {
+                    best = (size, index);
+                }
+            }
+            keep_indices.insert(best.1);
+        }
+
+        for &(index, _, ref variant) in &matching {
+            if keep_indices.contains(&index) {
+                continue;
+            }
+            // A body-area copy on a page earlier than the matched variant's first margin
+            // sighting cannot be the running head — the head was not printed yet. The
+            // first-seen keep above assumes the opening page carries a head copy; a book
+            // whose opening page prints none (the standard convention) has its first
+            // sighting on a LATER page, and without this guard the title itself is
+            // marked, its heading dropped, and `retain_page_furniture_safely` deletes
+            // it. The variant — not the paragraph's own text — carries the key, so a
+            // title with a trailing number ("RAM and ROM 3" against a "RAM and ROM"
+            // head) is kept too. Mid-page parked copies are unaffected: the sighting
+            // that registered the text sat on that page or an earlier one.
+            let before_first_margin_sighting = {
+                let key: String = variant
+                    .trim()
+                    .to_lowercase()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect();
+                first_seen_page.get(&key).is_some_and(|&first| page_idx < first)
+            };
+            if before_first_margin_sighting
+                && page[index]
+                    .block_bbox
+                    .is_some_and(|bbox| !in_page_margin(bbox, page_idx))
+            {
+                continue;
+            }
+            let para = &mut page[index];
+            tracing::trace!(
+                text = %paragraph_plain_text(para).chars().take(60).collect::<String>(),
+                was_heading = ?para.heading_level,
+                "marking repeating text as furniture"
+            );
+            para.is_page_furniture = true;
+            para.heading_level = None;
         }
     }
 }
@@ -1840,6 +2298,123 @@ pub(super) fn mark_cross_page_repeating_short_text(all_pages: &mut [Vec<PdfParag
 
 #[cfg(test)]
 mod tests {
+    use super::reads_as_body_content;
+
+    /// GH#1599: the font-size heading gates had no shape test, so a block whose cluster landed above
+    /// the body font became a heading on word count alone. On the Intel SDM that promoted 1852
+    /// bulleted sentences to `# ` headings.
+    #[test]
+    fn should_treat_a_bulleted_line_as_body_content() {
+        assert!(reads_as_body_content(
+            "\u{00B7} Streaming loads must be 16-byte aligned.",
+            6
+        ));
+        assert!(reads_as_body_content(
+            "\u{2022} PCD and PWT pins (Pentium processor)",
+            6
+        ));
+    }
+
+    /// A block that runs on past an interior full stop is prose, however its font clustered.
+    #[test]
+    fn should_treat_a_line_running_past_a_sentence_boundary_as_body_content() {
+        assert!(reads_as_body_content(
+            "Site 07 access blocked by washout on county rd 12. Attempted alternate route via ridge trail",
+            15,
+        ));
+    }
+
+    /// The other side, and the reason the period test alone was not enough: a real title may end in
+    /// a full stop. Dropping this one cost a paper its `# ` title in the corpus measurement.
+    #[test]
+    fn should_keep_a_short_title_that_ends_in_a_period() {
+        assert!(!reads_as_body_content(
+            "TableFormer: Table Structure Understanding with Transformers.",
+            7,
+        ));
+    }
+
+    /// Section patterns legitimately end in a period at any length.
+    #[test]
+    fn should_keep_a_numbered_section_heading_that_ends_in_a_period() {
+        assert!(!reads_as_body_content(
+            "3.2. Methods and Materials Used Throughout This Study.",
+            8
+        ));
+        assert!(!reads_as_body_content("ARTICLE IV.", 2));
+    }
+
+    /// A long heading with no sentence shape at all is still a heading.
+    #[test]
+    fn should_keep_a_long_heading_with_no_sentence_shape() {
+        assert!(!reads_as_body_content(
+            "Determining an Access Sub Page Write Permission For Extended Page Tables",
+            11,
+        ));
+    }
+
+    /// GH#1599 residue: the block reaching the gate joins its physical lines with `\n`, so the
+    /// sentence boundary that promoted this line to `##` was `".\nAttempted"`, not `". Attempted"`.
+    /// This is the reproducer's text verbatim, at the word count the gate is handed.
+    #[test]
+    fn should_treat_a_sentence_boundary_at_a_line_break_as_body_content() {
+        assert!(reads_as_body_content(
+            "Site 07 access blocked by washout on county rd 12.\nAttempted alternate route via ridge trail - impassable",
+            18,
+        ));
+    }
+
+    /// The boundary must be a sentence boundary, not merely a line break: a title that wraps mid
+    /// phrase stays a title however many lines it takes.
+    #[test]
+    fn should_keep_a_wrapped_title_whose_line_break_is_not_a_sentence_boundary() {
+        assert!(!reads_as_body_content(
+            "Determining an Access Sub Page Write\nPermission For Extended Page Tables In Long Mode",
+            14,
+        ));
+    }
+
+    /// A trailing ellipsis is a truncation marker, not a sentence terminator -- the same judgement
+    /// [`ends_with_sentence_period`] makes at the end of a line, applied mid line.
+    #[test]
+    fn should_keep_a_truncated_title_followed_by_a_capitalised_word() {
+        assert!(!reads_as_body_content(
+            "Impaired Glucose Tolerance and Cardiovascular Risk Across Northern Regions ... Continued Analysis Here",
+            13,
+        ));
+    }
+
+    /// GH#1599 residue: an OCR'd table arrives as one line of joined cells and has no sentence
+    /// shape to object to, because it is not a sentence. The reproducer's table verbatim.
+    #[test]
+    fn should_treat_a_flattened_table_row_as_body_content() {
+        assert!(reads_as_body_content(
+            "Samples Status\no 6 Complete\n02 6 Complete\n03 4 Partial\no7 0 N/A - blocked",
+            16,
+        ));
+    }
+
+    /// The share threshold, not just the count: a title may name several years without becoming a
+    /// table. Three bare numerals clear [`MIN_TABULAR_NUMERIC_TOKENS`]; three of fourteen tokens
+    /// does not clear the share.
+    #[test]
+    fn should_keep_a_long_heading_that_merely_mentions_several_numbers() {
+        assert!(!reads_as_body_content(
+            "Quarterly Site Inspection Results for 2019 2020 and 2021 Across the Northern Basin Region",
+            14,
+        ));
+    }
+
+    /// Only a bare numeral counts. Measurements, percentages and part numbers are prose tokens, so
+    /// a line full of them is judged on its sentence shape like any other.
+    #[test]
+    fn should_not_count_measurements_or_part_numbers_as_tabular_numerals() {
+        assert!(!reads_as_body_content(
+            "Average turnaround 3.2 days data completeness 92% sensor B-114 drift o7 across every northern site",
+            15,
+        ));
+    }
+
     use super::*;
     use crate::pdf::hierarchy::SegmentData;
 
@@ -2056,6 +2631,100 @@ mod tests {
         p
     }
 
+    /// An H1 with a controllable baseline so opener-adjacency tests can place
+    /// title lines at the printed stack distance (tessent: 23pt at 22pt type).
+    fn make_h1_at(font_size: f32, text: &str, baseline_y: f32) -> PdfParagraph {
+        let mut p = make_h1_with_text(font_size, text);
+        let line = &mut p.lines[0];
+        line.baseline_y = baseline_y;
+        let segment = &mut line.segments[0];
+        segment.baseline_y = baseline_y;
+        segment.y = baseline_y;
+        p
+    }
+
+    #[test]
+    fn test_merge_chapter_opener_label_and_wrapped_title() {
+        // Tessent 开题页实测几何：22pt Arial-Bold，三行 23pt 间距
+        // （p221: y70.4 / y93.4 / y116.4）。旧的 4-word 上限拒绝 5 词的
+        // 标题行，"Chapter 4 / Create Tessent Insertion Attributes Using /
+        // Liberty" 于是碎成三个 H1，任何标题都不含完整
+        // "Chapter 4 <title>"，fulltest 书签断言随之全部脱靶。
+        let mut page = vec![
+            make_h1_at(22.0, "Chapter 4", 70.4),
+            make_h1_at(22.0, "Create Tessent Insertion Attributes Using", 93.4),
+            make_h1_at(22.0, "Liberty", 116.4),
+            {
+                let mut body = make_paragraph(12.0, 5);
+                body.lines[0].baseline_y = 160.0;
+                body.lines[0].segments[0].baseline_y = 160.0;
+                body
+            },
+        ];
+        merge_consecutive_h1s(&mut page);
+        assert_eq!(page.len(), 2, "label + two title lines must fuse into one H1");
+        assert_eq!(page[0].heading_level, Some(1));
+        assert_eq!(
+            page[0].text,
+            "Chapter 4 Create Tessent Insertion Attributes Using Liberty"
+        );
+    }
+
+    #[test]
+    fn test_merge_appendix_opener_two_lines() {
+        let mut page = vec![
+            make_h1_at(22.0, "Appendix A", 70.4),
+            make_h1_at(22.0, "Attributes and the Tessent Cell Library", 93.4),
+        ];
+        merge_consecutive_h1s(&mut page);
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].text, "Appendix A Attributes and the Tessent Cell Library");
+    }
+
+    #[test]
+    fn test_opener_label_distant_h1_not_absorbed() {
+        // 反例：标签行下方隔了正文间距（>2.5× 行高）的 H1 是独立标题，
+        // 不得被开题合并吸收。几何缺失（baseline 0）时同样拒绝。
+        let mut page = vec![
+            make_h1_at(22.0, "Chapter 4", 70.4),
+            make_h1_at(22.0, "Create Tessent Insertion Attributes", 210.0),
+        ];
+        merge_consecutive_h1s(&mut page);
+        assert_eq!(page.len(), 2, "an H1 140pt below the label is not its title line");
+
+        let mut geometry_free = vec![
+            make_h1_with_text(22.0, "Chapter 4"),
+            make_h1_with_text(22.0, "Some Longer Title With More Words"),
+        ];
+        // make_h1_with_text inherits baseline 700 on both lines — emulate a
+        // missing baseline by zeroing it, which the relaxed path must refuse.
+        // The 6-word next line only clears the opener channel (the conservative
+        // path caps it at 4), so the merge decision here is solely the
+        // adjacency check's geometry refusal.
+        for p in &mut geometry_free {
+            p.lines[0].baseline_y = 0.0;
+            p.lines[0].segments[0].baseline_y = 0.0;
+        }
+        merge_consecutive_h1s(&mut geometry_free);
+        assert_eq!(geometry_free.len(), 2, "geometry-free opener links must not merge");
+    }
+
+    #[test]
+    fn test_non_label_two_word_h1_keeps_conservative_cap() {
+        // 反例守卫：非标签的 2 词 H1（"KAISUN HOLDINGS"）不得借开题通道
+        // 把后续 5-12 词的 H1 吸进来——原 4-word 上限的保护必须保留。
+        let mut page = vec![
+            make_h1_at(24.0, "KAISUN HOLDINGS", 100.0),
+            make_h1_at(24.0, "Annual Report of the Board of Directors", 123.0),
+        ];
+        merge_consecutive_h1s(&mut page);
+        assert_eq!(
+            page.len(),
+            2,
+            "a non-label two-word H1 must not absorb a long title line"
+        );
+    }
+
     #[test]
     fn test_merge_consecutive_h1s_same_font() {
         let mut page = vec![
@@ -2168,12 +2837,72 @@ mod tests {
             vec![make_margin_body("Page 1 of 10"), make_body_center("Unique content C")],
             vec![make_margin_body("Page 1 of 10"), make_body_center("Unique content D")],
         ];
-        mark_cross_page_repeating_text(&mut pages, &page_heights);
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
         assert!(!pages[0][0].is_page_furniture, "first occurrence must not be furniture");
         assert!(pages[1][0].is_page_furniture);
         assert!(pages[2][0].is_page_furniture);
         assert!(pages[3][0].is_page_furniture);
         assert!(!pages[0][1].is_page_furniture);
+    }
+
+    /// A running head that quotes the chapter title but starts only on the page AFTER the
+    /// opening (the standard book convention: the opening page carries no head) must not
+    /// take the title with it. The first margin sighting then sits on a later page, the
+    /// largest-font rescue never applies to the opening page, and the title used to be
+    /// marked as furniture and deleted — losing the chapter from the output entirely.
+    #[test]
+    fn test_cross_page_repeating_keeps_title_when_head_starts_after_opening_page() {
+        let page_heights = vec![792.0; 6];
+        let mut title = make_h1(24.0, "RAM and ROM");
+        title.heading_level = Some(1);
+        title.block_bbox = Some((50.0, 400.0, 300.0, 430.0));
+        let mut body = make_paragraph(12.0, 3);
+        body.block_bbox = Some((50.0, 300.0, 300.0, 330.0));
+        let mut pages = vec![vec![title, body]];
+        for index in 1..6 {
+            pages.push(vec![
+                make_margin_body("RAM and ROM"),
+                make_body_center(&format!("Unique content {index}")),
+            ]);
+        }
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
+        assert!(
+            !pages[0][0].is_page_furniture,
+            "the chapter opening title predates every head copy; deleting it loses the chapter"
+        );
+        assert!(pages[0][0].heading_level.is_some(), "the title keeps its heading level");
+        assert!(!pages[1][0].is_page_furniture, "first-seen page keeps its largest copy");
+        assert!(pages[2][0].is_page_furniture);
+        assert!(pages[5][0].is_page_furniture);
+    }
+
+    /// The same opening-page protection must reach a title carrying a trailing number
+    /// the head lacks: it only matches the head's furniture string through the folio
+    /// tolerance ("RAM and ROM 3" matches "RAM and ROM"), so the guard has to look up
+    /// the matched variant's first sighting, not the title's own key.
+    #[test]
+    fn test_cross_page_repeating_keeps_folio_variant_title_when_head_starts_later() {
+        let page_heights = vec![792.0; 6];
+        let mut title = make_h1(24.0, "RAM and ROM 3");
+        title.heading_level = Some(1);
+        title.block_bbox = Some((50.0, 400.0, 300.0, 430.0));
+        let mut body = make_paragraph(12.0, 3);
+        body.block_bbox = Some((50.0, 300.0, 300.0, 330.0));
+        let mut pages = vec![vec![title, body]];
+        for index in 1..6 {
+            pages.push(vec![
+                make_margin_body("RAM and ROM"),
+                make_body_center(&format!("Unique content {index}")),
+            ]);
+        }
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
+        assert!(
+            !pages[0][0].is_page_furniture,
+            "the numbered chapter title predates every head copy; deleting it loses the chapter"
+        );
+        assert!(pages[0][0].heading_level.is_some(), "the title keeps its heading level");
+        assert!(pages[2][0].is_page_furniture);
+        assert!(pages[5][0].is_page_furniture);
     }
 
     #[test]
@@ -2188,7 +2917,7 @@ mod tests {
             body.block_bbox = Some((50.0, 400.0, 300.0, 420.0));
             pages.push(vec![h, body]);
         }
-        mark_cross_page_repeating_text(&mut pages, &page_heights);
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
         assert!(!pages[0][0].is_page_furniture, "first occurrence must not be furniture");
         assert!(pages[1][0].is_page_furniture);
         assert!(pages[1][0].heading_level.is_none());
@@ -2224,7 +2953,7 @@ mod tests {
                 make_body_center("Section content F"),
             ],
         ];
-        mark_cross_page_repeating_text(&mut pages, &page_heights);
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
         assert!(
             !pages[0][0].is_page_furniture,
             "first occurrence of copyright notice must be preserved"
@@ -3167,7 +3896,7 @@ mod tests {
         let mut pages: Vec<Vec<PdfParagraph>> = (0..6)
             .map(|_| vec![make_margin_body(title), make_body_center("body text here")])
             .collect();
-        mark_cross_page_repeating_text(&mut pages, &page_heights);
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
 
         assert!(
             !pages[0][0].is_page_furniture,
@@ -3182,6 +3911,71 @@ mod tests {
                 "body text on page {i} must not be furniture"
             );
         }
+    }
+
+    /// `content_filter.include_headers = true` must protect a top-band running header
+    /// from the cross-page majority/streak rule, mirroring how the flat-text pass
+    /// zeroes that band's width under the same permission.
+    #[test]
+    fn test_cross_page_repeating_text_respects_include_headers() {
+        /// `block_bbox` is (left, bottom, right, top) in PDF bottom-up coordinates:
+        /// a header on a 792pt page has its top edge near 792, a footer near 0.
+        fn make_top_margin(text: &str) -> PdfParagraph {
+            let mut p = make_paragraph(12.0, 1);
+            p.lines[0].segments[0].text = text.to_string();
+            p.block_bbox = Some((50.0, 762.0, 300.0, 782.0));
+            p
+        }
+        fn make_bottom_margin(text: &str) -> PdfParagraph {
+            let mut p = make_paragraph(12.0, 1);
+            p.lines[0].segments[0].text = text.to_string();
+            p.block_bbox = Some((50.0, 10.0, 300.0, 30.0));
+            p
+        }
+        let page_heights = vec![792.0_f32; 6];
+        let header = "Analysis of Thermodynamic Properties";
+        let footer = "Prepared by the thermodynamics working group";
+
+        let mut pages: Vec<Vec<PdfParagraph>> = (0..6)
+            .map(|_| vec![make_top_margin(header), make_body_center("body text here")])
+            .collect();
+        mark_cross_page_repeating_text(&mut pages, &page_heights, false, true);
+        for (i, page) in pages.iter().enumerate() {
+            assert!(
+                !page[0].is_page_furniture,
+                "top-band header must be preserved with include_headers (page {i})"
+            );
+        }
+
+        let mut pages: Vec<Vec<PdfParagraph>> = (0..6)
+            .map(|_| vec![make_top_margin(header), make_body_center("body text here")])
+            .collect();
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
+        assert!(
+            pages[1][0].is_page_furniture,
+            "top-band header is furniture again once include_headers is off"
+        );
+
+        // The footer band is the mirror case: with include_footers on, a bottom-band
+        // streak must survive even though headers are being stripped in the same call.
+        let mut pages: Vec<Vec<PdfParagraph>> = (0..6)
+            .map(|_| vec![make_body_center("body text here"), make_bottom_margin(footer)])
+            .collect();
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, false);
+        for (i, page) in pages.iter().enumerate() {
+            assert!(
+                !page[1].is_page_furniture,
+                "bottom-band footer must be preserved with include_footers (page {i})"
+            );
+        }
+        let mut pages: Vec<Vec<PdfParagraph>> = (0..6)
+            .map(|_| vec![make_body_center("body text here"), make_bottom_margin(footer)])
+            .collect();
+        mark_cross_page_repeating_text(&mut pages, &page_heights, true, true);
+        assert!(
+            pages[1][1].is_page_furniture,
+            "bottom-band footer is furniture again once include_footers is off"
+        );
     }
 
     /// Short-text tier-2 detection must also exempt the first occurrence of repeating text.
@@ -3218,6 +4012,111 @@ mod tests {
 
         assert!(pages.iter().all(|page| !page[0].is_page_furniture));
     }
+
+    fn make_line_paragraph(line_count: usize, is_monospace: bool) -> PdfParagraph {
+        let lines: Vec<super::super::types::PdfLine> = (0..line_count)
+            .map(|i| super::super::types::PdfLine {
+                segments: vec![SegmentData {
+                    text: format!("line{i}"),
+                    x: 0.0,
+                    y: 700.0 - i as f32 * 12.0,
+                    width: 40.0,
+                    height: 10.0,
+                    font_size: 10.0,
+                    is_bold: false,
+                    is_italic: false,
+                    is_monospace,
+                    baseline_y: 700.0 - i as f32 * 12.0,
+                    rotation_degrees: 0.0,
+                    assigned_role: None,
+                }],
+                baseline_y: 700.0 - i as f32 * 12.0,
+                dominant_font_size: 10.0,
+                is_bold: false,
+                is_monospace,
+            })
+            .collect();
+        let word_count = PdfParagraph::compute_word_count("", &lines);
+
+        PdfParagraph {
+            text: String::new(),
+            lines,
+            dominant_font_size: 10.0,
+            heading_level: None,
+            is_bold: false,
+            is_list_item: false,
+            is_code_block: false,
+            is_formula: false,
+            is_page_furniture: false,
+            layout_class: None,
+            layout_region_path: None,
+            caption_for: None,
+            block_bbox: None,
+            word_count,
+        }
+    }
+
+    #[test]
+    fn detect_monospace_code_blocks_fences_a_lone_multi_line_paragraph() {
+        // Regression test for GH#1557: a standalone 2-line monospace paragraph (no
+        // consecutive monospace neighbor) must still be recognized as a code block. ~keep
+        let mut paragraphs = vec![make_line_paragraph(2, true), make_line_paragraph(3, false)];
+
+        detect_monospace_code_blocks(&mut paragraphs);
+
+        assert!(
+            paragraphs[0].is_code_block,
+            "a standalone 2-line all-monospace paragraph must be fenced as code"
+        );
+        assert_eq!(paragraphs[0].layout_class, Some(LayoutHintClass::Code));
+        assert!(
+            !paragraphs[1].is_code_block,
+            "an ordinary multi-line prose paragraph must not be fenced as code"
+        );
+    }
+
+    #[test]
+    fn detect_monospace_code_blocks_still_merges_one_line_per_paragraph_listings() {
+        // Pre-existing behavior must be unaffected: a code listing split into
+        // one-line-per-paragraph still merges across consecutive monospace paragraphs. ~keep
+        let mut paragraphs = vec![
+            make_line_paragraph(1, true),
+            make_line_paragraph(1, true),
+            make_line_paragraph(1, true),
+            make_line_paragraph(1, false),
+        ];
+
+        detect_monospace_code_blocks(&mut paragraphs);
+
+        assert!(paragraphs[0].is_code_block);
+        assert!(paragraphs[1].is_code_block);
+        assert!(paragraphs[2].is_code_block);
+        assert!(!paragraphs[3].is_code_block);
+    }
+
+    #[test]
+    fn detect_monospace_code_blocks_renders_singleton_with_original_lines() {
+        let mut paragraph = make_line_paragraph(3, true);
+        paragraph.lines[0].segments[0].text = "import java.net.URI;".to_string();
+        paragraph.lines[1].segments[0].text = "public class Example {".to_string();
+        paragraph.lines[2].segments[0].text = "}".to_string();
+        let mut paragraphs = vec![paragraph];
+
+        detect_monospace_code_blocks(&mut paragraphs);
+
+        assert!(
+            paragraphs[0].is_code_block,
+            "a singleton multi-line listing must be fenced"
+        );
+        let document =
+            super::super::assembly::assemble_internal_document(vec![paragraphs], &[], None, &[], &Default::default());
+        let markdown = crate::rendering::render_markdown(&document);
+        assert_eq!(
+            markdown.trim(),
+            "```\nimport java.net.URI;\npublic class Example {\n}\n```",
+            "assembly and Markdown rendering must preserve the code listing's physical lines"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -3250,6 +4149,45 @@ mod numbered_section_heading_tests {
         assert!(!is_numbered_section_heading("1. Énumération 1"));
         assert!(!is_numbered_section_heading("12) apples and oranges"));
         assert!(!is_numbered_section_heading("1.\nÉnumération 1"));
+    }
+
+    /// GH#1608: a heading that puts a keyword in front of its number was invisible
+    /// to this predicate, which is the only boundary signal the paragraph grouper
+    /// has for a heading sharing font, weight and spacing with its neighbour.
+    #[test]
+    fn keyword_numbered_section_headings_are_headings() {
+        assert!(is_numbered_section_heading(
+            "ARTIKEL 1. TOEPASSELIJKHEID VAN DE INKOOPVOORWAARDEN"
+        ));
+        assert!(is_numbered_section_heading("Appendix 1 PRODUCT LIST"));
+        assert!(is_numbered_section_heading("Annex III SCOPE OF THE WORKS"));
+        // The enumeration is a letter, which the bare roman/arabic scan cannot read.
+        assert!(is_numbered_section_heading("Exhibit A PRODUCT LIST"));
+        // A single-level number with a MIXED-CASE tail, which a bare enumerator rejects.
+        assert!(is_numbered_section_heading("Appendix 1 Product list"));
+        assert!(is_numbered_section_heading("Chapter 1"));
+        assert!(is_numbered_section_heading("Artículo 5 CONDICIONES"));
+    }
+
+    /// The guard the widening must not breach: the same keyword and the same
+    /// enumerator shape occur in ordinary prose, and only the case of the word
+    /// after the enumerator separates them. GH#1608 page 8.
+    #[test]
+    fn prose_opening_with_a_keyword_and_a_number_is_not_a_heading() {
+        assert!(!is_numbered_section_heading("Artikel 12 van de wet is van toepassing."));
+        assert!(!is_numbered_section_heading("Article 7 of the contract applies here"));
+        assert!(!is_numbered_section_heading("Bijlage bij de overeenkomst"));
+        // `7a` is not a terminated enumerator.
+        assert!(!is_numbered_section_heading("Article 7a IS NOT ENUMERATED"));
+    }
+
+    /// `MIN_SECTION_KEYWORD_CHARS` is load-bearing, not decoration: a two-letter
+    /// preposition in front of a number and an all-caps tail satisfies every
+    /// other term of the keyword arm.
+    #[test]
+    fn a_short_word_before_a_number_is_not_a_section_keyword() {
+        assert!(!is_numbered_section_heading("Op 3 MAART"));
+        assert!(!is_numbered_section_heading("In 5 STAPPEN"));
     }
 
     #[test]

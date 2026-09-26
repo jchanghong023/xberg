@@ -8,9 +8,9 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'lib.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `try_convert_annotation_kind_from_core`, `try_convert_asset_category_from_core`, `try_convert_auth_config_from_core`, `try_convert_block_type_from_core`, `try_convert_boundary_reason_from_core`, `try_convert_browser_backend_from_core`, `try_convert_browser_mode_from_core`, `try_convert_browser_wait_from_core`, `try_convert_call_mode_from_core`, `try_convert_candle_device_preference_from_core`, `try_convert_candle_trocr_variant_from_core`, `try_convert_chunk_sizing_from_core`, `try_convert_chunk_type_from_core`, `try_convert_chunker_type_from_core`, `try_convert_chunking_reason_from_core`, `try_convert_code_content_mode_from_core`, `try_convert_code_data_node_kind_from_core`, `try_convert_confidence_semantics_from_core`, `try_convert_content_filter_kind_from_core`, `try_convert_content_layer_from_core`, `try_convert_crawl_strategy_kind_from_core`, `try_convert_credential_provider_config_from_core`, `try_convert_diff_line_from_core`, `try_convert_document_content_encoding_from_core`, `try_convert_element_type_from_core`, `try_convert_embedding_model_type_from_core`, `try_convert_embeddings_embedding_backend_from_core`, `try_convert_entity_category_from_core`, `try_convert_execution_provider_type_from_core`, `try_convert_extract_input_kind_from_core`, `try_convert_extraction_method_from_core`, `try_convert_form_field_type_from_core`, `try_convert_format_metadata_from_core`, `try_convert_formula_model_from_core`, `try_convert_glm_ocr_layout_mode_from_core`, `try_convert_glm_ocr_task_kind_from_core`, `try_convert_host_matcher_from_core`, `try_convert_html_theme_from_core`, `try_convert_image_kind_from_core`, `try_convert_image_output_format_from_core`, `try_convert_image_type_from_core`, `try_convert_inline_type_from_core`, `try_convert_jupyter_cell_rendering_from_core`, `try_convert_keyword_algorithm_from_core`, `try_convert_late_interaction_model_type_from_core`, `try_convert_layout_class_from_core`, `try_convert_layout_strategy_from_core`, `try_convert_link_type_from_core`, `try_convert_merge_mode_from_core`, `try_convert_mime_detection_policy_from_core`, `try_convert_ner_backend_kind_from_core`, `try_convert_no_chunking_reason_from_core`, `try_convert_node_content_from_core`, `try_convert_ocr_backend_type_from_core`, `try_convert_ocr_bounding_geometry_from_core`, `try_convert_ocr_element_level_from_core`, `try_convert_ocr_strategy_from_core`, `try_convert_output_format_from_core`, `try_convert_paddle_inference_backend_from_core`, `try_convert_paddle_language_from_core`, `try_convert_paddle_ocr_vl_task_kind_from_core`, `try_convert_page_orientation_handling_from_core`, `try_convert_page_unit_type_from_core`, `try_convert_pdf_annotation_type_from_core`, `try_convert_pdf_backend_from_core`, `try_convert_pii_category_from_core`, `try_convert_preset_category_from_core`, `try_convert_probe_status_from_core`, `try_convert_processing_stage_from_core`, `try_convert_psm_mode_from_core`, `try_convert_redaction_strategy_from_core`, `try_convert_reduction_level_from_core`, `try_convert_region_kind_from_core`, `try_convert_relationship_kind_from_core`, `try_convert_reranker_head_from_core`, `try_convert_reranker_model_type_from_core`, `try_convert_result_format_from_core`, `try_convert_revision_anchor_from_core`, `try_convert_revision_kind_from_core`, `try_convert_schema_compliance_from_core`, `try_convert_sparse_embedding_model_type_from_core`, `try_convert_structured_data_type_from_core`, `try_convert_summary_strategy_from_core`, `try_convert_table_chunking_mode_from_core`, `try_convert_table_model_from_core`, `try_convert_table_overlap_preference_from_core`, `try_convert_text_direction_from_core`, `try_convert_tier_strategy_from_core`, `try_convert_uri_kind_from_core`, `try_convert_url_extraction_mode_from_core`, `try_convert_vlm_fallback_policy_from_core`, `try_convert_whisper_model_from_core`
+// These functions are ignored because they are not marked as `pub`: `try_convert_annotation_kind_from_core`, `try_convert_asset_category_from_core`, `try_convert_auth_config_from_core`, `try_convert_block_type_from_core`, `try_convert_boundary_reason_from_core`, `try_convert_browser_backend_from_core`, `try_convert_browser_mode_from_core`, `try_convert_browser_wait_from_core`, `try_convert_call_mode_from_core`, `try_convert_candle_deepseek_ocr_dtype_from_core`, `try_convert_candle_device_preference_from_core`, `try_convert_candle_trocr_variant_from_core`, `try_convert_chunk_sizing_from_core`, `try_convert_chunk_type_from_core`, `try_convert_chunker_type_from_core`, `try_convert_chunking_reason_from_core`, `try_convert_code_content_mode_from_core`, `try_convert_code_data_node_kind_from_core`, `try_convert_confidence_semantics_from_core`, `try_convert_content_filter_kind_from_core`, `try_convert_content_layer_from_core`, `try_convert_crawl_strategy_kind_from_core`, `try_convert_credential_provider_config_from_core`, `try_convert_diff_line_from_core`, `try_convert_document_content_encoding_from_core`, `try_convert_element_type_from_core`, `try_convert_embedding_model_type_from_core`, `try_convert_embeddings_embedding_backend_from_core`, `try_convert_entity_category_from_core`, `try_convert_execution_provider_type_from_core`, `try_convert_extract_input_kind_from_core`, `try_convert_extraction_method_from_core`, `try_convert_form_field_type_from_core`, `try_convert_format_metadata_from_core`, `try_convert_formula_model_from_core`, `try_convert_glm_ocr_layout_mode_from_core`, `try_convert_glm_ocr_task_kind_from_core`, `try_convert_host_matcher_from_core`, `try_convert_html_theme_from_core`, `try_convert_image_kind_from_core`, `try_convert_image_output_format_from_core`, `try_convert_image_type_from_core`, `try_convert_inline_type_from_core`, `try_convert_jupyter_cell_rendering_from_core`, `try_convert_keyword_algorithm_from_core`, `try_convert_late_interaction_model_type_from_core`, `try_convert_layout_class_from_core`, `try_convert_layout_strategy_from_core`, `try_convert_link_type_from_core`, `try_convert_merge_mode_from_core`, `try_convert_mime_detection_policy_from_core`, `try_convert_ner_backend_kind_from_core`, `try_convert_no_chunking_reason_from_core`, `try_convert_node_content_from_core`, `try_convert_ocr_backend_type_from_core`, `try_convert_ocr_bounding_geometry_from_core`, `try_convert_ocr_element_level_from_core`, `try_convert_ocr_strategy_from_core`, `try_convert_output_format_from_core`, `try_convert_paddle_inference_backend_from_core`, `try_convert_paddle_language_from_core`, `try_convert_paddle_ocr_vl_task_kind_from_core`, `try_convert_page_orientation_handling_from_core`, `try_convert_page_unit_type_from_core`, `try_convert_pdf_annotation_type_from_core`, `try_convert_pdf_backend_from_core`, `try_convert_pii_category_from_core`, `try_convert_preset_category_from_core`, `try_convert_probe_status_from_core`, `try_convert_processing_stage_from_core`, `try_convert_psm_mode_from_core`, `try_convert_redaction_strategy_from_core`, `try_convert_reduction_level_from_core`, `try_convert_region_kind_from_core`, `try_convert_relationship_kind_from_core`, `try_convert_reranker_head_from_core`, `try_convert_reranker_model_type_from_core`, `try_convert_result_format_from_core`, `try_convert_revision_anchor_from_core`, `try_convert_revision_kind_from_core`, `try_convert_schema_compliance_from_core`, `try_convert_sparse_embedding_model_type_from_core`, `try_convert_structured_data_type_from_core`, `try_convert_summary_strategy_from_core`, `try_convert_table_chunking_mode_from_core`, `try_convert_table_model_from_core`, `try_convert_table_overlap_preference_from_core`, `try_convert_text_direction_from_core`, `try_convert_tier_strategy_from_core`, `try_convert_uri_kind_from_core`, `try_convert_url_extraction_mode_from_core`, `try_convert_vlm_fallback_policy_from_core`, `try_convert_whisper_model_from_core`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ChunkClassificationEnrichmentConfig`, `DocumentExtractorDartCallbacks`, `EmbeddingBackendDartCallbacks`, `OcrBackendDartCallbacks`, `PostProcessorDartCallbacks`, `RendererDartCallbacks`, `RerankerBackendDartCallbacks`, `TokenizerBackendDartCallbacks`, `ValidatorDartCallbacks`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `backend_type`, `can_handle`, `confidence_semantics`, `count_tokens`, `dimensions`, `embed`, `emits_structured_markdown`, `estimated_duration_ms`, `extract`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `page_orientation_handling`, `priority`, `priority`, `priority`, `process_document`, `process_image_file`, `process_image`, `process`, `processing_stage`, `render_result`, `rerank`, `should_process`, `should_validate`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `supported_languages`, `supported_mime_types`, `supports_document_processing`, `supports_language`, `supports_table_detection`, `validate`, `version`, `version`, `version`, `version`, `version`, `version`, `version`, `version`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `backend_type`, `can_handle`, `confidence_semantics`, `count_tokens`, `dimensions`, `embed`, `emits_structured_markdown`, `estimated_duration_ms`, `extract`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `page_orientation_handling`, `priority`, `priority`, `priority`, `process_document`, `process_image_file`, `process_image`, `process`, `processing_stage`, `render_result`, `rerank`, `should_process`, `should_validate`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `supported_languages`, `supported_mime_types`, `supports_document_processing`, `supports_language`, `supports_table_detection`, `validate`, `version`, `version`, `version`, `version`, `version`, `version`, `version`, `version`
 
 /// Extract content from a single bytes or URI input.
 Future<ExtractionResult> extract({
@@ -87,6 +87,52 @@ Future<List<String>> listDocumentExtractors() =>
 /// A vector of OCR backend names.
 Future<List<String>> listOcrBackends() =>
     RustLib.instance.api.crateListOcrBackends();
+
+/// List every registered OCR backend's name alongside its declared supported languages.
+///
+/// This is the capability-enumeration counterpart to `list_ocr_backends`: where that function
+/// exposes only backend names, this exposes each backend's `supported_languages()` too, so a
+/// consumer (for example, a job-acceptance gate) does not need to hardcode a second list of
+/// backend languages.
+///
+/// # Determinism
+///
+/// The returned vector is sorted by `name`, regardless of registration order or the order
+/// reported by the underlying registry. `supported_languages` within each entry is **not**
+/// sorted — see `OcrBackendCapabilities.supported_languages` for why.
+///
+/// # Cost
+///
+/// Calling this is not free for every backend. In particular, `TesseractBackend`'s
+/// `supported_languages()` allocates a Tesseract API and initializes it against the same
+/// tessdata directory a real OCR job resolves (`resolve_tessdata_path`), the first time it
+/// is called, to enumerate installed tessdata languages; subsequent calls are served from a
+/// cache.
+///
+/// **Errors:**
+///
+/// Returns an error only if the registry lock cannot be acquired in the current environment.
+Future<List<OcrBackendCapabilities>> listOcrBackendCapabilities() =>
+    RustLib.instance.api.crateListOcrBackendCapabilities();
+
+/// Check whether a specific registered OCR backend supports a language.
+///
+/// Delegates to the named backend's own `OcrBackend.supports_language`, which is the correct
+/// per-language decision — do not infer support (or its absence) from whether
+/// `list_ocr_backend_capabilities` reports an empty `supported_languages` list for that
+/// backend, since an empty list can mean "does not enumerate" rather than "supports nothing"
+/// (see `OcrBackendCapabilities.supported_languages`).
+///
+/// **Errors:**
+///
+/// Returns an error if no backend with that name (or alias) is registered.
+Future<bool> ocrBackendSupportsLanguage({
+  required String backend,
+  required String language,
+}) => RustLib.instance.api.crateOcrBackendSupportsLanguage(
+  backend: backend,
+  language: language,
+);
 
 /// List all registered post-processor names.
 ///
@@ -440,6 +486,11 @@ Future<CoreProperties> createCorePropertiesFromJson({required String json}) =>
 Future<SecurityLimits> createSecurityLimitsFromJson({required String json}) =>
     RustLib.instance.api.crateCreateSecurityLimitsFromJson(json: json);
 
+Future<OcrBackendCapabilities> createOcrBackendCapabilitiesFromJson({
+  required String json,
+}) =>
+    RustLib.instance.api.crateCreateOcrBackendCapabilitiesFromJson(json: json);
+
 Future<TokenReductionConfig> createTokenReductionConfigFromJson({
   required String json,
 }) => RustLib.instance.api.crateCreateTokenReductionConfigFromJson(json: json);
@@ -779,6 +830,10 @@ Future<PageInfo> createPageInfoFromJson({required String json}) =>
 Future<PageContent> createPageContentFromJson({required String json}) =>
     RustLib.instance.api.crateCreatePageContentFromJson(json: json);
 
+Future<PageOcrConfidence> createPageOcrConfidenceFromJson({
+  required String json,
+}) => RustLib.instance.api.crateCreatePageOcrConfidenceFromJson(json: json);
+
 Future<LayoutRegion> createLayoutRegionFromJson({required String json}) =>
     RustLib.instance.api.crateCreateLayoutRegionFromJson(json: json);
 
@@ -825,6 +880,9 @@ Future<DocumentSummary> createDocumentSummaryFromJson({required String json}) =>
 
 Future<Table> createTableFromJson({required String json}) =>
     RustLib.instance.api.crateCreateTableFromJson(json: json);
+
+Future<TableCellStyle> createTableCellStyleFromJson({required String json}) =>
+    RustLib.instance.api.crateCreateTableCellStyleFromJson(json: json);
 
 Future<TableCell> createTableCellFromJson({required String json}) =>
     RustLib.instance.api.crateCreateTableCellFromJson(json: json);
@@ -1310,6 +1368,11 @@ Future<GlmOcrTaskKind> createGlmOcrTaskKindFromJson({required String json}) =>
 Future<GlmOcrLayoutMode> createGlmOcrLayoutModeFromJson({
   required String json,
 }) => RustLib.instance.api.crateCreateGlmOcrLayoutModeFromJson(json: json);
+
+Future<CandleDeepseekOcrDtype> createCandleDeepseekOcrDtypeFromJson({
+  required String json,
+}) =>
+    RustLib.instance.api.crateCreateCandleDeepseekOcrDtypeFromJson(json: json);
 
 Future<LayoutClass> createLayoutClassFromJson({required String json}) =>
     RustLib.instance.api.crateCreateLayoutClassFromJson(json: json);
@@ -2591,6 +2654,13 @@ enum CallMode {
   textPlusVision,
 }
 
+/// Floating-point precision accepted by `candle-deepseek-ocr` backend options.
+///
+/// `Auto` (the default) resolves per compute device: BF16 on CUDA, F16 on Metal, F32 on CPU.
+/// A dtype with no kernel on the selected device fails the load hard rather than silently
+/// falling back to another precision -- this is not a tuning knob.
+enum CandleDeepseekOcrDtype { auto, f32, f16, bf16 }
+
 /// Device selection shared by the typed candle backend option objects.
 enum CandleDevicePreference { auto, cpu, cuda, metal }
 
@@ -3632,7 +3702,12 @@ class CodeMetadata {
 /// Controls thread usage for constrained environments.
 ///
 /// Set `max_threads` to cap all internal thread pools (Rayon, ONNX Runtime
-/// intra-op) and batch concurrency to a single limit.
+/// intra-op), batch concurrency and Tesseract recognition to a single limit.
+/// Set `max_concurrent_ocr` to give recognition a limit of its own, which is
+/// the knob to reach for when the host has cores to spare but not the memory
+/// to run a recognition session on each of them. It is applied as given and
+/// is not capped by `max_threads`. The first extraction in a process fixes
+/// it for that process — see the field's own documentation.
 ///
 /// # Default budget when `max_threads` is unset
 ///
@@ -3661,6 +3736,7 @@ class CodeMetadata {
 ///
 /// let config = ConcurrencyConfig {
 ///     max_threads: Some(2),
+///     max_concurrent_ocr: None,
 /// };
 /// ```
 class ConcurrencyConfig {
@@ -3675,17 +3751,41 @@ class ConcurrencyConfig {
   /// default will not scale past 8 on its own.
   final PlatformInt64? maxThreads;
 
-  const ConcurrencyConfig({this.maxThreads});
+  /// Maximum number of Tesseract recognition sessions that run at once.
+  ///
+  /// When `None`, recognition follows `max_threads`, reduced to the number
+  /// of sessions the host's free memory holds. Each session keeps its own
+  /// page image and recognition working set resident, so a host with many
+  /// cores and little memory needs this lower than the thread budget. Set
+  /// it to `4` to keep the fixed limit that releases up to 1.2.6 applied.
+  ///
+  /// A value set here is applied as given: neither the thread budget nor
+  /// the memory reading reduces it. Both of those bound the automatic
+  /// limit, and a caller who names a number has already decided what the
+  /// host can carry.
+  ///
+  /// The first extraction in a process fixes the limit for the rest of that
+  /// process, and a later extraction that names a different value keeps the
+  /// first one. The two limiters that enforce it — the admission semaphore
+  /// in the Tesseract backend and the handle pool behind it — are built once
+  /// inside a backend the plugin registry holds for the life of the process,
+  /// and the pool's capacity is fixed when it is constructed. A later value
+  /// could therefore be reported but never enforced. Set it on the first
+  /// extraction, or run one process per value.
+  final PlatformInt64? maxConcurrentOcr;
+
+  const ConcurrencyConfig({this.maxThreads, this.maxConcurrentOcr});
 
   @override
-  int get hashCode => maxThreads.hashCode;
+  int get hashCode => maxThreads.hashCode ^ maxConcurrentOcr.hashCode;
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is ConcurrencyConfig &&
           runtimeType == other.runtimeType &&
-          maxThreads == other.maxThreads;
+          maxThreads == other.maxThreads &&
+          maxConcurrentOcr == other.maxConcurrentOcr;
 }
 
 @freezed
@@ -3863,6 +3963,13 @@ class ContentFilterConfig {
   /// When `true` (default), text that repeats verbatim across a supermajority
   /// of pages is classified as furniture and stripped.  Disable this if brand
   /// names or repeated headings are being incorrectly removed by the heuristic.
+  ///
+  /// This flag also gates a same-page rule: a body paragraph is removed when
+  /// its text is also carried by a table detected on the same page (catches
+  /// table content that PDF extraction renders both as a table and as body
+  /// text). The comparison preserves case and never touches headings, list
+  /// items, code blocks, formulas, or captions, so it cannot delete a body
+  /// sentence merely for repeating an earlier heading's words (GH#1623).
   ///
   /// Note: when a layout-detection model is active, the model may independently
   /// classify page-header / page-footer / footnote regions as furniture on a
@@ -5004,8 +5111,19 @@ class DbfMetadata {
 
 /// Runtime options accepted by the `candle-deepseek-ocr` backend.
 class DeepseekOcrBackendOptions {
-  /// Local DeepSeek-OCR model directory. The backend requires this option.
+  /// Local DeepSeek-OCR model directory. Takes precedence over `model_id` when present.
   final String? modelPath;
+
+  /// Optional Hugging Face repository identifier. Defaults to the checksum-pinned
+  /// `deepseek-ai/DeepSeek-OCR`. Ignored when `model_path` is set.
+  final String? modelId;
+
+  /// Optional immutable Hugging Face model revision. The default model is pinned
+  /// automatically; a custom `model_id` requires this to be set explicitly.
+  final String? hfRevision;
+
+  /// Optional Hugging Face cache root.
+  final String? cacheDir;
 
   /// Optional per-call device override.
   final CandleDevicePreference? device;
@@ -5013,10 +5131,28 @@ class DeepseekOcrBackendOptions {
   /// DeepSeek-OCR model generation, either 1 or 2. Defaults to 2.
   final PlatformInt64? version;
 
-  const DeepseekOcrBackendOptions({this.modelPath, this.device, this.version});
+  /// Optional weight precision override; see [`CandleDeepseekOcrDtype`].
+  final CandleDeepseekOcrDtype? dtype;
+
+  const DeepseekOcrBackendOptions({
+    this.modelPath,
+    this.modelId,
+    this.hfRevision,
+    this.cacheDir,
+    this.device,
+    this.version,
+    this.dtype,
+  });
 
   @override
-  int get hashCode => modelPath.hashCode ^ device.hashCode ^ version.hashCode;
+  int get hashCode =>
+      modelPath.hashCode ^
+      modelId.hashCode ^
+      hfRevision.hashCode ^
+      cacheDir.hashCode ^
+      device.hashCode ^
+      version.hashCode ^
+      dtype.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -5024,8 +5160,12 @@ class DeepseekOcrBackendOptions {
       other is DeepseekOcrBackendOptions &&
           runtimeType == other.runtimeType &&
           modelPath == other.modelPath &&
+          modelId == other.modelId &&
+          hfRevision == other.hfRevision &&
+          cacheDir == other.cacheDir &&
           device == other.device &&
-          version == other.version;
+          version == other.version &&
+          dtype == other.dtype;
 }
 
 /// MIME type detection response.
@@ -7102,6 +7242,11 @@ class ExtractedDocument {
   /// retained. This is not a completeness or recall score: clean text can score
   /// highly even when an extractor omitted or rejected other content. Inspect
   /// `processing_warnings` separately for known degraded or partial extraction.
+  ///
+  /// When the text came from OCR and the result carries enough recognized words to
+  /// judge, this score is additionally capped by the mean OCR recognition confidence.
+  /// Text that looks clean but that OCR itself had little confidence in therefore
+  /// cannot score high. A native, non-OCR extraction is not capped.
   /// Previously stored in `metadata.additional["quality_score"]`.
   final double? qualityScore;
 
@@ -7540,7 +7685,8 @@ class ExtractionConfidence {
   /// Fraction of pages with a usable text layer.
   final double textCoverage;
 
-  /// Mean OCR per-element recognition confidence when OCR ran; `None` when it did not.
+  /// OCR recognition confidence, word-count-weighted across every recognized word, when OCR
+  /// ran; `None` when it did not.
   final double? ocrAggregate;
 
   /// Whether the merged output validates against the preset schema.
@@ -7634,6 +7780,49 @@ class ExtractionConfig {
   ///
   /// Cannot be `true` simultaneously with `force_ocr`.
   final bool disableOcr;
+
+  /// Whether a PDF whose native text layer is empty or near-empty falls back to OCR
+  /// under [`OcrStrategy::Auto`] (GH#1752).
+  ///
+  /// `None` (the default) derives the answer from whether [`Self::ocr`] is set, which is
+  /// exactly the behaviour shipped before this field existed: with an `ocr` block the
+  /// fallback always runs, and without one it runs only when the page's native text is
+  /// *completely* empty (#1338). That carve-out means a scanned page carrying a visible
+  /// page label, Bates number or scanner stamp keeps only that label.
+  ///
+  /// `Some(true)` applies the near-empty fallback without requiring an `ocr` block: the
+  /// text-quality gate decides, using [`OcrConfig::default`]'s thresholds when no block is
+  /// present, and an automatic OCR backend must be registered.
+  ///
+  /// `Some(false)` suppresses the fallback even when an `ocr` block is present.
+  final bool? ocrNearEmptyFallback;
+
+  /// Whether [`OcrStrategy::ScannedPages`] folds the per-page text-quality gate into its
+  /// page selection, on top of the pages scan detection flagged (GH#1752).
+  ///
+  /// `None` (the default) derives the answer from whether [`Self::ocr`] is set, which is
+  /// exactly the behaviour shipped before this field existed. Without an `ocr` block
+  /// `ScannedPages` therefore degrades to detected-scans-only.
+  ///
+  /// `Some(true)` runs the gate without requiring an `ocr` block, using
+  /// [`OcrConfig::default`]'s thresholds; an automatic OCR backend must be registered.
+  ///
+  /// `Some(false)` selects detected scans only even when an `ocr` block is present, which
+  /// is the setting that avoids paying for recognition across a whole mixed document.
+  final bool? ocrScannedPageQualityGate;
+
+  /// Whether images embedded in a container document (DOCX, PPTX, ODT, HTML, ...) are sent
+  /// to OCR (GH#1752).
+  ///
+  /// `None` (the default) derives the answer from whether [`Self::ocr`] is set, which is
+  /// exactly the behaviour shipped before this field existed. `Some(true)` recognises
+  /// picture text without requiring an `ocr` block; `Some(false)` suppresses it even when
+  /// a block is present.
+  ///
+  /// Orthogonal to [`ImageExtractionConfig::run_ocr_on_images`], which still has to be
+  /// `true` (its own default) for embedded-image OCR to run. See
+  /// [`Self::runs_ocr_on_embedded_images`].
+  final bool? ocrEmbeddedImages;
 
   /// Text chunking configuration (None = chunking disabled)
   final ChunkingConfig? chunking;
@@ -7953,6 +8142,9 @@ class ExtractionConfig {
     required this.ocrStrategy,
     this.forceOcrPages,
     required this.disableOcr,
+    this.ocrNearEmptyFallback,
+    this.ocrScannedPageQualityGate,
+    this.ocrEmbeddedImages,
     this.chunking,
     this.contentFilter,
     this.images,
@@ -8009,6 +8201,9 @@ class ExtractionConfig {
       ocrStrategy.hashCode ^
       forceOcrPages.hashCode ^
       disableOcr.hashCode ^
+      ocrNearEmptyFallback.hashCode ^
+      ocrScannedPageQualityGate.hashCode ^
+      ocrEmbeddedImages.hashCode ^
       chunking.hashCode ^
       contentFilter.hashCode ^
       images.hashCode ^
@@ -8067,6 +8262,9 @@ class ExtractionConfig {
           ocrStrategy == other.ocrStrategy &&
           forceOcrPages == other.forceOcrPages &&
           disableOcr == other.disableOcr &&
+          ocrNearEmptyFallback == other.ocrNearEmptyFallback &&
+          ocrScannedPageQualityGate == other.ocrScannedPageQualityGate &&
+          ocrEmbeddedImages == other.ocrEmbeddedImages &&
           chunking == other.chunking &&
           contentFilter == other.contentFilter &&
           images == other.images &&
@@ -9060,6 +9258,23 @@ class GridCell {
   /// Bounding box for this cell (if available).
   final BoundingBox? bbox;
 
+  /// Outline level (1-6) of the heading style this cell's text carries, when it has one.
+  ///
+  /// A DOCX banner row -- row 0, one cell spanning the grid, styled `Heading1`..`Heading6` --
+  /// is what Word's navigation pane and a `TOC` field treat as the document's outline, but as
+  /// a table cell it reached consumers as anonymous text (GH#1587). `content` is deliberately
+  /// left as the bare cell text: prefixing it with `#` would put a markdown heading inside a
+  /// table cell, which is invalid where it lands and changes text every existing consumer
+  /// already reads. This field is the signal instead, so a caller can decide for itself
+  /// whether a `heading 2` in a banner row is a section title or a column label.
+  final PlatformInt64? headingLevel;
+
+  /// Human-readable name of the paragraph style applied to this cell's text (`heading 2`).
+  ///
+  /// Carries the style even when it resolves to no outline level, so a caller can key on a
+  /// named style this crate does not map to a heading. See [`GridCell::heading_level`].
+  final String? styleName;
+
   const GridCell({
     required this.content,
     required this.row,
@@ -9068,6 +9283,8 @@ class GridCell {
     required this.colSpan,
     required this.isHeader,
     this.bbox,
+    this.headingLevel,
+    this.styleName,
   });
 
   @override
@@ -9078,7 +9295,9 @@ class GridCell {
       rowSpan.hashCode ^
       colSpan.hashCode ^
       isHeader.hashCode ^
-      bbox.hashCode;
+      bbox.hashCode ^
+      headingLevel.hashCode ^
+      styleName.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -9091,7 +9310,9 @@ class GridCell {
           rowSpan == other.rowSpan &&
           colSpan == other.colSpan &&
           isHeader == other.isHeader &&
-          bbox == other.bbox;
+          bbox == other.bbox &&
+          headingLevel == other.headingLevel &&
+          styleName == other.styleName;
 }
 
 /// Header/heading element metadata.
@@ -10093,6 +10314,15 @@ sealed class ImageOutputFormat with _$ImageOutputFormat {
 /// for different document types.
 class ImagePreprocessingConfig {
   /// Target DPI for the image (300 is standard, 600 for small text).
+  ///
+  /// For a PDF page, this resamples the already-rendered raster; it does not make the page
+  /// re-render at a higher native resolution. A value above what
+  /// `image::preprocessing::calculate_target_dpi`'s memory/dimension clamp allows is
+  /// silently capped (GH#1786: 400 and 600 both clamped to the same ~372 on a Letter page
+  /// and produced byte-identical output), so upscaling interpolated pixels this way adds no
+  /// detail. To change the actual PDF render resolution, set `images.target_dpi` on
+  /// [`ExtractionConfig`](crate::core::config::ExtractionConfig) instead
+  /// (`image::dpi::effective_pdf_render_dpi`).
   final PlatformInt64 targetDpi;
 
   /// Auto-detect and correct image rotation.
@@ -10115,6 +10345,16 @@ class ImagePreprocessingConfig {
   /// Invert colors (white text on black → black on white).
   final bool invertColors;
 
+  /// Normalize shaded table rows (e.g. a subtotal row on a light or dark fill) before
+  /// binarization, so each shaded band is stretched to its own dark-text-on-white
+  /// polarity instead of being lost to a single whole-page threshold (GH#1785).
+  ///
+  /// This is a per-band step, not a replacement for `binarization_method`: no single
+  /// whole-page method recovers every fill color, and the per-band step itself can
+  /// regress a row style it does not fully model (e.g. a mid-grey fill with white
+  /// text), so it defaults to `false` rather than being enabled unconditionally.
+  final bool normalizeShadedRows;
+
   const ImagePreprocessingConfig({
     required this.targetDpi,
     required this.autoRotate,
@@ -10123,6 +10363,7 @@ class ImagePreprocessingConfig {
     required this.contrastEnhance,
     required this.binarizationMethod,
     required this.invertColors,
+    required this.normalizeShadedRows,
   });
 
   @override
@@ -10133,7 +10374,8 @@ class ImagePreprocessingConfig {
       denoise.hashCode ^
       contrastEnhance.hashCode ^
       binarizationMethod.hashCode ^
-      invertColors.hashCode;
+      invertColors.hashCode ^
+      normalizeShadedRows.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -10146,7 +10388,8 @@ class ImagePreprocessingConfig {
           denoise == other.denoise &&
           contrastEnhance == other.contrastEnhance &&
           binarizationMethod == other.binarizationMethod &&
-          invertColors == other.invertColors;
+          invertColors == other.invertColors &&
+          normalizeShadedRows == other.normalizeShadedRows;
 }
 
 class ImagePreprocessingMetadata {
@@ -11501,6 +11744,22 @@ class LlmConfig {
   /// compatibility in generated language bindings.
   final PlatformInt64? maxConcurrency;
 
+  /// Maximum size, in bytes, of a single HTTP response body read from the LLM
+  /// provider.
+  ///
+  /// Bounds response bodies on every non-streaming call (chat completions,
+  /// embeddings, model listings, …) and the error body read on a failed
+  /// request; a successful streaming response keeps its own existing frame
+  /// bounds and is unaffected. `None` (the default) means unbounded, matching
+  /// liter-llm's own default.
+  ///
+  /// Mirrors liter-llm's `client::ClientConfigBuilder::max_response_bytes`, which
+  /// is native-only (`native-http`, non-`wasm32`) — see
+  /// `llm::client::build_client_config`. `Some(0)` is rejected by
+  /// [`LlmConfig::validate`] rather than reaching liter-llm, which would refuse it
+  /// at client-build time with the same complaint.
+  final PlatformInt64? maxResponseBytes;
+
   const LlmConfig({
     required this.model,
     this.apiKey,
@@ -11529,6 +11788,7 @@ class LlmConfig {
     this.bedrock,
     this.credentialProvider,
     this.maxConcurrency,
+    this.maxResponseBytes,
   });
 
   @override
@@ -11559,7 +11819,8 @@ class LlmConfig {
       healthCheckSecs.hashCode ^
       bedrock.hashCode ^
       credentialProvider.hashCode ^
-      maxConcurrency.hashCode;
+      maxConcurrency.hashCode ^
+      maxResponseBytes.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -11592,7 +11853,8 @@ class LlmConfig {
           healthCheckSecs == other.healthCheckSecs &&
           bedrock == other.bedrock &&
           credentialProvider == other.credentialProvider &&
-          maxConcurrency == other.maxConcurrency;
+          maxConcurrency == other.maxConcurrency &&
+          maxResponseBytes == other.maxResponseBytes;
 }
 
 /// A custom provider configuration entry, in addition to liter-llm's built-in providers.
@@ -12461,6 +12723,49 @@ sealed class NodeContent with _$NodeContent {
   }) = NodeContent_MetadataBlock;
 }
 
+/// A registered OCR backend's declared name and language capabilities.
+///
+/// Returned by [`list_ocr_backend_capabilities`]. See that function's documentation for the
+/// determinism guarantees and the important caveat about what an empty `supported_languages`
+/// means.
+class OcrBackendCapabilities {
+  /// The backend's registered name, as returned by [`list_ocr_backends`].
+  final String name;
+
+  /// The languages this backend declares support for, via
+  /// [`OcrBackend::supported_languages`].
+  ///
+  /// An empty list means the backend does not enumerate its languages — it is *not* a
+  /// statement that the backend supports no languages. [`OcrBackend::supported_languages`]
+  /// is a defaulted trait method that returns `vec![]`, and not every backend overrides it:
+  /// the VLM backend (`llm::vlm_ocr::VlmOcrBackend`) accepts every language via
+  /// `supports_language` while inheriting the empty default here. Use
+  /// [`ocr_backend_supports_language`] to decide whether one specific language is usable —
+  /// never infer "unsupported" from an empty list.
+  ///
+  /// The order of this list is preserved exactly as the backend reported it and is *not*
+  /// re-sorted. Tesseract's order comes from enumerating installed tessdata files; PaddleOCR's
+  /// comes from its own `SUPPORTED_LANGUAGES` constant. Re-sorting would disagree with the
+  /// precedence each backend's own `supports_language` implementation uses internally.
+  final List<String> supportedLanguages;
+
+  const OcrBackendCapabilities({
+    required this.name,
+    required this.supportedLanguages,
+  });
+
+  @override
+  int get hashCode => name.hashCode ^ supportedLanguages.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is OcrBackendCapabilities &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          supportedLanguages == other.supportedLanguages;
+}
+
 /// OCR backend types.
 enum OcrBackendType {
   /// Tesseract OCR (native Rust binding)
@@ -12559,6 +12864,9 @@ class OcrConfig {
   /// deserializing from a config file, JSON body, or the REST/MCP API, a
   /// single string is also accepted, either as one code ("eng") or
   /// "+"-joined ("eng+deu").
+  ///
+  /// The four candle-based backends also use this list to decide which scripts are
+  /// plausible in their output, dropping a line written in an unconfigured script.
   final List<String> language;
 
   /// Tesseract-specific configuration (optional)
@@ -12664,6 +12972,21 @@ class OcrConfig {
   /// `ExtractionConfig::acceleration` before each `process_image` call.
   final AccelerationConfig? acceleration;
 
+  /// Security limits applied when decoding raw image bytes for OCR (GH#1554).
+  ///
+  /// Not user-configurable via config files — injected at runtime from
+  /// `ExtractionConfig::security_limits` before each `process_image` call, the same
+  /// pattern [`Self::acceleration`] uses. `ExtractionConfig::security_limits` remains the
+  /// source of truth and overwrites this field whenever it carries a value; a value set
+  /// here directly is honoured only when `ExtractionConfig` carries none, so the two
+  /// cannot drift while a directly-set limit is no longer silently discarded (GH#1651).
+  /// A backend consulting a
+  /// `backend_options` override for this call may still let that override win, but in
+  /// the absence of one this field is what backends should fall back to instead of
+  /// `SecurityLimits::default()`. `None` means "use `SecurityLimits::default()`", never
+  /// "disable the check".
+  final SecurityLimits? securityLimits;
+
   /// Caller-supplied Tesseract `traineddata` bytes per language code.
   ///
   /// Primary use case is the WASM build, which has no filesystem and cannot
@@ -12684,6 +13007,18 @@ class OcrConfig {
   /// the standard resolution chain: TESSDATA_PREFIX env, cache dir, system paths.
   final String? tessdataPath;
 
+  /// Repair OCR tokens that are clearly numeric but mis-punctuated: a dropped thousands
+  /// separator, a decimal point misread for a grouping comma, or one number split into two
+  /// tokens at a rendering gap (GH#1789).
+  ///
+  /// Defaults to `false`. Unlike the always-on list-marker repair
+  /// (`crate::extractors::pdf::ocr::scoring::repair_ocr_list_markers`), this repair has no
+  /// table-column context available at the point OCR text comes back as a flat string, so it
+  /// cannot tell `"1.234,56"` (European) from `"1,234.56"` (US) apart on its own -- it always
+  /// assumes the US/UK convention (comma groups, period decimals). Enable it only for
+  /// documents known to use that convention.
+  final bool numericRepair;
+
   const OcrConfig({
     required this.enabled,
     required this.backend,
@@ -12700,8 +13035,10 @@ class OcrConfig {
     this.vlmConfig,
     this.vlmPrompt,
     this.acceleration,
+    this.securityLimits,
     this.tessdataBytes,
     this.tessdataPath,
+    required this.numericRepair,
   });
 
   @override
@@ -12721,8 +13058,10 @@ class OcrConfig {
       vlmConfig.hashCode ^
       vlmPrompt.hashCode ^
       acceleration.hashCode ^
+      securityLimits.hashCode ^
       tessdataBytes.hashCode ^
-      tessdataPath.hashCode;
+      tessdataPath.hashCode ^
+      numericRepair.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -12744,8 +13083,10 @@ class OcrConfig {
           vlmConfig == other.vlmConfig &&
           vlmPrompt == other.vlmPrompt &&
           acceleration == other.acceleration &&
+          securityLimits == other.securityLimits &&
           tessdataBytes == other.tessdataBytes &&
-          tessdataPath == other.tessdataPath;
+          tessdataPath == other.tessdataPath &&
+          numericRepair == other.numericRepair;
 }
 
 /// A unified OCR element representing detected text with full metadata.
@@ -13171,8 +13512,10 @@ class OcrQualityThresholds {
   /// recorded municipal ordinance (10 prose pages, 6 scanned survey/architectural drawings)
   /// with Tesseract 5.5.3:
   ///
-  ///     prose      86.3 - 95.3
-  ///     drawings   18.5 - 64.3
+  /// ```text
+  /// prose      86.3 - 95.3
+  /// drawings   18.5 - 64.3
+  /// ```
   ///
   /// The default sits in that gap with ~11 points of margin on each side. Compare the
   /// short-word ratio, which separated the same two groups by 0.09 on a 0-1 scale.
@@ -13259,6 +13602,21 @@ class OcrQualityThresholds {
   /// is `true`.
   final double minProvenanceFallbackRatio;
 
+  /// Whether to route a page to OCR when its decoded text does not read as any real,
+  /// detectable language (issue #1696). Unlike `enable_provenance_ocr_routing`, this
+  /// catches a `/ToUnicode` CMap that resolves every glyph to *a* character, but
+  /// consistently the WRONG one (e.g. a ROT-shifted mapping) -- text that is structurally
+  /// indistinguishable from real prose to every character-shape check, including the
+  /// provenance signal, because the mapping tier really is file-backed. Defaults to `true`.
+  final bool enablePlausibilityOcrRouting;
+
+  /// Minimum fraction of a page's language-detection chunks that whatlang classifies as
+  /// reliable (`Info::is_reliable()`) before the page is trusted as legible (issue #1696).
+  /// Below this AND below the mean-confidence guard together, the page's text layer is
+  /// treated as implausible and routed to OCR. Only used when
+  /// `enable_plausibility_ocr_routing` is `true`.
+  final double minReliableLanguageChunkRatio;
+
   const OcrQualityThresholds({
     required this.minTotalNonWhitespace,
     required this.minNonWhitespacePerPage,
@@ -13284,6 +13642,8 @@ class OcrQualityThresholds {
     required this.minUndecodableRatio,
     required this.enableProvenanceOcrRouting,
     required this.minProvenanceFallbackRatio,
+    required this.enablePlausibilityOcrRouting,
+    required this.minReliableLanguageChunkRatio,
   });
 
   @override
@@ -13311,7 +13671,9 @@ class OcrQualityThresholds {
       pipelineMinQuality.hashCode ^
       minUndecodableRatio.hashCode ^
       enableProvenanceOcrRouting.hashCode ^
-      minProvenanceFallbackRatio.hashCode;
+      minProvenanceFallbackRatio.hashCode ^
+      enablePlausibilityOcrRouting.hashCode ^
+      minReliableLanguageChunkRatio.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -13343,7 +13705,9 @@ class OcrQualityThresholds {
           pipelineMinQuality == other.pipelineMinQuality &&
           minUndecodableRatio == other.minUndecodableRatio &&
           enableProvenanceOcrRouting == other.enableProvenanceOcrRouting &&
-          minProvenanceFallbackRatio == other.minProvenanceFallbackRatio;
+          minProvenanceFallbackRatio == other.minProvenanceFallbackRatio &&
+          enablePlausibilityOcrRouting == other.enablePlausibilityOcrRouting &&
+          minReliableLanguageChunkRatio == other.minReliableLanguageChunkRatio;
 }
 
 /// Rotation information for an OCR element.
@@ -13680,8 +14044,17 @@ class PaddleOcrConfig {
   /// - `"mobile"` (default): Lightweight models (~4.5MB detection, ~16.5MB recognition), fast download and inference
   /// - `"server"`: Large, high-accuracy models (~88MB detection, ~84MB recognition), best for GPU or complex documents
   ///
-  /// For PP-OCRv6 (`model_version = "pp-ocrv6"`): `"medium"` (default), `"small"`, or `"tiny"`.
-  /// A legacy `"mobile"`/`"server"` tier under v6 falls back to `"medium"`.
+  /// For PP-OCRv6 (`model_version = "pp-ocrv6"`, the default):
+  /// - `"small"`: ~9.9MB detection, full 18,708-char CJK+Latin+JA/KO recognition dictionary.
+  ///   The default `"mobile"` resolves here, so this is what an unconfigured extraction uses.
+  /// - `"medium"`: ~62MB detection, same dictionary. Higher accuracy, substantially slower on
+  ///   CPU. A legacy `"server"` tier, or any unrecognised value, resolves here.
+  /// - `"tiny"`: ~1.8MB detection, but a reduced 6,904-char (~zh/en) dictionary — it cannot
+  ///   read the scripts the other two cover.
+  ///
+  /// Note PaddleOCR pages do not run concurrently: the ONNX session is held behind a mutex, so
+  /// the thread budget goes to intra-op parallelism and wall time scales with page count times
+  /// per-page inference. Tier choice therefore dominates throughput on multi-page documents.
   final String modelTier;
 
   /// Model generation: `"pp-ocrv6"` (default) or `"pp-ocrv5"`.
@@ -13690,7 +14063,7 @@ class PaddleOcrConfig {
   /// tiers (see `model_tier`). Scripts outside the v6 unified coverage (Arabic, Cyrillic,
   /// Devanagari, Greek, Tamil, Telugu, Thai) transparently fall back to the PP-OCRv5
   /// per-script recognition models. Defaults to `"pp-ocrv6"`; the default `model_tier`
-  /// (`"mobile"`) resolves to the v6 `"medium"` tier. Select `"pp-ocrv5"` to pin the
+  /// (`"mobile"`) resolves to the v6 `"small"` tier. Select `"pp-ocrv5"` to pin the
   /// legacy per-script/unified fleet.
   final String modelVersion;
 
@@ -14025,6 +14398,9 @@ class PageContent {
   /// formats and for sheets with an empty name.
   final String? sheetName;
 
+  /// Aggregate OCR confidence for this page. `None` when the page was not OCR'd.
+  final PageOcrConfidence? ocrConfidence;
+
   const PageContent({
     required this.pageNumber,
     required this.content,
@@ -14037,6 +14413,7 @@ class PageContent {
     this.speakerNotes,
     this.sectionName,
     this.sheetName,
+    this.ocrConfidence,
   });
 
   @override
@@ -14051,7 +14428,8 @@ class PageContent {
       layoutRegions.hashCode ^
       speakerNotes.hashCode ^
       sectionName.hashCode ^
-      sheetName.hashCode;
+      sheetName.hashCode ^
+      ocrConfidence.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -14068,7 +14446,8 @@ class PageContent {
           layoutRegions == other.layoutRegions &&
           speakerNotes == other.speakerNotes &&
           sectionName == other.sectionName &&
-          sheetName == other.sheetName;
+          sheetName == other.sheetName &&
+          ocrConfidence == other.ocrConfidence;
 }
 
 /// Metadata for individual page/slide/sheet.
@@ -14194,6 +14573,50 @@ class PageInfo {
           hidden == other.hidden &&
           isBlank == other.isBlank &&
           hasVectorGraphics == other.hasVectorGraphics;
+}
+
+/// Aggregate OCR legibility score for a page, reported by the backend that produced its text.
+///
+/// This is distinct from [`OcrConfidence`], which scores a single detected element (a word or
+/// line) using detection/recognition confidence from the OCR engine itself. `PageOcrConfidence`
+/// is a page-level summary computed after noise filtering, intended for triage of which pages
+/// are worth a closer look, not for comparing OCR engines against each other.
+class PageOcrConfidence {
+  /// Aggregate legibility score in `0.0..=1.0`, or `None` when the backend that
+  /// produced this page does not report a calibrated legibility scale.
+  ///
+  /// Backends differ in what their confidence numbers mean (see `OcrConfidence`'s
+  /// per-backend normalization), and not every backend maps onto a 0.0-1.0 legibility
+  /// scale at all. When a backend has no such calibrated scale, this is `None` rather
+  /// than a misleading number, and scores must never be compared across backends.
+  final double? score;
+
+  /// Number of words the score was averaged over, AFTER noise filtering.
+  ///
+  /// A small `word_count` means the average is based on little evidence, so a high
+  /// `score` next to a small `word_count` is not representative of the whole page.
+  final PlatformInt64 wordCount;
+
+  /// Name of the OCR backend that produced the page text.
+  final String backend;
+
+  const PageOcrConfidence({
+    this.score,
+    required this.wordCount,
+    required this.backend,
+  });
+
+  @override
+  int get hashCode => score.hashCode ^ wordCount.hashCode ^ backend.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PageOcrConfidence &&
+          runtimeType == other.runtimeType &&
+          score == other.score &&
+          wordCount == other.wordCount &&
+          backend == other.backend;
 }
 
 /// How a backend copes with a page raster whose text is not upright.
@@ -14647,14 +15070,14 @@ class PdfConfig {
   /// Ignored when `ContentFilterConfig.include_headers` is `true`.
   /// Effective nonzero margins require per-page OCR so geometry can be filtered;
   /// document-capable OCR backends use their image-processing path in that case.
-  /// Default: 0.06 (6%)
+  /// Default: 0.0 (disabled; set explicitly to filter header content)
   final double? topMarginFraction;
 
   /// Bottom margin fraction (0.0–1.0) of page height to exclude footers/page numbers.
   /// Ignored when `ContentFilterConfig.include_footers` is `true`.
   /// Effective nonzero margins require per-page OCR so geometry can be filtered;
   /// document-capable OCR backends use their image-processing path in that case.
-  /// Default: 0.05 (5%)
+  /// Default: 0.0 (disabled; set explicitly to filter footer content)
   final double? bottomMarginFraction;
 
   /// Allow single-column pseudo tables in extraction results.
@@ -14879,6 +15302,30 @@ class PdfMetadata {
   /// `None` when the document could not be inspected; empty when no page qualifies.
   final Int64List? scannedPages;
 
+  /// Pages whose text was dominated by fabricated character mappings (1-indexed):
+  /// `MappingProvenance::Fallback`, a font whose glyph-to-Unicode mapping resolved to
+  /// a value the extractor chose rather than read from the file (issue #1254). This is
+  /// a fact about how the text was derived, independent of `scanned_pages`'s raster-based
+  /// scan detection, and independent of whether the resulting text happens to look
+  /// structurally like prose (issue #1667: a broken mapping that lands on ordinary
+  /// letters and punctuation passes every character-shape check but is still fabricated).
+  ///
+  /// `None` when `OcrQualityThresholds::enable_provenance_ocr_routing` is `false`; empty
+  /// when no page qualifies.
+  final Int64List? fabricatedTextPages;
+
+  /// Pages whose native text layer reads as no real detectable language (1-indexed): a
+  /// `/ToUnicode` CMap (or other mapping tier) that resolves every glyph to *a* character,
+  /// consistently the WRONG one (e.g. a ROT-shifted mapping), so the page is structurally
+  /// indistinguishable from real prose to `fabricated_text_pages`'s provenance check and to
+  /// every character-shape heuristic (issue #1696; issue #1667's `quality_score: 1.0` with
+  /// no warning on such a page is the same underlying gap). This is a content-plausibility
+  /// fact, independent of `fabricated_text_pages` and of `scanned_pages`.
+  ///
+  /// `None` when `OcrQualityThresholds::enable_plausibility_ocr_routing` is `false`; empty
+  /// when no page qualifies.
+  final Int64List? implausibleTextPages;
+
   /// Pages the `auto` layout strategy skipped (1-indexed).
   ///
   /// `None` unless layout detection ran with `LayoutStrategy::Auto`; empty
@@ -14901,6 +15348,8 @@ class PdfMetadata {
     this.pageCount,
     this.scannedConfidence,
     this.scannedPages,
+    this.fabricatedTextPages,
+    this.implausibleTextPages,
     this.layoutGatedPages,
     this.layoutGateReasons,
   });
@@ -14915,6 +15364,8 @@ class PdfMetadata {
       pageCount.hashCode ^
       scannedConfidence.hashCode ^
       scannedPages.hashCode ^
+      fabricatedTextPages.hashCode ^
+      implausibleTextPages.hashCode ^
       layoutGatedPages.hashCode ^
       layoutGateReasons.hashCode;
 
@@ -14931,6 +15382,8 @@ class PdfMetadata {
           pageCount == other.pageCount &&
           scannedConfidence == other.scannedConfidence &&
           scannedPages == other.scannedPages &&
+          fabricatedTextPages == other.fabricatedTextPages &&
+          implausibleTextPages == other.implausibleTextPages &&
           layoutGatedPages == other.layoutGatedPages &&
           layoutGateReasons == other.layoutGateReasons;
 }
@@ -16632,7 +17085,11 @@ class SecurityLimits {
   /// caught by `max_content_size` instead.
   final PlatformInt64 maxEntityLength;
 
-  /// Maximum string growth and decoded image allocation per document (100 MB)
+  /// Maximum string growth and decoded image allocation per operation (100 MB).
+  ///
+  /// Per-page passes such as layout detection charge each batch against this limit,
+  /// not the whole document; only `max_pages` bounds the rasters retained across a
+  /// document (GH#1721).
   final PlatformInt64 maxContentSize;
 
   /// Maximum iterations per operation
@@ -16728,6 +17185,7 @@ class SecurityLimits {
 /// - `cors_origins`: empty vector (allows all origins)
 /// - `max_request_body_bytes`: 104_857_600 (100 MB)
 /// - `max_multipart_field_bytes`: 104_857_600 (100 MB)
+/// - `job_timeout_secs`: 600 (10 minutes)
 class ServerConfig {
   /// Server host address (e.g., "127.0.0.1", "0.0.0.0")
   final String host;
@@ -16748,12 +17206,22 @@ class ServerConfig {
   /// Maximum size of multipart fields in bytes (default: 100 MB)
   final PlatformInt64 maxMultipartFieldBytes;
 
+  /// Fallback timeout, in seconds, for `POST /extract-async` jobs whose request does not
+  /// pin down `extraction_timeout_secs` (default: 600, 10 minutes).
+  ///
+  /// A per-request `extraction_timeout_secs: Some(n)` always overrides this value. An
+  /// explicit `extraction_timeout_secs: null` deliberately does NOT mean "run unbounded" —
+  /// it still falls back to this server-configured cap, because an unbounded job on a
+  /// shared server is a denial-of-service risk.
+  final PlatformInt64 jobTimeoutSecs;
+
   const ServerConfig({
     required this.host,
     required this.port,
     required this.corsOrigins,
     required this.maxRequestBodyBytes,
     required this.maxMultipartFieldBytes,
+    required this.jobTimeoutSecs,
   });
 
   @override
@@ -16762,7 +17230,8 @@ class ServerConfig {
       port.hashCode ^
       corsOrigins.hashCode ^
       maxRequestBodyBytes.hashCode ^
-      maxMultipartFieldBytes.hashCode;
+      maxMultipartFieldBytes.hashCode ^
+      jobTimeoutSecs.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -16773,7 +17242,8 @@ class ServerConfig {
           port == other.port &&
           corsOrigins == other.corsOrigins &&
           maxRequestBodyBytes == other.maxRequestBodyBytes &&
-          maxMultipartFieldBytes == other.maxMultipartFieldBytes;
+          maxMultipartFieldBytes == other.maxMultipartFieldBytes &&
+          jobTimeoutSecs == other.jobTimeoutSecs;
 }
 
 /// A URL entry from a sitemap.
@@ -17377,6 +17847,19 @@ class Table {
   /// future extension, not implemented yet.
   final String? tableId;
 
+  /// Paragraph styles carried by individual cells, for the cells that have one.
+  ///
+  /// Sparse and flat on purpose. A DOCX banner row -- row 0, one cell spanning the grid,
+  /// styled `Heading1`..`Heading6` -- is what Word's navigation pane and a `TOC` field treat
+  /// as the document outline, but as a table cell it reached consumers as anonymous text
+  /// (GH#1587). `cells` keeps the bare text: prefixing it with `#` would put a markdown
+  /// heading inside a table cell, which is invalid where it lands and would change text every
+  /// existing consumer already reads. This list is the signal instead.
+  ///
+  /// Entries are only emitted for cells that actually carry a style, so an ordinary table
+  /// serialises exactly as it did before. Indices are into `cells`.
+  final List<TableCellStyle> cellStyles;
+
   /// Header cells for this fragment, i.e. the first row of `cells`.
   ///
   /// Populated even when this fragment's own header row was merged away or
@@ -17391,6 +17874,7 @@ class Table {
     required this.pageNumber,
     this.boundingBox,
     this.tableId,
+    required this.cellStyles,
     this.columns,
   });
 
@@ -17401,6 +17885,7 @@ class Table {
       pageNumber.hashCode ^
       boundingBox.hashCode ^
       tableId.hashCode ^
+      cellStyles.hashCode ^
       columns.hashCode;
 
   @override
@@ -17413,6 +17898,7 @@ class Table {
           pageNumber == other.pageNumber &&
           boundingBox == other.boundingBox &&
           tableId == other.tableId &&
+          cellStyles == other.cellStyles &&
           columns == other.columns;
 }
 
@@ -17455,6 +17941,45 @@ class TableCell {
           rowSpan == other.rowSpan &&
           colSpan == other.colSpan &&
           isHeader == other.isHeader;
+}
+
+/// The paragraph style a single table cell's text carries, located by grid position.
+///
+/// Flat rather than a nested `Vec<Vec<Option<..>>>`: the nested shape marshals badly across the
+/// FFI bindings, and the data is sparse anyway. See [`Table::cell_styles`].
+class TableCellStyle {
+  /// Zero-indexed row of the cell this style belongs to.
+  final PlatformInt64 row;
+
+  /// Zero-indexed column of the cell this style belongs to.
+  final PlatformInt64 col;
+
+  /// Outline level 1-6 when the style resolves to a heading, otherwise `None`.
+  final PlatformInt64? headingLevel;
+
+  /// Human-readable style name, e.g. `heading 2`.
+  final String? styleName;
+
+  const TableCellStyle({
+    required this.row,
+    required this.col,
+    this.headingLevel,
+    this.styleName,
+  });
+
+  @override
+  int get hashCode =>
+      row.hashCode ^ col.hashCode ^ headingLevel.hashCode ^ styleName.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TableCellStyle &&
+          runtimeType == other.runtimeType &&
+          row == other.row &&
+          col == other.col &&
+          headingLevel == other.headingLevel &&
+          styleName == other.styleName;
 }
 
 /// Controls how markdown tables are handled when they exceed the chunk size limit.
@@ -17617,13 +18142,31 @@ class TesseractConfig {
   /// "+"-joined ("eng+deu").
   final List<String> language;
 
-  /// Page Segmentation Mode (0-13).
+  /// Page Segmentation Mode (1-13).
   ///
-  /// Common values:
-  /// - 3: Fully automatic page segmentation (native default)
-  /// - 6: Assume a single uniform block of text (WASM default — avoids layout-analysis hang)
+  /// PSM 0 is rejected: Tesseract's `PSM_OSD_ONLY` performs orientation and script
+  /// detection with no character recognition, so it cannot satisfy a text-extraction
+  /// request and previously yielded an empty document (GH#1586).
+  ///
+  /// `None` (the default) means the caller made no explicit choice: the extraction
+  /// pipeline applies its own context-appropriate PSM (whole-image PSM 11, vertical-
+  /// language PSM 5, layout-region PSM 6, or the sparse-text retry's PSM 3) exactly as
+  /// it would with no `TesseractConfig` at all — see issue #1573. Setting any other
+  /// field on this struct no longer changes that behaviour.
+  ///
+  /// A rendered PDF page (`force_ocr` / `force_ocr_pages` / scanned-page OCR) does **not**
+  /// currently get a context-appropriate default here: it falls through to the engine's
+  /// generic automatic-layout PSM (3) even though standalone image OCR of the same raster
+  /// would use PSM 11 (GH#1786). Measurements on this repository's own synthetic table
+  /// fixtures gave contradictory results across font/tessdata combinations (see GH#1786's
+  /// resolution notes) — table-heavy pages may benefit from setting `psm: 11` explicitly.
+  ///
+  /// Common explicit values:
+  /// - 3: Fully automatic page segmentation (native engine default)
+  /// - 6: Assume a single uniform block of text (WASM engine default — avoids
+  ///   layout-analysis hang)
   /// - 11: Sparse text with no particular order
-  final PlatformInt64 psm;
+  final PlatformInt64? psm;
 
   /// Output format ("text" or "markdown")
   final String outputFormat;
@@ -17693,12 +18236,17 @@ class TesseractConfig {
   /// Variable-width space detection
   final bool textordSpaceSizeIsVariable;
 
-  /// Use adaptive thresholding method
-  final bool thresholdingMethod;
+  /// Tesseract image-binarization method (0-2): 0 = Otsu (default), 1 = LeptonicaOtsu,
+  /// 2 = Sauvola. Sent to Tesseract's integer `thresholding_method` engine variable.
+  ///
+  /// GH#1784: used to be a `bool` sent as `"true"`/`"false"`, silently ignored by
+  /// Tesseract's integer parser. A config for the old field still deserializes: `false` ->
+  /// `0` (Otsu, the prior no-op), `true` -> `1` (LeptonicaOtsu, the old "adaptive" doc).
+  final PlatformInt64 thresholdingMethod;
 
   const TesseractConfig({
     required this.language,
-    required this.psm,
+    this.psm,
     required this.outputFormat,
     required this.oem,
     required this.minConfidence,
@@ -18640,12 +19188,20 @@ sealed class VlmFallbackPolicy with _$VlmFallbackPolicy {
   /// Try the classical OCR backend first. If the quality score is below
   /// `quality_threshold`, send the page to the VLM.
   ///
-  /// `quality_threshold` is in the `[0.0, 1.0]` range produced by
-  /// `text::quality::calculate_quality_score`. A value of `0.5` is a
-  /// reasonable starting point; calibrate with the Stage 0 benchmark harness.
+  /// `quality_threshold` is in the `[0.0, 1.0]` range, but it is **not** the same
+  /// quantity reported on `score` (GH#1584).
+  /// The accept decision blends text-shape quality with confidence, weighted 0.7/0.3
+  /// (`extractors::pdf::ocr::pipeline_stage_score`) -- when the backend's confidence is on
+  /// a known scale it contributes only 30% of the compared score, so a page can clear this
+  /// threshold on clean-looking text even while its own `PageOcrConfidence.score` reads
+  /// below it. Do not calibrate this value by reading `PageOcrConfidence.score` off a
+  /// sample page and expecting an equal `quality_threshold` to reproduce the same
+  /// accept/reject outcome. A value of `0.5` is a reasonable starting point; calibrate with
+  /// the Stage 0 benchmark harness.
   const factory VlmFallbackPolicy.onLowQuality({
-    /// Minimum acceptable quality score from the classical backend.
-    /// Pages scoring below this are retried with VLM.
+    /// Minimum acceptable quality score from the classical backend. Pages scoring below
+    /// this are retried with VLM -- see this variant's doc comment for what "scoring"
+    /// means here.
     required double qualityThreshold,
   }) = VlmFallbackPolicy_OnLowQuality;
 

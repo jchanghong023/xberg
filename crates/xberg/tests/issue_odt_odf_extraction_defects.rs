@@ -102,9 +102,10 @@ async fn should_preserve_text_of_span_nested_inside_span_issue_93() {
         .await
         .expect("extraction should succeed");
 
+    // fork 默认 Markdown 渲染：粗体 span 以 `**...**` 输出（fork.md）
     assert_eq!(
         result.content.trim(),
-        "Before outer inner tail after",
+        "Before **outer inner tail** after",
         "text nested two levels deep inside a span must not be truncated"
     );
 }
@@ -154,9 +155,10 @@ async fn should_preserve_url_and_text_of_hyperlink_wrapping_styled_span_issue_94
         .await
         .expect("extraction should succeed");
 
+    // fork 默认 Markdown 渲染：超链接以 `[label](url)` 输出、粗体 span 以 `**...**` 输出（fork.md）
     assert_eq!(
         result.content.trim(),
-        "Visit our site today",
+        "Visit [**our site**](https://example.com/page) today",
         "text:a wrapping a styled text:span must not drop the link text"
     );
 

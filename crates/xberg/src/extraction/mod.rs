@@ -68,6 +68,8 @@ pub mod html;
 
 #[cfg(feature = "office")]
 pub mod doc;
+#[cfg(feature = "office")]
+pub(crate) mod visio;
 
 #[cfg(feature = "office")]
 pub mod docx;
@@ -105,8 +107,13 @@ pub mod ooxml_constants;
 #[cfg(feature = "office")]
 pub mod ooxml_embedded;
 
-#[cfg(feature = "office")]
+// `image_format` is shared by the Office extractors and by `image_ocr`; the latter is compiled
+// for any build with `ocr` (which carries `tokio-runtime`) but not necessarily `office`, so the
+// module has to be available whenever either is on.
+#[cfg(any(feature = "office", feature = "ocr"))]
 pub mod image_format;
+
+pub mod markdown_utils;
 
 #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
 pub mod image_ocr;

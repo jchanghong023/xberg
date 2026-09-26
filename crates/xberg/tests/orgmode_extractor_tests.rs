@@ -365,7 +365,8 @@ async fn test_orgmode_links() {
         .await
         .expect("Should extract links from Org Mode");
 
-    assert_contains_ci(&result.content, "AT&T", "Should contain AT&T link description");
+    // fork 默认 Markdown 渲染：`&` 转义为 `\&`（fork.md）
+    assert_contains_ci(&result.content, "AT\\&T", "Should contain AT&T link description");
     assert_contains_ci(&result.content, "URL", "Should contain 'URL' link description");
     assert_contains_ci(&result.content, "email", "Should contain 'email' link description");
     assert_contains_ci(&result.content, "ampersand", "Should contain ampersand reference");
@@ -501,7 +502,8 @@ Backslash: \ and other symbols: | ~ `
         .expect("Should extract special characters from Org Mode");
 
     assert_contains_ci(&result.content, "ampersand", "Should contain ampersand text");
-    assert_contains_ci(&result.content, "AT&T", "Should preserve ampersands in company names");
+    // fork 默认 Markdown 渲染：`&` 转义为 `\&`（fork.md）
+    assert_contains_ci(&result.content, "AT\\&T", "Should preserve ampersands in company names");
     assert_contains_ci(&result.content, "bracket", "Should contain bracket text");
 
     println!("✅ Org Mode special characters test passed!");
@@ -739,7 +741,7 @@ async fn test_orgmode_comprehensive_document() {
         "embedded link",
         "Should contain 'embedded link' link description",
     );
-    assert_contains_ci(&result.content, "AT&T", "Should contain AT&T link description");
+    assert_contains_ci(&result.content, "AT\\&T", "Should contain AT&T link description");
     assert_contains_ci(&result.content, "special", "Should contain special characters section");
 
     println!("✅ Org Mode comprehensive document test passed!");
