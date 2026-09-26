@@ -2414,6 +2414,18 @@ fn find_intersections(h_edges: &[Edge], v_edges: &[Edge]) -> Vec<Intersection> {
 /// the X axis's differently-motivated one. ~keep
 const CELL_RULE_SPAN_TOL: f32 = 6.0;
 
+/// Cap on how many widened candidate columns `build_cells_from_intersections` tries per
+/// starting corner once the nearest crossing cannot close a cell (`divider_ends_below`).
+/// Each extra candidate re-scans `v_edges`/`h_edges` inside `side_closes`/`band_is_ruled`,
+/// so an unbounded retry turns the outer O(nx*ny) loop into O(nx^2*ny*E) on input with a
+/// broken divider at every column — PR #1807's own description reports four large corpus
+/// files timing out from exactly this. Measured maximum candidate index actually needed:
+/// 2 across `pdf_grouped_table_headers` + `pdf_spanning_table_cells`, 3 across the full
+/// `spatial_table_detector` unit-test module (including
+/// `header_cell_search_skips_nonclosing_inner_corner`). 8 leaves comfortable headroom
+/// above both without reintroducing the unbounded scan. ~keep
+const MAX_HEADER_CELL_WIDENING_CANDIDATES: usize = 8;
+
 /// Build cells from intersection points.
 /// A cell exists when all four corners (x1,y1), (x2,y1), (x1,y2), (x2,y2) are present
 /// and there is no intermediate intersection between them on either axis.
@@ -2495,7 +2507,7 @@ fn build_cells_from_intersections(pts: &[Intersection], h_edges: &[Edge], v_edge
                 })
             });
             for (candidate, nxi) in ((xi + 1)..nx).filter(|&nxi| has(nxi, yi)).enumerate() {
-                if candidate > 0 && !divider_ends_below {
+                if candidate > 0 && (!divider_ends_below || candidate > MAX_HEADER_CELL_WIDENING_CANDIDATES) {
                     break;
                 }
                 let side_closes = |x: f32, nyi: usize| -> bool {
