@@ -1109,6 +1109,17 @@ const MAX_REDIRECT_DISTANCE_FRACTION: f32 = 0.25;
 // inside a table. Consulted only for a split that `MIN_DENSE_COLUMN_SPLIT_LINES` lines already
 // run through, i.e. one that demonstrably sits inside a column. ~keep
 const MAX_GUTTER_CROSSING_LINES: usize = 1;
+
+/// The largest share of the lines *outside* the band the corridor search is scoped to that may
+/// disagree with the incoming split and still leave it read as the page's own gutter.
+///
+/// GH#1801. Measured over the nine carriers this gate has to separate, as a fraction of the
+/// non-furniture lines outside the band: the three pages whose split must be KEPT sit at 3.7%,
+/// 2.2% and 1.4% (3 of 81, 1 of 46, 1 of 71), and the lowest page that must still be REDIRECTED
+/// sits at 15.6% (15 of 96; the others are 34.7%, 46.6% and 40.0%). 0.08 is about a factor of two
+/// clear of each side -- a real margin, not an order of magnitude, so re-measure it rather than
+/// assume it if a new carrier lands near it. ~keep
+const MAX_OUT_OF_BAND_SPLIT_DISAGREEMENT_FRACTION: f32 = 0.08;
 // GH#1762 adversarial review: `redirect_survives_a_second_table_closing_the_band_from_below_gh1762`
 // (text.rs tests) shows a second full-width table below the rescued band does NOT
 // exceed this tolerance -- but only because the band's pre-existing boundary line
@@ -1615,6 +1626,19 @@ fn redirect_split_out_of_content(
     // lines, must not close this band's gutter. Falls back to the page when no single
     // band carries the evidence. ~keep
     let band = band_lines_around_table_gap_split(spans, lines, furniture_width, min_gutter, split_x);
+    // GH#1801: only redirect a split the rest of the page disagrees with. A real out-of-band
+    // population is required as well as a low disagreement rate inside it, because an empty or
+    // tiny one reports agreement it never measured -- see `out_of_band_split_agreement`. ~keep
+    if let Some(band_lines) = band.as_deref() {
+        let (outside, disagreeing) =
+            out_of_band_split_agreement(spans, lines, band_lines, furniture_width, min_gutter, split_x);
+        if outside >= MIN_DENSE_COLUMN_SPLIT_LINES
+            && disagreeing < MIN_DENSE_COLUMN_SPLIT_LINES
+            && disagreeing as f32 <= outside as f32 * MAX_OUT_OF_BAND_SPLIT_DISAGREEMENT_FRACTION
+        {
+            return split_x;
+        }
+    }
     let search_lines: &[SpanLine] = band.as_deref().unwrap_or(lines);
     let max_redirect_distance = page_width * MAX_REDIRECT_DISTANCE_FRACTION;
     let widest_within_reach = |corridors: Vec<(f32, f32)>| {
@@ -1713,6 +1737,14 @@ fn both_sides_are_columns(
     cross_gutter_row_pairing_fraction(spans, &indices, x) <= MAX_CROSS_GUTTER_ROW_PAIRING_FRACTION
 }
 
+/// True if one of the line's inked spans is written across `x`.
+fn line_crosses(spans: &[xberg_native_pdf::layout::TextSpan], line: &SpanLine, x: f32) -> bool {
+    line.iter().any(|&index| {
+        let span = &spans[index];
+        span_has_ink(span) && span.bbox.left() < x && span.bbox.right() > x
+    })
+}
+
 /// How many non-furniture lines have an inked span written across `x`.
 fn lines_crossing(
     spans: &[xberg_native_pdf::layout::TextSpan],
@@ -1723,13 +1755,51 @@ fn lines_crossing(
     lines
         .iter()
         .filter(|&line| !line_has_width_furniture(spans, line, furniture_width))
-        .filter(|line| {
-            line.iter().any(|&index| {
-                let span = &spans[index];
-                span_has_ink(span) && span.bbox.left() < x && span.bbox.right() > x
-            })
-        })
+        .filter(|&line| line_crosses(spans, line, x))
         .count()
+}
+
+/// `(lines outside `band`, how many of them disagree with a split at `x`)`, counting only
+/// non-furniture lines. A line disagrees when one of its inked spans is written across the split,
+/// or when the split falls inside one of its own multi-column internal gaps -- the same two
+/// signals `lines_crossing` and `lines_with_internal_gap_at` count page-wide.
+///
+/// GH#1801: `band_lines_around_table_gap_split` exists so the corridor question is asked of the
+/// band the split is wrong in rather than of the whole page (GH#1762). On a page whose table spans
+/// the *full* width that scoping inverts. Inside such a table the gaps between its own columns are
+/// the only corridors there are, so the search moves a split that was already the page's gutter
+/// into one of them; every prose line below the table then straddles the new split and becomes a
+/// band boundary, and the two columns come out interleaved line by line.
+///
+/// What separates those pages from the one the band scoping was written for is what the rest of the
+/// page says about the split, which is why both halves of this pair are returned. The disagreement
+/// count alone is not enough: on a page where the band *is* the page (a table whose rows interleave
+/// in y with the prose beside it, so no boundary line ever separates them) there is no rest of the
+/// page to consult, and a count of 0 means "nothing was examined", not "everything agrees" -- the
+/// GH#1742 and GH#1545 carriers measure 0 and 7 lines outside the band against 46 to 81 on the
+/// GH#1801 carriers. The caller therefore requires a real out-of-band population as well as a low
+/// disagreement rate within it (`MAX_OUT_OF_BAND_SPLIT_DISAGREEMENT_FRACTION`). ~keep
+fn out_of_band_split_agreement(
+    spans: &[xberg_native_pdf::layout::TextSpan],
+    lines: &[SpanLine],
+    band: &[SpanLine],
+    furniture_width: f32,
+    min_gutter: f32,
+    x: f32,
+) -> (usize, usize) {
+    let mut outside = 0usize;
+    let mut disagreeing = 0usize;
+    for line in lines
+        .iter()
+        .filter(|&line| !band.contains(line))
+        .filter(|&line| !line_has_width_furniture(spans, line, furniture_width))
+    {
+        outside += 1;
+        if line_crosses(spans, line, x) || line_has_internal_gap_at(spans, line, min_gutter, x) {
+            disagreeing += 1;
+        }
+    }
+    (outside, disagreeing)
 }
 
 /// Every maximal x-interval at least `min_gutter` wide that at most
@@ -6791,6 +6861,100 @@ mod tests {
             metadata.pdf_specific.fabricated_text_pages,
             Some(expected_fabricated),
             "fabricated_text_pages must match the pre-#1744 page-by-page computation exactly"
+        );
+    }
+
+    /// GH#1801: the redirect is suppressed only when a real population of lines outside the
+    /// band agrees the split is already the gutter. Pins all three terms of that gate, because
+    /// each one alone admits a page the other two reject: the population floor (an empty
+    /// out-of-band set reports agreement it never measured), the absolute cap, and the rate.
+    #[test]
+    fn gh1801_out_of_band_agreement_needs_a_population_and_a_low_rate() {
+        const SPLIT_X: f32 = 225.0;
+        const MIN_GUTTER: f32 = 20.0;
+        const FURNITURE_WIDTH: f32 = 400.0;
+
+        let mut spans: Vec<TextSpan> = Vec::new();
+        let mut lines: Vec<SpanLine> = Vec::new();
+        let mut band: Vec<SpanLine> = Vec::new();
+
+        // A full-width table: every row straddles the split, so every row disagrees with it.
+        // These are the band, and the gate must ignore them -- they are the reason the corridor
+        // search was scoped to a band in the first place (GH#1762).
+        for row in 0..3 {
+            let y = 700.0 - row as f32 * 10.0;
+            let first = spans.len();
+            spans.push(span_with_width("left cell", 50.0, y, 150.0, 7.0, 7.0));
+            spans.push(span_with_width("right cell", 250.0, y, 150.0, 7.0, 7.0));
+            let line = vec![first, first + 1];
+            lines.push(line.clone());
+            band.push(line);
+        }
+
+        // Two columns of prose below it. Each line lies wholly on one side of the split, so it
+        // neither crosses it nor holds it inside one of its own gaps: it agrees.
+        for row in 0..8 {
+            let y = 600.0 - row as f32 * 10.0;
+            for column_x in [50.0f32, 250.0] {
+                let first = spans.len();
+                spans.push(span_with_width("prose", column_x, y, 150.0, 7.0, 7.0));
+                lines.push(vec![first]);
+            }
+        }
+
+        let (outside, disagreeing) =
+            out_of_band_split_agreement(&spans, &lines, &band, FURNITURE_WIDTH, MIN_GUTTER, SPLIT_X);
+        assert_eq!(
+            (outside, disagreeing),
+            (16, 0),
+            "the sixteen prose lines are outside the band and all agree; the three table rows are in it"
+        );
+        assert!(
+            outside >= MIN_DENSE_COLUMN_SPLIT_LINES
+                && disagreeing < MIN_DENSE_COLUMN_SPLIT_LINES
+                && disagreeing as f32 <= outside as f32 * MAX_OUT_OF_BAND_SPLIT_DISAGREEMENT_FRACTION,
+            "a page whose prose agrees must keep its split"
+        );
+
+        // The rate term is load-bearing on its own: three straddling lines are still under the
+        // absolute cap of six, but 3 of 19 is 15.8% -- above the 8% a real gutter shows.
+        let mut with_straddlers = lines.clone();
+        for row in 0..3 {
+            let first = spans.len();
+            spans.push(span_with_width(
+                "a full width caption",
+                50.0,
+                500.0 - row as f32 * 10.0,
+                350.0,
+                7.0,
+                7.0,
+            ));
+            with_straddlers.push(vec![first]);
+        }
+        let (outside, disagreeing) =
+            out_of_band_split_agreement(&spans, &with_straddlers, &band, FURNITURE_WIDTH, MIN_GUTTER, SPLIT_X);
+        assert_eq!((outside, disagreeing), (19, 3), "the three captions cross the split");
+        assert!(
+            disagreeing < MIN_DENSE_COLUMN_SPLIT_LINES,
+            "the absolute cap alone would still keep this split"
+        );
+        assert!(
+            disagreeing as f32 > outside as f32 * MAX_OUT_OF_BAND_SPLIT_DISAGREEMENT_FRACTION,
+            "the rate term is what redirects it"
+        );
+
+        // The documented trap: when the band is the whole page there is nothing outside it, and
+        // a disagreement count of zero means nothing was examined rather than everyone agreeing.
+        let (outside, disagreeing) =
+            out_of_band_split_agreement(&spans, &lines, &lines, FURNITURE_WIDTH, MIN_GUTTER, SPLIT_X);
+        assert_eq!(
+            (outside, disagreeing),
+            (0, 0),
+            "no line is outside a band that is the page"
+        );
+        assert!(
+            outside < MIN_DENSE_COLUMN_SPLIT_LINES,
+            "the population floor must reject a vacuous agreement"
         );
     }
 }
