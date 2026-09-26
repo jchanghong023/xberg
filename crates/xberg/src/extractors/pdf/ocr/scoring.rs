@@ -861,6 +861,44 @@ pub(crate) fn repair_ocr_numeric_tokens(text: &str) -> std::borrow::Cow<'_, str>
         std::borrow::Cow::Borrowed(text)
     }
 }
+
+/// (fork) Apply [`repair_ocr_numeric_tokens`] to every string representation an
+/// `ExtractedDocument` carries: the flat `content`, the hOCR element texts, the table cells
+/// and each table's `markdown`, and the prebuilt OCR elements that the fork's OCR layout grid
+/// fence (`rendering/ocr_layout.rs`) renders from. Missing any one of them leaves the same
+/// number repaired in one output surface and unrepaired in another. Mirrors
+/// `extractors::image::apply_numeric_repair_to_standalone_image_ocr`, which does the same for
+/// the standalone-image route's already-destructured fields.
+#[cfg(feature = "ocr")]
+pub(crate) fn repair_extracted_document_numbers(doc: &mut crate::types::ExtractedDocument) {
+    if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(&doc.content) {
+        doc.content = repaired;
+    }
+    if let Some(internal_doc) = doc.ocr_internal_document.as_mut() {
+        for element in &mut internal_doc.elements {
+            if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(&element.text) {
+                element.text = repaired;
+            }
+        }
+    }
+    for table in doc.tables.iter_mut() {
+        for row in &mut table.cells {
+            for cell in row {
+                if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(cell) {
+                    *cell = repaired;
+                }
+            }
+        }
+        if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(&table.markdown) {
+            table.markdown = repaired;
+        }
+    }
+    for ocr_element in doc.ocr_elements.iter_mut().flatten() {
+        if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(&ocr_element.text) {
+            ocr_element.text = repaired;
+        }
+    }
+}
 /// The backend-native-scale confidence floor a page's confidence must clear, or `false` if
 /// this backend's confidence cannot be used as a calibrated diagnostic at all.
 ///

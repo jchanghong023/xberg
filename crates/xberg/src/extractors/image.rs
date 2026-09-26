@@ -1614,11 +1614,17 @@ fn apply_public_image_ocr_element_policy(document: &mut InternalDocument, config
 /// `markdown` string. OCR-produced elements never populate `InternalElement::annotations`
 /// (grep-verified against this crate), so rewriting `.text` in place cannot desynchronize a
 /// byte-range annotation the way it could for hand-authored or PDF-native text.
+///
+/// (fork) The prebuilt OCR elements are a fourth string representation: the fork's OCR layout
+/// grid fence (`rendering/ocr_layout.rs`, the only carrier of a picture's relative layout) is
+/// rendered from them by the caller, so an unrepaired token would survive in the fence right
+/// next to the repaired prose.
 #[cfg(all(feature = "ocr", feature = "pdf"))]
 fn apply_numeric_repair_to_standalone_image_ocr(
     content: &mut String,
     internal_document: Option<&mut InternalDocument>,
     tables: &mut [crate::types::Table],
+    ocr_elements: &mut Option<Vec<crate::types::ocr_elements::OcrElement>>,
 ) {
     use crate::extractors::pdf::ocr::repair_ocr_numeric_tokens;
 
@@ -1642,6 +1648,13 @@ fn apply_numeric_repair_to_standalone_image_ocr(
         }
         if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(&table.markdown) {
             table.markdown = repaired;
+        }
+    }
+    if let Some(ocr_elements) = ocr_elements {
+        for ocr_element in ocr_elements {
+            if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(&ocr_element.text) {
+                ocr_element.text = repaired;
+            }
         }
     }
 }
@@ -1826,6 +1839,9 @@ impl ImageExtractor {
         #[cfg(not(all(feature = "ocr", feature = "pdf")))]
         let ocr_content = ocr_result.content;
         let ocr_metadata = ocr_result.metadata;
+        #[cfg(all(feature = "ocr", feature = "pdf"))]
+        let mut ocr_elements = ocr_result.ocr_elements;
+        #[cfg(not(all(feature = "ocr", feature = "pdf")))]
         let ocr_elements = ocr_result.ocr_elements;
         let ocr_formulas = ocr_result.formulas;
         let processing_warnings = ocr_result.processing_warnings;
@@ -1847,7 +1863,7 @@ impl ImageExtractor {
         // GH#1789: opt-in, same gate and rationale as the PDF mixed-OCR route
         // (`extractors::pdf::ocr::pipeline::numeric_repair_enabled`). See
         // `apply_numeric_repair_to_standalone_image_ocr`'s own doc comment for why this has to
-        // touch three separate string representations of the same OCR run, not just
+        // touch every string representation of the same OCR run, not just
         // `ocr_content`.
         #[cfg(all(feature = "ocr", feature = "pdf"))]
         if ocr_config.numeric_repair {
@@ -1855,6 +1871,7 @@ impl ImageExtractor {
                 &mut ocr_content,
                 ocr_internal_document.as_mut(),
                 &mut ocr_tables,
+                &mut ocr_elements,
             );
         }
 

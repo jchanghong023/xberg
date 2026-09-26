@@ -558,6 +558,14 @@ fn apply_ocr_result(
             // archive/recursive consumer would extract images out of OCR output. ~keep
             ocr_document.images = None;
             ocr_config.apply_public_element_policy(&mut ocr_document);
+            // (fork) The markdown renderer builds the image's OCR grid fence from this
+            // very result (`ExtractedImage::ocr_result`), so with `numeric_repair` on the
+            // repair must reach every representation it carries; otherwise the fence keeps
+            // the unrepaired token right next to the repaired prose the standalone-image
+            // route extracted.
+            if ocr_config.numeric_repair {
+                crate::extractors::pdf::ocr::repair_extracted_document_numbers(&mut ocr_document);
+            }
             images[idx].ocr_result = Some(Box::new(ocr_document));
         }
         Err(e) => {
