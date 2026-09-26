@@ -130,8 +130,14 @@ fn type3_font_load_warning_is_not_reported_as_missing_glyph_ink() {
     );
     let warning = &warnings[0];
     assert_eq!(warning.source, "pdf-render");
+    // (fork) The upstream test asserts the older "did not affect the rendered output"
+    // wording, which no production code emits any more (upstream 2f610626b5 reclassified
+    // font-load notices without updating this string). The live template is
+    // `render_notice_warning`: the notice passes the engine's cause through as a
+    // "logged a warning and continued" diagnostic — the property under test is that a
+    // font-load notice is *not* worded as glyph/content loss.
     assert!(
-        warning.message.contains("did not affect the rendered output"),
+        warning.message.contains("logged a warning and continued"),
         "warning must describe a font-load diagnostic, not content loss; got: {}",
         warning.message
     );
