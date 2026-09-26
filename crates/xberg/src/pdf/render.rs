@@ -415,6 +415,32 @@ pub fn take_xberg_native_pdf_render_warnings() -> Vec<ProcessingWarning> {
     ENGINE_PENDING_WARNINGS.with(|pending| std::mem::take(&mut *pending.borrow_mut()))
 }
 
+/// Deposit warnings drained on another thread into *this* thread's pending buffer, so a later
+/// [`take_xberg_native_pdf_render_warnings`] here returns them.
+///
+/// [`ENGINE_PENDING_WARNINGS`] is thread-local, so a render performed on a worker thread fills
+/// that worker's buffer and the extracting thread's drain never sees it. The layout route
+/// already handles this by draining inside its own `spawn_blocking` closure and threading the
+/// result back (#353); the rayon-parallel `force_ocr` and `force_ocr_pages` render paths had no
+/// equivalent, so on a multi-core host every page of a multi-page document lost its render
+/// warnings -- missing glyph ink, a blank image, a fallback font -- while a single-page document
+/// kept them, because rayon runs an unsplit batch on the calling thread (#1847).
+///
+/// Deduped on arrival, matching the per-thread drain's own behaviour: the same engine
+/// diagnostic raised on several pages is one warning to the caller. ~keep
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(crate) fn absorb_render_warnings(warnings: Vec<ProcessingWarning>) {
+    if warnings.is_empty() {
+        return;
+    }
+    ENGINE_PENDING_WARNINGS.with(|pending| {
+        let mut pending = pending.borrow_mut();
+        for warning in warnings {
+            crate::core::diagnostics::push_warning_deduped(&mut pending, warning);
+        }
+    });
+}
+
 /// Reasonable max pixel dimension (on either axis) for a rendered page before we
 /// force a lower DPI. This prevents Pixmap allocation failures or OOM for
 /// extremely wide/tall technical diagrams, CAD exports, etc. while still
