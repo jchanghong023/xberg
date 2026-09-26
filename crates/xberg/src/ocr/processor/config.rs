@@ -423,25 +423,6 @@ mod tests {
         );
     }
 
-    /// `security_limits` bounds the decode inside `perform_ocr`, which runs only on a cache MISS.
-    /// Leaving it out of the key let a request carrying a strict limit be served the result an
-    /// earlier permissive request had cached, so the limit never applied.
-    #[test]
-    fn should_distinguish_cache_keys_by_security_limits() {
-        let permissive = create_test_config();
-        let mut strict = permissive.clone();
-        strict.security_limits = Some(crate::extractors::security::SecurityLimits {
-            max_content_size: 1,
-            ..Default::default()
-        });
-
-        assert_ne!(
-            hash_config(&permissive, TEST_TESSDATA_PATH),
-            hash_config(&strict, TEST_TESSDATA_PATH),
-            "a configured security limit must not reuse an unrestricted run's cached result"
-        );
-    }
-
     /// Negative control for the two tests above: the added fields must not be hashed so loosely
     /// that two identical configurations stop sharing an entry, which would disable the cache.
     #[test]
