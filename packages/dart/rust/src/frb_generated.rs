@@ -13437,6 +13437,7 @@ const _: fn() = || {
         let _: bool = ImagePreprocessingConfig.contrast_enhance;
         let _: String = ImagePreprocessingConfig.binarization_method;
         let _: bool = ImagePreprocessingConfig.invert_colors;
+        let _: bool = ImagePreprocessingConfig.normalize_shaded_rows;
     }
     {
         let ImagePreprocessingMetadata = None::<crate::ImagePreprocessingMetadata>.unwrap();
@@ -13900,6 +13901,7 @@ const _: fn() = || {
         let _: Option<crate::SecurityLimits> = OcrConfig.security_limits;
         let _: Option<std::collections::HashMap<String, Vec<u8>>> = OcrConfig.tessdata_bytes;
         let _: Option<String> = OcrConfig.tessdata_path;
+        let _: bool = OcrConfig.numeric_repair;
     }
     {
         let OcrElement = None::<crate::OcrElement>.unwrap();
@@ -14658,7 +14660,7 @@ const _: fn() = || {
         let _: String = TesseractConfig.tessedit_char_blacklist;
         let _: bool = TesseractConfig.tessedit_use_primary_params_model;
         let _: bool = TesseractConfig.textord_space_size_is_variable;
-        let _: bool = TesseractConfig.thresholding_method;
+        let _: i64 = TesseractConfig.thresholding_method;
     }
     {
         let TextAnnotation = None::<crate::TextAnnotation>.unwrap();
@@ -19263,6 +19265,7 @@ impl SseDecode for crate::ImagePreprocessingConfig {
         let mut var_contrastEnhance = <bool>::sse_decode(deserializer);
         let mut var_binarizationMethod = <String>::sse_decode(deserializer);
         let mut var_invertColors = <bool>::sse_decode(deserializer);
+        let mut var_normalizeShadedRows = <bool>::sse_decode(deserializer);
         return crate::ImagePreprocessingConfig {
             target_dpi: var_targetDpi,
             auto_rotate: var_autoRotate,
@@ -19271,6 +19274,7 @@ impl SseDecode for crate::ImagePreprocessingConfig {
             contrast_enhance: var_contrastEnhance,
             binarization_method: var_binarizationMethod,
             invert_colors: var_invertColors,
+            normalize_shaded_rows: var_normalizeShadedRows,
         };
     }
 }
@@ -21571,6 +21575,7 @@ impl SseDecode for crate::OcrConfig {
         let mut var_securityLimits = <Option<crate::SecurityLimits>>::sse_decode(deserializer);
         let mut var_tessdataBytes = <Option<std::collections::HashMap<String, Vec<u8>>>>::sse_decode(deserializer);
         let mut var_tessdataPath = <Option<String>>::sse_decode(deserializer);
+        let mut var_numericRepair = <bool>::sse_decode(deserializer);
         return crate::OcrConfig {
             enabled: var_enabled,
             backend: var_backend,
@@ -21590,6 +21595,7 @@ impl SseDecode for crate::OcrConfig {
             security_limits: var_securityLimits,
             tessdata_bytes: var_tessdataBytes,
             tessdata_path: var_tessdataPath,
+            numeric_repair: var_numericRepair,
         };
     }
 }
@@ -25215,7 +25221,7 @@ impl SseDecode for crate::TesseractConfig {
         let mut var_tesseditCharBlacklist = <String>::sse_decode(deserializer);
         let mut var_tesseditUsePrimaryParamsModel = <bool>::sse_decode(deserializer);
         let mut var_textordSpaceSizeIsVariable = <bool>::sse_decode(deserializer);
-        let mut var_thresholdingMethod = <bool>::sse_decode(deserializer);
+        let mut var_thresholdingMethod = <i64>::sse_decode(deserializer);
         return crate::TesseractConfig {
             language: var_language,
             psm: var_psm,
@@ -29944,6 +29950,7 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::ImagePreprocessingConfi
             self.0.contrast_enhance.into_into_dart().into_dart(),
             self.0.binarization_method.into_into_dart().into_dart(),
             self.0.invert_colors.into_into_dart().into_dart(),
+            self.0.normalize_shaded_rows.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -31147,6 +31154,7 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::OcrConfig> {
             self.0.security_limits.into_into_dart().into_dart(),
             self.0.tessdata_bytes.into_into_dart().into_dart(),
             self.0.tessdata_path.into_into_dart().into_dart(),
+            self.0.numeric_repair.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -36851,6 +36859,7 @@ impl SseEncode for crate::ImagePreprocessingConfig {
         <bool>::sse_encode(self.contrast_enhance, serializer);
         <String>::sse_encode(self.binarization_method, serializer);
         <bool>::sse_encode(self.invert_colors, serializer);
+        <bool>::sse_encode(self.normalize_shaded_rows, serializer);
     }
 }
 
@@ -38744,6 +38753,7 @@ impl SseEncode for crate::OcrConfig {
         <Option<crate::SecurityLimits>>::sse_encode(self.security_limits, serializer);
         <Option<std::collections::HashMap<String, Vec<u8>>>>::sse_encode(self.tessdata_bytes, serializer);
         <Option<String>>::sse_encode(self.tessdata_path, serializer);
+        <bool>::sse_encode(self.numeric_repair, serializer);
     }
 }
 
@@ -41759,7 +41769,7 @@ impl SseEncode for crate::TesseractConfig {
         <String>::sse_encode(self.tessedit_char_blacklist, serializer);
         <bool>::sse_encode(self.tessedit_use_primary_params_model, serializer);
         <bool>::sse_encode(self.textord_space_size_is_variable, serializer);
-        <bool>::sse_encode(self.thresholding_method, serializer);
+        <i64>::sse_encode(self.thresholding_method, serializer);
     }
 }
 

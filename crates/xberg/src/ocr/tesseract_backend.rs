@@ -1365,6 +1365,7 @@ mod tests {
             contrast_enhance: true,
             binarization_method: "adaptive".to_string(),
             invert_colors: false,
+            normalize_shaded_rows: false,
         };
 
         let custom_tess_config = crate::types::TesseractConfig {

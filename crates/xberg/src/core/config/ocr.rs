@@ -972,6 +972,19 @@ pub struct OcrConfig {
     /// the standard resolution chain: TESSDATA_PREFIX env, cache dir, system paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tessdata_path: Option<PathBuf>,
+
+    /// Repair OCR tokens that are clearly numeric but mis-punctuated: a dropped thousands
+    /// separator, a decimal point misread for a grouping comma, or one number split into two
+    /// tokens at a rendering gap (GH#1789).
+    ///
+    /// Defaults to `false`. Unlike the always-on list-marker repair
+    /// (`crate::extractors::pdf::ocr::scoring::repair_ocr_list_markers`), this repair has no
+    /// table-column context available at the point OCR text comes back as a flat string, so it
+    /// cannot tell `"1.234,56"` (European) from `"1,234.56"` (US) apart on its own -- it always
+    /// assumes the US/UK convention (comma groups, period decimals). Enable it only for
+    /// documents known to use that convention.
+    #[serde(default)]
+    pub numeric_repair: bool,
 }
 
 impl Default for OcrConfig {
@@ -995,6 +1008,7 @@ impl Default for OcrConfig {
             security_limits: None,
             tessdata_bytes: None,
             tessdata_path: None,
+            numeric_repair: false,
         }
     }
 }
@@ -1287,9 +1301,10 @@ fn validate_languages(languages: &[String]) -> Result<(), XbergError> {
 
 /// Validate the Tesseract tuning knobs that are plain integers and strings rather than enums.
 ///
-/// `psm`, `oem` and `binarization_method` are the only OCR fields whose type does not already
-/// constrain them at deserialization time, so an out-of-range mode reaches the backend and fails
-/// there — far from the config that caused it. Validating here keeps the error next to the input.
+/// `psm`, `oem`, `thresholding_method` and `binarization_method` are the only OCR fields whose
+/// type does not already constrain them at deserialization time, so an out-of-range mode
+/// reaches the backend and fails there — far from the config that caused it. Validating here
+/// keeps the error next to the input.
 fn validate_tesseract_tuning(tesseract_config: Option<&crate::types::TesseractConfig>) -> Result<(), XbergError> {
     let Some(tesseract_config) = tesseract_config else {
         return Ok(());
@@ -1298,6 +1313,7 @@ fn validate_tesseract_tuning(tesseract_config: Option<&crate::types::TesseractCo
         crate::core::config_validation::validate_tesseract_psm(psm)?;
     }
     crate::core::config_validation::validate_tesseract_oem(tesseract_config.oem)?;
+    crate::core::config_validation::validate_tesseract_thresholding_method(tesseract_config.thresholding_method)?;
     if let Some(ref preprocessing) = tesseract_config.preprocessing {
         crate::core::config_validation::validate_image_preprocessing_config(preprocessing)?;
     }

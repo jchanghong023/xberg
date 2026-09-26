@@ -126,8 +126,11 @@ pub struct TesseractConfig {
     pub tessedit_use_primary_params_model: bool,
     /// Tesseract `textord_space_size_is_variable` variable.
     pub textord_space_size_is_variable: bool,
-    /// Use adaptive thresholding (`true`) instead of Otsu (`false`).
-    pub thresholding_method: bool,
+    /// Tesseract `thresholding_method` engine variable (0-2): 0 = Otsu, 1 = LeptonicaOtsu,
+    /// 2 = Sauvola. Sent to Tesseract as a decimal integer string — see GH#1784: this used to
+    /// be a `bool` sent as `"true"`/`"false"`, which Tesseract's integer parameter parser
+    /// (`stream >> intval`) silently failed to read, so the setting had no effect.
+    pub thresholding_method: u8,
 
     /// Enable automatic page rotation based on orientation detection.
     ///
@@ -187,11 +190,20 @@ pub struct TesseractConfig {
     /// `SecurityLimits::default()` on every route -- a caller who raised the limit to admit
     /// a large scan was still refused at 100 MiB.
     ///
-    /// `#[serde(skip)]` because it is injected at runtime, never read from a config file,
-    /// and deliberately absent from `hash_config` (`ocr::processor::config`): limits gate
-    /// whether a decode is attempted and never change the text Tesseract produces, so
-    /// folding them into the cache key would split cache entries that are identical in
-    /// content. `None` means `SecurityLimits::default()`, never "disable the check". ~keep
+    /// `#[serde(skip)]` because it is injected at runtime and never read from a config file.
+    ///
+    /// These ARE part of the OCR cache key (`hash_security_limits` in
+    /// `ocr::processor::config`), and must stay there. This doc previously argued the opposite
+    /// -- that limits only gate whether a decode is attempted and never change the text
+    /// Tesseract produces, so hashing them would split entries identical in content. The first
+    /// half is true and the conclusion still does not follow: the gate lives inside
+    /// `perform_ocr`, which runs only on a cache MISS, so a request carrying a strict limit was
+    /// served an earlier permissive request's cached result and the limit never applied at all.
+    /// That is a silent policy bypass, and it made `issue_1651_ocr_security_limits` flaky --
+    /// whichever sibling test populated the entry first decided the outcome. Ordinary callers
+    /// share one default `SecurityLimits`, so cache reuse is unaffected in practice.
+    ///
+    /// `None` means `SecurityLimits::default()`, never "disable the check". ~keep
     #[serde(skip)]
     pub security_limits: Option<crate::extractors::security::SecurityLimits>,
 }
@@ -252,7 +264,7 @@ impl Default for TesseractConfig {
             tessedit_char_blacklist: String::new(),
             tessedit_use_primary_params_model: true,
             textord_space_size_is_variable: true,
-            thresholding_method: false,
+            thresholding_method: 0,
             auto_rotate: false,
             tessdata_path: None,
             source_dpi: None,
@@ -312,7 +324,7 @@ impl From<&crate::types::TesseractConfig> for TesseractConfig {
             tessedit_char_blacklist: config.tessedit_char_blacklist.clone(),
             tessedit_use_primary_params_model: config.tessedit_use_primary_params_model,
             textord_space_size_is_variable: config.textord_space_size_is_variable,
-            thresholding_method: config.thresholding_method,
+            thresholding_method: config.thresholding_method as u8,
             auto_rotate: config.preprocessing.as_ref().map(|p| p.auto_rotate).unwrap_or(false),
             tessdata_path: None,
             // The public config is a user-supplied document-wide setting and cannot know the
@@ -605,7 +617,7 @@ mod tests {
             tessedit_char_blacklist: "!@#$".to_string(),
             tessedit_use_primary_params_model: false,
             textord_space_size_is_variable: false,
-            thresholding_method: true,
+            thresholding_method: 2,
         };
 
         let internal_config: TesseractConfig = (&public_config).into();
@@ -630,6 +642,6 @@ mod tests {
         assert_eq!(internal_config.tessedit_char_blacklist, "!@#$");
         assert!(!internal_config.tessedit_use_primary_params_model);
         assert!(!internal_config.textord_space_size_is_variable);
-        assert!(internal_config.thresholding_method);
+        assert_eq!(internal_config.thresholding_method, 2);
     }
 }

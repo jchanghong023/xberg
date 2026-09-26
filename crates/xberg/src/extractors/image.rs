@@ -1600,6 +1600,50 @@ fn apply_public_image_ocr_element_policy(document: &mut InternalDocument, config
     document.prebuilt_ocr_elements = config.select_public_elements(document.prebuilt_ocr_elements.take());
 }
 
+/// GH#1789's numeric-token repair, applied to every string representation of a standalone
+/// image's OCR run that can end up in the final document.
+///
+/// A single flat-string repair on the OCR backend's plain `content` is not enough on this
+/// route: when hOCR paragraph structure is available (the common case), the final page text is
+/// rebuilt from `internal_doc.elements`, not from that flat string, so the repair has to run on
+/// every element's `text` too. Table cells are a second, independent string representation of
+/// the same OCR run, including the cell text baked into each table's `markdown` field, and need
+/// the same repair applied separately -- fixing `cells` alone would leave a stale, unrepaired
+/// `markdown` string. OCR-produced elements never populate `InternalElement::annotations`
+/// (grep-verified against this crate), so rewriting `.text` in place cannot desynchronize a
+/// byte-range annotation the way it could for hand-authored or PDF-native text.
+#[cfg(all(feature = "ocr", feature = "pdf"))]
+fn apply_numeric_repair_to_standalone_image_ocr(
+    content: &mut String,
+    internal_document: Option<&mut InternalDocument>,
+    tables: &mut [crate::types::Table],
+) {
+    use crate::extractors::pdf::ocr::repair_ocr_numeric_tokens;
+
+    if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(content) {
+        *content = repaired;
+    }
+    if let Some(internal_doc) = internal_document {
+        for element in &mut internal_doc.elements {
+            if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(&element.text) {
+                element.text = repaired;
+            }
+        }
+    }
+    for table in tables {
+        for row in &mut table.cells {
+            for cell in row {
+                if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(cell) {
+                    *cell = repaired;
+                }
+            }
+        }
+        if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(&table.markdown) {
+            table.markdown = repaired;
+        }
+    }
+}
+
 #[cfg_attr(alef, alef(skip))]
 /// Image extractor for various image formats.
 ///
@@ -1771,6 +1815,13 @@ impl ImageExtractor {
         // below; nothing else consumes it, so no clone (#1571-era lesson —
         // backfilling `ExtractedImage::ocr_result` from here was deliberately
         // removed, see the call sites in `extract_content`).
+        // Only the GH#1789 numeric repair below mutates this, and that is gated on
+        // `ocr` + `pdf`; an unconditional `mut` is a dead `mut` on every narrower leg,
+        // which the formula-recognition+pdf clippy gate rejects. Same shape as
+        // `ocr_tables`/`ocr_internal_document` just below. ~keep
+        #[cfg(all(feature = "ocr", feature = "pdf"))]
+        let mut ocr_content = ocr_result.content;
+        #[cfg(not(all(feature = "ocr", feature = "pdf")))]
         let ocr_content = ocr_result.content;
         let ocr_metadata = ocr_result.metadata;
         let ocr_elements = ocr_result.ocr_elements;
@@ -1780,10 +1831,30 @@ impl ImageExtractor {
         // detection) used to be dropped here entirely: nothing on the
         // standalone-image path ever read it, so a table found in a bare
         // image never reached the output.
-        #[cfg(feature = "ocr")]
+        // Only the GH#1789 repair below mutates these two, and it is gated on `ocr` + `pdf`,
+        // so binding them `mut` under `ocr` alone is a dead `mut` on the ocr-without-pdf leg. ~keep
+        #[cfg(all(feature = "ocr", feature = "pdf"))]
+        let mut ocr_tables = ocr_result.tables;
+        #[cfg(all(feature = "ocr", feature = "pdf"))]
+        let mut ocr_internal_document = ocr_result.ocr_internal_document;
+        #[cfg(all(feature = "ocr", not(feature = "pdf")))]
         let ocr_tables = ocr_result.tables;
-        #[cfg(feature = "ocr")]
+        #[cfg(all(feature = "ocr", not(feature = "pdf")))]
         let ocr_internal_document = ocr_result.ocr_internal_document;
+
+        // GH#1789: opt-in, same gate and rationale as the PDF mixed-OCR route
+        // (`extractors::pdf::ocr::pipeline::numeric_repair_enabled`). See
+        // `apply_numeric_repair_to_standalone_image_ocr`'s own doc comment for why this has to
+        // touch three separate string representations of the same OCR run, not just
+        // `ocr_content`.
+        #[cfg(all(feature = "ocr", feature = "pdf"))]
+        if ocr_config.numeric_repair {
+            apply_numeric_repair_to_standalone_image_ocr(
+                &mut ocr_content,
+                ocr_internal_document.as_mut(),
+                &mut ocr_tables,
+            );
+        }
 
         // ~keep The whole image is one OCR run, so its confidence describes page 1 and only
         // page 1. The multi-frame TIFF branch below splits that single run's text by byte

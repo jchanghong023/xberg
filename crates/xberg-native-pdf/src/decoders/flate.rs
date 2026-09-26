@@ -29,7 +29,23 @@ pub const DEFAULT_MAX_DECOMPRESSED_BYTES: u64 = 256 * 1024 * 1024;
 
 fn effective_limit_from_str(val: Option<&str>) -> u64 {
     val.and_then(|v| v.parse::<u64>().ok())
-        .map(|mb| mb * 1024 * 1024)
+        .map(|mb| mb.saturating_mul(1024 * 1024))
+        // A zero here would be read downstream as `StreamDecoder::decode`'s "cap disabled"
+        // sentinel, so setting this security control to what looks like its STRICTEST value
+        // would silently switch off the ratio check, the absolute-size check and the
+        // RunLength/LZW mid-decode caps together. Treated as an invalid override and ignored,
+        // loudly: a deployment that meant to tighten the limit must not end up with none. ~keep
+        .filter(|bytes| {
+            if *bytes == 0 {
+                tracing::warn!(
+                    "ignoring a decompression limit of 0 MB: that would disable bomb protection \
+                     entirely, so the {} byte default applies instead",
+                    DEFAULT_MAX_DECOMPRESSED_BYTES
+                );
+                return false;
+            }
+            true
+        })
         .unwrap_or(DEFAULT_MAX_DECOMPRESSED_BYTES)
 }
 
@@ -211,7 +227,10 @@ impl FlateDecoder {
 }
 
 impl StreamDecoder for FlateDecoder {
-    fn decode(&self, input: &[u8]) -> Result<Vec<u8>> {
+    // `max_output_bytes` (GH#1764) is ignored here: this decoder already enforces its own,
+    // independently configured `max_decompressed_bytes` mid-decode via `.take(limit)` in
+    // every strategy below, and predates the trait-level cap. ~keep
+    fn decode(&self, input: &[u8], _max_output_bytes: usize) -> Result<Vec<u8>> {
         let limit = self.max_decompressed_bytes;
 
         let zlib_err = match try_zlib_decode(input, limit)? {
@@ -472,7 +491,7 @@ mod tests {
         encoder.write_all(original).unwrap();
         let compressed = encoder.finish().unwrap();
 
-        let decoded = decoder.decode(&compressed).unwrap();
+        let decoded = decoder.decode(&compressed, 0).unwrap();
         assert_eq!(decoded, original);
     }
 
@@ -485,7 +504,7 @@ mod tests {
         encoder.write_all(original).unwrap();
         let compressed = encoder.finish().unwrap();
 
-        let decoded = decoder.decode(&compressed).unwrap();
+        let decoded = decoder.decode(&compressed, 0).unwrap();
         assert_eq!(decoded, original);
     }
 
@@ -498,7 +517,7 @@ mod tests {
         encoder.write_all(&original).unwrap();
         let compressed = encoder.finish().unwrap();
 
-        let decoded = decoder.decode(&compressed).unwrap();
+        let decoded = decoder.decode(&compressed, 0).unwrap();
         assert_eq!(decoded, original);
     }
 
@@ -510,7 +529,7 @@ mod tests {
         // SPEC COMPLIANCE: We now correctly reject invalid compressed data
         // instead of returning it as raw data (which violated PDF spec) ~keep
         let invalid = b"This is not zlib compressed data";
-        let result = decoder.decode(invalid);
+        let result = decoder.decode(invalid, 0);
         assert!(result.is_err());
 
         if let Err(e) = result {
@@ -548,7 +567,7 @@ mod tests {
         let compressed = encoder.finish().unwrap();
 
         let decoder = FlateDecoder::with_limit(1024);
-        let decoded = decoder.decode(&compressed).unwrap();
+        let decoded = decoder.decode(&compressed, 0).unwrap();
         assert_eq!(decoded, original);
     }
 
@@ -560,7 +579,7 @@ mod tests {
         let compressed = encoder.finish().unwrap();
 
         let decoder = FlateDecoder::with_limit(10);
-        let result = decoder.decode(&compressed);
+        let result = decoder.decode(&compressed, 0);
         assert!(result.is_err(), "expected rejection when output exceeds custom limit");
     }
 
@@ -583,6 +602,23 @@ mod tests {
         assert_eq!(
             effective_limit_from_str(Some("not_a_number")),
             DEFAULT_MAX_DECOMPRESSED_BYTES
+        );
+    }
+
+    /// A limit of `0` MB must NOT be honoured: downstream, `0` is `StreamDecoder::decode`'s
+    /// "cap disabled" sentinel, so obeying it would turn the strictest-looking setting of this
+    /// security control into no protection at all.
+    #[test]
+    fn test_effective_limit_rejects_zero_instead_of_disabling_the_cap() {
+        assert_eq!(
+            effective_limit_from_str(Some("0")),
+            DEFAULT_MAX_DECOMPRESSED_BYTES,
+            "0 MB must fall back to the default, never to the cap-disabled sentinel"
+        );
+        assert_ne!(
+            effective_limit_from_str(Some("0")),
+            0,
+            "the resolved limit must never be 0"
         );
     }
 
