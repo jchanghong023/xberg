@@ -305,33 +305,6 @@ async fn run_layout_for_pdf_pages_async(
         .map_err(|error| XbergError::Other(format!("layout runner task failed: {error}")))?;
         result.map(|attempt| (attempt, glyph_drop_warnings))
     }
-
-    #[cfg(not(feature = "tokio-runtime"))]
-    {
-        let execution_provider_overridden = crate::ort_discovery::execution_provider_override().is_some();
-        let acceleration_override = rtdetr_acceleration_override(layout_config, execution_provider_overridden);
-        let result = run_layout_with_auto_cpu_retry(
-            layout_config,
-            execution_provider_overridden,
-            acceleration_override,
-            |attempt_config| {
-                run_layout_for_pdf_pages_with_security_limits(
-                    content,
-                    attempt_config,
-                    thread_budget,
-                    gated_handling,
-                    budget.security_limits,
-                    budget.images_config,
-                )
-            },
-        )
-        .map(merge_render_warning);
-        // No `spawn_blocking` here, so this already runs on the caller's own
-        // thread; draining here keeps both branches return warnings the same
-        // way regardless of which one compiled in.
-        let glyph_drop_warnings = crate::pdf::render::take_xberg_native_pdf_render_warnings();
-        result.map(|attempt| (attempt, glyph_drop_warnings))
-    }
 }
 
 #[cfg(all(feature = "pdf", feature = "layout-detection"))]
