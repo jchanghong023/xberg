@@ -428,6 +428,43 @@ pub fn take_xberg_native_pdf_render_warnings() -> Vec<ProcessingWarning> {
 ///
 /// Deduped on arrival, matching the per-thread drain's own behaviour: the same engine
 /// diagnostic raised on several pages is one warning to the caller. ~keep
+/// Render `page_indices` across the rayon pool, keeping each page's render warnings.
+///
+/// The per-page drain has to happen on the worker that rendered, because
+/// [`ENGINE_PENDING_WARNINGS`] is thread-local; the collected set is then deposited into the
+/// calling thread's buffer, where the extractor's own drain finds it. Lives here rather than at
+/// the two call sites so the thread-affinity rule is stated once, next to the buffer it is about
+/// (xberg-io/xberg#1847). ~keep
+#[cfg(all(
+    feature = "pdf",
+    any(feature = "ocr", feature = "ocr-pipeline"),
+    feature = "tokio-runtime",
+    not(target_arch = "wasm32")
+))]
+pub(crate) fn par_render_pages_collecting_warnings<T: Send>(
+    page_indices: Vec<usize>,
+    render: impl Fn(usize) -> crate::Result<T> + Sync + Send,
+) -> crate::Result<Vec<T>> {
+    use rayon::prelude::*;
+
+    let collected: std::sync::Mutex<Vec<ProcessingWarning>> = std::sync::Mutex::default();
+    let rendered: crate::Result<Vec<T>> = page_indices
+        .into_par_iter()
+        .map(|page_index| {
+            let page = render(page_index);
+            let warnings = take_xberg_native_pdf_render_warnings();
+            if !warnings.is_empty()
+                && let Ok(mut collected) = collected.lock()
+            {
+                collected.extend(warnings);
+            }
+            page
+        })
+        .collect();
+    absorb_render_warnings(collected.into_inner().unwrap_or_default());
+    rendered
+}
+
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
 pub(crate) fn absorb_render_warnings(warnings: Vec<ProcessingWarning>) {
     if warnings.is_empty() {

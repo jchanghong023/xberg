@@ -838,27 +838,9 @@ pub(super) fn render_full_pdf_ocr_batch(
     // sequential iterator there, matching `render_selected_pages_from_document`. ~keep
     #[cfg(all(feature = "tokio-runtime", not(target_arch = "wasm32")))]
     {
-        use rayon::prelude::*;
-        // ~keep #1847: the engine's render-warning buffer is thread-local, so warnings raised on
-        // a rayon worker are invisible to the extracting thread's drain. Drain on the worker that
-        // rendered the page and hand them back, mirroring what the layout route does inside its
-        // own `spawn_blocking` closure.
-        let drained: std::sync::Mutex<Vec<crate::types::ProcessingWarning>> = std::sync::Mutex::default();
-        let rendered: crate::Result<Vec<EncodedPage>> = page_range
-            .into_par_iter()
-            .map(|page_idx| {
-                let page = render_one_full_pdf_ocr_page(doc, page_rotations, page_idx, security_limits, images_config);
-                let warnings = crate::pdf::render::take_xberg_native_pdf_render_warnings();
-                if !warnings.is_empty()
-                    && let Ok(mut collected) = drained.lock()
-                {
-                    collected.extend(warnings);
-                }
-                page
-            })
-            .collect();
-        crate::pdf::render::absorb_render_warnings(drained.into_inner().unwrap_or_default());
-        rendered
+        crate::pdf::render::par_render_pages_collecting_warnings(page_range.collect(), |page_idx| {
+            render_one_full_pdf_ocr_page(doc, page_rotations, page_idx, security_limits, images_config)
+        })
     }
     #[cfg(any(not(feature = "tokio-runtime"), target_arch = "wasm32"))]
     {
@@ -983,24 +965,9 @@ pub(super) fn render_selected_pages_from_document(
     // in `pipeline.rs`. ~keep
     #[cfg(all(feature = "tokio-runtime", not(target_arch = "wasm32")))]
     {
-        use rayon::prelude::*;
-        // ~keep #1847: same thread-local drain problem as `render_full_pdf_ocr_batch` above.
-        let drained: std::sync::Mutex<Vec<crate::types::ProcessingWarning>> = std::sync::Mutex::default();
-        let rendered: crate::Result<Vec<(usize, image::DynamicImage)>> = page_indices
-            .par_iter()
-            .map(|&idx| {
-                let page = render_one_selected_page(doc, page_rotations, idx, security_limits, images_config);
-                let warnings = crate::pdf::render::take_xberg_native_pdf_render_warnings();
-                if !warnings.is_empty()
-                    && let Ok(mut collected) = drained.lock()
-                {
-                    collected.extend(warnings);
-                }
-                page
-            })
-            .collect();
-        crate::pdf::render::absorb_render_warnings(drained.into_inner().unwrap_or_default());
-        rendered
+        crate::pdf::render::par_render_pages_collecting_warnings(page_indices.to_vec(), |idx| {
+            render_one_selected_page(doc, page_rotations, idx, security_limits, images_config)
+        })
     }
     #[cfg(any(not(feature = "tokio-runtime"), target_arch = "wasm32"))]
     {
