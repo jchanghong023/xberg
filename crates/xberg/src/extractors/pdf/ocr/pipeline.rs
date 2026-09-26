@@ -59,7 +59,8 @@ use super::rendering::{
     clone_rgb_for_png_encode, fallback_render_document, open_pdf_for_full_ocr, open_pdf_for_page_ocr,
     page_dimensions_pt, page_needs_xobject_fallback, pre_rendered_page_geometry, pre_rendered_page_source_dpi,
     recover_page_text_from_image_xobjects, render_full_pdf_ocr_batch, render_selected_pages_from_document,
-    share_rendered_page_images, valid_page_indices, validate_png_encode_pages_individually, xobject_fallback_warning,
+    share_rendered_page_images, valid_page_indices, validate_png_encode_pages_individually,
+    whole_page_raster_for_ocr_page, xobject_fallback_warning,
 };
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 use super::scoring::{
@@ -1744,9 +1745,12 @@ pub(super) async fn extract_with_ocr_for_page(
                 #[cfg(not(feature = "pdf"))]
                 let source_dpi: Option<f64> = None;
                 #[cfg(feature = "pdf")]
-                let whole_page_raster = lazy_pdf_render_state.as_ref().is_some_and(|(doc, _, _)| {
-                    crate::pdf::scan_detect::full_page_raster_density(doc, *page_idx).is_some()
-                });
+                let whole_page_raster = whole_page_raster_for_ocr_page(
+                    lazy_pdf_render_state.as_ref(),
+                    &mut fallback_pdf_state,
+                    content,
+                    *page_idx,
+                );
                 #[cfg(not(feature = "pdf"))]
                 let whole_page_raster = false;
                 let config_clone = ocr_config_with_page_rotation_hint(
@@ -1834,9 +1838,12 @@ pub(super) async fn extract_with_ocr_for_page(
                 #[cfg(not(feature = "pdf"))]
                 let source_dpi: Option<f64> = None;
                 #[cfg(feature = "pdf")]
-                let whole_page_raster = lazy_pdf_render_state.as_ref().is_some_and(|(doc, _, _)| {
-                    crate::pdf::scan_detect::full_page_raster_density(doc, *page_idx).is_some()
-                });
+                let whole_page_raster = whole_page_raster_for_ocr_page(
+                    lazy_pdf_render_state.as_ref(),
+                    &mut fallback_pdf_state,
+                    content,
+                    *page_idx,
+                );
                 #[cfg(not(feature = "pdf"))]
                 let whole_page_raster = false;
                 let config_for_page = ocr_config_with_page_rotation_hint(

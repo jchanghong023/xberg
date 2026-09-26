@@ -749,26 +749,44 @@ pub(super) fn fallback_render_document<'a>(
     })
     .as_ref()
 }
+/// Whether `page_idx` is a scan (one full-page raster), for the whole-image Tesseract PSM
+/// hint (`ocr_config_with_page_rotation_hint`'s `whole_page_raster` argument).
+///
+/// `lazy_pdf_render_state` answers this directly when it is open (the non-layout OCR routes,
+/// which render pages themselves). The layout-detection route hands in pre-rendered `images`
+/// instead, so `lazy_pdf_render_state` is never opened there (see its `let` in
+/// `extract_with_ocr_for_page`) -- without a fallback, that route always got `false` here,
+/// silently keeping a scanned page's PSM at the engine default when layout detection was on,
+/// even though the very same page under `force_ocr` alone got the whole-image PSM (#1828).
+/// Falls back to the same lazily-opened, memoized handle the XObject recovery fallback uses
+/// just below in `extract_with_ocr_for_page`, for the same reason: nothing here needs anything
+/// `lazy_pdf_render_state` is indexed for beyond the page's own raster geometry. ~keep
+#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
+pub(super) fn whole_page_raster_for_ocr_page(
+    lazy_pdf_render_state: Option<&(xberg_native_pdf::PdfDocument, usize, Vec<u32>)>,
+    fallback_pdf_state: &mut Option<Option<xberg_native_pdf::PdfDocument>>,
+    content: Option<&[u8]>,
+    page_idx: usize,
+) -> bool {
+    match lazy_pdf_render_state {
+        Some((doc, _, _)) => crate::pdf::scan_detect::full_page_raster_density(doc, page_idx).is_some(),
+        None => fallback_render_document(fallback_pdf_state, content)
+            .is_some_and(|doc| crate::pdf::scan_detect::full_page_raster_density(doc, page_idx).is_some()),
+    }
+}
 /// The DPI to render `page_idx` at for OCR.
 ///
-/// A caller's `images` config decides as before (#1577). Without one, a page that is a single
-/// full-page raster renders at that raster's own density, bounded by
-/// `crate::image::dpi::scan_page_render_dpi`, instead of the 150 default: a 196 dpi scan
-/// rendered at 150 and then upscaled to 300 by the OCR preprocessor lost table values that
-/// OCR of the same page as an image read (#1786). Every other page keeps the default.
+/// Thin wrapper over [`crate::image::dpi::pdf_ocr_render_dpi`], which also backs the
+/// layout-detection route's OCR render (`extractors::pdf::layout_runner`) so both routes make
+/// the same scan-density decision (#1828). See that function's doc comment for the decision
+/// itself.
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
 pub(super) fn ocr_page_render_dpi(
     doc: &xberg_native_pdf::PdfDocument,
     page_idx: usize,
     images_config: Option<&crate::core::config::ImageExtractionConfig>,
 ) -> i32 {
-    if images_config.is_none()
-        && let Some(density) = crate::pdf::scan_detect::full_page_raster_density(doc, page_idx)
-    {
-        return crate::image::dpi::scan_page_render_dpi(density);
-    }
-    let (page_width_pt, page_height_pt) = crate::pdf::render::get_page_dimensions_pt(doc, page_idx);
-    crate::image::dpi::effective_pdf_render_dpi(images_config, f64::from(page_width_pt), f64::from(page_height_pt))
+    crate::image::dpi::pdf_ocr_render_dpi(doc, page_idx, images_config)
 }
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
 fn render_one_full_pdf_ocr_page(
