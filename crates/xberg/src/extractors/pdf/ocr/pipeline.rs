@@ -65,7 +65,8 @@ use super::rendering::{
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 use super::scoring::{
     NativeTextStats, OcrPageNoiseVerdict, accept_or_reject_ocr_page, compute_quality_score, mean_text_conf_of,
-    page_ocr_confidence, pipeline_stage_score, repair_ocr_list_markers, repair_ocr_numeric_tokens, word_count_of,
+    ocr_content_is_repairable_prose, page_ocr_confidence, pipeline_stage_score, repair_ocr_list_markers,
+    repair_ocr_numeric_tokens, word_count_of,
 };
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
@@ -84,9 +85,17 @@ use crate::core::config::OcrQualityThresholds;
 /// from the call site as its own function so the config-wiring path can be exercised in a unit
 /// test without running a real OCR page (see `pipeline_tests::numeric_repair_enabled_reads_the_
 /// ocr_config_flag` and its sibling `..._defaults_to_disabled`).
+///
+/// ~keep Also false when the OCR run returns markup instead of prose: on this route the repair's
+/// only target is each page's OCR text, which under `output_format = "hocr"` or `"tsv"` *is* the
+/// markup, and the separator rule re-punctuates its bare coordinate integers (GH#1836). See
+/// [`ocr_content_is_repairable_prose`].
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 pub(super) fn numeric_repair_enabled(config: &ExtractionConfig) -> bool {
-    config.ocr.as_ref().is_some_and(|ocr| ocr.numeric_repair)
+    config
+        .ocr
+        .as_ref()
+        .is_some_and(|ocr| ocr.numeric_repair && ocr_content_is_repairable_prose(ocr))
 }
 
 /// Build mixed text from native extraction and per-page OCR results.

@@ -978,8 +978,23 @@ pub struct OcrConfig {
     /// (`crate::extractors::pdf::ocr::scoring::repair_ocr_list_markers`), this repair has no
     /// table-column context available at the point OCR text comes back as a flat string, so it
     /// cannot tell `"1.234,56"` (European) from `"1,234.56"` (US) apart on its own -- it always
-    /// assumes the US/UK convention (comma groups, period decimals). Enable it only for
-    /// documents known to use that convention.
+    /// assumes the US/UK convention (comma groups, period decimals).
+    ///
+    /// The rules read only the punctuation and digit counts, never whether a token is an amount,
+    /// so each of these is rewritten too (GH#1836). Enable it only for documents whose numbers are
+    /// amounts, and which use that convention:
+    ///
+    /// - A bare 4-9 digit integer becomes grouped, whatever it denotes: `"Year 2019"` ->
+    ///   `"Year 2,019"`, and likewise a ZIP code, a page number or a part number. Only a literal
+    ///   `"FY "` prefix is exempt.
+    /// - A US-convention decimal with exactly three fraction digits and at most three integer
+    ///   digits becomes an amount: `"0.125"` -> `"0,125"`. Four fraction digits (`"0.7906"`) or a
+    ///   trailing `%` are left alone.
+    /// - A lone digit followed by a single space and an already-grouped number is joined, which is
+    ///   indistinguishable from two adjacent table cells: `"5 12,000"` -> `"512,000"`.
+    ///
+    /// The repair is skipped entirely when `tesseract_config.output_format` is `"hocr"` or
+    /// `"tsv"`, because it would re-punctuate the bare coordinate integers in that markup.
     #[serde(default)]
     pub numeric_repair: bool,
 }

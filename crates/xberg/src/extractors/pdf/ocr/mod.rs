@@ -36,7 +36,7 @@ pub(crate) use scoring::{mean_text_conf_of, page_ocr_confidence, word_count_of};
 // there (`all(feature = "ocr", feature = "pdf")`, since this module tree only exists under
 // `feature = "pdf"`).
 #[cfg(feature = "ocr")]
-pub(crate) use scoring::repair_ocr_numeric_tokens;
+pub(crate) use scoring::{ocr_content_is_repairable_prose, repair_ocr_numeric_tokens};
 
 // ~keep These three are reachable only from `extractors::pdf`'s own `#[cfg(test)]` unit tests,
 // so a non-test build of this crate never exercises the re-export itself (the underlying items

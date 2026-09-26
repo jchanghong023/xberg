@@ -1574,15 +1574,23 @@ fn apply_public_image_ocr_element_policy(document: &mut InternalDocument, config
 /// `markdown` string. OCR-produced elements never populate `InternalElement::annotations`
 /// (grep-verified against this crate), so rewriting `.text` in place cannot desynchronize a
 /// byte-range annotation the way it could for hand-authored or PDF-native text.
+///
+/// `content_is_prose` is false when the backend's `output_format` makes `content` markup
+/// (`"hocr"`, `"tsv"`) rather than text -- the repair then skips it, because the separator rule
+/// re-punctuates the bare four-digit coordinate integers in a `bbox` or TSV column and the markup
+/// stops parsing (GH#1836). The element and table repairs are unaffected either way: those are
+/// recognized text in both cases, and `internal_document` is `None` on the markup routes anyway,
+/// since only the `"markdown"` arm parses hOCR into one. ~keep
 #[cfg(all(feature = "ocr", feature = "pdf"))]
 fn apply_numeric_repair_to_standalone_image_ocr(
     content: &mut String,
+    content_is_prose: bool,
     internal_document: Option<&mut InternalDocument>,
     tables: &mut [crate::types::Table],
 ) {
     use crate::extractors::pdf::ocr::repair_ocr_numeric_tokens;
 
-    if let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(content) {
+    if content_is_prose && let std::borrow::Cow::Owned(repaired) = repair_ocr_numeric_tokens(content) {
         *content = repaired;
     }
     if let Some(internal_doc) = internal_document {
@@ -1800,6 +1808,7 @@ impl ImageExtractor {
         if ocr_config.numeric_repair {
             apply_numeric_repair_to_standalone_image_ocr(
                 &mut ocr_content,
+                crate::extractors::pdf::ocr::ocr_content_is_repairable_prose(ocr_config),
                 ocr_internal_document.as_mut(),
                 &mut ocr_tables,
             );
