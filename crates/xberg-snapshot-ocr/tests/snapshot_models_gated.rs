@@ -11,9 +11,9 @@
 //! 运行条件（全部满足才实际执行）：
 //! - `XBERG_SNAPSHOT_TEST_MODELS` = 模型目录（文件名无关，按钉定 SHA-256 识别成员，
 //!   例如 det.onnx / rec.onnx / dict/dict.txt 任意命名均可）；
-//! - `ORT_DYLIB_PATH` = onnxruntime 动态库路径（会话构建前钉定，防抢加载）。
-//! 可选：`XBERG_SNAPSHOT_TINY_DICT` = 一个非成套字典文件（如 v6 tiny 字典），
-//! 用于验证字典错配被拒。
+//! - `ORT_DYLIB_PATH` 仅 load-dynamic ort 构建需要（静态链接默认构建无需设置）。
+//!
+//! 可选：`XBERG_SNAPSHOT_TINY_DICT` = 一个非成套字典文件（如 v6 tiny 字典），用于验证字典错配被拒。
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 
 use std::path::{Path, PathBuf};
@@ -22,8 +22,8 @@ use std::sync::OnceLock;
 
 use xberg_snapshot_ocr::backend::sha256::sha256_hex;
 use xberg_snapshot_ocr::{
-    AssetError, DICT_SHA256, DET_MODEL_SHA256, ModelMember, REC_MODEL_SHA256, REFERENCE_INTRA_THREADS,
-    SnapshotOcrError, SnapshotOcrModels,
+    AssetError, ModelMember, SnapshotOcrError, SnapshotOcrModels, DET_MODEL_SHA256, DICT_SHA256, REC_MODEL_SHA256,
+    REFERENCE_INTRA_THREADS,
 };
 
 /// 按钉定摘要定位出的三个模型成员路径。
@@ -42,9 +42,8 @@ fn pinned_models() -> &'static Result<ModelPaths, String> {
         let Some(dir) = std::env::var_os("XBERG_SNAPSHOT_TEST_MODELS") else {
             return Err("skip: XBERG_SNAPSHOT_TEST_MODELS is not set".to_string());
         };
-        if std::env::var_os("ORT_DYLIB_PATH").is_none() {
-            return Err("skip: ORT_DYLIB_PATH is not set".to_string());
-        }
+        // ORT_DYLIB_PATH is only needed for load-dynamic ort builds; the
+        // default workspace build statically links onnxruntime.
         locate_by_digest(Path::new(&dir))
     })
 }
@@ -102,8 +101,8 @@ fn scan_recursive(
     if depth > 4 {
         return Ok(());
     }
-    let entries = std::fs::read_dir(dir)
-        .map_err(|error| format!("FAIL: cannot read model dir {}: {error}", dir.display()))?;
+    let entries =
+        std::fs::read_dir(dir).map_err(|error| format!("FAIL: cannot read model dir {}: {error}", dir.display()))?;
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -113,8 +112,7 @@ fn scan_recursive(
         if !path.is_file() {
             continue;
         }
-        let bytes = std::fs::read(&path)
-            .map_err(|error| format!("FAIL: cannot read {}: {error}", path.display()))?;
+        let bytes = std::fs::read(&path).map_err(|error| format!("FAIL: cannot read {}: {error}", path.display()))?;
         match sha256_hex(&bytes).as_str() {
             DET_MODEL_SHA256 if det.is_none() => *det = Some(path),
             REC_MODEL_SHA256 if rec.is_none() => *rec = Some(path),
@@ -207,8 +205,8 @@ fn load_succeeds_and_blank_image_yields_no_text() {
     let Some(m) = require_models() else {
         return;
     };
-    let models = SnapshotOcrModels::load(&m.det, &m.rec, &m.dict, REFERENCE_INTRA_THREADS)
-        .expect("pinned model set must load");
+    let models =
+        SnapshotOcrModels::load(&m.det, &m.rec, &m.dict, REFERENCE_INTRA_THREADS).expect("pinned model set must load");
     let cancel = AtomicBool::new(false);
     let output = models
         .recognize(&white_image(64, 64), 64, 64, &cancel)
@@ -224,8 +222,8 @@ fn recognize_is_deterministic_on_synthetic_pattern() {
     let Some(m) = require_models() else {
         return;
     };
-    let models = SnapshotOcrModels::load(&m.det, &m.rec, &m.dict, REFERENCE_INTRA_THREADS)
-        .expect("pinned model set must load");
+    let models =
+        SnapshotOcrModels::load(&m.det, &m.rec, &m.dict, REFERENCE_INTRA_THREADS).expect("pinned model set must load");
     let (width, height, image) = bar_pattern_image();
     let cancel = AtomicBool::new(false);
     let first = models
@@ -236,7 +234,7 @@ fn recognize_is_deterministic_on_synthetic_pattern() {
         .expect("second recognition must succeed");
     assert_eq!(first, second, "same input must give byte-identical output");
     for record in &first.records {
-        for &(x, y) in record.quad.iter() {
+        for &(x, y) in &record.quad {
             assert!(
                 x.is_finite() && y.is_finite() && x >= 0.0 && y >= 0.0,
                 "quad coordinate ({x}, {y}) out of domain"
@@ -251,8 +249,8 @@ fn cancelled_flag_yields_cancelled() {
     let Some(m) = require_models() else {
         return;
     };
-    let models = SnapshotOcrModels::load(&m.det, &m.rec, &m.dict, REFERENCE_INTRA_THREADS)
-        .expect("pinned model set must load");
+    let models =
+        SnapshotOcrModels::load(&m.det, &m.rec, &m.dict, REFERENCE_INTRA_THREADS).expect("pinned model set must load");
     let cancel = AtomicBool::new(true);
     let error = models
         .recognize(&white_image(64, 64), 64, 64, &cancel)

@@ -121,11 +121,7 @@ fn map_builder_err<S>(e: ort::Error<S>) -> RecError {
 )]
 pub(crate) fn rec_resize_geometry(width: usize, height: usize) -> (usize, usize) {
     let ratio = width as f64 / height as f64; // paddlex: w * 1.0 / h
-    let max_wh_ratio = if ratio > BASE_WH_RATIO {
-        ratio
-    } else {
-        BASE_WH_RATIO
-    };
+    let max_wh_ratio = if ratio > BASE_WH_RATIO { ratio } else { BASE_WH_RATIO };
     let img_w = (REC_IMAGE_HEIGHT as f64 * max_wh_ratio) as i64; // python int() 截断
     if img_w > MAX_IMG_W {
         (MAX_IMG_W as usize, MAX_IMG_W as usize)
@@ -298,11 +294,7 @@ impl RecPaddlex {
     /// 单批前向（paddlex `ToBatch` + `runner(x=...)` + `CTCLabelDecode`）。
     // ONNX tensor dimensions are i64; preserve the original conversion of the
     // model's dimensions back to native indexing sizes.
-    #[allow(
-        clippy::cast_possible_wrap,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
+    #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn recognize_batch(&self, batch: &[BgrImage]) -> Result<Vec<(String, f64)>, RecError> {
         if batch.is_empty() {
             return Ok(Vec::new());
@@ -318,11 +310,7 @@ impl RecPaddlex {
         for crop in batch {
             norms.push(resize_norm_img(crop));
         }
-        let batch_w = geometries
-            .iter()
-            .map(|(img_w, _)| *img_w)
-            .max()
-            .unwrap_or(320);
+        let batch_w = geometries.iter().map(|(img_w, _)| *img_w).max().unwrap_or(320);
 
         // ToBatch：补零到 max(imgW) 后堆叠 (N, 3, 48, W)。
         let n = batch.len();
@@ -339,10 +327,7 @@ impl RecPaddlex {
         }
         let shape = vec![n as i64, 3, REC_IMAGE_HEIGHT as i64, batch_w as i64];
         let input = OrtTensor::from_array((shape, x))?;
-        let mut session = self
-            .session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut session = self.session.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let outputs = session.run(ort::inputs![input])?;
         let output = outputs
             .values()
@@ -350,9 +335,7 @@ impl RecPaddlex {
             .ok_or_else(|| RecError::OutputShape("no output tensor".to_string()))?;
         let (out_shape, out_data) = output.try_extract_tensor::<f32>()?;
         if out_shape.len() != 3 {
-            return Err(RecError::OutputShape(format!(
-                "expected (N, T, C), got {out_shape:?}"
-            )));
+            return Err(RecError::OutputShape(format!("expected (N, T, C), got {out_shape:?}")));
         }
         let classes = out_shape[2] as usize;
         if classes != self.characters.len() {
@@ -458,9 +441,7 @@ mod tests {
         let expect = f64::from((0.9f32 + 0.6f32 + 0.5f32) / 3.0f32);
         assert!((score - expect).abs() < 1e-12);
         // 全 blank → 空串 score 0。
-        let blank: Vec<f32> = (0..12)
-            .map(|i| if i % 4 == 0 { 0.9 } else { 0.03 })
-            .collect();
+        let blank: Vec<f32> = (0..12).map(|i| if i % 4 == 0 { 0.9 } else { 0.03 }).collect();
         let (t2, s2) = ctc_decode_sample(&blank, 4, &characters);
         assert_eq!(t2, "");
         assert_eq!(s2, 0.0);

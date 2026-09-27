@@ -43,10 +43,7 @@ pub struct LayoutResult {
 /// `max(0.0, …)` 保证非负，实际不可达。
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn round_nonnegative_half_up(value: f64) -> usize {
-    assert!(
-        value >= 0.0,
-        "layout rounding input must be non-negative: {value}"
-    );
+    assert!(value >= 0.0, "layout rounding input must be non-negative: {value}");
     // 先加 0.5 再 floor 保证半值向上舍入；结果为整数值且非负，as usize
     // 至多饱和，不会回绕。
     (value + 0.5).floor() as usize
@@ -57,9 +54,7 @@ fn round_nonnegative_half_up(value: f64) -> usize {
 /// Python `unicodedata.category(c) == "Cc"` 即 Unicode 通用类别 Cc，
 /// 与 [`char::is_control`]（U+0000..=U+001F、U+007F..=U+009F）完全一致。
 pub fn sanitize_ocr_text(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect()
+    text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
 /// 单个字符的半宽格数（附录 B）：有组合类计 0；EAW 为 W/F 计 2；其余计 1。
@@ -131,12 +126,8 @@ fn or_fallback(value: f64, fallback: f64) -> f64 {
 
 /// 四顶点 x/y 的最小/最大值（geometry.py `quad_bounds`）。
 fn quad_bounds(quad: &Quad) -> (f64, f64, f64, f64) {
-    let (mut min_x, mut min_y, mut max_x, mut max_y) = (
-        f64::INFINITY,
-        f64::INFINITY,
-        f64::NEG_INFINITY,
-        f64::NEG_INFINITY,
-    );
+    let (mut min_x, mut min_y, mut max_x, mut max_y) =
+        (f64::INFINITY, f64::INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
     for &(x, y) in quad {
         min_x = min_x.min(x);
         min_y = min_y.min(y);
@@ -235,9 +226,7 @@ fn cluster_lines(mut items: Vec<LayoutItem>, body_height: f64) -> Vec<TextLine> 
         for (index, line) in lines.iter().enumerate() {
             let overlap = line_overlap(&item, line);
             let baseline_difference = (item.baseline - line.baseline()).abs();
-            if overlap >= LINE_VERTICAL_OVERLAP
-                || baseline_difference <= body_height * BASELINE_HEIGHT_FACTOR
-            {
+            if overlap >= LINE_VERTICAL_OVERLAP || baseline_difference <= body_height * BASELINE_HEIGHT_FACTOR {
                 matches.push((overlap, -baseline_difference, index));
             }
         }
@@ -256,12 +245,7 @@ fn cluster_lines(mut items: Vec<LayoutItem>, body_height: f64) -> Vec<TextLine> 
                 .iter()
                 .map(|item| item.left)
                 .fold(f64::INFINITY, f64::min)
-                .total_cmp(
-                    &b.items
-                        .iter()
-                        .map(|item| item.left)
-                        .fold(f64::INFINITY, f64::min),
-                ),
+                .total_cmp(&b.items.iter().map(|item| item.left).fold(f64::INFINITY, f64::min)),
         )
     });
     for line in &mut lines {
@@ -306,8 +290,7 @@ fn estimate_row_step(lines: &[TextLine], body_height: f64) -> f64 {
         .windows(2)
         .filter_map(|pair| {
             let (previous, current) = (&pair[0], &pair[1]);
-            (current.baseline() > previous.baseline())
-                .then(|| current.baseline() - previous.baseline())
+            (current.baseline() > previous.baseline()).then(|| current.baseline() - previous.baseline())
         })
         .collect();
     let typical: Vec<f64> = differences
@@ -324,11 +307,9 @@ fn render_line(line: &TextLine, left_origin: f64, grid_width: f64) -> String {
     let mut cursor: usize = 0;
     let mut occupied_right: Option<f64> = None;
     for item in &line.items {
-        let mut target_column =
-            round_nonnegative_half_up((item.left - left_origin).max(0.0) / grid_width);
+        let mut target_column = round_nonnegative_half_up((item.left - left_origin).max(0.0) / grid_width);
         if let Some(occupied) = occupied_right {
-            let gap_columns =
-                round_nonnegative_half_up((item.left - occupied).max(0.0) / grid_width);
+            let gap_columns = round_nonnegative_half_up((item.left - occupied).max(0.0) / grid_width);
             target_column = target_column.max(cursor + gap_columns);
         }
         target_column = target_column.max(cursor);
@@ -391,10 +372,7 @@ pub fn build_layout(spans: &[RecognizedSpan]) -> LayoutResult {
         };
     }
 
-    let heights: Vec<f64> = items
-        .iter()
-        .map(|item| quad_dimensions(&item.quad).1)
-        .collect();
+    let heights: Vec<f64> = items.iter().map(|item| quad_dimensions(&item.quad).1).collect();
     let body_height = or_fallback(trimmed_median(&heights), 1.0);
     let grid_width = estimate_grid_width(&items);
     let lines = cluster_lines(items, body_height);
@@ -406,8 +384,7 @@ pub fn build_layout(spans: &[RecognizedSpan]) -> LayoutResult {
     let mut previous_row: Option<usize> = None;
     let first_baseline = lines[0].baseline();
     for line in &lines {
-        let estimated_row =
-            round_nonnegative_half_up((line.baseline() - first_baseline).max(0.0) / row_step);
+        let estimated_row = round_nonnegative_half_up((line.baseline() - first_baseline).max(0.0) / row_step);
         let row = match previous_row {
             Some(prev) => estimated_row.max(prev + 1),
             None => estimated_row,
@@ -476,10 +453,7 @@ mod tests {
     // 覆盖 O-28
     #[test]
     fn cjk_and_ascii_use_half_width_grid() {
-        let spans = [
-            span("中文", 0.0, 0.0, 40.0, 20.0),
-            span("ABCD", 60.0, 0.0, 100.0, 20.0),
-        ];
+        let spans = [span("中文", 0.0, 0.0, 40.0, 20.0), span("ABCD", 60.0, 0.0, 100.0, 20.0)];
         let result = build_layout(&spans);
         assert_eq!(display_cell_width("中文"), 4);
         assert_eq!(result.text, "中文  ABCD");
@@ -534,10 +508,7 @@ mod tests {
     // 覆盖 O-28
     #[test]
     fn large_vertical_gap_becomes_blank_rows() {
-        let spans = [
-            span("top", 0.0, 0.0, 30.0, 10.0),
-            span("bottom", 0.0, 60.0, 60.0, 70.0),
-        ];
+        let spans = [span("top", 0.0, 0.0, 30.0, 10.0), span("bottom", 0.0, 60.0, 60.0, 70.0)];
         let text = build_layout(&spans).text;
         let lines: Vec<&str> = text.split('\n').collect();
         assert_eq!(lines[0], "top");
@@ -548,30 +519,21 @@ mod tests {
     // 覆盖 O-28
     #[test]
     fn collision_pushes_later_text_right() {
-        let spans = [
-            span("abcdef", 0.0, 0.0, 60.0, 10.0),
-            span("X", 40.0, 0.0, 50.0, 10.0),
-        ];
+        let spans = [span("abcdef", 0.0, 0.0, 60.0, 10.0), span("X", 40.0, 0.0, 50.0, 10.0)];
         assert_eq!(build_layout(&spans).text, "abcdefX");
     }
 
     // 覆盖 O-28
     #[test]
     fn half_cell_spacing_rounds_up_instead_of_to_even() {
-        let spans = [
-            span("A", 0.0, 0.0, 10.0, 10.0),
-            span("B", 25.0, 0.0, 35.0, 10.0),
-        ];
+        let spans = [span("A", 0.0, 0.0, 10.0, 10.0), span("B", 25.0, 0.0, 35.0, 10.0)];
         assert_eq!(build_layout(&spans).text, "A  B");
     }
 
     // 覆盖 O-28
     #[test]
     fn physical_gap_survives_mixed_box_cell_widths() {
-        let spans = [
-            span("AB", 0.0, 0.0, 15.0, 10.0),
-            span("X", 20.0, 0.0, 30.0, 10.0),
-        ];
+        let spans = [span("AB", 0.0, 0.0, 15.0, 10.0), span("X", 20.0, 0.0, 30.0, 10.0)];
         assert_eq!(build_layout(&spans).text, "AB X");
     }
 

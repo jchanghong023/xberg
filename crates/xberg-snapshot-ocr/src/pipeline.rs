@@ -266,16 +266,10 @@ pub fn validate_perspective(quad: &Quad) -> Result<(f64, f64), PipelineError> {
     }
     // ocr.py:209-210 用 Python round()（半偶/银行家舍入）后取整；round_ties_even
     // 与之逐位一致，不用 floor(x+0.5)（半上取整会在 x.5 处偏离 oracle）。
-    let output_width = f64::max(
-        distance_f32(points[0], points[1]),
-        distance_f32(points[3], points[2]),
-    )
-    .round_ties_even();
-    let output_height = f64::max(
-        distance_f32(points[0], points[3]),
-        distance_f32(points[1], points[2]),
-    )
-    .round_ties_even();
+    let output_width =
+        f64::max(distance_f32(points[0], points[1]), distance_f32(points[3], points[2])).round_ties_even();
+    let output_height =
+        f64::max(distance_f32(points[0], points[3]), distance_f32(points[1], points[2])).round_ties_even();
     if output_width < 2.0 || output_height < 2.0 {
         return Err(PipelineError::DegenerateDetectionQuad);
     }
@@ -346,10 +340,7 @@ pub fn detect_candidates<B: OcrBackend>(
 
 /// 单个不可中断识别批：调用后端并按 `_predict_recognition`（`ocr.py:813-819`）
 /// 复核输出长度与分数范围。
-fn predict_recognition<B: OcrBackend>(
-    backend: &B,
-    images: &[B::Image],
-) -> Result<Vec<(String, f64)>, PipelineError> {
+fn predict_recognition<B: OcrBackend>(backend: &B, images: &[B::Image]) -> Result<Vec<(String, f64)>, PipelineError> {
     let outputs = backend.recognize(images)?;
     if outputs.len() != images.len() {
         return Err(PipelineError::PredictorOutput);
@@ -388,10 +379,7 @@ fn recognize_initial<B: OcrBackend>(
         }
         let end = (start + RECOGNITION_BATCH_SIZE).min(records.len());
         // 批次裁剪交给后端需要一次性借用连续切片，`Image: Clone` 即为此设。
-        let images: Vec<B::Image> = records[start..end]
-            .iter()
-            .map(|record| record.crop.clone())
-            .collect();
+        let images: Vec<B::Image> = records[start..end].iter().map(|record| record.crop.clone()).collect();
         let attempts = predict_recognition(backend, &images)?;
         for (record, (text, score)) in records[start..end].iter_mut().zip(attempts) {
             record.attempts.push(RecognitionAttempt {
@@ -437,8 +425,7 @@ fn flush_dense_code_retries<B: OcrBackend>(
         // 且（更长，或同长且分数更高）时替换 0° 尝试。
         if !text.is_empty()
             && score >= initial_score - CODE_STRETCH_SCORE_TOLERANCE
-            && (text_length > initial_length
-                || (text_length == initial_length && score > initial_score))
+            && (text_length > initial_length || (text_length == initial_length && score > initial_score))
         {
             record.attempts[0] = RecognitionAttempt {
                 text,
@@ -473,8 +460,7 @@ fn recognize_dense_code_retries<B: OcrBackend>(
             let initial = &record.attempts[0];
             let dense = record.source_height >= SMALL_TEXT_CROP_HEIGHT
                 && record.source_height <= WIDE_TEXT_MAX_HEIGHT
-                && f64::from(record.source_width) / f64::from(record.source_height)
-                    >= WIDE_TEXT_MIN_ASPECT_RATIO
+                && f64::from(record.source_width) / f64::from(record.source_height) >= WIDE_TEXT_MIN_ASPECT_RATIO
                 && looks_like_dense_code_outline(&initial.text);
             dense.then(|| backend.stretch_recognition_crop(&record.crop))
         };
@@ -548,8 +534,7 @@ fn recognize_rotations<B: OcrBackend>(
         let mut jobs: Vec<(u16, B::Image)> = {
             let record = &records[index];
             let initial_score = record.attempts[0].score;
-            let (crop_width, crop_height) =
-                recognition_dimensions(record.source_width, record.source_height);
+            let (crop_width, crop_height) = recognition_dimensions(record.source_width, record.source_height);
             // 密集代码替换发生在首试 attempts[0] 上，因此这里的首试分已包含
             // 替换结果（附录 B：替换后分数参与 180° 加试判据）。
             additional_rotations(f64::from(crop_height), f64::from(crop_width), initial_score)
@@ -738,9 +723,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 detect_script: Box::new(|_| Ok((Vec::new(), Vec::new()))),
-                recognize_script: Box::new(|batch| {
-                    Ok(batch.iter().map(|_| ("text".to_string(), 0.9)).collect())
-                }),
+                recognize_script: Box::new(|batch| Ok(batch.iter().map(|_| ("text".to_string(), 0.9)).collect())),
                 detect_calls: Cell::new(0),
                 recognize_calls: RefCell::new(Vec::new()),
                 rotations_called: RefCell::new(Vec::new()),
@@ -814,14 +797,8 @@ mod tests {
             (self.recognize_script)(batch)
         }
 
-        fn tile(
-            &self,
-            _image: &Self::Image,
-            tile: &TileRegion,
-        ) -> Result<Self::Image, PipelineError> {
-            Ok(FakeImage::Tile {
-                index: tile.index(),
-            })
+        fn tile(&self, _image: &Self::Image, tile: &TileRegion) -> Result<Self::Image, PipelineError> {
+            Ok(FakeImage::Tile { index: tile.index() })
         }
 
         fn detect(&self, tile_image: &Self::Image) -> Result<(Vec<Quad>, Vec<f64>), PipelineError> {
@@ -840,25 +817,11 @@ mod tests {
     }
 
     /// 构造一条识别记录：整图假瓦片 + 候选 + 带标签裁剪。
-    fn crop_record(
-        candidate_quad: Quad,
-        score: f64,
-        source_width: u32,
-        source_height: u32,
-    ) -> CropRecord<FakeImage> {
-        let tile = TileRegion::new(
-            0,
-            0,
-            0,
-            source_width,
-            source_height,
-            source_width,
-            source_height,
-        )
-        .expect("测试瓦片合法");
+    fn crop_record(candidate_quad: Quad, score: f64, source_width: u32, source_height: u32) -> CropRecord<FakeImage> {
+        let tile =
+            TileRegion::new(0, 0, 0, source_width, source_height, source_width, source_height).expect("测试瓦片合法");
         let candidate =
-            DetectionCandidate::new(candidate_quad, score, tile, 0.0, false, Vec::new())
-                .expect("测试候选合法");
+            DetectionCandidate::new(candidate_quad, score, tile, 0.0, false, Vec::new()).expect("测试候选合法");
         CropRecord {
             candidate,
             crop: FakeImage::Crop {
@@ -886,8 +849,7 @@ mod tests {
             1 => Ok((vec![second_tile_quad], vec![0.9])),
             _ => Ok((Vec::new(), Vec::new())),
         });
-        let candidates =
-            detect_candidates(&backend, &FakeImage::Canvas, 2500, 400, None).expect("检测应成功");
+        let candidates = detect_candidates(&backend, &FakeImage::Canvas, 2500, 400, None).expect("检测应成功");
         // 400×2500 选区：瓦片原点 x = 0、1088、2176，共 3 次检测调用。
         assert_eq!(backend.detect_calls(), 3);
         // 两个接缝片段先合并后去重，得到整体包围盒（Python oracle 同值）。
@@ -924,36 +886,16 @@ mod tests {
                 Ok(batch
                     .iter()
                     .map(|image| match image {
-                        FakeImage::Crop {
-                            left: 0.0,
-                            height: 40,
-                        } => ("vertical-bad".to_string(), 0.4),
-                        FakeImage::Crop {
-                            left: 40.0,
-                            height: 20,
-                        } => ("low-bad".to_string(), 0.2),
+                        FakeImage::Crop { left: 0.0, height: 40 } => ("vertical-bad".to_string(), 0.4),
+                        FakeImage::Crop { left: 40.0, height: 20 } => ("low-bad".to_string(), 0.2),
                         FakeImage::Crop { .. } => ("confident".to_string(), 0.8),
                         FakeImage::Rotated { degrees: 90, inner }
-                            if matches!(
-                                inner.as_ref(),
-                                FakeImage::Crop {
-                                    left: 0.0,
-                                    height: 40
-                                }
-                            ) =>
+                            if matches!(inner.as_ref(), FakeImage::Crop { left: 0.0, height: 40 }) =>
                         {
                             ("vertical".to_string(), 0.95)
                         }
-                        FakeImage::Rotated {
-                            degrees: 180,
-                            inner,
-                        } if matches!(
-                            inner.as_ref(),
-                            FakeImage::Crop {
-                                left: 40.0,
-                                height: 20
-                            }
-                        ) =>
+                        FakeImage::Rotated { degrees: 180, inner }
+                            if matches!(inner.as_ref(), FakeImage::Crop { left: 40.0, height: 20 }) =>
                         {
                             ("upright".to_string(), 0.9)
                         }
@@ -961,19 +903,13 @@ mod tests {
                     })
                     .collect())
             });
-        let candidates =
-            detect_candidates(&backend, &FakeImage::Canvas, 200, 100, None).expect("检测应成功");
+        let candidates = detect_candidates(&backend, &FakeImage::Canvas, 200, 100, None).expect("检测应成功");
         assert_eq!(candidates.len(), 3);
         let mut records: Vec<CropRecord<FakeImage>> = candidates
             .iter()
             .zip(dimensions)
             .map(|(candidate, (width, height))| {
-                crop_record(
-                    *candidate.quad(),
-                    candidate.detection_score(),
-                    width,
-                    height,
-                )
+                crop_record(*candidate.quad(), candidate.detection_score(), width, height)
             })
             .collect();
         recognize_records(&backend, &mut records, None).expect("识别应成功");
@@ -981,11 +917,7 @@ mod tests {
         // 每条记录各取最优方向：竖排 90°、低置信度 180°、高置信度原方向。
         assert_eq!(
             span_texts(&spans),
-            vec![
-                "vertical".to_string(),
-                "upright".to_string(),
-                "confident".to_string(),
-            ]
+            vec!["vertical".to_string(), "upright".to_string(), "confident".to_string(),]
         );
         for batch in backend.recognize_batches() {
             assert!(batch.len() <= RECOGNITION_BATCH_SIZE);
@@ -1000,10 +932,8 @@ mod tests {
     // 密集代码行做一次 1.5× 拉伸重试，更长且分数达容差的文本替换 0° 尝试。
     #[test]
     fn dense_code_outline_uses_targeted_horizontal_retry() {
-        let initial_text =
-            "@0|_init_.py|TARGET_AST_UNAVAILABLE;M1|_init_.py::module|UNAVAILABLE|".to_string();
-        let improved_text =
-            "@0|__init__.py|TARGET_AST_UNAVAILABLE;M1|__init__.py::module|UNAVAILABLE|".to_string();
+        let initial_text = "@0|_init_.py|TARGET_AST_UNAVAILABLE;M1|_init_.py::module|UNAVAILABLE|".to_string();
+        let improved_text = "@0|__init__.py|TARGET_AST_UNAVAILABLE;M1|__init__.py::module|UNAVAILABLE|".to_string();
         let mut records = vec![crop_record(quad(0.0, 0.0, 500.0, 20.0), 0.9, 500, 20)];
         let backend = FakeBackend::new().with_recognize(move |batch| {
             Ok(batch
@@ -1024,10 +954,7 @@ mod tests {
         let spans = assemble_spans(&records, None).expect("组装应成功");
         assert_eq!(
             span_texts(&spans),
-            vec![
-                "@0|__init__.py|TARGET_AST_UNAVAILABLE;M1|__init__.py::module|UNAVAILABLE|"
-                    .to_string()
-            ]
+            vec!["@0|__init__.py|TARGET_AST_UNAVAILABLE;M1|__init__.py::module|UNAVAILABLE|".to_string()]
         );
     }
 
@@ -1035,12 +962,8 @@ mod tests {
     // 更短的重试文本即使分数更高也不替换初次结果。
     #[test]
     fn dense_code_retry_does_not_replace_a_longer_initial_result() {
-        let initial_text =
-            "@0|entry.py::module|UNAVAILABLE|;M1|entry.py::module|UNAVAILABLE|".to_string();
-        let shorter_retry = initial_text
-            .strip_suffix('|')
-            .expect("测试文本以 | 结尾")
-            .to_string();
+        let initial_text = "@0|entry.py::module|UNAVAILABLE|;M1|entry.py::module|UNAVAILABLE|".to_string();
+        let shorter_retry = initial_text.strip_suffix('|').expect("测试文本以 | 结尾").to_string();
         let final_text = initial_text.clone();
         let mut records = vec![crop_record(quad(0.0, 0.0, 500.0, 20.0), 0.9, 500, 20)];
         let backend = FakeBackend::new().with_recognize(move |batch| {
@@ -1090,8 +1013,7 @@ mod tests {
     #[test]
     fn visible_text_keeps_internal_whitespace() {
         let mut records = vec![crop_record(quad(0.0, 0.0, 80.0, 20.0), 0.9, 80, 20)];
-        let backend =
-            FakeBackend::new().with_recognize(|_| Ok(vec![("left  right".to_string(), 0.9)]));
+        let backend = FakeBackend::new().with_recognize(|_| Ok(vec![("left  right".to_string(), 0.9)]));
         recognize_records(&backend, &mut records, None).expect("识别应成功");
         let spans = assemble_spans(&records, None).expect("组装应成功");
         assert_eq!(span_texts(&spans), vec!["left  right".to_string()]);
@@ -1107,13 +1029,7 @@ mod tests {
             arm.store(true, AtomicOrdering::SeqCst);
             Ok((Vec::new(), Vec::new()))
         });
-        let outcome = detect_candidates(
-            &backend,
-            &FakeImage::Canvas,
-            2500,
-            400,
-            Some(cancel.as_ref()),
-        );
+        let outcome = detect_candidates(&backend, &FakeImage::Canvas, 2500, 400, Some(cancel.as_ref()));
         assert_eq!(outcome, Err(PipelineError::Cancelled));
         // 第 1 个瓦片的检测调用完成后即取消，不发起后续瓦片。
         assert_eq!(backend.detect_calls(), 1);

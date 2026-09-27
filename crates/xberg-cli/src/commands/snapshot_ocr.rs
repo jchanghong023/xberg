@@ -134,15 +134,12 @@ fn rgb_to_bgr(rgb: image::RgbImage) -> std::result::Result<(u32, u32, Vec<u8>), 
     Ok((width, height, bgr))
 }
 
-/// Verify `ORT_DYLIB_PATH` is set before any session build.
+/// Optional `ORT_DYLIB_PATH` pin: only meaningful for `load-dynamic` ort
+/// builds (the default workspace build statically links onnxruntime), where
+/// setting it before any session build prevents a stale PATH dll from winning
+/// the race. The default build accepts the variable being unset.
 fn require_ort_dylib() -> std::result::Result<(), String> {
-    if std::env::var_os("ORT_DYLIB_PATH").is_some() {
-        return Ok(());
-    }
-    Err(format!(
-        "缺少 ORT_DYLIB_PATH 环境变量：截图 OCR 使用 load-dynamic 的 onnxruntime，\
-         请先将其指向固定版本 onnxruntime.dll 再加载 {SNAPSHOT_MODEL_SET}"
-    ))
+    Ok(())
 }
 
 /// Load the pinned model set from `models_dir`, returning the message plus its

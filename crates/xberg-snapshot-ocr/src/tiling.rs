@@ -120,15 +120,7 @@ pub fn generate_tiles_with(
             let width = tile_size.min(image_width - x);
             let height = tile_size.min(image_height - y);
             let index = tiles.len();
-            tiles.push(TileRegion::new(
-                index,
-                x,
-                y,
-                width,
-                height,
-                image_width,
-                image_height,
-            )?);
+            tiles.push(TileRegion::new(index, x, y, width, height, image_width, image_height)?);
         }
     }
     Ok(tiles)
@@ -140,12 +132,7 @@ pub fn generate_tiles_with(
 /// # Errors
 /// 同 [`generate_tiles_with`]。
 pub fn generate_tiles(image_width: u32, image_height: u32) -> Result<Vec<TileRegion>, TilingError> {
-    generate_tiles_with(
-        image_width,
-        image_height,
-        DEFAULT_TILE_SIZE,
-        DEFAULT_TILE_OVERLAP,
-    )
+    generate_tiles_with(image_width, image_height, DEFAULT_TILE_SIZE, DEFAULT_TILE_OVERLAP)
 }
 
 /// 将瓦片局部坐标四边形平移到选区全局坐标（Python
@@ -244,9 +231,7 @@ mod tests {
         assert_eq!(tiles.len(), 9);
         assert_eq!(tiles.iter().map(TileRegion::right).max(), Some(2305));
         assert_eq!(tiles.iter().map(TileRegion::bottom).max(), Some(2305));
-        assert!(tiles
-            .iter()
-            .any(|tile| tile.x() == 2176 && tile.y() == 2176));
+        assert!(tiles.iter().any(|tile| tile.x() == 2176 && tile.y() == 2176));
     }
 
     // 覆盖 O-24

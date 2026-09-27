@@ -84,14 +84,10 @@ impl TileRegion {
         image_height: u32,
     ) -> Result<Self, DomainError> {
         if width == 0 || height == 0 {
-            return Err(DomainError::TileOutOfBounds(
-                "tile dimensions must be positive",
-            ));
+            return Err(DomainError::TileOutOfBounds("tile dimensions must be positive"));
         }
         if image_width == 0 || image_height == 0 {
-            return Err(DomainError::TileOutOfBounds(
-                "image dimensions must be positive",
-            ));
+            return Err(DomainError::TileOutOfBounds("image dimensions must be positive"));
         }
         let right = x
             .checked_add(width)

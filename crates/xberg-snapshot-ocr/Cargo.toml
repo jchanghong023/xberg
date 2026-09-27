@@ -11,10 +11,13 @@ description = "Screenshot OCR channel: byte-pinned PP-OCRv6 small det/rec with d
 
 [dependencies]
 # Same versions the JchTools worker used (geo-clipper 0.9 = pyclipper's
-# Clipper 6.4.2 binding; ort 2.0.0-rc.13 with load-dynamic for ORT_DYLIB_PATH).
+# Clipper 6.4.2 binding). ort uses the workspace declaration; this crate
+# builds standalone too (e.g. `cargo test -p xberg-snapshot-ocr`), so it
+# carries download-binaries + copy-dylibs itself for statically linked ORT.
+# ORT_DYLIB_PATH is only relevant for load-dynamic builds, not this default.
 geo-clipper = { workspace = true }
 geo-types = { workspace = true }
-ort = { workspace = true, features = ["load-dynamic"] }
+ort = { workspace = true, features = ["download-binaries", "copy-dylibs", "tls-rustls"] }
 
 [dev-dependencies]
 image = { workspace = true, features = ["png"] }

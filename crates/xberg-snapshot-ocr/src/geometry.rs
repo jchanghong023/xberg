@@ -144,12 +144,7 @@ fn cross(first: Point, second: Point, third: Point) -> f64 {
 /// （Python `_line_intersection`）。
 // 变量名逐字沿用 Python 源（segment_dx/segment_dy/clip_dx/clip_dy），便于对审。
 #[allow(clippy::similar_names)]
-fn line_intersection(
-    segment_start: Point,
-    segment_end: Point,
-    clip_start: Point,
-    clip_end: Point,
-) -> Point {
+fn line_intersection(segment_start: Point, segment_end: Point, clip_start: Point, clip_end: Point) -> Point {
     let segment_dx = segment_end.0 - segment_start.0;
     let segment_dy = segment_end.1 - segment_start.1;
     let clip_dx = clip_end.0 - clip_start.0;
@@ -233,11 +228,7 @@ pub fn overlap_metrics(first: &Quad, second: &Quad) -> OverlapMetrics {
     }
     let intersection = intersection_area(first, second);
     let union = first_area + second_area - intersection;
-    let iou = if union > EPSILON {
-        intersection / union
-    } else {
-        0.0
-    };
+    let iou = if union > EPSILON { intersection / union } else { 0.0 };
     let smaller_ratio = intersection / first_area.min(second_area);
     OverlapMetrics {
         intersection,

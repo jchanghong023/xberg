@@ -61,10 +61,7 @@ impl fmt::Display for ImageOpError {
             Self::InvalidDetectionQuad => write!(f, "invalid detection quadrilateral"),
             Self::DegenerateDetectionQuad => write!(f, "degenerate detection quadrilateral"),
             Self::InvalidRotation(degrees) => {
-                write!(
-                    f,
-                    "rotation must be 90, 180, or 270 degrees (got {degrees})"
-                )
+                write!(f, "rotation must be 90, 180, or 270 degrees (got {degrees})")
             }
         }
     }
@@ -99,11 +96,7 @@ impl BgrImage {
         if data.len() != width * height * 3 {
             return Err(ImageOpError::InvalidBufferLen);
         }
-        Ok(Self {
-            width,
-            height,
-            data,
-        })
+        Ok(Self { width, height, data })
     }
 
     /// 图宽（像素）。
@@ -288,10 +281,8 @@ fn resize_cubic_precise(src: &BgrImage, dw: usize, dh: usize) -> BgrImage {
                 let coeffs = xweights[dx];
                 for c in 0..3 {
                     let sample = |k: usize| f64::from(src.data[(src_y * sw + indices[k]) * 3 + c]);
-                    row[dx * 3 + c] = sample(0) * coeffs[0]
-                        + sample(1) * coeffs[1]
-                        + sample(2) * coeffs[2]
-                        + sample(3) * coeffs[3];
+                    row[dx * 3 + c] =
+                        sample(0) * coeffs[0] + sample(1) * coeffs[1] + sample(2) * coeffs[2] + sample(3) * coeffs[3];
                 }
             }
             cached_rows[slot] = Some(src_y);
@@ -299,10 +290,8 @@ fn resize_cubic_precise(src: &BgrImage, dw: usize, dh: usize) -> BgrImage {
         for dx in 0..dw {
             for c in 0..3 {
                 let sample = |k: usize| horizontal[((indices[k] % 4) * dw + dx) * 3 + c];
-                let value = sample(0) * coeffs[0]
-                    + sample(1) * coeffs[1]
-                    + sample(2) * coeffs[2]
-                    + sample(3) * coeffs[3];
+                let value =
+                    sample(0) * coeffs[0] + sample(1) * coeffs[1] + sample(2) * coeffs[2] + sample(3) * coeffs[3];
                 out.data[(dy * dw + dx) * 3 + c] = value.round_ties_even().clamp(0.0, 255.0) as u8;
             }
         }
@@ -350,8 +339,8 @@ fn resize_impl(src: &BgrImage, dst_width: usize, dst_height: usize, interp: Inte
     if interp == Interp::Linear {
         let iscale_x = scale_x.round_ties_even() as i64;
         let iscale_y = scale_y.round_ties_even() as i64;
-        let area_fast = (scale_x - iscale_x as f64).abs() < f64::EPSILON
-            && (scale_y - iscale_y as f64).abs() < f64::EPSILON;
+        let area_fast =
+            (scale_x - iscale_x as f64).abs() < f64::EPSILON && (scale_y - iscale_y as f64).abs() < f64::EPSILON;
         if area_fast && iscale_x == 2 && iscale_y == 2 {
             resize_area_fast_2x2(src, &mut out);
             return out;
@@ -450,11 +439,7 @@ fn resize_impl(src: &BgrImage, dst_width: usize, dst_height: usize, interp: Inte
 /// 水平重采样（`HResizeLinear` / `HResizeCubic` / `HResizeLanczos4`，元素域）。
 // OpenCV represents element offsets as signed i32 until border replication
 // has brought them into the nonnegative source-row range.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
-)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
 #[allow(clippy::too_many_arguments)]
 fn hresize(
     s: &[u8],
@@ -882,8 +867,8 @@ fn lu_solve8(a: &mut [f64; 64], b: &mut [f64; 8]) -> bool {
 /// `cv::invert` 3×3 CV_64F DECOMP_LU（`lapack.cpp:944`）：det3 + 伴随公式。
 /// 奇异（det == 0）时按 OpenCV 语义返回全零矩阵。
 fn invert3x3(m: &[f64; 9]) -> [f64; 9] {
-    let det = m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6])
-        + m[2] * (m[3] * m[7] - m[4] * m[6]);
+    let det =
+        m[0] * (m[4] * m[8] - m[5] * m[7]) - m[1] * (m[3] * m[8] - m[5] * m[6]) + m[2] * (m[3] * m[7] - m[4] * m[6]);
     if det == 0.0 {
         return [0.0; 9];
     }
@@ -920,10 +905,7 @@ fn invert3x3(m: &[f64; 9]) -> [f64; 9] {
     clippy::cast_sign_loss,
     clippy::cast_possible_wrap
 )]
-pub fn warp_perspective_cubic_replicate(
-    img: &BgrImage,
-    quad: &[(f64, f64); 4],
-) -> Result<BgrImage, ImageOpError> {
+pub fn warp_perspective_cubic_replicate(img: &BgrImage, quad: &[(f64, f64); 4]) -> Result<BgrImage, ImageOpError> {
     let pts32 = [
         (quad[0].0 as f32, quad[0].1 as f32),
         (quad[1].0 as f32, quad[1].1 as f32),
@@ -943,8 +925,7 @@ pub fn warp_perspective_cubic_replicate(
         ((dw - 1) as f32, (dh - 1) as f32),
         (0.0f32, (dh - 1) as f32),
     ];
-    let forward =
-        get_perspective_transform(&pts32, &dst).ok_or(ImageOpError::DegenerateDetectionQuad)?;
+    let forward = get_perspective_transform(&pts32, &dst).ok_or(ImageOpError::DegenerateDetectionQuad)?;
     let m = invert3x3(&forward);
 
     let sw = img.width as i32;
@@ -961,8 +942,7 @@ pub fn warp_perspective_cubic_replicate(
     let bw0 = (1024 / bh0_init).min(dw);
     let bh0 = (1024 / bw0).min(dh);
 
-    let (m0, m1, m2, m3, m4, m5, m6, m7, m8) =
-        (m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]);
+    let (m0, m1, m2, m3, m4, m5, m6, m7, m8) = (m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]);
 
     let mut y = 0usize;
     while y < dh {
@@ -979,11 +959,7 @@ pub fn warp_perspective_cubic_replicate(
                 let out_row = &mut out.data[((y + y1) * dw + x) * 3..((y + y1) * dw + x + bw) * 3];
                 for x1 in 0..bw {
                     let mut w = w0 + m6 * x1 as f64;
-                    w = if w == 0.0 {
-                        0.0
-                    } else {
-                        f64::from(INTER_TAB_SIZE) / w
-                    };
+                    w = if w == 0.0 { 0.0 } else { f64::from(INTER_TAB_SIZE) / w };
                     let fx = (x0 + m0 * x1 as f64) * w;
                     let fy = (y0 + m3 * x1 as f64) * w;
                     let fxc = fx.clamp(f64::from(i32::MIN), f64::from(i32::MAX));
@@ -992,8 +968,7 @@ pub fn warp_perspective_cubic_replicate(
                     let yi = fyc.round_ties_even() as i32;
                     let sx = (xi >> INTER_BITS).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) - 1;
                     let sy = (yi >> INTER_BITS).clamp(i32::from(i16::MIN), i32::from(i16::MAX)) - 1;
-                    let alpha = ((yi & (INTER_TAB_SIZE - 1)) * INTER_TAB_SIZE
-                        + (xi & (INTER_TAB_SIZE - 1))) as usize;
+                    let alpha = ((yi & (INTER_TAB_SIZE - 1)) * INTER_TAB_SIZE + (xi & (INTER_TAB_SIZE - 1))) as usize;
                     let wtab = &tab[alpha * 16..alpha * 16 + 16];
                     for k in 0..3usize {
                         let sum = if (0..width1).contains(&sx) && (0..height1).contains(&sy) {
@@ -1001,8 +976,8 @@ pub fn warp_perspective_cubic_replicate(
                             let mut acc = 0i32;
                             for r in 0..4usize {
                                 for c in 0..4usize {
-                                    acc += i32::from(img.data[base + r * sw_elems + c * 3])
-                                        * i32::from(wtab[r * 4 + c]);
+                                    acc +=
+                                        i32::from(img.data[base + r * sw_elems + c * 3]) * i32::from(wtab[r * 4 + c]);
                                 }
                             }
                             acc
@@ -1012,9 +987,8 @@ pub fn warp_perspective_cubic_replicate(
                                 let yr = clip(sy + r as i32, sh);
                                 for c in 0..4usize {
                                     let xc = clip(sx + c as i32, sw);
-                                    acc += i32::from(
-                                        img.data[yr as usize * sw_elems + xc as usize * 3 + k],
-                                    ) * i32::from(wtab[r * 4 + c]);
+                                    acc += i32::from(img.data[yr as usize * sw_elems + xc as usize * 3 + k])
+                                        * i32::from(wtab[r * 4 + c]);
                                 }
                             }
                             acc
@@ -1116,8 +1090,7 @@ mod tests {
             4,
             2,
             vec![
-                0, 0, 0, 10, 10, 10, 20, 20, 20, 30, 30, 30, 40, 40, 40, 50, 50, 50, 60, 60, 60,
-                70, 70, 70,
+                0, 0, 0, 10, 10, 10, 20, 20, 20, 30, 30, 30, 40, 40, 40, 50, 50, 50, 60, 60, 60, 70, 70, 70,
             ],
         )
         .unwrap();
@@ -1194,11 +1167,7 @@ mod tests {
         assert_eq!(r1.pixel(0, 0), [70, 80, 90]);
         // 目标 (2,1) ← 源 (1,0) = (100,110,120)。
         assert_eq!(r1.pixel(2, 1), [100, 110, 120]);
-        let back = rot90(
-            &rot90(&rot90(&rot90(&img, 1).unwrap(), 1).unwrap(), 1).unwrap(),
-            1,
-        )
-        .unwrap();
+        let back = rot90(&rot90(&rot90(&rot90(&img, 1).unwrap(), 1).unwrap(), 1).unwrap(), 1).unwrap();
         assert_eq!(back.data(), img.data());
         for quarters in 2..=3 {
             let twice = rot90(&rot90(&img, quarters).unwrap(), 4 - quarters).unwrap();

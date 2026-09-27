@@ -21,9 +21,7 @@
 
 use std::cmp::Ordering;
 
-use crate::geometry::{
-    bounding_quad_of_quads, overlap_metrics, quad_bounds, quad_dimensions, vertical_overlap_ratio,
-};
+use crate::geometry::{bounding_quad_of_quads, overlap_metrics, quad_bounds, quad_dimensions, vertical_overlap_ratio};
 use crate::tiling::{internal_edge_metrics, EdgeMetrics};
 use crate::types::{DetectionCandidate, DomainError, Quad, TileRegion};
 
@@ -77,10 +75,7 @@ impl DisjointSet {
 fn rank_cmp(left: &DetectionCandidate, right: &DetectionCandidate) -> Ordering {
     (!left.touches_internal_edge())
         .cmp(&(!right.touches_internal_edge()))
-        .then_with(|| {
-            left.internal_edge_distance()
-                .total_cmp(&right.internal_edge_distance())
-        })
+        .then_with(|| left.internal_edge_distance().total_cmp(&right.internal_edge_distance()))
         .then_with(|| left.detection_score().total_cmp(&right.detection_score()))
 }
 
@@ -111,10 +106,7 @@ fn component_groups(size: usize, groups: &mut DisjointSet) -> Vec<Vec<usize>> {
     let mut components: Vec<Vec<usize>> = Vec::new();
     for index in 0..size {
         let root = groups.find(index);
-        if let Some(slot) = roots
-            .iter()
-            .position(|candidate_root| *candidate_root == root)
-        {
+        if let Some(slot) = roots.iter().position(|candidate_root| *candidate_root == root) {
             components[slot].push(index);
         } else {
             roots.push(root);
@@ -144,8 +136,8 @@ fn touches_left_edge(candidate: &DetectionCandidate, tolerance: f64) -> bool {
 fn tiles_are_horizontal_neighbors(first: &DetectionCandidate, second: &DetectionCandidate) -> bool {
     let first_tile = first.source_tile();
     let second_tile = second.source_tile();
-    let tile_vertical_overlap = i64::from(first_tile.bottom().min(second_tile.bottom()))
-        - i64::from(first_tile.y().max(second_tile.y()));
+    let tile_vertical_overlap =
+        i64::from(first_tile.bottom().min(second_tile.bottom())) - i64::from(first_tile.y().max(second_tile.y()));
     if tile_vertical_overlap <= 0 || first_tile.x() == second_tile.x() {
         return false;
     }
@@ -165,12 +157,11 @@ fn is_seam_pair(
     }
     // Python `sorted(..., key=tile.x)` 为稳定排序；相等时保留 (first,
     // second)（实际不会发生：瓦片 x 相等已被水平相邻检查排除）。
-    let (left_tile_candidate, right_tile_candidate) =
-        if first.source_tile().x() <= second.source_tile().x() {
-            (first, second)
-        } else {
-            (second, first)
-        };
+    let (left_tile_candidate, right_tile_candidate) = if first.source_tile().x() <= second.source_tile().x() {
+        (first, second)
+    } else {
+        (second, first)
+    };
     let first_height = quad_dimensions(first.quad()).1;
     let second_height = quad_dimensions(second.quad()).1;
     let larger_height = first_height.max(second_height);
@@ -219,10 +210,7 @@ fn is_seam_pair(
 /// 合并一个重叠/接缝组件（Python `_merge_component`）：外接矩形、分数取
 /// 最大、成员瓦片并集矩形上重算内部边缘量、源瓦片取 `(x, y, index)` 最大
 /// 者、瓦片下标拼接后由构造函数去重排序。
-fn merge_component(
-    items: &[DetectionCandidate],
-    component: &[usize],
-) -> Result<DetectionCandidate, DomainError> {
+fn merge_component(items: &[DetectionCandidate], component: &[usize]) -> Result<DetectionCandidate, DomainError> {
     let mut source = items[component[0]].source_tile();
     let mut union_x = source.x();
     let mut union_y = source.y();
@@ -241,10 +229,7 @@ fn merge_component(
         union_bottom = union_bottom.max(tile.bottom());
         max_score = max_score.max(candidate.detection_score());
     }
-    let member_quads: Vec<Quad> = component
-        .iter()
-        .map(|index| *items[*index].quad())
-        .collect();
+    let member_quads: Vec<Quad> = component.iter().map(|index| *items[*index].quad()).collect();
     let merged_quad = match bounding_quad_of_quads(&member_quads) {
         Ok(quad) => quad,
         // 分组逻辑保证组件非空，外接框输入不可能为空。
@@ -322,9 +307,9 @@ pub fn merge_seam_fragments_with(
         } else {
             match merge_component(candidates, component) {
                 Ok(candidate) => merged.push(candidate),
-                Err(error) => unreachable!(
-                    "组件成员均已通过构造校验且共享同一图像尺寸，并集瓦片与合并候选必然合法：{error}"
-                ),
+                Err(error) => {
+                    unreachable!("组件成员均已通过构造校验且共享同一图像尺寸，并集瓦片与合并候选必然合法：{error}")
+                }
             }
         }
     }
@@ -337,15 +322,8 @@ pub fn merge_seam_fragments_with(
             (bounds.1, bounds.0, candidate)
         })
         .collect();
-    decorated.sort_by(|left, right| {
-        left.0
-            .total_cmp(&right.0)
-            .then_with(|| left.1.total_cmp(&right.1))
-    });
-    decorated
-        .into_iter()
-        .map(|(_, _, candidate)| candidate)
-        .collect()
+    decorated.sort_by(|left, right| left.0.total_cmp(&right.0).then_with(|| left.1.total_cmp(&right.1)));
+    decorated.into_iter().map(|(_, _, candidate)| candidate).collect()
 }
 
 /// 重叠去重（Python `deduplicate_candidates` 默认阈值版本）。
@@ -369,18 +347,13 @@ pub fn deduplicate_candidates_with(
     smaller_intersection_threshold: f64,
 ) -> Vec<DetectionCandidate> {
     require_unit_range("iou_threshold", iou_threshold);
-    require_unit_range(
-        "smaller_intersection_threshold",
-        smaller_intersection_threshold,
-    );
+    require_unit_range("smaller_intersection_threshold", smaller_intersection_threshold);
 
     let mut groups = DisjointSet::new(candidates.len());
     for (first_index, first) in candidates.iter().enumerate() {
         for (second_index, second) in candidates.iter().enumerate().skip(first_index + 1) {
             let metrics = overlap_metrics(first.quad(), second.quad());
-            if metrics.iou >= iou_threshold
-                || metrics.smaller_ratio >= smaller_intersection_threshold
-            {
+            if metrics.iou >= iou_threshold || metrics.smaller_ratio >= smaller_intersection_threshold {
                 groups.union(first_index, second_index);
             }
         }
@@ -402,10 +375,7 @@ pub fn deduplicate_candidates_with(
             .then_with(|| left.1.total_cmp(&right.1))
             .then_with(|| left.2.cmp(&right.2))
     });
-    decorated
-        .into_iter()
-        .map(|(_, _, _, candidate)| candidate)
-        .collect()
+    decorated.into_iter().map(|(_, _, _, candidate)| candidate).collect()
 }
 
 /// 完整整理：先合并接缝片段、后重叠去重（Python `consolidate_candidates`）。
@@ -433,13 +403,7 @@ mod tests {
 
     /// 对应 Python `_candidate(...)`；未显式给出 `source_tile_indices`，
     /// 由构造函数归一化为 `[source_tile.index]`。
-    fn candidate(
-        quad: Quad,
-        score: f64,
-        tile: TileRegion,
-        distance: f64,
-        touching: bool,
-    ) -> DetectionCandidate {
+    fn candidate(quad: Quad, score: f64, tile: TileRegion, distance: f64, touching: bool) -> DetectionCandidate {
         DetectionCandidate::new(quad, score, tile, distance, touching, Vec::new()).unwrap()
     }
 
@@ -457,13 +421,7 @@ mod tests {
     fn duplicate_prefers_candidate_away_from_internal_edge() {
         let (tile0, tile1, _) = base_tiles();
         let edge = candidate(rect_quad(100.0, 20.0, 300.0, 50.0), 0.99, tile0, 0.0, true);
-        let interior = candidate(
-            rect_quad(102.0, 20.0, 302.0, 50.0),
-            0.55,
-            tile1,
-            30.0,
-            false,
-        );
+        let interior = candidate(rect_quad(102.0, 20.0, 302.0, 50.0), 0.55, tile1, 30.0, false);
         assert_eq!(
             deduplicate_candidates(&[edge, interior.clone()]).as_slice(),
             &[interior]
@@ -474,24 +432,9 @@ mod tests {
     #[test]
     fn duplicate_then_prefers_distance_then_score() {
         let (tile0, tile1, _) = base_tiles();
-        let near = candidate(
-            rect_quad(100.0, 20.0, 300.0, 50.0),
-            0.99,
-            tile0,
-            10.0,
-            false,
-        );
-        let far = candidate(
-            rect_quad(100.0, 20.0, 300.0, 50.0),
-            0.50,
-            tile1,
-            20.0,
-            false,
-        );
-        assert_eq!(
-            deduplicate_candidates(&[near, far.clone()]).as_slice(),
-            &[far]
-        );
+        let near = candidate(rect_quad(100.0, 20.0, 300.0, 50.0), 0.99, tile0, 10.0, false);
+        let far = candidate(rect_quad(100.0, 20.0, 300.0, 50.0), 0.50, tile1, 20.0, false);
+        assert_eq!(deduplicate_candidates(&[near, far.clone()]).as_slice(), &[far]);
     }
 
     // 覆盖 O-25：test_transitive_duplicate_group_is_single_candidate
@@ -511,20 +454,8 @@ mod tests {
     #[test]
     fn seam_fragments_merge_across_overlapping_tiles() {
         let (tile0, tile1, _) = base_tiles();
-        let left = candidate(
-            rect_quad(1000.0, 100.0, 1216.0, 120.0),
-            0.8,
-            tile0,
-            0.0,
-            true,
-        );
-        let right = candidate(
-            rect_quad(1088.0, 101.0, 1350.0, 121.0),
-            0.9,
-            tile1,
-            0.0,
-            true,
-        );
+        let left = candidate(rect_quad(1000.0, 100.0, 1216.0, 120.0), 0.8, tile0, 0.0, true);
+        let right = candidate(rect_quad(1088.0, 101.0, 1350.0, 121.0), 0.9, tile1, 0.0, true);
         let merged = merge_seam_fragments(&[left, right]);
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].quad(), &rect_quad(1000.0, 100.0, 1350.0, 121.0));
@@ -558,10 +489,7 @@ mod tests {
     fn assert_four_tile_seam_chain(fragments: &[DetectionCandidate]) {
         let consolidated = consolidate_candidates(fragments);
         assert_eq!(consolidated.len(), 1);
-        assert_eq!(
-            consolidated[0].quad(),
-            &rect_quad(1000.0, 100.0, 3500.0, 120.0)
-        );
+        assert_eq!(consolidated[0].quad(), &rect_quad(1000.0, 100.0, 3500.0, 120.0));
         assert_eq!(consolidated[0].source_tile_indices(), &[0_usize, 1, 2, 3]);
     }
 
@@ -583,26 +511,11 @@ mod tests {
     #[test]
     fn overlap_threshold_does_not_discard_one_seam_outer_edge() {
         let (tile0, tile1, _) = base_tiles();
-        let left = candidate(
-            rect_quad(1016.0, 100.0, 1216.0, 120.0),
-            0.8,
-            tile0,
-            0.0,
-            true,
-        );
-        let right = candidate(
-            rect_quad(1088.0, 100.0, 1300.0, 120.0),
-            0.9,
-            tile1,
-            0.0,
-            true,
-        );
+        let left = candidate(rect_quad(1016.0, 100.0, 1216.0, 120.0), 0.8, tile0, 0.0, true);
+        let right = candidate(rect_quad(1088.0, 100.0, 1300.0, 120.0), 0.9, tile1, 0.0, true);
         let consolidated = consolidate_candidates(&[left, right]);
         assert_eq!(consolidated.len(), 1);
-        assert_eq!(
-            consolidated[0].quad(),
-            &rect_quad(1016.0, 100.0, 1300.0, 120.0)
-        );
+        assert_eq!(consolidated[0].quad(), &rect_quad(1016.0, 100.0, 1300.0, 120.0));
         assert_eq!(consolidated[0].source_tile_indices(), &[0_usize, 1]);
     }
 
@@ -628,43 +541,19 @@ mod tests {
             .collect();
         let consolidated = consolidate_candidates(&candidates);
         assert_eq!(consolidated.len(), 1);
-        assert_eq!(
-            consolidated[0].quad(),
-            &rect_quad(1000.0, 1200.0, 1400.0, 1230.0)
-        );
+        assert_eq!(consolidated[0].quad(), &rect_quad(1000.0, 1200.0, 1400.0, 1230.0));
     }
 
     // 覆盖 O-25：test_interior_fragment_does_not_replace_reconstructed_seam_line
     #[test]
     fn interior_fragment_does_not_replace_reconstructed_seam_line() {
         let (tile0, tile1, tile2) = base_tiles();
-        let left = candidate(
-            rect_quad(20.0, 100.0, 1214.0, 120.0),
-            0.88,
-            tile0,
-            2.0,
-            true,
-        );
-        let middle = candidate(
-            rect_quad(1089.0, 100.0, 2302.0, 120.0),
-            0.91,
-            tile1,
-            1.0,
-            true,
-        );
-        let short_interior = candidate(
-            rect_quad(2184.0, 100.0, 2368.0, 120.0),
-            0.89,
-            tile2,
-            8.0,
-            false,
-        );
+        let left = candidate(rect_quad(20.0, 100.0, 1214.0, 120.0), 0.88, tile0, 2.0, true);
+        let middle = candidate(rect_quad(1089.0, 100.0, 2302.0, 120.0), 0.91, tile1, 1.0, true);
+        let short_interior = candidate(rect_quad(2184.0, 100.0, 2368.0, 120.0), 0.89, tile2, 8.0, false);
         let consolidated = consolidate_candidates(&[left, middle, short_interior]);
         assert_eq!(consolidated.len(), 1);
-        assert_eq!(
-            consolidated[0].quad(),
-            &rect_quad(20.0, 100.0, 2368.0, 120.0)
-        );
+        assert_eq!(consolidated[0].quad(), &rect_quad(20.0, 100.0, 2368.0, 120.0));
         assert_eq!(consolidated[0].source_tile_indices(), &[0_usize, 1, 2]);
     }
 
@@ -672,26 +561,11 @@ mod tests {
     #[test]
     fn seam_fragment_can_start_half_text_height_inside_tile() {
         let (tile0, tile1, _) = base_tiles();
-        let left = candidate(
-            rect_quad(20.0, 100.0, 1214.0, 134.0),
-            0.86,
-            tile0,
-            2.0,
-            true,
-        );
-        let right = candidate(
-            rect_quad(1105.0, 101.0, 2303.0, 135.0),
-            0.85,
-            tile1,
-            1.0,
-            true,
-        );
+        let left = candidate(rect_quad(20.0, 100.0, 1214.0, 134.0), 0.86, tile0, 2.0, true);
+        let right = candidate(rect_quad(1105.0, 101.0, 2303.0, 135.0), 0.85, tile1, 1.0, true);
         let consolidated = consolidate_candidates(&[left, right]);
         assert_eq!(consolidated.len(), 1);
-        assert_eq!(
-            consolidated[0].quad(),
-            &rect_quad(20.0, 100.0, 2303.0, 135.0)
-        );
+        assert_eq!(consolidated[0].quad(), &rect_quad(20.0, 100.0, 2303.0, 135.0));
         assert_eq!(consolidated[0].source_tile_indices(), &[0_usize, 1]);
     }
 
@@ -710,15 +584,8 @@ mod tests {
         let (tile0, tile1, _) = base_tiles();
         let duplicate1 = candidate(rect_quad(20.0, 20.0, 100.0, 40.0), 0.5, tile0, 10.0, false);
         let duplicate2 = candidate(rect_quad(21.0, 20.0, 101.0, 40.0), 0.6, tile1, 20.0, false);
-        let unrelated = candidate(
-            rect_quad(500.0, 80.0, 600.0, 100.0),
-            0.7,
-            tile0,
-            50.0,
-            false,
-        );
-        let result =
-            consolidate_candidates(&[duplicate1.clone(), duplicate2.clone(), unrelated.clone()]);
+        let unrelated = candidate(rect_quad(500.0, 80.0, 600.0, 100.0), 0.7, tile0, 50.0, false);
+        let result = consolidate_candidates(&[duplicate1.clone(), duplicate2.clone(), unrelated.clone()]);
         assert_eq!(result.len(), 2);
         assert!(result.contains(&duplicate2));
         assert!(result.contains(&unrelated));

@@ -192,10 +192,7 @@ impl DetPaddlex {
     fn run_probmap(&self, tensor: &[f32], w: u32, h: u32) -> Result<Vec<f32>, DetError> {
         let shape = vec![1_i64, 3, i64::from(h), i64::from(w)];
         let value = ort::value::Tensor::from_array((shape, tensor.to_vec()))?;
-        let mut session = self
-            .session
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut session = self.session.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let outputs = session.run(ort::inputs![value])?;
         let output = outputs
             .values()
@@ -203,18 +200,13 @@ impl DetPaddlex {
             .ok_or_else(|| DetError::InvalidShape("模型无输出张量".into()))?;
         let (out_shape, out_data) = output.try_extract_tensor::<f32>()?;
         if out_shape.len() < 2 {
-            return Err(DetError::InvalidShape(format!(
-                "概率图维度异常: {out_shape:?}"
-            )));
+            return Err(DetError::InvalidShape(format!("概率图维度异常: {out_shape:?}")));
         }
         let raw_h = out_shape[out_shape.len() - 2];
         let raw_w = out_shape[out_shape.len() - 1];
         let map_h = usize::try_from(raw_h).ok();
         let map_w = usize::try_from(raw_w).ok();
-        if map_h != Some(h as usize)
-            || map_w != Some(w as usize)
-            || out_data.len() < h as usize * w as usize
-        {
+        if map_h != Some(h as usize) || map_w != Some(w as usize) || out_data.len() < h as usize * w as usize {
             return Err(DetError::InvalidShape(format!(
                 "概率图 {raw_w}x{raw_h} 与输入 {w}x{h} 不符"
             )));
@@ -267,11 +259,7 @@ fn resize_type0(bgr: &[u8], w: u32, h: u32) -> (Vec<u8>, u32, u32) {
     if resize_h == h && resize_w == w {
         return (bgr.to_vec(), h, w);
     }
-    (
-        cv_resize_linear_bgr(bgr, w, h, resize_w, resize_h),
-        resize_h,
-        resize_w,
-    )
+    (cv_resize_linear_bgr(bgr, w, h, resize_w, resize_h), resize_h, resize_w)
 }
 
 /// `cv2.resize`（8UC3、INTER_LINEAR）的逐位移植（O-24）。
@@ -338,16 +326,11 @@ fn cv_resize_linear_bgr(src: &[u8], sw: u32, sh: u32, dw: u32, dh: u32) -> Vec<u
             let single_tap = xofs[dx] + 1 >= sw;
             for c in 0..3 {
                 let (s0, s1) = if single_tap {
-                    (
-                        i64::from(row0[sx + c]) * 2048,
-                        i64::from(row1[sx + c]) * 2048,
-                    )
+                    (i64::from(row0[sx + c]) * 2048, i64::from(row1[sx + c]) * 2048)
                 } else {
                     (
-                        i64::from(row0[sx + c]) * i64::from(a0)
-                            + i64::from(row0[sx + 3 + c]) * i64::from(a1),
-                        i64::from(row1[sx + c]) * i64::from(a0)
-                            + i64::from(row1[sx + 3 + c]) * i64::from(a1),
+                        i64::from(row0[sx + c]) * i64::from(a0) + i64::from(row0[sx + 3 + c]) * i64::from(a1),
+                        i64::from(row1[sx + c]) * i64::from(a0) + i64::from(row1[sx + 3 + c]) * i64::from(a1),
                     )
                 };
                 // VResizeLinear<uchar,int,short> 特化：两级截断 + 舍入移位。
@@ -401,13 +384,7 @@ fn normalize_chw(bgr: &[u8], w: u32, h: u32) -> Vec<f32> {
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
-fn boxes_from_bitmap(
-    pred: &[f32],
-    map_w: u32,
-    map_h: u32,
-    tile_w: u32,
-    tile_h: u32,
-) -> (Vec<[[f64; 2]; 4]>, Vec<f64>) {
+fn boxes_from_bitmap(pred: &[f32], map_w: u32, map_h: u32, tile_w: u32, tile_h: u32) -> (Vec<[[f64; 2]; 4]>, Vec<f64>) {
     let (map_w, map_h) = (map_w as usize, map_h as usize);
     // Python `pred > thresh`：f32 严格大于（0.3 两侧同为 f32）。
     let mask: Vec<u8> = pred
@@ -438,10 +415,7 @@ fn boxes_from_bitmap(
             // （sside≥3 且 score≥0.5）下 distance>0 必有解，此分支仅防御。
             continue;
         }
-        let unclipped: Vec<(i32, i32)> = unclipped
-            .iter()
-            .map(|&(x, y)| (x as i32, y as i32))
-            .collect();
+        let unclipped: Vec<(i32, i32)> = unclipped.iter().map(|&(x, y)| (x as i32, y as i32)).collect();
         let (box2, sside2) = get_mini_boxes(&unclipped);
         if sside2 < MIN_SIZE + 2.0 {
             continue;
@@ -468,23 +442,10 @@ fn get_mini_boxes(points: &[(i32, i32)]) -> (Vec<(f32, f32)>, f32) {
     // Python `sorted(..., key=lambda p: p[0])`：稳定排序，仅按 x。
     let mut sorted: Vec<(f32, f32)> = corners.to_vec();
     sorted.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-    let (index_1, index_4) = if sorted[1].1 > sorted[0].1 {
-        (0, 1)
-    } else {
-        (1, 0)
-    };
-    let (index_2, index_3) = if sorted[3].1 > sorted[2].1 {
-        (2, 3)
-    } else {
-        (3, 2)
-    };
+    let (index_1, index_4) = if sorted[1].1 > sorted[0].1 { (0, 1) } else { (1, 0) };
+    let (index_2, index_3) = if sorted[3].1 > sorted[2].1 { (2, 3) } else { (3, 2) };
     (
-        vec![
-            sorted[index_1],
-            sorted[index_2],
-            sorted[index_3],
-            sorted[index_4],
-        ],
+        vec![sorted[index_1], sorted[index_2], sorted[index_3], sorted[index_4]],
         rect.width.min(rect.height),
     )
 }
@@ -506,10 +467,7 @@ struct RotatedRectF32 {
 )]
 fn min_area_rect(points: &[(i32, i32)]) -> RotatedRectF32 {
     let hull = convex_hull_ccw(points);
-    let hull_f32: Vec<(f32, f32)> = hull
-        .iter()
-        .map(|&i| (points[i].0 as f32, points[i].1 as f32))
-        .collect();
+    let hull_f32: Vec<(f32, f32)> = hull.iter().map(|&i| (points[i].0 as f32, points[i].1 as f32)).collect();
     let n = hull_f32.len();
     let mut rect = RotatedRectF32 {
         center: (0.0, 0.0),
@@ -521,12 +479,10 @@ fn min_area_rect(points: &[(i32, i32)]) -> RotatedRectF32 {
         let out = rotating_calipers_min_area_rect(&hull_f32);
         rect.center.0 = out[0].0 + (out[1].0 + out[2].0) * 0.5_f32;
         rect.center.1 = out[0].1 + (out[1].1 + out[2].1) * 0.5_f32;
-        rect.width = (f64::from(out[1].0) * f64::from(out[1].0)
-            + f64::from(out[1].1) * f64::from(out[1].1))
-        .sqrt() as f32;
-        rect.height = (f64::from(out[2].0) * f64::from(out[2].0)
-            + f64::from(out[2].1) * f64::from(out[2].1))
-        .sqrt() as f32;
+        rect.width =
+            (f64::from(out[1].0) * f64::from(out[1].0) + f64::from(out[1].1) * f64::from(out[1].1)).sqrt() as f32;
+        rect.height =
+            (f64::from(out[2].0) * f64::from(out[2].0) + f64::from(out[2].1) * f64::from(out[2].1)).sqrt() as f32;
         let radians = f64::from(out[1].1).atan2(f64::from(out[1].0)) as f32;
         rect.angle_deg = (f64::from(radians * 180.0_f32) / std::f64::consts::PI) as f32;
     } else if n == 2 {
@@ -609,15 +565,7 @@ fn convex_hull_ccw(points: &[(i32, i32)]) -> Vec<usize> {
     let mut tl_stack = vec![0_i64; total + 2];
     let tl_count = sklansky(&order, points, 0, maxy_ind as i64, &mut tl_stack, -1, 1);
     let mut tr_stack = vec![0_i64; total + 2];
-    let tr_count = sklansky(
-        &order,
-        points,
-        total as i64 - 1,
-        maxy_ind as i64,
-        &mut tr_stack,
-        -1,
-        -1,
-    );
+    let tr_count = sklansky(&order, points, total as i64 - 1, maxy_ind as i64, &mut tr_stack, -1, -1);
     // !clockwise → 交换（tl 承担右链、tr 承担左链）。
     let (tl_stack, tl_count, tr_stack, tr_count) = (tr_stack, tr_count, tl_stack, tl_count);
     for i in 0..tl_count.saturating_sub(1) {
@@ -640,15 +588,7 @@ fn convex_hull_ccw(points: &[(i32, i32)]) -> Vec<usize> {
     let mut bl_stack = vec![0_i64; total + 2];
     let bl_count = sklansky(&order, points, 0, miny_ind as i64, &mut bl_stack, 1, -1);
     let mut br_stack = vec![0_i64; total + 2];
-    let br_count = sklansky(
-        &order,
-        points,
-        total as i64 - 1,
-        miny_ind as i64,
-        &mut br_stack,
-        1,
-        1,
-    );
+    let br_count = sklansky(&order, points, total as i64 - 1, miny_ind as i64, &mut br_stack, 1, 1);
     let (mut bl_count, mut br_count) = (bl_count, br_count);
 
     if stop_idx >= 0 {
@@ -660,8 +600,7 @@ fn convex_hull_ccw(points: &[(i32, i32)]) -> Vec<usize> {
             -1
         };
         if check_idx == stop_idx
-            || (check_idx >= 0
-                && points[order[check_idx as usize]] == points[order[stop_idx as usize]])
+            || (check_idx >= 0 && points[order[check_idx as usize]] == points[order[stop_idx as usize]])
         {
             // 全部共线：下半为上半镜像（两段各保留 ≤2 点）。
             bl_count = bl_count.min(2);
@@ -732,11 +671,7 @@ fn maybe_cyclic_shift(hullbuf: &mut Vec<usize>) {
 /// `stacksize - 1`。
 #[allow(clippy::too_many_lines)]
 // Signed sentinel indices and the branch layout follow OpenCV's Sklansky_ state machine.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::if_not_else
-)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::if_not_else)]
 fn sklansky(
     order: &[usize],
     points: &[(i32, i32)],
@@ -803,11 +738,7 @@ fn sklansky(
 /// 返回 `[corner, width_vec, height_vec]` 三点（minAreaRect 的 out[0..2]）。
 #[allow(clippy::too_many_lines)]
 // Caliper vectors round f64 intermediates to f32; signed stored indices follow OpenCV.
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss
-)]
+#[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
 fn rotating_calipers_min_area_rect(points: &[(f32, f32)]) -> [(f32, f32); 3] {
     let n = points.len();
     let mut inv_vect_length = vec![0.0_f32; n];
@@ -957,38 +888,10 @@ fn rotating_calipers_min_area_rect(points: &[(f32, f32)]) -> [(f32, f32); 3] {
 fn box_score_fast(pred: &[f32], map_w: usize, map_h: usize, box_pts: &[(f32, f32)]) -> f64 {
     let w = map_w as i64;
     let h = map_h as i64;
-    let xmin = 0_i64.max(
-        box_pts
-            .iter()
-            .map(|p| p.0.floor() as i64)
-            .min()
-            .unwrap_or(0)
-            .min(w - 1),
-    );
-    let xmax = 0_i64.max(
-        box_pts
-            .iter()
-            .map(|p| p.0.ceil() as i64)
-            .max()
-            .unwrap_or(0)
-            .min(w - 1),
-    );
-    let ymin = 0_i64.max(
-        box_pts
-            .iter()
-            .map(|p| p.1.floor() as i64)
-            .min()
-            .unwrap_or(0)
-            .min(h - 1),
-    );
-    let ymax = 0_i64.max(
-        box_pts
-            .iter()
-            .map(|p| p.1.ceil() as i64)
-            .max()
-            .unwrap_or(0)
-            .min(h - 1),
-    );
+    let xmin = 0_i64.max(box_pts.iter().map(|p| p.0.floor() as i64).min().unwrap_or(0).min(w - 1));
+    let xmax = 0_i64.max(box_pts.iter().map(|p| p.0.ceil() as i64).max().unwrap_or(0).min(w - 1));
+    let ymin = 0_i64.max(box_pts.iter().map(|p| p.1.floor() as i64).min().unwrap_or(0).min(h - 1));
+    let ymax = 0_i64.max(box_pts.iter().map(|p| p.1.ceil() as i64).max().unwrap_or(0).min(h - 1));
 
     let roi_w = (xmax - xmin + 1) as usize;
     let roi_h = (ymax - ymin + 1) as usize;
@@ -1223,14 +1126,8 @@ fn clip_line(mw: i32, mh: i32, p1: &mut (i32, i32), p2: &mut (i32, i32)) -> bool
     let bottom = i64::from(mh) - 1;
     let (mut x1, mut y1) = (i64::from(p1.0), i64::from(p1.1));
     let (mut x2, mut y2) = (i64::from(p2.0), i64::from(p2.1));
-    let c1_0 = i32::from(x1 < 0)
-        + i32::from(x1 > right) * 2
-        + i32::from(y1 < 0) * 4
-        + i32::from(y1 > bottom) * 8;
-    let c2_0 = i32::from(x2 < 0)
-        + i32::from(x2 > right) * 2
-        + i32::from(y2 < 0) * 4
-        + i32::from(y2 > bottom) * 8;
+    let c1_0 = i32::from(x1 < 0) + i32::from(x1 > right) * 2 + i32::from(y1 < 0) * 4 + i32::from(y1 > bottom) * 8;
+    let c2_0 = i32::from(x2 < 0) + i32::from(x2 > right) * 2 + i32::from(y2 < 0) * 4 + i32::from(y2 > bottom) * 8;
     let (mut c1, mut c2) = (c1_0, c2_0);
 
     if (c1 & c2) == 0 && (c1 | c2) != 0 {
@@ -1276,15 +1173,7 @@ fn draw_line8(mask: &mut [u8], mw: i32, mh: i32, p1: (i32, i32), p2: (i32, i32))
     let mut pt1 = p1;
     let mut pt2 = p2;
     // LineIterator::init 的二次裁剪（端点越界时）。
-    if pt1.0 < 0
-        || pt1.0 >= mw
-        || pt1.1 < 0
-        || pt1.1 >= mh
-        || pt2.0 < 0
-        || pt2.0 >= mw
-        || pt2.1 < 0
-        || pt2.1 >= mh
-    {
+    if pt1.0 < 0 || pt1.0 >= mw || pt1.1 < 0 || pt1.1 >= mh || pt2.0 < 0 || pt2.0 >= mw || pt2.1 < 0 || pt2.1 >= mh {
         clip_line(mw, mh, &mut pt1, &mut pt2);
     }
     let mut dx = i64::from(pt2.0) - i64::from(pt1.0);
@@ -1324,11 +1213,7 @@ fn draw_line8(mask: &mut [u8], mw: i32, mh: i32, p1: (i32, i32), p2: (i32, i32))
                 y += delta_y as i32;
             }
         }
-        err += if diag {
-            (dx + dx) - (dy + dy)
-        } else {
-            -(dy + dy)
-        };
+        err += if diag { (dx + dx) - (dy + dy) } else { -(dy + dy) };
     }
 }
 
@@ -1453,16 +1338,7 @@ fn find_contours_list_simple(mask: &[u8], w: usize, h: usize) -> Vec<Vec<(i32, i
 #[allow(clippy::cast_sign_loss)]
 fn fetch_contour(img: &mut [i8], pw: usize, origin: (i32, i32), is_hole: bool) -> Vec<(i32, i32)> {
     /// `icvCodeDeltas`（与 `CV_INIT_3X3_DELTAS` 同序：E/NE/N/NW/W/SW/S/SE）。
-    const CODE_D: [(i32, i32); 8] = [
-        (1, 0),
-        (1, -1),
-        (0, -1),
-        (-1, -1),
-        (-1, 0),
-        (-1, 1),
-        (0, 1),
-        (1, 1),
-    ];
+    const CODE_D: [(i32, i32); 8] = [(1, 0), (1, -1), (0, -1), (-1, -1), (-1, 0), (-1, 1), (0, 1), (1, 1)];
     let nbd: i8 = 2;
     let at = |img: &[i8], x: i32, y: i32| img[y as usize * pw + x as usize];
     let mut pts = Vec::new();

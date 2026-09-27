@@ -72,19 +72,12 @@ fn rotation_preference(rotation_degrees: u16) -> u8 {
 /// `attempts` 为空时 panic，对齐 Python `best_attempt` 空序列抛
 /// `ValueError` 的语义。
 pub fn select_best(attempts: &[RecognitionAttempt]) -> &RecognitionAttempt {
-    assert!(
-        !attempts.is_empty(),
-        "at least one recognition attempt is required"
-    );
+    assert!(!attempts.is_empty(), "at least one recognition attempt is required");
     let mut best = 0;
     for index in 1..attempts.len() {
         let candidate = &attempts[index];
         let incumbent = &attempts[best];
-        let better = match candidate
-            .score
-            .partial_cmp(&incumbent.score)
-            .unwrap_or(Ordering::Equal)
-        {
+        let better = match candidate.score.partial_cmp(&incumbent.score).unwrap_or(Ordering::Equal) {
             Ordering::Greater => true,
             Ordering::Equal => {
                 let candidate_text = !candidate.text.is_empty();

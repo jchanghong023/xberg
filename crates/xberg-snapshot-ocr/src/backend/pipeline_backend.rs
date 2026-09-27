@@ -20,8 +20,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use crate::pipeline::{
-    CropRecord, OcrBackend, PipelineError, SMALL_TEXT_SCALE_FACTOR,
-    WIDE_TEXT_HORIZONTAL_SCALE_FACTOR,
+    CropRecord, OcrBackend, PipelineError, SMALL_TEXT_SCALE_FACTOR, WIDE_TEXT_HORIZONTAL_SCALE_FACTOR,
 };
 use crate::types::Quad;
 use crate::types::TileRegion;
@@ -79,12 +78,7 @@ impl WorkerOcrBackend {
     /// # Errors
     /// 任一模型或字典加载失败时返回 [`PipelineError::Backend`]（消息不含
     /// 截图内容与用户数据，O-29/O-30）。
-    pub fn load(
-        det_model: &Path,
-        rec_model: &Path,
-        dict: &Path,
-        intra_threads: usize,
-    ) -> Result<Self, PipelineError> {
+    pub fn load(det_model: &Path, rec_model: &Path, dict: &Path, intra_threads: usize) -> Result<Self, PipelineError> {
         Self::load_with_logging(det_model, rec_model, dict, intra_threads, true)
     }
 
@@ -105,10 +99,9 @@ impl WorkerOcrBackend {
         intra_threads: usize,
         record_calls: bool,
     ) -> Result<Self, PipelineError> {
-        let det = DetPaddlex::from_path(det_model, intra_threads)
-            .map_err(|e| PipelineError::Backend(e.to_string()))?;
-        let rec = RecPaddlex::load(rec_model, dict, intra_threads)
-            .map_err(|e| PipelineError::Backend(e.to_string()))?;
+        let det = DetPaddlex::from_path(det_model, intra_threads).map_err(|e| PipelineError::Backend(e.to_string()))?;
+        let rec =
+            RecPaddlex::load(rec_model, dict, intra_threads).map_err(|e| PipelineError::Backend(e.to_string()))?;
         Ok(Self {
             det,
             rec,
@@ -153,8 +146,7 @@ impl OcrBackend for WorkerOcrBackend {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     fn stretch_recognition_crop(&self, image: &Self::Image) -> Self::Image {
         // ocr.py:262 用 Python round()（半偶）后取整。
-        let width = (f64::from(image.width() as u32) * WIDE_TEXT_HORIZONTAL_SCALE_FACTOR)
-            .round_ties_even() as usize;
+        let width = (f64::from(image.width() as u32) * WIDE_TEXT_HORIZONTAL_SCALE_FACTOR).round_ties_even() as usize;
         image_ops::resize_inter_lanczos4(image, width, image.height())
     }
 
@@ -163,9 +155,7 @@ impl OcrBackend for WorkerOcrBackend {
             0 => image.clone(),
             // 管线只传 additional_rotations 的 90/180/270；rot90 对 1..=3 不可能
             // 失败，防御分支按契约违规原样返回（不产生错误数据流）。
-            degrees => {
-                image_ops::rot90(image, u32::from(degrees / 90)).unwrap_or_else(|_| image.clone())
-            }
+            degrees => image_ops::rot90(image, u32::from(degrees / 90)).unwrap_or_else(|_| image.clone()),
         }
     }
 
@@ -215,11 +205,7 @@ impl OcrBackend for WorkerOcrBackend {
     fn detect(&self, tile_image: &Self::Image) -> Result<(Vec<Quad>, Vec<f64>), PipelineError> {
         let (polys, scores) = self
             .det
-            .detect_tile_detached(
-                tile_image.data(),
-                tile_image.width() as u32,
-                tile_image.height() as u32,
-            )
+            .detect_tile_detached(tile_image.data(), tile_image.width() as u32, tile_image.height() as u32)
             .map_err(|e| PipelineError::Backend(e.to_string()))?;
         let polys = polys
             .into_iter()
@@ -251,10 +237,7 @@ impl OcrBackend for WorkerOcrBackend {
 /// [`OcrBackend::enhance_small_crop`] 原地替换，此处只装填增强前裁剪。
 #[allow(clippy::cast_possible_truncation)] // CropRecord stores dimensions as u32.
 #[must_use]
-pub fn build_record(
-    candidate: crate::types::DetectionCandidate,
-    crop: BgrImage,
-) -> CropRecord<BgrImage> {
+pub fn build_record(candidate: crate::types::DetectionCandidate, crop: BgrImage) -> CropRecord<BgrImage> {
     let source_width = crop.width() as u32;
     let source_height = crop.height() as u32;
     CropRecord {
@@ -265,7 +248,6 @@ pub fn build_record(
         attempts: Vec::new(),
     }
 }
-
 
 // ─────────────────── Xberg glue: assembly from validated parts ───────────────────
 

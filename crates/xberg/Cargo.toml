@@ -272,6 +272,11 @@ paddle-ocr-ort = [
     "dep:reqwest",
     "dep:ureq",
     "dep:ort",
+    # Dev builds resolve ORT at runtime (load-dynamic is unified across the ort
+    # package), so this feature carries the bundled known-good runtime for them —
+    # the same role `transcription` played before the whisper removal. Packaged
+    # builds use `ort-dynamic` plus the staged DLL instead.
+    "ort-bundled",
     "image-encode",
     "dep:ndarray",
     "html",
@@ -341,7 +346,7 @@ sceptre-ocr-candle-cuda = ["sceptre-ocr-candle", "sceptre/candle-cuda"]
 sceptre-wasm = ["dep:sceptre", "sceptre/tract", "image-encode"]
 # Dev default: downloads the pyke prebuilt ONNX Runtime (needs glibc >= 2.38 to run).
 # Release links Microsoft's runtime instead (system strategy) — see publish.yaml (#1284).
-ort-bundled = ["ort?/download-binaries", "ort?/tls-rustls", "xberg-gliner?/ort-bundled"]
+ort-bundled = ["ort?/download-binaries", "ort?/copy-dylibs", "ort?/tls-rustls", "xberg-gliner?/ort-bundled"]
 # Build-time only: configures ORT to load ONNX Runtime dynamically at runtime.
 # No #[cfg] gates — passed through to the `ort` crate.
 ort-dynamic = ["ort?/load-dynamic", "xberg-gliner?/ort-dynamic"]

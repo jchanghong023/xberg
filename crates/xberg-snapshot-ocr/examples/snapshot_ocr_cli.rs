@@ -7,14 +7,18 @@
 //!     --image <image.png> [--json] [--runs N]
 //! ```
 //!
-//! Environment: `ORT_DYLIB_PATH` must point at the onnxruntime shared library
-//! and is pinned BEFORE any session is built, so no search-path DLL can be
-//! loaded first (anti-preemption). Model files are verified against the pinned
-//! `snapshot-pp-ocrv6-small-textsnap` digests at load; mismatch aborts.
+//! Environment: for `load-dynamic` ort builds, `ORT_DYLIB_PATH` must point at
+//! the onnxruntime shared library and is pinned BEFORE any session is built
+//! (anti-preemption); the default statically linked build needs nothing.
+//! Model files are verified against the pinned `snapshot-pp-ocrv6-small-textsnap`
+//! digests at load; mismatch aborts.
 //!
 //! Output: layout text on stdout (or a JSON report with `--json`), timings on
 //! stderr. Repeated `--runs` must produce byte-identical text (determinism
 //! contract, OCR-SNAPSHOT.md SNAP-13).
+
+// parse_args guarantees the fields these expects unwrap are present.
+#![allow(clippy::expect_used)]
 
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -89,11 +93,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         eprintln!("{message}");
         message.into()
     })?;
-    // Pin the onnxruntime library before any session build (anti-preemption).
-    if std::env::var_os("ORT_DYLIB_PATH").is_none() {
-        return Err("ORT_DYLIB_PATH is not set; point it at onnxruntime before loading"
-            .into());
-    }
+    // For load-dynamic ort builds, pin the onnxruntime library before any
+    // session build (anti-preemption). Statically linked builds need nothing.
+    // ORT_DYLIB_PATH, when set, is honored by ort itself.
 
     let image_path = args.image.clone().expect("checked in parse_args");
     let (width, height, bgr) = load_bgr(&image_path)?;

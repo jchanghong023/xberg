@@ -34,8 +34,9 @@
 //!
 //! # Runtime requirements
 //!
-//! - `ort` is compiled with `load-dynamic`; set `ORT_DYLIB_PATH` to the
+//! - with `load-dynamic` builds of `ort`, set `ORT_DYLIB_PATH` to the
 //!   onnxruntime shared library BEFORE calling [`SnapshotOcrModels::load`]
+//!   (statically linked builds resolve ORT at link time and need nothing)
 //!   (pin the same-directory DLL first so no other copy is preemptively
 //!   loaded through the search path).
 //! - All session builds are serialized through the process-wide
@@ -67,23 +68,19 @@ use crate::backend::pipeline_backend::{build_record, WorkerOcrBackend};
 use crate::backend::rec::{RecError, RecPaddlex};
 use crate::backend::sha256::sha256_hex;
 use crate::layout::build_layout;
-use crate::pipeline::{
-    assemble_spans, detect_candidates, recognize_records, OcrBackend, PipelineError,
-};
+use crate::pipeline::{assemble_spans, detect_candidates, recognize_records, OcrBackend, PipelineError};
 use crate::types::Quad;
 
 /// Snapshot model set name (SNAP-02).
 pub const SNAPSHOT_MODEL_SET: &str = "snapshot-pp-ocrv6-small-textsnap";
 
 /// Pinned det model digest: `PP-OCRv6_small_det/inference.onnx` (SNAP-03).
-pub const DET_MODEL_SHA256: &str =
-    "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940";
+pub const DET_MODEL_SHA256: &str = "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940";
 /// Pinned det model size in bytes (SNAP-03).
 pub const DET_MODEL_BYTES: u64 = 9_891_707;
 
 /// Pinned rec model digest: `PP-OCRv6_small_rec/inference.onnx` (SNAP-03).
-pub const REC_MODEL_SHA256: &str =
-    "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed";
+pub const REC_MODEL_SHA256: &str = "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed";
 /// Pinned rec model size in bytes (SNAP-03).
 pub const REC_MODEL_BYTES: u64 = 21_148_338;
 
@@ -299,7 +296,8 @@ impl fmt::Debug for SnapshotOcrModels {
 impl SnapshotOcrModels {
     /// Load the three model members after SHA-256 + size verification.
     ///
-    /// `ORT_DYLIB_PATH` must point at onnxruntime before this call. On any
+    /// For `load-dynamic` builds of `ort`, `ORT_DYLIB_PATH` must point at
+    /// onnxruntime before this call. On any
     /// mismatch the load fails with an [`AssetError`] naming the member and
     /// expected/actual digests; there is no fallback path (SNAP-04/SNAP-05).
     ///
@@ -405,8 +403,7 @@ impl SnapshotOcrModels {
             }
             // Degenerate quads are skipped exactly like the JchTools service
             // (`if let Ok(crop) = warp_perspective_cubic_replicate(...)`).
-            if let Ok(crop) = image_ops::warp_perspective_cubic_replicate(&image, candidate.quad())
-            {
+            if let Ok(crop) = image_ops::warp_perspective_cubic_replicate(&image, candidate.quad()) {
                 records.push(build_record(candidate, crop));
             }
         }
