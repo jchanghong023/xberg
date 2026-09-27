@@ -6,7 +6,7 @@
 
 - PDF 默认抽取图片；省略 `images` 段仍抽取并处理图片。图片 OCR 文本默认追加到输出，显式 `extract_images = false` 能关闭图片输出；图片输出与 OCR 处理是独立开关，不将关闭输出解释为关闭所有 OCR。
 - 内嵌图片默认 OCR，包括没有 `ocr` 配置块的情况。`ocr_embedded_images` 未设置时视为开启，显式 `false` 可关闭；图片处理还须尊重相应 OCR 配置，不能因不输出图片字节而跳过已启用的 OCR。
-- 编入 `paddle-ocr` 时默认后端为 PaddleOCR pp-ocrv6 tiny；否则为 Tesseract。标准包保留 Tesseract 作为可显式选择的后备，允许 `--ocr-backend tesseract` 或 `ocr.backend` 覆盖。
+- 编入 `paddle-ocr` 时默认后端为 PaddleOCR pp-ocrv6 tiny；否则为 Tesseract。标准包保留 Tesseract 作为可显式选择的后备，允许 `--ocr-backend tesseract` 或 `ocr.backend` 覆盖。截图 OCR 是独立能力（模型集 `snapshot-pp-ocrv6-small-textsnap`），不属于 `ocr.backend` 选择集，行为与交付见 [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md)。
 - 未显式配置 `pipeline` 时，不自动合成 Tesseract/PaddleOCR 混合回退链；默认或显式选择的单后端都不能被悄悄扩展。需要混合时由调用方显式配置。
 - Tesseract 语言代码在各消费者使用前统一解析为语言包名，例如 `zh` → `chi_sim`；已有包名保持可用。
 - 验收：缺省 PDF/Office 转换具有抽图及 OCR 结果；关闭图片输出和关闭内嵌 OCR 分别生效；缺省后端与显式选择一致；未配 pipeline 时 `effective_pipeline()` 为 `None`；短语言码与对应包名效果一致。

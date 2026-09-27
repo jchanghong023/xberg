@@ -14,7 +14,6 @@
             paddle_ocr,
             auto_rotate,
             layout_detection,
-            feature = "transcription",
             feature = "chunking-tokenizers",
             feature = "onnx-runtime",
             feature = "ner-onnx",
@@ -32,7 +31,6 @@ use std::time::Duration;
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
     feature = "candle-deepseek-ocr",
-    feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
     all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -45,7 +43,6 @@ use sha2::{Digest, Sha256};
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
     feature = "candle-deepseek-ocr",
-    feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
     all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -58,7 +55,6 @@ use std::io::{BufReader, Read};
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
     feature = "candle-deepseek-ocr",
-    feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
     all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -71,7 +67,6 @@ use std::path::Path;
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
     feature = "candle-deepseek-ocr",
-    feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
     all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -96,7 +91,6 @@ use std::path::PathBuf;
             paddle_ocr,
             auto_rotate,
             layout_detection,
-            feature = "transcription",
             feature = "chunking-tokenizers",
             feature = "onnx-runtime",
             feature = "ner-onnx",
@@ -116,7 +110,6 @@ const DEFAULT_MODEL_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -136,7 +129,6 @@ static QUARANTINE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
         paddle_ocr,
         auto_rotate,
         layout_detection,
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "ner-onnx",
@@ -157,7 +149,6 @@ const HF_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
         paddle_ocr,
         auto_rotate,
         layout_detection,
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "ner-onnx",
@@ -183,7 +174,6 @@ const HF_MAX_RETRY_ATTEMPTS: usize = 2;
         paddle_ocr,
         auto_rotate,
         layout_detection,
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "ner-onnx",
@@ -201,7 +191,6 @@ struct Ipv4FirstResolver;
         paddle_ocr,
         auto_rotate,
         layout_detection,
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "ner-onnx",
@@ -235,7 +224,6 @@ impl reqwest::dns::Resolve for Ipv4FirstResolver {
         paddle_ocr,
         auto_rotate,
         layout_detection,
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "ner-onnx",
@@ -264,7 +252,6 @@ fn order_ipv4_first(addrs: &mut [std::net::SocketAddr]) {
         paddle_ocr,
         auto_rotate,
         layout_detection,
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "ner-onnx",
@@ -305,7 +292,6 @@ pub(crate) fn hf_client_builder() -> hf_hub::HFClientBuilder {
             paddle_ocr,
             auto_rotate,
             layout_detection,
-            feature = "transcription",
             feature = "chunking-tokenizers",
             feature = "onnx-runtime",
             feature = "ner-onnx",
@@ -334,7 +320,6 @@ pub(crate) fn model_download_timeout() -> Duration {
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
     feature = "candle-deepseek-ocr",
-    feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
     all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -353,7 +338,6 @@ pub(crate) fn hf_offline_mode() -> bool {
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
     feature = "candle-deepseek-ocr",
-    feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
     all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -371,7 +355,6 @@ fn env_flag_enabled(value: &std::ffi::OsStr) -> bool {
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
     feature = "candle-deepseek-ocr",
-    feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
     all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -403,7 +386,6 @@ fn offline_cache_miss(repo_id: &str, remote_filename: &str, revision: Option<&st
             paddle_ocr,
             auto_rotate,
             layout_detection,
-            feature = "transcription",
             feature = "chunking-tokenizers",
             feature = "onnx-runtime",
             feature = "ner-onnx",
@@ -461,7 +443,6 @@ where
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
     feature = "candle-deepseek-ocr",
-    feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
     all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -488,7 +469,6 @@ pub(crate) fn download_lock(key: &str) -> std::sync::Arc<std::sync::Mutex<()>> {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings"
@@ -509,7 +489,6 @@ pub(crate) struct ArtifactFileLock {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings"
@@ -532,7 +511,6 @@ impl Drop for ArtifactFileLock {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings"
@@ -559,7 +537,6 @@ pub(crate) fn acquire_artifact_file_lock(path: &Path) -> Result<ArtifactFileLock
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings"
@@ -589,7 +566,6 @@ fn is_lock_contention(error: &std::io::Error) -> bool {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings"
@@ -654,7 +630,6 @@ pub(crate) fn acquire_artifact_file_lock_with_timeout(
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings"
@@ -678,7 +653,6 @@ fn hf_artifact_lock_path(repo_id: &str, cache_dir: Option<&Path>, expected_sha25
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
     feature = "candle-deepseek-ocr",
-    feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
     all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -698,7 +672,6 @@ fn is_sha256_hex(value: &str) -> bool {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings",
@@ -734,18 +707,6 @@ pub(crate) fn hf_cache_key(cache_dir: Option<&Path>) -> String {
         .to_string()
 }
 
-/// Resolve an artifact strictly from an existing Hugging Face cache entry.
-#[cfg(feature = "transcription")]
-pub(crate) fn hf_cached_file(
-    repo_id: &str,
-    remote_filename: &str,
-    revision: Option<&str>,
-    cache_dir: Option<&Path>,
-) -> Result<Option<PathBuf>, String> {
-    let api = hf_client(cache_dir)?;
-    hf_cached_revision_with_client(&api, repo_id, remote_filename, revision)
-}
-
 /// Minimum wall-clock gap between rendered progress lines. hf-hub emits a progress event per
 /// stream chunk, which on a fast link is thousands per second; throttling keeps both the
 /// rendering cost and the emitted log volume bounded.
@@ -758,7 +719,6 @@ pub(crate) fn hf_cached_file(
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings",
@@ -782,7 +742,6 @@ const PROGRESS_RENDER_INTERVAL: Duration = Duration::from_secs(1);
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings",
@@ -806,7 +765,6 @@ struct TracingDownloadProgress {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings",
@@ -830,7 +788,6 @@ struct TracingProgressState {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings",
@@ -868,7 +825,6 @@ impl TracingDownloadProgress {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings",
@@ -928,7 +884,6 @@ impl hf_hub::progress::ProgressHandler for TracingDownloadProgress {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings",
@@ -951,7 +906,6 @@ fn render_progress(message: &str) {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings",
@@ -981,7 +935,6 @@ fn format_transfer(completed: u64, total: u64) -> String {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings",
@@ -1007,7 +960,6 @@ fn format_bytes(bytes: u64) -> String {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings",
@@ -1031,7 +983,6 @@ pub(crate) fn progress_handler(progress: crate::core::config::DownloadProgress) 
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings"
@@ -1124,7 +1075,6 @@ mod progress_tests {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings",
@@ -1171,7 +1121,6 @@ pub(crate) fn hf_resolve_file(
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings",
@@ -1341,7 +1290,6 @@ pub(crate) fn hf_download_revision(repo_id: &str, remote_filename: &str, revisio
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings"
@@ -1483,7 +1431,6 @@ pub(crate) fn hf_force_download_revision(
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
     feature = "candle-deepseek-ocr",
-    feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
     all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -1527,7 +1474,6 @@ fn verified_cached_path(
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -1554,7 +1500,6 @@ struct QuarantinedEntry {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -1621,7 +1566,6 @@ fn quarantine_hf_cache_entry(
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -1649,7 +1593,6 @@ fn deterministic_hf_blob_path(snapshot: &Path, expected_sha256: &str) -> Option<
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -1675,7 +1618,6 @@ fn hf_blob_belongs_to_snapshot(snapshot: &Path, blob: &Path) -> bool {
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -1752,7 +1694,6 @@ fn restore_quarantined_entries(
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -1797,7 +1738,6 @@ pub(crate) fn hf_cached_revision(
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings"
@@ -1880,7 +1820,6 @@ pub(crate) fn parse_sha256_manifest(content: &str) -> Result<Vec<(String, String
     feature = "ner-onnx",
     feature = "candle-paddleocr-vl",
     feature = "candle-deepseek-ocr",
-    feature = "transcription",
     feature = "chunking-tokenizers",
     feature = "onnx-runtime",
     all(feature = "static-embeddings", not(target_arch = "wasm32"))
@@ -1927,7 +1866,6 @@ pub(crate) fn verify_sha256(path: &Path, expected: &str, label: &str) -> Result<
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
         feature = "candle-deepseek-ocr",
-        feature = "transcription",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings"
@@ -2445,7 +2383,6 @@ mod download_deadline_tests {
         paddle_ocr,
         auto_rotate,
         layout_detection,
-        feature = "transcription",
         feature = "onnx-runtime",
         feature = "ner-onnx",
         feature = "static-embeddings"

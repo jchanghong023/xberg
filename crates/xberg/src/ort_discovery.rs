@@ -223,7 +223,6 @@ pub(crate) fn is_explicit_provider_request(
     feature = "auto-rotate",
     feature = "reranker",
     feature = "onnx-runtime",
-    feature = "transcription"
 ))]
 pub(crate) fn apply_execution_providers(
     builder: ort::session::builder::SessionBuilder,
@@ -285,7 +284,6 @@ pub(crate) fn apply_execution_providers(
     feature = "auto-rotate",
     feature = "reranker",
     feature = "onnx-runtime",
-    feature = "transcription"
 ))]
 #[cfg(target_os = "macos")]
 fn build_coreml_ep() -> ort::ep::CoreML {
@@ -319,7 +317,6 @@ fn build_coreml_ep() -> ort::ep::CoreML {
     feature = "auto-rotate",
     feature = "reranker",
     feature = "onnx-runtime",
-    feature = "transcription"
 ))]
 #[cfg(target_os = "macos")]
 fn register_coreml_strict(
@@ -351,7 +348,6 @@ fn register_coreml_strict(
     feature = "auto-rotate",
     feature = "reranker",
     feature = "onnx-runtime",
-    feature = "transcription"
 ))]
 #[cfg(feature = "cuda")]
 fn register_cuda_strict(
@@ -385,7 +381,6 @@ fn register_cuda_strict(
     feature = "auto-rotate",
     feature = "reranker",
     feature = "onnx-runtime",
-    feature = "transcription"
 ))]
 #[cfg(feature = "tensorrt")]
 fn register_tensorrt_strict(
@@ -422,7 +417,6 @@ fn register_tensorrt_strict(
     feature = "auto-rotate",
     feature = "reranker",
     feature = "onnx-runtime",
-    feature = "transcription"
 ))]
 fn register_auto_providers(
     builder: ort::session::builder::SessionBuilder,

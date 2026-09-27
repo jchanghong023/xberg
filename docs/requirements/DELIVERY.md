@@ -6,10 +6,10 @@
 
 - 开发 CLI 和出厂包采用同一标准 feature 集：`formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api`，关闭 default features；HTTP 服务 `xberg serve` 必须存在。
 - 不含 heic、pdfium、candle、MCP、embedding、NER 或 `layout-detection`，不附带 pdfium.dll。lib 测试可保留上游 layout 专属能力以维持测试覆盖，这不是向出厂包恢复 layout 能力。
-- Windows zip 内含可运行的 xberg.exe、所需 ONNX Runtime/MSVC CRT DLL、Whisper tiny 和 PaddleOCR pp-ocrv6 tiny 模型；Paddle 模型含 det、rec、dict、textline-cls。模型须校验 sha256/大小，并以包内 `models/` 的 HF 缓存布局离线可用。
-- 不分发 RT-DETR/TATR，也不把未使用的 SLANeXT、SLANet_plus、table_classifier、pp_doclayout_v3 纳入必需模型。OCR 位置保真以 [OCR.md](OCR.md) 为准。
-- 打包必须验证干净 PATH 下的 `--version`、DLL 导入闭包以及带 OCR 配置的离线转换。正向 smoke 要求转换成功、出现 `PaddleOCR engine initialized successfully` 且无离线缺模型诊断；有必需模型时必须追加空缓存负向探测，并出现 HF 离线缺模型诊断。负向要求是诊断，不保证进程必须非零退出。
-- 验收：离线包不依赖用户机器偶然已有的 DLL/模型缓存，抽取/OCR/Whisper 可用；远程与本地使用同一打包脚本。外部 ffmpeg 回退前提见 [TRANSCRIPTION.md](TRANSCRIPTION.md)。
+- Windows zip 内含可运行的 xberg.exe、所需 ONNX Runtime/MSVC CRT DLL、PaddleOCR pp-ocrv6 tiny 模型（det、rec、dict、textline-cls，HF 缓存布局）、截图 OCR 模型集（`models/snapshot-ocr/`：det.onnx、rec.onnx、dict.txt，即 TextSnap PP-OCRv6 small 固定字节，见 [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md)）、媒体转写资产（`models/sense_voice_zh_en_ja_ko_yue_2024_07_17/` 的 `model.int8.onnx` 与 `tokens.txt`、`models/vad/silero_vad.onnx`）与转写原生库（`sherpa-onnx/` 的 sherpa-onnx-c-api/cxx-api 与配套 onnxruntime DLL、`ffmpeg/` 的 avutil-61/swresample-7/avcodec-63/avformat-63 及其 LICENSE）。全部模型与 DLL 须校验 sha256/大小，离线可用；Whisper 模型不再分发。
+- 不分发 RT-DETR/TATR，也不把未使用的 SLANeXT、SLANet_plus、table_classifier、pp_doclayout_v3 纳入必需模型。OCR 位置保真以 [OCR.md](OCR.md) 为准，截图通道以 [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md) 为准。
+- 打包必须验证干净 PATH 下的 `--version`、DLL 导入闭包以及带 OCR 配置的离线转换。正向 smoke 要求转换成功、出现 `PaddleOCR engine initialized successfully` 且无离线缺模型诊断，并追加截图 OCR（对内置样图出非空文本）与媒体转写（对内置样音出段结构或明确「无音频轨道/未检测到语音」）各一项；有必需模型时必须追加空缓存负向探测，并出现 HF 离线缺模型诊断（覆盖文档 OCR、截图 OCR 与转写资产）。负向要求是诊断，不保证进程必须非零退出。
+- 验收：离线包不依赖用户机器偶然已有的 DLL/模型缓存，抽取、文档 OCR、截图 OCR 与媒体转写可用；远程与本地使用同一打包脚本。
 
 ## 发布与测试门结果
 

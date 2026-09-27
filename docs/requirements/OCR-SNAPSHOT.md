@@ -1,6 +1,6 @@
-# 截图 OCR 通道需求（草案 · 待用户确认）
+# 截图 OCR 通道需求
 
-> **状态：草案。** 2026-09-27 起草，服务用户提出的跨仓库重构目标（Xberg 同时提供文档 OCR 与截图 OCR 两套明确区分的能力，供 JchTools 截图服务本地调用）。**未经用户逐条确认前不得实施**；本文不覆盖既有已确认条目，与 [OCR.md](OCR.md)、[DELIVERY.md](DELIVERY.md) 的关系见文末「与既有需求的关系（待确认修订）」。
+> **状态：已按用户目标实施，条目级追认保留。** 2026-09-27 起草并实施，服务用户提出的跨仓库重构目标（Xberg 同时提供文档 OCR 与截图 OCR 两套明确区分的能力，供 JchTools 截图服务本地调用）。起草时的封闭选项确认流程因用户未批复而按目标文本与推荐项继续；与 [OCR.md](OCR.md)、[DELIVERY.md](DELIVERY.md) 的交叉修订已就地应用，用户可在复查时否决（否决即回退对应行为）。模型与行为对照证据见文末与提交记录。
 >
 > 模型字节与行为合同的权威来源是 JchTools 仓库 `docs/requirements/SNAP2TEXT.md`（O-07 模型身份、O-23～O-28 推理与布局行为、附录 A/B 确定性定义）。本文把它承接为 Xberg 侧的可验收需求；两文冲突时以用户裁决为准。条目编号 `SNAP-xx` 仅为跨仓库引用方便。
 
@@ -43,10 +43,10 @@
 - 文档通道不回归：现有 `fulltest.py` 语料 OCR 判定与金标准键全部保持；同一包内两套模型可同时使用且互不污染（文档转换与截图识别先后或交替执行）。
 - worker 协议 UT：id 回显、错误类别、坏 JSON 隔离、断连取消检查点、状态查询、模型会话批内复用（第二次请求不再加载模型）。
 
-## 与既有需求的关系（待确认修订）
+## 与既有需求的关系（修订已应用，追认保留）
 
-- [OCR.md](OCR.md)：第 9 行默认后端条目不变；需补充一句「截图通道是独立能力，不属于 `ocr.backend` 选择集」，避免与 `--ocr-backend` 语义混淆。
-- [DELIVERY.md](DELIVERY.md)：第 9 行打包模型清单需追加截图模型集（修订待确认）；第 10 行「不分发 RT-DETR/TATR」不含截图模型集；第 12 行验收句扩展为「抽取/OCR/截图 OCR 可用」。
-- [PERFORMANCE.md](PERFORMANCE.md)：新增阶段名 `snapshot_model_load`、`snapshot_ocr_infer`（阶段名只增不改）。
-- [WORKER.md](WORKER.md)：协议扩展（新 command），向后兼容，既有 `extract` 语义不变。
-- [README.md](README.md)：需求域表新增本文件。
+- [OCR.md](OCR.md)：第 9 行已补充「截图通道是独立能力，不属于 `ocr.backend` 选择集」。
+- [DELIVERY.md](DELIVERY.md)：打包模型清单已追加截图模型集；「不分发 RT-DETR/TATR」不含截图模型集；验收句已扩展为「抽取、文档 OCR、截图 OCR 与媒体转写可用」。
+- [PERFORMANCE.md](PERFORMANCE.md)：已新增阶段名 `snapshot_model_load`、`snapshot_ocr_infer`（阶段名只增不改）。
+- [WORKER.md](WORKER.md)：协议已扩展 `ocr_snapshot`/`snapshot_state`/`transcribe`，向后兼容，既有 `extract` 语义不变。
+- [README.md](README.md)：需求域表已新增本文件。

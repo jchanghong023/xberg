@@ -91,4 +91,4 @@ pub use summarization::SummarizationConfig;
 pub use translation::TranslationConfig;
 
 #[cfg(feature = "transcription-types")]
-pub use transcription::{TranscriptionConfig, WhisperModel};
+pub use transcription::TranscriptionConfig;

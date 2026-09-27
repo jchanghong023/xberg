@@ -341,8 +341,8 @@ pub struct ExtractionConfig {
     /// Transcription (speech-to-text) configuration for audio/video files.
     ///
     /// When set and `enabled`, files with audio/video MIME types (mp3, mp4,
-    /// m4a, wav, webm, etc.) are routed to the Whisper-based transcription
-    /// pipeline. The actual heavy dependencies are only active under the
+    /// m4a, wav, webm, etc.) are routed to the SenseVoice transcription
+    /// pipeline (FFmpeg DLL decode → Silero VAD → SenseVoice INT8). The actual heavy dependencies are only active under the
     /// `transcription` feature; the field is visible under `transcription-types`
     /// (including on WASM and Android targets that use the no-ORT preset).
     ///

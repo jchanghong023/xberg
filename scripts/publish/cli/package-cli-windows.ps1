@@ -18,21 +18,53 @@ with the recognized lines re-laid-out as a monospace `text` grid
 (`rendering/ocr_layout.rs`) so their relative positions survive.
 `--no-default-features` drops the heavy default stacks (embeddings,
 candle-VLM). Deliberately excluded: heic (no stock Windows libheif build path),
-pdfium, mcp, embedding/NER, layout detection. Whisper tiny is bundled so
-video/audio inputs transcribe offline; the PaddleOCR pp-ocrv6 tiny set
-(~13 MiB: det + rec + dict + textline cls) is bundled so OCR works offline.
+pdfium, mcp, embedding/NER, layout detection. Whisper is no longer distributed:
+the only transcription chain is FFmpeg shared-library decode -> Silero VAD ->
+SenseVoice INT8 via runtime-loaded sherpa-onnx, and the PaddleOCR pp-ocrv6
+tiny set (~13 MiB: det + rec + dict + textline cls) is bundled so OCR works
+offline.
+
+Beyond the HF-cached PaddleOCR models, the bundle stages the media capability
+assets from -MediaAssetRoot (never downloaded by this script, every file
+verified against a pinned size + SHA-256):
+  models/snapshot-ocr/{det.onnx,rec.onnx,dict/dict.txt}      screenshot OCR (TextSnap PP-OCRv6 small)
+  models/sense_voice_zh_en_ja_ko_yue_2024_07_17/{model.int8.onnx,tokens.txt}
+  models/vad/silero_vad.onnx                                 Silero VAD
+  sherpa-onnx/{sherpa-onnx-c-api,sherpa-onnx-cxx-api,onnxruntime,
+               onnxruntime_providers_shared}.dll + LICENSE   v1.13.6 C API + its ORT
+  ffmpeg/{avutil-61,swresample-7,avcodec-63,avformat-63}.dll
+  + LICENSE.txt                                              n9.0.2 shared LGPL
+  samples/silence-1s.wav                                     offline-smoke audio fixture
+
+CI asset provisioning (not automated here): a CI runner must populate
+-MediaAssetRoot before invoking this script, from the same public sources the
+JchTools release pipeline uses -- each file is hash-pinned below, so any
+equivalent source works:
+  snapshot models (TextSnap conversion artifacts, byte-pinned; published with
+    the JchTools release assets) -> <root>/snapshot-models/
+  SenseVoice + Silero VAD (k2-fsa sherpa-onnx "asr-models" release assets) ->
+    <root>/media-models/models/
+  sherpa-onnx v1.13.6 win-x64 dynamic libraries (k2-fsa sherpa-onnx release)
+    -> <root>/media-dlls/
+  FFmpeg n9.0.2 shared LGPL (BtbN autobuild):
+    https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-24-14-14/ffmpeg-n9.0.2-3-ga5923073bf-win64-lgpl-shared-9.0.zip
+    -> <root>/media-dlls/ffmpeg/
+  sherpa-onnx Apache-2.0 license text (verified byte-identical to the pinned
+    copy below):
+    https://raw.githubusercontent.com/k2-fsa/sherpa-onnx/v1.13.6/LICENSE
+    -> <root>/media-dlls/sherpa-onnx/LICENSE
 
 Before zipping, the staged tree must pass: a cleaned-PATH `--version` probe,
 in-tree MSVC CRT deployment, the shared PE import-closure gate
 (scripts/ci/verify-windows-dll-closure.ps1 -RequireImportClosure), and an
-offline smoke test that proves the bundled models are what the binary loads --
-the same command against an empty cache must fail instead of silently
-downloading.
+offline smoke test that proves the bundled models and native libraries are
+what the binary loads -- document OCR against the staged cache plus the same
+commands against an empty/missing model set must report the offline
+missing-model diagnostics instead of silently downloading.
 
 Every stage that can overlap does, and all of it is throttled by -Jobs: the
-pinned Whisper tiny files race the cargo build into
-target/package-models-<target>; the stage-directory writes
-and the validation probes run concurrently. While any of that runs the script
+stage-directory writes and the validation probes run concurrently. While any
+of that runs the script
 samples system CPU and, at the end,
 writes the sampling log and a "quiet window" report to
 target/package-cpu-<timestamp>.csv and -summary.txt, so a stage that leaves the
@@ -65,6 +97,16 @@ param(
   # no -Jobs, so CI behavior is unchanged.
   [int]$Jobs = 0,
   [string]$OrtVersion = "1.24.2",
+  # Root of the locally provisioned media assets, layout:
+  #   <root>/snapshot-models/{det.onnx,rec.onnx,dict/dict.txt}
+  #   <root>/media-models/models/{sense_voice_zh_en_ja_ko_yue_2024_07_17,vad}/...
+  #   <root>/media-dlls/{sherpa-onnx-*.dll,onnxruntime*.dll}
+  #   <root>/media-dlls/ffmpeg/{av*.dll,swresample-7.dll,LICENSE.txt}
+  #   <root>/media-dlls/sherpa-onnx/LICENSE
+  # The assets are staged (copied + hash-verified), never downloaded; see the
+  # CI provisioning notes in the header comment. Empty resolves to
+  # <repo>/.tmp/assets.
+  [string]$MediaAssetRoot = "",
   # CPU sampling: one sample every -MonitorIntervalSec, a run of samples below
   # -QuietCpuPct lasting -QuietSeconds or longer is reported as a quiet window.
   # Anything at or under 20% of the machine is treated as a stalled/serial stage.
@@ -97,10 +139,18 @@ $Stage = Join-Path $RepoRoot $StageName
 $ZipPath = Join-Path $RepoRoot "$StageName.zip"
 $StageExe = Join-Path $Stage "xberg.exe"
 $ModelsRoot = Join-Path $Stage "models"
-# Persistent local model cache (same HF layout as the bundle). Whisper + any
-# already-verified OCR file is reused across runs; the Stage wipe never
+# Persistent local model cache (same HF layout as the bundle). Any
+# already-verified PaddleOCR file is reused across runs; the Stage wipe never
 # touches this directory.
 $ModelCacheRoot = Join-Path $RepoRoot "target/package-models-$Target"
+# Media assets are never downloaded: empty -MediaAssetRoot means the
+# conventional local layout under <repo>/.tmp/assets.
+$MediaAssetRoot = if ([string]::IsNullOrWhiteSpace($MediaAssetRoot)) {
+  Join-Path $RepoRoot ".tmp/assets"
+}
+else {
+  $MediaAssetRoot
+}
 
 # Keep in sync with AGENTS.md「编译」小节. Fork scope: file→Markdown + OCR +
 # transcription + HTTP API (`xberg serve`). No heic/pdfium/candle/mcp/
@@ -123,8 +173,7 @@ $Features = @(
 # were removed together with the layout feature (2026-09-21 requirement change:
 # no layout model, image input is OCR-only); the manifest still lists them plus
 # SLANeXT/SLANet_plus/table-classifier/pp_doclayout_v3, and each spec below must
-# match exactly one entry. Whisper tiny is staged separately via
-# $TranscriptionFiles (not listed by `cache manifest`).
+# match exactly one entry.
 # PaddleOCR pp-ocrv6 tiny (~13 MiB): det + rec + dict + the v2 textline
 # orientation classifier the v6 path still resolves. `small`/`medium`
 # det/rec entries stay out of the bundle — only the default tier ships.
@@ -135,21 +184,48 @@ $RequiredModels = @(
   @{ Label = "paddle cls"; Regex = '^v2/classifiers/PP-LCNet_x1_0_textline_ori\.onnx$' }
 )
 
-# The transcription model the runtime resolves for `transcription.model = "tiny"`
-# (video/audio extraction). `xberg cache manifest` does not list it -- the CLI
-# resolves it through hf-hub by repository name at use time -- so the files are
-# pinned here instead: repository revision plus size and SHA256 for every file,
-# staged into the HF cache layout hf-hub reads. Bundled because the requirement
-# is that a shipped bundle transcribes offline: without these five files the
-# first video input attempts a download instead of transcribing.
-$TranscriptionRepo = "onnx-community/whisper-tiny"
-$TranscriptionRevision = "ff4177021cc41f7db950912b73ea4fdf7d01d8e7"
-$TranscriptionFiles = @(
-  @{ Path = "config.json"; SizeBytes = 2243; Sha256 = "46aeea0a406afbeb563fc8e59ca10609203df4299af6a83f73752fef369efd2d" }
-  @{ Path = "tokenizer.json"; SizeBytes = 2480466; Sha256 = "27fc476bfe7f17299480be2273fc0608e4d5a99aba2ab5dec5374b4482d1a566" }
-  @{ Path = "onnx/encoder_model.onnx"; SizeBytes = 32904992; Sha256 = "6642befb640f950d4a8cbbd17834d59e7e75f575b81ccf213e06b050623ab1dd" }
-  @{ Path = "onnx/decoder_model.onnx"; SizeBytes = 118397483; Sha256 = "ab79e3f2a9a3d98f159f853a3172120a38af7eb5f7863d706aa7d39c228f009e" }
-  @{ Path = "onnx/decoder_with_past_model.onnx"; SizeBytes = 113638998; Sha256 = "0485135066eb1d36dcb04dbabd0cc1141c7cd8c442217abd0798d55fe2bc6bed" }
+# Byte-pinned media capability assets, staged from -MediaAssetRoot (copied and
+# verified, never downloaded -- see the CI provisioning notes in the header).
+# Whisper tiny is no longer distributed: the only transcription chain is
+# FFmpeg DLL decode -> Silero VAD -> SenseVoice INT8 via runtime-loaded
+# sherpa-onnx, so the bundle ships those models and native libraries instead
+# of an HF snapshot. Every entry is checked by size + SHA-256 at the staged
+# copy; a missing source fails the run. `RepoRelative` entries resolve against
+# the repository instead of -MediaAssetRoot.
+$PinnedAssets = @(
+  # Screenshot OCR model set (TextSnap PP-OCRv6 small conversions, SNAP-03).
+  # The dict lives under dict/ because the loader resolves <root>/dict/dict.txt.
+  @{ Label = "snapshot det"; Source = "snapshot-models/det.onnx"; Target = "models/snapshot-ocr/det.onnx"; SizeBytes = 9891707; Sha256 = "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940" }
+  @{ Label = "snapshot rec"; Source = "snapshot-models/rec.onnx"; Target = "models/snapshot-ocr/rec.onnx"; SizeBytes = 21148338; Sha256 = "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed" }
+  @{ Label = "snapshot dict"; Source = "snapshot-models/dict/dict.txt"; Target = "models/snapshot-ocr/dict/dict.txt"; SizeBytes = 74947; Sha256 = "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d" }
+  # SenseVoice INT8 + tokens + Silero VAD (the transcription model set the
+  # runtime pins in its own manifest and re-verifies at load).
+  @{ Label = "sensevoice model"; Source = "media-models/models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx"; Target = "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx"; SizeBytes = 239233841; Sha256 = "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51" }
+  @{ Label = "sensevoice tokens"; Source = "media-models/models/sense_voice_zh_en_ja_ko_yue_2024_07_17/tokens.txt"; Target = "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/tokens.txt"; SizeBytes = 315894; Sha256 = "f449eb28dc567533d7fa59be34e2abca8784f771850c78a47fb731a31429a1dc" }
+  @{ Label = "silero vad"; Source = "media-models/models/vad/silero_vad.onnx"; Target = "models/vad/silero_vad.onnx"; SizeBytes = 643854; Sha256 = "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6" }
+  # sherpa-onnx v1.13.6 C API + the ONNX Runtime build it ships with (loaded
+  # from this directory at run time, never PATH).
+  @{ Label = "sherpa c api"; Source = "media-dlls/sherpa-onnx-c-api.dll"; Target = "sherpa-onnx/sherpa-onnx-c-api.dll"; SizeBytes = 2866688; Sha256 = "c372657098ced2cac7d0a54d2926f3ce61542b06ad0a6eb71c8aee8c186db6c9" }
+  @{ Label = "sherpa cxx api"; Source = "media-dlls/sherpa-onnx-cxx-api.dll"; Target = "sherpa-onnx/sherpa-onnx-cxx-api.dll"; SizeBytes = 128512; Sha256 = "a90a5e2065a23e52996b5aed2e296f6d71c85b3966ec77fbda57604d1defcbdc" }
+  @{ Label = "sherpa ort"; Source = "media-dlls/onnxruntime.dll"; Target = "sherpa-onnx/onnxruntime.dll"; SizeBytes = 16720896; Sha256 = "4ee0ae76cbf51bde6999f36829939b2b06d340ab57867ef82b61a0b674111efa" }
+  @{ Label = "sherpa ort providers"; Source = "media-dlls/onnxruntime_providers_shared.dll"; Target = "sherpa-onnx/onnxruntime_providers_shared.dll"; SizeBytes = 10752; Sha256 = "cd7245821ad7054d1904ac221ca3d6b913c0e8977f0b408787f3bc2c430a5403" }
+  @{ Label = "sherpa license"; Source = "media-dlls/sherpa-onnx/LICENSE"; Target = "sherpa-onnx/LICENSE"; SizeBytes = 11358; Sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30" }
+  # FFmpeg n9.0.2 shared LGPL: the four decode/resample libraries the
+  # transcription chain loads, plus the license that must travel with them.
+  @{ Label = "ffmpeg avutil"; Source = "media-dlls/ffmpeg/avutil-61.dll"; Target = "ffmpeg/avutil-61.dll"; SizeBytes = 3016704; Sha256 = "26ee298e9e71ec1d018d0394bc8f967f6742fc73380b9a196fa95737a1ac3a9b" }
+  @{ Label = "ffmpeg swresample"; Source = "media-dlls/ffmpeg/swresample-7.dll"; Target = "ffmpeg/swresample-7.dll"; SizeBytes = 734720; Sha256 = "aea51fb6a87787276334d77fa3d472154641dad9fc7815245f690fdca41ec572" }
+  @{ Label = "ffmpeg avcodec"; Source = "media-dlls/ffmpeg/avcodec-63.dll"; Target = "ffmpeg/avcodec-63.dll"; SizeBytes = 91182080; Sha256 = "9d82d5c867632d3c0758edb6273b47ad8f3e97aeda66d4c4ac784f00320597f8" }
+  @{ Label = "ffmpeg avformat"; Source = "media-dlls/ffmpeg/avformat-63.dll"; Target = "ffmpeg/avformat-63.dll"; SizeBytes = 22764032; Sha256 = "9b41797f2a749765f8c811b015461e737d09ef99bdf344c4c9bb5e4da30fe320" }
+  @{ Label = "ffmpeg license"; Source = "media-dlls/ffmpeg/LICENSE.txt"; Target = "ffmpeg/LICENSE.txt"; SizeBytes = 7651; Sha256 = "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768" }
+  # PaddleOCR ONNX 许可材料（SNAP-19）：xberg-io/paddleocr-onnx-models 的模型
+  # 权重按 Apache-2.0 再分发；标准 Apache-2.0 许可文本与 sherpa-onnx 的 LICENSE
+  # 字节相同（cfc7749b…），随 HF 缓存一起放在 models/ 根，HF 缓存扫描只识别
+  # models--* 目录，多出的许可文件不影响加载。
+  @{ Label = "paddle license"; Source = "media-dlls/sherpa-onnx/LICENSE"; Target = "models/paddleocr-onnx-models-LICENSE.txt"; SizeBytes = 11358; Sha256 = "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30" }
+  # The offline smoke's audio fixture: 1s of silence, extracted in the bundle
+  # so the transcription probe proves the decode -> VAD -> SenseVoice chain
+  # reports "no speech detected" instead of inventing a transcript.
+  @{ Label = "sample audio"; RepoRelative = $true; Source = "test_documents/audio/silence-1s.wav"; Target = "samples/silence-1s.wav"; SizeBytes = 32044; Sha256 = "643f8a8dc8bd9c19225afffad2becfec5426180b3749cb208abdf1a6c8354efc" }
 )
 
 # MSVC runtime DLLs the loader needs beside the binary when a shipped PE imports
@@ -406,9 +482,10 @@ function Test-ModelFile([string]$Path, [string]$Sha256, [int64]$SizeBytes) {
 }
 
 function Get-RequiredModelEntries([string]$Exe, [string]$ModelsRoot) {
-  # No layout models requested (fork no longer compiles the layout feature);
-  # Whisper is handled by Get-TranscriptionModelEntries. Skip the cache-manifest
-  # probe entirely.
+  # No layout models requested (fork no longer compiles the layout feature).
+  # The media capability assets (snapshot OCR / SenseVoice / VAD / sherpa-onnx
+  # / FFmpeg) are staged from $PinnedAssets below and are not listed by the
+  # manifest.
   if ($RequiredModels.Count -eq 0) {
     return @()
   }
@@ -447,25 +524,6 @@ function Get-RequiredModelEntries([string]$Exe, [string]$ModelsRoot) {
     }
   }
   return @($selected)
-}
-
-function Get-TranscriptionModelEntries([string]$ModelsRoot) {
-  # Same shape as Get-RequiredModelEntries, but the file list comes from the
-  # pinned $TranscriptionFiles instead of the CLI manifest. Target paths are the
-  # Hugging Face cache layout: models--<owner>--<repo>/snapshots/<rev>/<file>.
-  $cacheRepo = "models--" + $TranscriptionRepo.Replace('/', '--')
-  $snapshot = Join-Path (Join-Path $ModelsRoot $cacheRepo) ("snapshots/" + $TranscriptionRevision)
-  $entries = foreach ($file in $TranscriptionFiles) {
-    [pscustomobject]@{
-      Label        = "Whisper tiny $($file.Path)"
-      RelativePath = "$cacheRepo/snapshots/$TranscriptionRevision/$($file.Path)"
-      Sha256       = $file.Sha256
-      SizeBytes    = [int64]$file.SizeBytes
-      Url          = "https://huggingface.co/$TranscriptionRepo/resolve/$TranscriptionRevision/$($file.Path)"
-      Target       = Join-Path $snapshot ($file.Path.Replace('/', '\'))
-    }
-  }
-  return @($entries)
 }
 
 # Shared download worker. A ThreadJob cannot dot-source this script or call its
@@ -652,7 +710,6 @@ function Install-CrtDlls([string]$Stage, [string]$RepoRoot) {
 
 Push-Location $RepoRoot
 $cpuJob = $null
-$whisperJob = $null
 $modelJob = $null
 $emptyCache = $null
 $validateRoot = $null
@@ -739,16 +796,9 @@ try {
     Write-Host "  using the ONNX Runtime staged by the environment (ORT_LIB_LOCATION=$env:ORT_LIB_LOCATION)"
   }
 
-  # Whisper is fully pinned here (URL + SHA + size) and does not need the built
-  # exe. Prefetch it into the persistent model cache so a cold
-  # run does not wait until after CRT to pull ~265MB.
-  New-Item -ItemType Directory -Path $ModelCacheRoot -Force | Out-Null
-  $whisperCacheEdges = @(Get-TranscriptionModelEntries -ModelsRoot $ModelCacheRoot |
-    Where-Object { -not (Test-ModelFile $_.Target $_.Sha256 $_.SizeBytes) })
-  if ($whisperCacheEdges.Count -gt 0) {
-    Write-Host "whisper: prefetching $($whisperCacheEdges.Count) file(s) into $ModelCacheRoot (races cargo build)"
-    $whisperJob = Start-ModelDownloadJob -Plan $whisperCacheEdges -Throttle ([Math]::Min(4, $Jobs)) -LocalCache ""
-  }
+  # The media asset staging does not need the built exe either, but the pinned
+  # copies are verified inside the Stage phase below, which already overlaps
+  # the cargo build; there is nothing left to prefetch ahead of it.
 
   Write-Phase "Build"
   Write-Host "  xberg-cli, $($Features.Count) features, $Jobs jobs"
@@ -773,17 +823,10 @@ try {
     throw "expected binary at $builtExe after the build"
   }
 
-  if ($whisperJob) {
-    Complete-ModelInstall -Plan @() -Job $whisperJob | Out-Null
-    $whisperJob = $null
-    Write-Host "  whisper prefetch into $ModelCacheRoot done"
-  }
-
   # Manifest only needs the freshly built target exe (normal PATH / MSVC CRT),
   # not the staged tree. Resolve OCR edges here so downloads can overlap
   # Stage + CRT instead of waiting for both.
   $selected = @(Get-RequiredModelEntries -Exe $builtExe -ModelsRoot $ModelsRoot)
-  $selected += @(Get-TranscriptionModelEntries -ModelsRoot $ModelsRoot)
 
   Write-Phase "Stage"
   Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
@@ -794,8 +837,8 @@ try {
   Write-Host "  staged xberg.exe"
 
   # Start model installs into the freshly created Stage/models while the rest
-  # of Stage and CRT run. Cache hits (Whisper + previous OCR) copy
-  # locally; misses download.
+  # of Stage and CRT run. Cache hits (previous OCR runs) copy locally;
+  # misses download.
   $modelPlan = @($selected | Where-Object { -not (Test-ModelFile $_.Target $_.Sha256 $_.SizeBytes) })
   $modelSkipped = $selected.Count - $modelPlan.Count
   if ($modelSkipped -gt 0) { Write-Host "  $modelSkipped model file(s) already present and verified" }
@@ -808,7 +851,7 @@ try {
   # bounded by -Jobs. Each reports its own outcome instead of throwing, so one
   # failure cannot hide another; the parent summarizes and throws once.
   $ortLib = $env:ORT_LIB_LOCATION
-  $stageTasks = @("ort-dlls", "licenses", "launcher")
+  $stageTasks = @("ort-dlls", "media-assets", "licenses", "launcher")
   $stageResults = @($stageTasks) | ForEach-Object -Parallel {
     $ProgressPreference = "SilentlyContinue"
     # A parallel block runs in a fresh runspace: the caller's
@@ -830,6 +873,32 @@ try {
           }
           "$($dlls.Count) ONNX Runtime DLL(s)"
         }
+        "media-assets" {
+          # Staging loop for the byte-pinned media assets. The helper functions
+          # of this script are not visible inside a parallel runspace, so the
+          # size + SHA-256 check is spelled out here; verifying the staged copy
+          # (not the source) proves both the source bytes and the copy in one
+          # hash pass. The assets are never downloaded: a missing source is a
+          # provisioning failure with a pointing message, not a fetch.
+          $pinnedTotal = 0L
+          foreach ($asset in $using:PinnedAssets) {
+            $sourceRoot = if ($asset.RepoRelative) { $using:RepoRoot } else { $using:MediaAssetRoot }
+            $source = Join-Path $sourceRoot ($asset.Source -replace '/', '\')
+            $target = Join-Path $using:Stage ($asset.Target -replace '/', '\')
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+              throw "media asset '$($asset.Label)' is missing at '$source' (media assets are never downloaded; populate -MediaAssetRoot, see the provisioning notes in this script's header)"
+            }
+            $assetDir = Split-Path -Parent $target
+            New-Item -ItemType Directory -Path $assetDir -Force | Out-Null
+            Copy-Item -LiteralPath $source -Destination $target -Force
+            if ((Get-Item -LiteralPath $target).Length -ne $asset.SizeBytes -or
+                (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash -ne $asset.Sha256) {
+              throw "media asset '$($asset.Label)' failed the pinned size/SHA-256 check at '$target' (pinned $($asset.SizeBytes) bytes / $($asset.Sha256))"
+            }
+            $pinnedTotal += $asset.SizeBytes
+          }
+          "$($using:PinnedAssets.Count) media asset file(s), $([Math]::Round($pinnedTotal / 1MB, 1)) MB (size+sha256 verified)"
+        }
         "licenses" {
           foreach ($file in @("LICENSE", "THIRD_PARTY_LICENSES.md")) {
             Copy-Item -LiteralPath (Join-Path $using:RepoRoot $file) -Destination (Join-Path $using:Stage $file) -Force
@@ -837,11 +906,22 @@ try {
           "LICENSE, THIRD_PARTY_LICENSES.md"
         }
         "launcher" {
+          # The env lines pin the media capability locations so a user who runs
+          # the bundle through xberg.cmd gets every shipped channel offline
+          # without any setup: SenseVoice models + sherpa-onnx + FFmpeg all
+          # resolve into the bundle (the sensevoice exe-adjacent candidates do
+          # not include the sherpa-onnx/ subdirectory), and ORT_DYLIB_PATH pins
+          # the bundle root onnxruntime.dll that both paddle-ocr and the
+          # snapshot OCR channel load (api-18 compatible).
           $launcher = @(
             "@echo off"
             "setlocal"
             'set "XBERG_ROOT=%~dp0"'
             'set "HF_HUB_CACHE=%XBERG_ROOT%models"'
+            'set "XBERG_SENSEVOICE_MODEL_DIR=%XBERG_ROOT%models"'
+            'set "XBERG_SHERPA_DLL_DIR=%XBERG_ROOT%sherpa-onnx"'
+            'set "XBERG_FFMPEG_DLL_DIR=%XBERG_ROOT%ffmpeg"'
+            'set "ORT_DYLIB_PATH=%XBERG_ROOT%onnxruntime.dll"'
             '"%XBERG_ROOT%xberg.exe" %*'
             "exit /b %ERRORLEVEL%"
           ) -join "`r`n"
@@ -889,10 +969,17 @@ try {
     $modelTotal += $length
     Write-Host ("  {0,-14} {1,10:N1} MB  {2}" -f $edge.Label, ($length / 1MB), $edge.RelativePath)
   }
+  $pinnedTotal = 0L
+  foreach ($asset in $PinnedAssets) {
+    $pinnedTotal += $asset.SizeBytes
+    Write-Host ("  {0,-14} {1,10:N1} MB  {2}" -f $asset.Label, ($asset.SizeBytes / 1MB), $asset.Target)
+  }
 
   Write-Phase "Validate"
   $fixture = Join-Path $RepoRoot "fixtures/images/test_hello_world.png"
   if (-not (Test-Path -LiteralPath $fixture)) { throw "smoke fixture missing: $fixture" }
+  $sampleAudio = Join-Path $Stage "samples/silence-1s.wav"
+  if (-not (Test-Path -LiteralPath $sampleAudio)) { throw "smoke audio fixture missing: $sampleAudio" }
   $cleanPath = Get-CleanPath -DirectoryToDrop $RepoRoot
   $emptyCache = Join-Path ([System.IO.Path]::GetTempPath()) ("xberg-empty-cache-" + [Guid]::NewGuid().ToString("N"))
   New-Item -ItemType Directory -Path $emptyCache -Force | Out-Null
@@ -927,21 +1014,23 @@ try {
     @{
       Name = "smoke-positive"
       Exe = $verifyPwsh
-      Args = @("-NoProfile", "-File", $smokeScript, "-Exe", $StageExe, "-Fixture", $fixture, "-CacheDir", $ModelsRoot, "-CleanPath", $cleanPath)
+      Args = @("-NoProfile", "-File", $smokeScript, "-Exe", $StageExe, "-Fixture", $fixture, "-AudioFixture", $sampleAudio, "-CacheDir", $ModelsRoot, "-CleanPath", $cleanPath)
       Env = @{}
     }
   )
   # Empty-cache probe: with HF models bundled, offline-smoke.ps1 extracts the
   # fixture so the run resolves the PaddleOCR models through the cache under
-  # test. Against an empty cache the run must report the offline model-cache
-  # miss instead of silently downloading. The exit code is deliberately not
-  # asserted (the diagnostic is what proves the cache was consulted).
+  # test, and points the snapshot/transcription channels at missing model
+  # roots so each reports its missing-model diagnostic. Against the empty
+  # cache every run must report the offline model-cache miss instead of
+  # silently downloading. The exit code is deliberately not asserted (the
+  # diagnostic is what proves the cache was consulted).
   if ($RequiredModels.Count -gt 0) {
     $checks += @(
       @{
         Name = "smoke-empty-cache"
         Exe = $verifyPwsh
-        Args = @("-NoProfile", "-File", $smokeScript, "-Exe", $StageExe, "-Fixture", $fixture, "-CacheDir", $emptyCache, "-CleanPath", $cleanPath, "-ExpectEmptyCacheFailure")
+        Args = @("-NoProfile", "-File", $smokeScript, "-Exe", $StageExe, "-Fixture", $fixture, "-AudioFixture", $sampleAudio, "-CacheDir", $emptyCache, "-CleanPath", $cleanPath, "-ExpectEmptyCacheFailure")
         Env = @{}
       }
     )
@@ -970,7 +1059,8 @@ try {
   }
   # A probe that hangs (a model session deadlocked on load, a missing DLL stuck mid-load)
   # must fail the gate instead of blocking the packaging run until a human kills it. The
-  # window is generous: the smoke probes load RT-DETR/TATR/PaddleOCR from the staged cache.
+  # window is generous: the smoke probes load the PaddleOCR, snapshot-OCR and SenseVoice
+  # models from the staged tree.
   # All probes share one deadline: per-probe full windows handed out serially would let
   # k simultaneously hung probes stall the gate for k times the timeout and eat the
   # workflow's own budget before any diagnostics get written.
@@ -1032,7 +1122,7 @@ try {
   Write-Phase "Done"
   Write-Host "staging dir: $Stage"
   Write-Host ("zip:         {0} ({1:N1} MB)" -f $ZipPath, ((Get-Item -LiteralPath $ZipPath).Length / 1MB))
-  Write-Host ("models:      {0} files, {1:N1} MB" -f $selected.Count, ($modelTotal / 1MB))
+  Write-Host ("models:      {0} HF-cached file(s), {1:N1} MB + {2} pinned media asset file(s), {3:N1} MB" -f $selected.Count, ($modelTotal / 1MB), $PinnedAssets.Count, ($pinnedTotal / 1MB))
 
   if ($cpuJob) {
     Stop-CpuMonitor -Job $cpuJob
@@ -1044,11 +1134,9 @@ try {
 }
 finally {
   if ($cpuJob) { Stop-CpuMonitor -Job $cpuJob }
-  foreach ($job in @($whisperJob, $modelJob)) {
-    if ($job) {
-      Stop-Job -Job $job -ErrorAction SilentlyContinue
-      Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
-    }
+  if ($modelJob) {
+    Stop-Job -Job $modelJob -ErrorAction SilentlyContinue
+    Remove-Job -Job $modelJob -Force -ErrorAction SilentlyContinue
   }
   if ($emptyCache) { Remove-Item -Recurse -Force $emptyCache -ErrorAction SilentlyContinue }
   if ($validateRoot) { Remove-Item -Recurse -Force $validateRoot -ErrorAction SilentlyContinue }

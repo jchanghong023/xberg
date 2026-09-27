@@ -68,6 +68,9 @@ def main():
     ap.add_argument("--timeout", type=int, default=None, help="传给 fulltest.py 的单文件超时(秒)")
     ap.add_argument("--keep-tmp", action="store_true",
                     help=f"跑完后保留 {TMP_DIR}（默认：成功即删除，失败保留）")
+    ap.add_argument("--media-assets", default=None,
+                    help="转发给 fulltest.py 的 SenseVoice 媒体资产根目录；缺省时打包版 "
+                         "CLI 使用随包模型/DLL，无需外部资产")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -108,6 +111,8 @@ def main():
         cmd += ["--src", args.src]
     if args.timeout:
         cmd += ["--timeout", str(args.timeout)]
+    if args.media_assets:
+        cmd += ["--media-assets", args.media_assets]
 
     print("\n[3/3] 对打包版 CLI 跑 fulltest.py（--keep-going 全量测完）")
     rc = subprocess.run(cmd).returncode

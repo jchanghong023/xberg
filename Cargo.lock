@@ -281,9 +281,6 @@ name = "arbitrary"
 version = "1.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
-dependencies = [
- "derive_arbitrary",
-]
 
 [[package]]
 name = "arc-swap"
@@ -1168,7 +1165,7 @@ dependencies = [
  "log",
  "quick-xml 0.41.0",
  "serde",
- "zip 8.6.0",
+ "zip",
 ]
 
 [[package]]
@@ -1211,7 +1208,7 @@ dependencies = [
  "tokenizers 0.22.2",
  "yoke 0.8.3",
  "zerocopy",
- "zip 8.6.0",
+ "zip",
 ]
 
 [[package]]
@@ -2482,17 +2479,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "derive_arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
 name = "derive_builder"
 version = "0.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2883,7 +2869,7 @@ dependencies = [
  "parking_lot",
  "skeptic",
  "ureq 3.4.2",
- "zip 8.6.0",
+ "zip",
 ]
 
 [[package]]
@@ -2928,12 +2914,6 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
-
-[[package]]
-name = "extended"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af9673d8203fcb076b19dfd17e38b3d4ae9f44959416ea532ce72415a6020365"
 
 [[package]]
 name = "fallible-iterator"
@@ -3800,16 +3780,6 @@ dependencies = [
 
 [[package]]
 name = "gif"
-version = "0.13.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ae047235e33e2829703574b54fdec96bfbad892062d97fed2f76022287de61b"
-dependencies = [
- "color_quant",
- "weezl 0.1.12",
-]
-
-[[package]]
-name = "gif"
 version = "0.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
@@ -4497,13 +4467,7 @@ dependencies = [
  "bytemuck",
  "byteorder",
  "color_quant",
- "exr",
- "gif 0.13.3",
- "jpeg-decoder",
  "num-traits",
- "png 0.17.16",
- "qoi",
- "tiff 0.9.1",
 ]
 
 [[package]]
@@ -4516,14 +4480,14 @@ dependencies = [
  "byteorder-lite",
  "color_quant",
  "exr",
- "gif 0.14.2",
+ "gif",
  "image-webp",
  "moxcms",
  "num-traits",
- "png 0.18.1",
+ "png",
  "ravif",
  "rayon",
- "tiff 0.11.3",
+ "tiff",
  "zune-core",
  "zune-jpeg",
 ]
@@ -4901,9 +4865,6 @@ name = "jpeg-decoder"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
-dependencies = [
- "rayon",
-]
 
 [[package]]
 name = "jpeg-encoder"
@@ -5237,32 +5198,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lofty"
-version = "0.25.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bb21dd79145b0781f2423fda92dd807fcd3911e44b66044d86db3b11ec7accf9"
-dependencies = [
- "byteorder",
- "data-encoding",
- "flate2",
- "lofty_attr",
- "log",
- "ogg_pager",
- "paste",
-]
-
-[[package]]
-name = "lofty_attr"
-version = "0.13.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fdbca1b60ba7cea959ffc84ac27f3dbdbacd6dfda168c7eabbc00e48654bb9fd"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.6",
-]
-
-[[package]]
 name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5463,20 +5398,6 @@ checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
 dependencies = [
  "cfg-if",
  "digest 0.11.3",
-]
-
-[[package]]
-name = "mel_spec"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0cfc86c477482e75cca77856f89cd5cb485c91331269abff41b9b15364a49492"
-dependencies = [
- "cc",
- "image 0.24.9",
- "ndarray 0.16.1",
- "ndarray-npy",
- "num",
- "rustfft",
 ]
 
 [[package]]
@@ -5801,21 +5722,6 @@ dependencies = [
 
 [[package]]
 name = "ndarray"
-version = "0.16.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "882ed72dce9365842bf196bdeedf5055305f11fc8c03dee7bb0194a6cad34841"
-dependencies = [
- "matrixmultiply",
- "num-complex",
- "num-integer",
- "num-traits",
- "portable-atomic",
- "portable-atomic-util",
- "rawpointer",
-]
-
-[[package]]
-name = "ndarray"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "520080814a7a6b4a6e9070823bb24b4531daac8c4627e08ba5de8c5ef2f2752d"
@@ -5827,20 +5733,6 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "rawpointer",
-]
-
-[[package]]
-name = "ndarray-npy"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b313788c468c49141a9d9b6131fc15f403e6ef4e8446a0b2e18f664ddb278a9"
-dependencies = [
- "byteorder",
- "ndarray 0.16.1",
- "num-complex",
- "num-traits",
- "py_literal",
- "zip 2.4.2",
 ]
 
 [[package]]
@@ -6219,15 +6111,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ogg_pager"
-version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d36b1d6964c3ac92b7aea701057e02b6b91143d70d83b20abf75a231a3c0216"
-dependencies = [
- "byteorder",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6557,48 +6440,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "pest"
-version = "2.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45d3aca230fad2e6f6317ca0a72724338c4960cb97168a85cdee66df4a9a21a8"
-dependencies = [
- "memchr",
- "ucd-trie",
-]
-
-[[package]]
-name = "pest_derive"
-version = "2.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "284b60557f2c4a2e72ad3f2d34d42685a2fa4a6a61d0d2a10c0ae2a5e916c2cf"
-dependencies = [
- "pest",
- "pest_generator",
-]
-
-[[package]]
-name = "pest_generator"
-version = "2.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d9d1f08a115309ee99268cf85e5228e0e56aa9caf8841ec12866b6be07c3109"
-dependencies = [
- "pest",
- "pest_meta",
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "pest_meta"
-version = "2.9.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed93ba1a9ffcca32130a5188701c81c0c49cf00d4b7c5007d5148951d743adcb"
-dependencies = [
- "pest",
-]
-
-[[package]]
 name = "phc"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6776,19 +6617,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
 dependencies = [
  "plotters-backend",
-]
-
-[[package]]
-name = "png"
-version = "0.17.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "82151a2fc869e011c153adc57cf2789ccb8d9906ce52c0b39a6b5697749d7526"
-dependencies = [
- "bitflags 1.3.2",
- "crc32fast",
- "fdeflate",
- "flate2",
- "miniz_oxide 0.8.9",
 ]
 
 [[package]]
@@ -7100,19 +6928,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
-name = "py_literal"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "102df7a3d46db9d3891f178dcc826dc270a6746277a9ae6436f8d29fd490a8e1"
-dependencies = [
- "num-bigint",
- "num-complex",
- "num-traits",
- "pest",
- "pest_derive",
-]
-
-[[package]]
 name = "pyo3"
 version = "0.29.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7188,15 +7003,6 @@ name = "qcms"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edecfcd5d755a5e5d98e24cf43113e7cdaec5a070edd0f6b250c03a573da30fa"
-
-[[package]]
-name = "qoi"
-version = "0.4.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f6d64c71eb498fe9eae14ce4ec935c555749aef511cca85b5568910d6e48001"
-dependencies = [
- "bytemuck",
-]
 
 [[package]]
 name = "qrcode"
@@ -9028,141 +8834,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a7973cce6668464ea31f176d85b13c7ab3bba2cb3b77a2ed26abd7801688010a"
 
 [[package]]
-name = "symphonia"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a7edef6a96b696d4e0cab5ee9ebb7ca155ed95f30a6b45bbb8b97d2727f02424"
-dependencies = [
- "lazy_static",
- "symphonia-bundle-mp3",
- "symphonia-codec-aac",
- "symphonia-codec-adpcm",
- "symphonia-codec-pcm",
- "symphonia-core",
- "symphonia-format-isomp4",
- "symphonia-format-mkv",
- "symphonia-format-riff",
- "symphonia-metadata",
-]
-
-[[package]]
-name = "symphonia-bundle-mp3"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98ea5ffc8716bff677dfb3b01b420c7b758de901a72b8c330bf2040ab74b4add"
-dependencies = [
- "lazy_static",
- "log",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-codec-aac"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5bf8e39552d34a3c4c98333370e62f48c92456d2e814f273b5c3ad7c4a5f45c"
-dependencies = [
- "lazy_static",
- "log",
- "symphonia-common",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-codec-adpcm"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "445932ecb0c59362fde9c082dd63a75380650c5077fdb8b80b8cac850442a74c"
-dependencies = [
- "log",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-codec-pcm"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e04ba75686acbe43542fdd374571195f0530c0b7785ca25cc6840e9c6c4b6eea"
-dependencies = [
- "log",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-common"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2acc3fcc18ec9b8cdd48614e259c4cf0d27b71d41e5d9b120b42c5adab12d7c4"
-dependencies = [
- "log",
- "symphonia-core",
- "symphonia-metadata",
-]
-
-[[package]]
-name = "symphonia-core"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01c412864d599d4750d0c3d684d7e093ec05e5309681ef5252cc1096a437f6e0"
-dependencies = [
- "bitflags 2.13.2",
- "bytemuck",
- "lazy_static",
- "log",
- "num-complex",
- "smallvec",
-]
-
-[[package]]
-name = "symphonia-format-isomp4"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e681a70e1870d34e02abf1dbc51e4267c3f1827801474e8870be8c689fc4dc3"
-dependencies = [
- "log",
- "symphonia-common",
- "symphonia-core",
- "symphonia-metadata",
-]
-
-[[package]]
-name = "symphonia-format-mkv"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d015c5c0558864665894b3f4cbd95e10abb01b9c868e751c72670f326a56360e"
-dependencies = [
- "lazy_static",
- "log",
- "symphonia-common",
- "symphonia-core",
-]
-
-[[package]]
-name = "symphonia-format-riff"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ff70929083a8c1a5f6cd7c904b6071c7914ad04739b510c2f7239dfc9b7dabe"
-dependencies = [
- "extended",
- "log",
- "symphonia-core",
- "symphonia-metadata",
-]
-
-[[package]]
-name = "symphonia-metadata"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83713a97705d77bdef7cdbc0768fd6e5a54e4cd7e48d60a806ae85639e2c87c6"
-dependencies = [
- "lazy_static",
- "log",
- "regex-lite",
- "smallvec",
- "symphonia-core",
-]
-
-[[package]]
 name = "syn"
 version = "1.0.109"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9405,17 +9076,6 @@ dependencies = [
 
 [[package]]
 name = "tiff"
-version = "0.9.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ba1310fcea54c6a9a4fd1aad794ecc02c31682f6bfbecdf460bf19533eed1e3e"
-dependencies = [
- "flate2",
- "jpeg-decoder",
- "weezl 0.1.12",
-]
-
-[[package]]
-name = "tiff"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b63feaf3343d35b6ca4d50483f94843803b0f51634937cc2ec519fc32232bc52"
@@ -9510,7 +9170,7 @@ dependencies = [
  "bytemuck",
  "cfg-if",
  "log",
- "png 0.18.1",
+ "png",
  "tiny-skia-path",
 ]
 
@@ -10414,12 +10074,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ucd-trie"
-version = "0.1.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2896d95c02a80c6d6a5d6e953d479f5ddf2dfdb6a244441010e373ac0fb88971"
-
-[[package]]
 name = "ug"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10485,7 +10139,7 @@ dependencies = [
  "thiserror 2.0.21",
  "unicode-normalization",
  "unparser-shared",
- "zip 8.6.0",
+ "zip",
 ]
 
 [[package]]
@@ -11639,13 +11293,11 @@ dependencies = [
  "libc",
  "libloading 0.9.0",
  "liter-llm",
- "lofty",
  "log",
  "lopdf",
  "lru",
  "mail-parser",
  "mathemascii",
- "mel_spec",
  "memchr",
  "memmap2",
  "mime",
@@ -11694,12 +11346,11 @@ dependencies = [
  "similar",
  "snap",
  "strum 0.28.0",
- "symphonia",
  "syn 3.0.6",
  "tar",
  "tempfile",
  "thiserror 2.0.21",
- "tiff 0.11.3",
+ "tiff",
  "tokenizers 0.21.4",
  "tokenizers 0.23.2",
  "tokio",
@@ -11723,7 +11374,6 @@ dependencies = [
  "uuid",
  "v_htmlescape",
  "whatlang",
- "windows",
  "wiremock",
  "xberg-candle-ocr",
  "xberg-gliner",
@@ -11735,7 +11385,7 @@ dependencies = [
  "xberg-tesseract",
  "xberg-windows-metafile",
  "zeroize",
- "zip 8.6.0",
+ "zip",
 ]
 
 [[package]]
@@ -12053,7 +11703,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "vcpkg",
- "zip 8.6.0",
+ "zip",
 ]
 
 [[package]]
@@ -12380,23 +12030,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
-]
-
-[[package]]
-name = "zip"
-version = "2.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
-dependencies = [
- "arbitrary",
- "crc32fast",
- "crossbeam-utils",
- "displaydoc",
- "flate2",
- "indexmap 2.14.2",
- "memchr",
- "thiserror 2.0.21",
- "zopfli",
 ]
 
 [[package]]

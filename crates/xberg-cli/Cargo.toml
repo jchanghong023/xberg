@@ -157,8 +157,9 @@ ner-onnx = ["legacy-base", "xberg/ner-onnx"]
 ner-llm = ["legacy-base", "xberg/ner-llm"]
 summarization = ["legacy-base", "xberg/summarization"]
 summarization-llm = ["legacy-base", "xberg/summarization-llm"]
-# Audio transcription is intentionally opt-in because it adds the Whisper/ORT
-# inference stack. The `all` release and container profile enables it so the CLI
+# Audio transcription is intentionally opt-in because it adds the SenseVoice
+# chain (runtime-loaded sherpa-onnx / FFmpeg shared libraries + pinned models).
+# The `all` release and container profile enables it so the CLI
 # exposes every capability included by xberg's corresponding full feature set.
 transcription = ["legacy-base", "xberg/transcription"]
 # (fork) 性能打点开关：转发 xberg/perf-tracing 打开库内关键阶段 span（target "perf"），

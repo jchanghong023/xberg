@@ -22,8 +22,8 @@
 //!   `markdown`, segment list, duration and `has_audio`.
 //!
 //! Model-session reuse is the point of this command: every ML backend the library
-//! uses (OCR engine pool, Tesseract processor, Whisper engines, layout model caches,
-//! the SenseVoice session cache, the snapshot OCR engine above) is a process-level
+//! uses (OCR engine pool, Tesseract processor, layout model caches, the SenseVoice
+//! session cache, the snapshot OCR engine above) is a process-level
 //! lazy cache, so simply keeping the process — and one tokio runtime — alive for the
 //! whole batch means the second and later files skip model loading. `xberg serve`
 //! relies on the same mechanism across HTTP requests.
@@ -556,11 +556,12 @@ fn transcribe_media(
     let path = request.path.ok_or("transcribe requires path (local media file)")?;
     validate_file_exists(&path).map_err(|error| format!("{error:#}"))?;
     let bytes = std::fs::read(&path).map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
-    // SV-06 header name: the input file name without its extension (the JchTools
-    // media worker convention).
+    // SV-06 header name: the input file's complete name including its extension,
+    // exactly the JchTools media worker's `markdown()` name source (`file_name()`),
+    // so callers can map each response back to its input file.
     let name = path
-        .file_stem()
-        .and_then(|stem| stem.to_str())
+        .file_name()
+        .and_then(|name| name.to_str())
         .unwrap_or("media")
         .to_string();
     let mime_type = mime_for_media(&path);
@@ -1150,24 +1151,19 @@ mod tests {
         );
     }
 
-    /// `transcribe` with a Whisper (non-sensevoice) startup config is rejected —
-    /// the Whisper pipeline stays untouched and never serves this command.
+    /// The Whisper backend no longer exists, so the pre-removal
+    /// "reject non-sensevoice backends" guard state is unconstructible: parsing a
+    /// startup config that still says `"backend": "whisper"` (SV-11) fails before
+    /// any `transcribe` request can run. This pins that contract at the CLI level.
     #[test]
     #[cfg(feature = "transcription")]
-    fn transcribe_rejects_non_sensevoice_backends() {
-        use xberg::core::config::transcription::{TranscriptionBackend, TranscriptionConfig};
-        let config = ExtractionConfig {
-            transcription: Some(TranscriptionConfig {
-                backend: TranscriptionBackend::Whisper,
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        let outcome = transcribe_request(&config, transcribe_req(json!("t"), "E:/no/speech.mp4"));
-        let RequestOutcome::Transcribe(Err(error)) = outcome else {
-            panic!("expected a transcribe failure");
-        };
-        assert!(error.contains("sensevoice"), "unexpected: {error}");
+    fn startup_config_rejects_the_retired_whisper_backend() {
+        let parsed = serde_json::from_value::<ExtractionConfig>(json!({
+            "transcription": { "enabled": true, "backend": "whisper" }
+        }));
+        let error = parsed.expect_err("the retired whisper backend must be rejected");
+        assert!(error.to_string().contains("unknown variant"), "unexpected: {error}");
+        assert!(error.to_string().contains("sensevoice"), "unexpected: {error}");
     }
 
     /// Missing media files fail the request without touching any model.

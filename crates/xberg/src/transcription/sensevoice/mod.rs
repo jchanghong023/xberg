@@ -4,9 +4,7 @@
 //! 16 kHz mono decode, fixed VAD parameters, `use_itn=1` Chinese recognition,
 //! the fixed 34-entry terminology map, and the SV-06 Markdown layout.
 //!
-//! This backend is opt-in per call through
-//! [`TranscriptionBackend::SenseVoice`](crate::core::config::transcription::TranscriptionBackend::SenseVoice);
-//! the Whisper pipeline stays the default and is untouched.
+//! This is the transcription feature's only backend (SV-01).
 //!
 //! Asset layout (all verified by pinned SHA-256 before any inference):
 //! SenseVoice `model.int8.onnx` + `tokens.txt`, Silero `silero_vad.onnx`
@@ -33,11 +31,11 @@ use sha2::Digest;
 use vad::VadPipeline;
 
 /// Model root override (config `transcription.model_dir`).
-pub(crate) const MODEL_DIR_ENV: &str = "XBERG_SENSEVOICE_MODEL_DIR";
+pub const MODEL_DIR_ENV: &str = "XBERG_SENSEVOICE_MODEL_DIR";
 /// Directory holding `sherpa-onnx-c-api.dll` (+ sibling `onnxruntime.dll`).
-pub(crate) const SHERPA_DLL_DIR_ENV: &str = "XBERG_SHERPA_DLL_DIR";
+pub const SHERPA_DLL_DIR_ENV: &str = "XBERG_SHERPA_DLL_DIR";
 /// Directory holding the four pinned FFmpeg shared libraries.
-pub(crate) const FFMPEG_DLL_DIR_ENV: &str = "XBERG_FFMPEG_DLL_DIR";
+pub const FFMPEG_DLL_DIR_ENV: &str = "XBERG_FFMPEG_DLL_DIR";
 
 /// SenseVoice INT8 model, pinned build (`model.int8.onnx`, 239,233,841 bytes).
 const SENSEVOICE_MODEL_RELATIVE: [&str; 2] = ["sense_voice_zh_en_ja_ko_yue_2024_07_17", "model.int8.onnx"];
@@ -90,11 +88,12 @@ pub struct SenseVoiceResult {
 ///
 /// The native engine (sherpa-onnx DLL symbols + the 239 MB SenseVoice INT8
 /// recognizer session) is a process-level cache keyed by the resolved model /
-/// token / DLL paths and the recognizer thread count — mirroring the Whisper
-/// `ENGINES` pattern — so repeated calls in one process skip the model load.
-/// VAD sessions are per-run state and are created and destroyed each call;
-/// digests are verified before any session is created (cache misses) and the
-/// VAD digest on every call. Output semantics are unchanged by the cache.
+/// token / DLL paths and the recognizer thread count — the same lifetime model
+/// as the JchTools media worker — so repeated calls in one process skip the
+/// model load. VAD sessions are per-run state and are created and destroyed
+/// each call; digests are verified before any session is created (cache
+/// misses) and the VAD digest on every call. Output semantics are unchanged
+/// by the cache.
 pub fn transcribe_bytes(
     content: &[u8],
     name: &str,
@@ -190,8 +189,8 @@ impl SenseVoiceSession {
 }
 
 /// Process-level cache of loaded SenseVoice sessions, keyed by the resolved
-/// model/token/DLL paths and the recognizer thread count. Mirrors the Whisper
-/// `ENGINES` pattern in `crate::extractors::transcription`.
+/// model/token/DLL paths and the recognizer thread count. Created at most once
+/// per distinct key and kept until process exit.
 static SESSIONS: LazyLock<Mutex<HashMap<String, Arc<SenseVoiceSession>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 

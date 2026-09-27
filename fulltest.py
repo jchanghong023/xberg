@@ -59,8 +59,24 @@ DEFAULT_OUT = Path(r"D:\测试转markdown转换效果\测试文档_md_fulltest")
 
 AV_EXTS = {"mp4", "wmv", "asf", "mov", "mkv", "m4a", "mp3", "wav", "webm", "flv", "avi"}
 IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"}
-# 测试语料以中文为主；whisper-tiny 无提示时常见英文幻觉，验收固定 zh
-TRANSCRIPTION_CFG = {"enabled": True, "model": "tiny", "language": "zh"}
+# 测试语料以中文为主；转写后端唯一且固定为 SenseVoice 中文识别（SV-01/SV-04，
+# 无语言/模型选项）。旧键 "model"/"language" 属已退役的 Whisper 配置，CLI 会
+# 以「Whisper 已移除」明确报错（SV-11）。
+TRANSCRIPTION_CFG = {"enabled": True, "backend": "sensevoice"}
+
+# 媒体资产目录（--media-assets，默认依次回退：环境变量 XBERG_MEDIA_ASSETS →
+# 仓库 .tmp/assets 若存在）。解析成功时向被测 CLI 注入三个环境变量：
+#   XBERG_SENSEVOICE_MODEL_DIR / XBERG_SHERPA_DLL_DIR / XBERG_FFMPEG_DLL_DIR。
+# 支持两种布局（以先命中为准）：
+#   布局 A（标准）：<dir>/models/sense_voice_zh_en_ja_ko_yue_2024_07_17/{model.int8.onnx,tokens.txt}
+#                   <dir>/models/vad/silero_vad.onnx
+#                   <dir>/sherpa-onnx/（sherpa-onnx-c-api.dll + onnxruntime.dll 等）
+#                   <dir>/ffmpeg/（avutil-61 / swresample-7 / avcodec-63 / avformat-63）
+#   布局 B（本仓库 .tmp/assets 现状）：<dir>/media-models/（models/ 子目录同上）、
+#                   <dir>/media-dlls/（sherpa DLL）、<dir>/media-dlls/ffmpeg/（FFmpeg DLL）
+# 资产缺席时音视频段按「缺媒体资产」WARN 跳过（AV_NO_ASSETS），不会伪装成通过。
+SENSEVOICE_MODEL_DIRNAME = "sense_voice_zh_en_ja_ko_yue_2024_07_17"
+DEFAULT_MEDIA_ASSETS = REPO / ".tmp" / "assets"
 
 # 召回率阈值（可用 CLI 覆盖）
 RECALL_GOOD = 0.85
@@ -136,6 +152,7 @@ ISSUE_META = {
     "PAGE_BODY_WEAK": "WARN",
     "AV_SPARSE": "FAIL",
     "AV_THIN": "WARN",
+    "AV_NO_ASSETS": "WARN",     # 缺媒体资产（--media-assets/XBERG_MEDIA_ASSETS），音视频未验证
     "PAGE_MISMATCH": "WARN",
     "TABLE_COLS": "WARN",
     "DUP_SPAM": "WARN",
@@ -2429,9 +2446,10 @@ def judge_av_sparsity(src_file: Path, m, issues):
 def kill_process_tree(proc):
     """终止 CLI 及其全部子进程。
 
-    Windows 上 Popen.kill() 只 TerminateProcess 掉 xberg.exe 本身；Windows Media 输入走
-    外部 ffmpeg 解码时，解码子进程会继续跑（占着源文件、在 %TEMP% 写 WAV），污染后续文件的
-    耗时统计。taskkill /T 覆盖子进程；失败时退回 proc.kill()。
+    Windows 上 Popen.kill() 只 TerminateProcess 掉 xberg.exe 本身。SenseVoice 链路的
+    FFmpeg/sherpa 解码是进程内 DLL 调用（无解码子进程），但超时的 CLI 仍可能持有
+    源文件或拖慢后续文件的耗时统计；taskkill /T 兜底覆盖任何残留子进程，失败时
+    退回 proc.kill()。
     """
     if os.name == "nt":
         done = subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
@@ -2476,6 +2494,36 @@ def run_with_ticker(label, cmd, env, timeout):
                 raise subprocess.TimeoutExpired(cmd, timeout)
     print("\r" + " " * 100 + "\r", end="", flush=True)
     return proc.returncode, out, err, time.time() - t0
+
+
+def resolve_media_assets(base):
+    """从资产根目录解析媒体环境变量；返回 (dict, None) 或 (None, 原因)。
+
+    布局 A / 布局 B 见文件头注释。以模型文件的实际在场为准，不做摘要校验
+    （摘要校验是 CLI 侧的职责，SV-08）。
+    """
+    if base is None:
+        return None, "未提供 --media-assets，且环境变量 XBERG_MEDIA_ASSETS 与仓库 .tmp/assets 均不在场"
+    base = Path(base)
+    if not base.is_dir():
+        return None, f"媒体资产目录不存在: {base}"
+    layout_probe = Path("models") / SENSEVOICE_MODEL_DIRNAME / "model.int8.onnx"
+    if (base / layout_probe).is_file() and (base / "models" / "vad" / "silero_vad.onnx").is_file():
+        model_dir, sherpa_dir, ffmpeg_dir = base, base / "sherpa-onnx", base / "ffmpeg"
+    elif (base / "media-models" / layout_probe).is_file() \
+            and (base / "media-models" / "models" / "vad" / "silero_vad.onnx").is_file():
+        model_dir, sherpa_dir, ffmpeg_dir = base / "media-models", base / "media-dlls", base / "media-dlls" / "ffmpeg"
+    else:
+        return None, (f"资产目录缺少模型文件（{layout_probe} 与 models/vad/silero_vad.onnx）: {base}")
+    if not sherpa_dir.is_dir():
+        return None, f"资产目录缺少 sherpa-onnx DLL 目录: {sherpa_dir}"
+    if not ffmpeg_dir.is_dir():
+        return None, f"资产目录缺少 FFmpeg DLL 目录: {ffmpeg_dir}"
+    return {
+        "XBERG_SENSEVOICE_MODEL_DIR": str(model_dir),
+        "XBERG_SHERPA_DLL_DIR": str(sherpa_dir),
+        "XBERG_FFMPEG_DLL_DIR": str(ffmpeg_dir),
+    }, None
 
 
 # ---------------------------------------------------------------- 单文件转换
@@ -3319,6 +3367,10 @@ def main():
     ap.add_argument("--timeout", type=int, default=1800)
     ap.add_argument("--pkg-dir", default=str(PKG_DIR),
                     help="提供 models/ 的目录（用于 HF_HUB_CACHE 与 PATH），默认仓库内打包目录")
+    ap.add_argument("--media-assets", default=None,
+                    help="SenseVoice 媒体资产根目录（布局见文件头注释）；缺省回退 "
+                         "XBERG_MEDIA_ASSETS，再回退仓库 .tmp/assets。缺席时音视频段按 "
+                         "AV_NO_ASSETS 跳过（WARN 诊断，不计通过）")
     ap.add_argument("--keep-going", action="store_true", help="遇到 FAIL 不终止，继续测完")
     ap.add_argument("--deep", action="store_true",
                     help="包含最重测试项（音视频转写）。日常 fulltest 默认跳过；slowtest.py 固定携带，打包版验收不丢覆盖")
@@ -3376,6 +3428,19 @@ def main():
         # 引擎所有模型都走 hf-hub，缓存根目录是 HF_HUB_CACHE；HF_HOME 会被解析成
         # $HF_HOME/hub，指向包内不存在的子目录，等于让引擎回退到用户缓存或联网下载。
         env["HF_HUB_CACHE"] = str(pkg_dir / "models")
+
+    # SenseVoice 媒体资产：解析成功则注入三个环境变量（模型根 / sherpa DLL / FFmpeg DLL），
+    # 失败则如实打印原因；音视频文件在主循环里按 AV_NO_ASSETS 跳过。
+    assets_base = args.media_assets or os.environ.get("XBERG_MEDIA_ASSETS") or (
+        DEFAULT_MEDIA_ASSETS if DEFAULT_MEDIA_ASSETS.is_dir() else None)
+    media_assets, media_assets_note = resolve_media_assets(assets_base)
+    if media_assets:
+        env.update(media_assets)
+        emit(f"[preflight] 媒体资产就绪: {assets_base}（已注入 XBERG_SENSEVOICE_MODEL_DIR/"
+             "XBERG_SHERPA_DLL_DIR/XBERG_FFMPEG_DLL_DIR）")
+    else:
+        emit(f"[preflight] 媒体资产未就绪：{media_assets_note}"
+             + ("（音视频文件将按 AV_NO_ASSETS 跳过）" if args.deep else ""))
 
     # (耗时治理) 最重的测试段（音视频转写；基线实测 219s 总耗时中 mp4 一项占 96.7s）默认
     # 不进日常 fulltest 队列；--deep（slowtest.py 固定携带）才包含，打包版验收不丢覆盖。
@@ -3446,6 +3511,32 @@ def main():
         # 超时记录也要带 golden.applied，否则基线与本次的问题码集合按「未加载金标准」剔除，
         # 该文件会显示成一批假「已修复」。
         exp = expect_for(f.name)
+        if av and media_assets is None:
+            # 缺媒体资产：如实记「未验证」诊断并跳过（WARN，不伪装成通过）。
+            m = structural_metrics("", img_dir)
+            issues = [make_issue("AV_NO_ASSETS",
+                                 f"缺媒体资产，音视频未验证已跳过（{media_assets_note}）")]
+            verdict = issues_to_verdict(issues)
+            report_file(f.name, verdict, m, None,
+                        {"warnings": [], "counts": {}, "notes": ["AV_NO_ASSETS"]}, 0.0, issues)
+            results.append({
+                "name": f.name, "verdict": verdict, "elapsed": 0.0,
+                "recall": None, "num_recall": None, "issues": issues,
+                "chars": 0, "method": None, "counts": {},
+            })
+            JSON_RESULTS.append({
+                "name": f.name, "verdict": verdict, "elapsed_s": 0.0,
+                "recall": None, "num_recall": None, "ident_recall": None,
+                "missing_numbers": [], "missing_idents": [],
+                "char_ratio": None, "src_images": None, "src_images_note": None,
+                "source_pages": None,
+                "metrics": json_metrics(m), "issues": issues,
+                "warnings": [], "notes": ["AV_NO_ASSETS"],
+                "golden": {"applied": bool(exp)},
+                "ocr": None, "counts": {}, "extraction_method": None,
+            })
+            progress_line(i, verdict, 0.0, t_start)
+            continue
         try:
             md_text, meta, elapsed, rc, used_cli = convert_one(cli, f, out_dir, args.timeout,
                                                                env, transcription=av, tag=tag)

@@ -449,32 +449,22 @@ layout-types = []
 # Included by auto-rotate; also usable standalone on WASM/Android targets.
 auto-rotate-types = []
 
-# Transcription (audio/video speech-to-text via Whisper ONNX + ORT).
+# Transcription (audio/video speech-to-text: FFmpeg DLL decode → Silero VAD →
+# SenseVoice INT8 via the runtime-loaded sherpa-onnx C API; no link-time ORT).
 # Matches the exact pattern of embeddings / layout-detection / paddle-ocr:
-# - transcription-types: pure config structs only (WASM/Android safe, no ORT)
-# - transcription: full inference (ORT + hf-hub + symphonia decode). Zero impact when off.
-# Excluded from no-ort-target, wasm-target, android-target (x86_64 emulator) exactly like other ORT ML.
+# - transcription-types: pure config structs only (WASM/Android safe)
+# - transcription: the full sensevoice chain. Zero impact when off.
+# Kept out of no-ort-target / wasm-target / android-target presets: the pinned
+# Windows shared libraries are Windows-only runtime assets.
 transcription-types = []
 transcription = [
     "transcription-types",
-    "dep:mel_spec",
-    "dep:ndarray",
-    "dep:ort",
-    "dep:hf-hub",
-    "dep:reqwest",
+    # Asset digest verification (SV-08) hashes the pinned model files with sha2.
     "dep:sha2",
-    "dep:fs2",
-    "dep:symphonia",
-    "dep:lofty",
-    "dep:tokenizers",
     # SenseVoice backend (transcription::sensevoice) loads its pinned native
     # libraries at runtime; no link-time dependency is added.
     "dep:libloading",
-    # Windows Media (ASF/WMV) containers are decoded through Media Foundation.
-    # Declared only in the Windows target block below, so this is a no-op on
-    # other targets, exactly like `dep:fs2` above.
-    "dep:windows",
-    "ort-bundled",
+    # The extractor drives the chain from async code (semaphore + spawn_blocking).
     "tokio-runtime",
 ]
 
@@ -1320,9 +1310,6 @@ itertools = { workspace = true, optional = true }
 jotdown = "0.10"
 jsonschema = { version = "0.57", optional = true, default-features = false }
 libc = { workspace = true }
-# lofty: pure-Rust audio tag reader (ID3v1/v2, MP4 atoms, Vorbis comments, FLAC, etc.)
-# MIT license. Used for metadata extraction independent of the inference backend.
-lofty = { version = "0.25", optional = true }
 # liter-llm is declared per-target in the platform-conditional dependencies blocks below (it
 # pulls reqwest/rustls → aws-lc-rs → aws-lc-sys; the MSVC build is handled by the fix shipped in
 # xberg-io/liter-llm). hf-hub 1.0 now rides the same reqwest/aws-lc-rs stack.
@@ -1336,7 +1323,6 @@ lru = { version = "0.18", optional = true }
 mail-parser = { version = "0.11.9", features = ["full_encoding"], optional = true }
 # AsciiMath parser, used to reach LaTeX through the shared MathML converter.
 mathemascii = { version = "0.4.0", optional = true }
-mel_spec = { version = "0.4", optional = true }
 memchr = "2.8.3"
 memmap2 = { workspace = true }
 mime = { workspace = true }
@@ -1416,17 +1402,6 @@ simdutf8 = { version = "0.1", optional = true }
 similar = { workspace = true, optional = true }
 snap = { version = "1.1", optional = true }
 strum = { version = "0.28", features = ["derive"], optional = true }
-# Symphonia: pure-Rust audio decoder for mp3, wav, m4a/mp4, webm etc.
-# MPL-2.0 (file-scoped copyleft, safe for our use). Exception granted in deny.toml.
-symphonia = { version = "0.6", optional = true, default-features = false, features = [
-    "aac",
-    "adpcm",
-    "isomp4",
-    "mkv",
-    "mp3",
-    "pcm",
-    "wav",
-] }
 tar = { version = "^0.4", optional = true }
 tempfile = { workspace = true, optional = true }
 thiserror = { workspace = true }
@@ -1588,14 +1563,6 @@ xberg-paddle-ocr = { path = "../xberg-paddle-ocr", version = "1.3.0", optional =
 # Windows GDI/GDI+ rasterization of EMF/WMF metafiles so OCR can run on Office vector
 # images (Visio OLE previews, legacy VML shapes). Windows-only: the crate is `#![cfg(windows)]`.
 xberg-windows-metafile = { path = "../xberg-windows-metafile", version = "1.3.0" }
-# Media Foundation decodes the audio track of Windows Media (ASF/WMV) inputs, which
-# symphonia cannot demux. The high-level `windows` crate is already in the tree at this
-# version, so this adds an edge, not a second copy. See src/transcription/wmf.rs.
-windows = { version = "0.62", optional = true, features = [
-    "Win32_Foundation",
-    "Win32_Media_MediaFoundation",
-    "Win32_System_Com",
-] }
 
 # tokio OS features (every native target, including Android and Windows): `process`, `fs`, and
 # `rt-multi-thread` all fail to compile on wasm32 — tokio's own wasm32 gate only allows

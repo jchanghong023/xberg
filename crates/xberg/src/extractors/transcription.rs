@@ -3,20 +3,14 @@
 //! Only compiled when the `transcription` feature is enabled.
 //! Registers for the audio and video MIME types declared in `core::mime`.
 //!
-//! The actual heavy lifting (model download + ORT inference) lives in
-//! `crate::transcription`. This module is the thin "plugin" adapter that
-//! the registry expects.
+//! The actual heavy lifting (FFmpeg DLL decode → Silero VAD → SenseVoice INT8)
+//! lives in `crate::transcription::sensevoice`. This module is the thin
+//! "plugin" adapter that the registry expects.
 
-use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 
 use crate::core::config::ExtractionConfig;
 use crate::plugins::{InternalDocumentExtractor, Plugin};
-use crate::transcription::container::decode_to_pcm;
-use crate::transcription::decode::PcmAudio;
-use crate::transcription::engine::WhisperEngine;
-use crate::transcription::model::{WhisperModelPaths, ensure_whisper_model};
-use crate::transcription::tags::AudioTags;
 use crate::types::internal::{ElementKind, InternalDocument, InternalElement};
 use crate::types::metadata::{AudioMetadata, FormatMetadata};
 use crate::{Result, XbergError};
@@ -29,77 +23,15 @@ const ATTR_START_MS: &str = "start_ms";
 /// Attribute key holding a segment's end time (milliseconds, as a decimal string).
 const ATTR_END_MS: &str = "end_ms";
 
-/// Push transcript text onto `doc` as one or more `Paragraph` elements.
-///
-/// When `timestamps` is `false`, all segment text is joined into a single flat
-/// paragraph (matching the pre-#306 behavior, since there is no per-segment
-/// timing to preserve). When `true`, each non-empty `(start_ms, end_ms, text)`
-/// segment becomes its own `Paragraph` element carrying `start_ms`/`end_ms`
-/// attributes, so callers get segment boundaries and per-segment timestamps
-/// without a new binding-visible type.
-fn push_transcript_elements(doc: &mut InternalDocument, segments: &[(u32, u32, String)], timestamps: bool) {
-    if timestamps {
-        for (start_ms, end_ms, text) in segments {
-            if text.is_empty() {
-                continue;
-            }
-            let mut element = InternalElement::text(ElementKind::Paragraph, text.as_str(), 0);
-            let mut attributes = AHashMap::default();
-            attributes.insert(ATTR_START_MS.to_string(), start_ms.to_string());
-            attributes.insert(ATTR_END_MS.to_string(), end_ms.to_string());
-            element.attributes = Some(attributes);
-            doc.push_element(element);
-        }
-        return;
-    }
-
-    let joined = segments
-        .iter()
-        .map(|(_, _, text)| text.as_str())
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    if !joined.is_empty() {
-        doc.push_element(InternalElement::text(ElementKind::Paragraph, &joined, 0));
-    }
-}
-
-/// Process-wide cache of loaded `WhisperEngine` instances, keyed by the
-/// canonical model paths (encoder|tokenizer). Mirrors the pattern in
-/// `crate::reranking::get_or_init_engine`.
-static ENGINES: LazyLock<Mutex<HashMap<String, Arc<WhisperEngine>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Semaphore that limits the number of concurrent Whisper inference calls.
+/// Semaphore that limits the number of concurrent transcription runs.
 ///
 /// The budget matches `resolve_thread_budget` — the same value used by the
-/// embedding and reranking semaphores so all ORT inference shares one
+/// embedding and reranking semaphores so all inference shares one
 /// per-process concurrency bound.
 static TRANSCRIPTION_SEMAPHORE: LazyLock<Arc<tokio::sync::Semaphore>> = LazyLock::new(|| {
     let budget = crate::core::config::concurrency::resolve_thread_budget(None);
     Arc::new(tokio::sync::Semaphore::new(budget))
 });
-
-/// Cache key for a loaded engine — stable across calls with identical model files.
-fn engine_cache_key(paths: &WhisperModelPaths) -> String {
-    format!("{}|{}", paths.encoder.display(), paths.tokenizer.display())
-}
-
-/// Return a cached `WhisperEngine` for `paths`, building and caching one on
-/// the first call for each distinct model.
-fn get_or_build_engine(paths: &WhisperModelPaths) -> Result<Arc<WhisperEngine>> {
-    let key = engine_cache_key(paths);
-    let mut map = ENGINES
-        .lock()
-        .map_err(|e| XbergError::transcription(format!("engine cache poisoned: {e}")))?;
-    if let Some(engine) = map.get(&key) {
-        return Ok(Arc::clone(engine));
-    }
-    let engine = WhisperEngine::load(paths)
-        .map_err(|e| XbergError::transcription(format!("whisper engine load failed: {e}")))?;
-    let arc = Arc::new(engine);
-    map.insert(key, Arc::clone(&arc));
-    Ok(arc)
-}
 
 /// Run `future` under a wall-clock deadline, bounding total async work.
 ///
@@ -119,8 +51,7 @@ where
             .map_err(|_| {
                 XbergError::transcription(format!(
                     "Transcription exceeded transcription.timeout_ms limit of {ms} ms. \
-                     Increase `transcription.timeout_ms`, use a smaller Whisper model, or \
-                     shorten the input."
+                     Increase `transcription.timeout_ms` or shorten the input."
                 ))
             })?,
         None => future.await,
@@ -132,10 +63,10 @@ where
 /// The permit is moved *into* the blocking closure rather than held by this future. A
 /// `spawn_blocking` task cannot be cancelled — dropping its `JoinHandle` detaches it and the
 /// closure still runs to completion — so a permit owned by the awaiting future is released the
-/// moment a caller times out or drops, while the Whisper inference it was bounding continues.
-/// `run_transcription_pipeline` is wrapped in [`apply_timeout`], so a `transcription.timeout_ms`
+/// moment a caller times out or drops, while the transcription it was bounding continues.
+/// The pipeline is wrapped in [`apply_timeout`], so a `transcription.timeout_ms`
 /// expiry drops that future on a live, designed-in code path, not a hypothetical one. Repeated
-/// abandoned calls then exceed the configured concurrency and keep several models resident on
+/// abandoned calls then exceed the configured concurrency and keep the model session resident on
 /// the blocking pool (same defect as GH#1641, which fixed the reranker; this is the transcription
 /// half). Taking the semaphore as a parameter also gives the tests a locally-owned semaphore,
 /// since the global one's permit count is 1 on a small host. ~keep
@@ -155,101 +86,23 @@ where
         task()
     })
     .await
-    .map_err(|e| XbergError::transcription(format!("whisper task panicked: {e}")))?
-    .map_err(|e| XbergError::transcription(format!("whisper inference failed: {e}")))
-}
-
-/// Decode audio, resolve/load the Whisper model, and run inference.
-///
-/// This is the portion of transcription that [`TranscriptionExtractor::extract_content`]
-/// bounds with [`TranscriptionConfig::timeout_ms`](crate::core::config::transcription::TranscriptionConfig::timeout_ms)
-/// via [`apply_timeout`]. Split out as a free function (rather than inlined) so the
-/// timeout wrapper composes cleanly around it.
-async fn run_transcription_pipeline(
-    content: &[u8],
-    mime_type: &str,
-    tcfg: &crate::core::config::transcription::TranscriptionConfig,
-) -> Result<InternalDocument> {
-    // Backend dispatch (coexistence): `sensevoice` takes the JchTools media
-    // chain; the Whisper pipeline below is the default and is untouched.
-    if tcfg.backend == crate::core::config::transcription::TranscriptionBackend::SenseVoice {
-        return run_sensevoice_pipeline(content, mime_type, tcfg).await;
-    }
-    let bytes_owned = content.to_vec();
-    let max_bytes_for_decode = tcfg.max_bytes;
-    let max_duration_for_decode = tcfg.max_duration_ms;
-    let timeout_for_decode = tcfg.timeout_ms;
-    let mime_owned = mime_type.to_string();
-    let (pcm, tags): (PcmAudio, crate::transcription::tags::AudioTags) = task::spawn_blocking(move || {
-        // ASF/WMV comes back through Media Foundation; everything else uses the
-        // built-in decoder unchanged. The limits travel with the call because this
-        // task outlives the extractor's timeout: a rescue decoder has to stop
-        // itself, the wrapper above can only stop waiting for it.
-        let pcm = decode_to_pcm(
-            &bytes_owned,
-            &mime_owned,
-            max_bytes_for_decode,
-            max_duration_for_decode,
-            timeout_for_decode,
-        )?;
-        let tags = crate::transcription::tags::read_audio_tags(&bytes_owned);
-        Ok::<_, XbergError>((pcm, tags))
-    })
-    .await
-    .map_err(|e| XbergError::transcription_with_source("Decoder task panicked", e))??;
-
-    if let Some(max_dur) = tcfg.max_duration_ms
-        && pcm.duration_ms > max_dur
-    {
-        return Err(XbergError::transcription(format!(
-            "Decoded audio duration {} ms exceeds transcription.max_duration_ms limit of {}",
-            pcm.duration_ms, max_dur
-        )));
-    }
-
-    let paths = {
-        let model = tcfg.model;
-        let cache_dir = tcfg.model_cache_dir.clone();
-        let allow_network = tcfg.allow_network;
-        let verify_hash = tcfg.verify_hash;
-        task::spawn_blocking(move || ensure_whisper_model(model, cache_dir.as_deref(), allow_network, verify_hash))
-            .await
-            .map_err(|e| XbergError::transcription(format!("model resolution task panicked: {e}")))?
-            .map_err(|e| XbergError::transcription(format!("whisper model resolution failed: {e}")))?
-    };
-
-    let engine = get_or_build_engine(&paths)?;
-
-    let pcm_clone = pcm.clone();
-    let lang_clone = tcfg.language.clone();
-    let timestamps = tcfg.timestamps;
-    let engine_for_task = Arc::clone(&engine);
-
-    let segments = transcribe_holding_permit(TRANSCRIPTION_SEMAPHORE.clone(), move || {
-        engine_for_task.transcribe_segments(&pcm_clone, lang_clone.as_deref(), timestamps)
-    })
-    .await?;
-
-    let mut doc = build_audio_document(tags, &pcm, mime_type);
-    push_transcript_elements(&mut doc, &segments, tcfg.timestamps);
-    Ok(doc)
+    .map_err(|e| XbergError::transcription(format!("transcription task panicked: {e}")))?
+    .map_err(|e| XbergError::transcription(format!("transcription failed: {e}")))
 }
 
 /// Document name constant used by the audio transcript extractor.
 ///
 /// `extract_content` only receives anonymous bytes (no source filename), so
 /// the SV-06 `# ` header falls back to this name on the extract path. Callers
-/// with a real path (e.g. the future worker `transcribe` command) pass the
+/// with a real path (e.g. the worker `transcribe` command) pass the
 /// real file name straight into `sensevoice::transcribe_bytes`.
 const SENSEVOICE_DOCUMENT_NAME: &str = "audio-transcript";
 
-/// SenseVoice backend pipeline: FFmpeg DLL decode → Silero VAD → SenseVoice
-/// INT8, producing the SV-06 Markdown structure.
+/// SenseVoice pipeline: FFmpeg DLL decode → Silero VAD → SenseVoice INT8,
+/// producing the SV-06 Markdown structure.
 ///
 /// Runs on the blocking thread pool under the shared transcription semaphore;
-/// the enclosing [`apply_timeout`] in `extract_content` bounds the whole call
-/// exactly like the Whisper path (on expiry the future is dropped while the
-/// blocking task finishes detached).
+/// the enclosing [`apply_timeout`] in `extract_content` bounds the whole call.
 async fn run_sensevoice_pipeline(
     content: &[u8],
     mime_type: &str,
@@ -261,13 +114,7 @@ async fn run_sensevoice_pipeline(
     let max_duration_ms = tcfg.max_duration_ms;
     let name = SENSEVOICE_DOCUMENT_NAME.to_string();
 
-    let permit = TRANSCRIPTION_SEMAPHORE
-        .clone()
-        .acquire_owned()
-        .await
-        .map_err(|e| XbergError::transcription(format!("semaphore closed: {e}")))?;
-    let result = task::spawn_blocking(move || {
-        let _permit = permit;
+    let result = transcribe_holding_permit(TRANSCRIPTION_SEMAPHORE.clone(), move || {
         crate::transcription::sensevoice::transcribe_bytes(
             &bytes,
             &name,
@@ -276,20 +123,11 @@ async fn run_sensevoice_pipeline(
             max_duration_ms,
         )
     })
-    .await
-    .map_err(|e| XbergError::transcription(format!("sensevoice task panicked: {e}")))?
-    .map_err(|e| XbergError::transcription(format!("sensevoice transcription failed: {e}")))?;
+    .await?;
 
-    let tags = crate::transcription::tags::read_audio_tags(content);
     // AudioMetadata carries the decoded duration (0 for trackless containers);
     // the sensevoice chain owns decoding, so no PCM samples are retained here.
-    let pcm_view = PcmAudio {
-        samples: Vec::new(),
-        sample_rate_hz: crate::transcription::sensevoice::SAMPLE_RATE_HZ,
-        channels: 1,
-        duration_ms: result.duration_ms,
-    };
-    let mut doc = build_audio_document(tags, &pcm_view, mime_type);
+    let mut doc = build_audio_document(result.duration_ms, mime_type);
     push_sensevoice_elements(&mut doc, &result);
     Ok(doc)
 }
@@ -297,9 +135,8 @@ async fn run_sensevoice_pipeline(
 /// Push the SV-06 document onto `doc`: `# name`, duration line, segment
 /// count, `## 转录`, then one paragraph per `[start --> end] text` segment.
 /// Each segment paragraph carries `start_ms`/`end_ms` attributes (structured
-/// timestamps for JSON consumers), mirroring the Whisper `timestamps = true`
-/// path. The identical layout is also available verbatim as
-/// `SenseVoiceResult::markdown`.
+/// timestamps for JSON consumers). The identical layout is also available
+/// verbatim as `SenseVoiceResult::markdown`.
 fn push_sensevoice_elements(doc: &mut InternalDocument, result: &crate::transcription::sensevoice::SenseVoiceResult) {
     use crate::transcription::sensevoice::{NO_AUDIO_NOTE, NO_SPEECH_NOTE, duration_line, segment_line_ms};
 
@@ -372,7 +209,7 @@ impl InternalDocumentExtractor for TranscriptionExtractor {
             XbergError::transcription(
                 "Transcription requested for audio/video input, but no `transcription` \
                      config block was provided (or `enabled` is false). \
-                     Add `transcription = { enabled = true, model = \"tiny\" }` (or equivalent) \
+                     Add `transcription = { enabled = true, backend = \"sensevoice\" }` \
                      to your ExtractionConfig.",
             )
         })?;
@@ -387,7 +224,7 @@ impl InternalDocumentExtractor for TranscriptionExtractor {
             )));
         }
 
-        apply_timeout(tcfg.timeout_ms, run_transcription_pipeline(content, mime_type, tcfg)).await
+        apply_timeout(tcfg.timeout_ms, run_sensevoice_pipeline(content, mime_type, tcfg)).await
     }
 
     fn supported_mime_types(&self) -> &[&str] {
@@ -395,9 +232,9 @@ impl InternalDocumentExtractor for TranscriptionExtractor {
         // aliases core/mime.rs declares for the four canonical types beside them.
         // `validate_mime_type` accepts an alias verbatim and the registry looks extractors up
         // by exact string with no alias resolution, so an unclaimed alias is advertised as
-        // supported and then fails as UnsupportedFormat (#229). The ASF/WMV entries are the
-        // containers the built-in decoder cannot read; their audio track is decoded through
-        // Media Foundation instead (crate::transcription::container).
+        // supported and then fails as UnsupportedFormat (#229). The ASF/WMV entries are
+        // decoded through the pinned FFmpeg shared libraries like every other container
+        // (SV-02: WMV/ASF remain readable).
         &[
             "audio/mpeg",
             "audio/mp3",
@@ -420,87 +257,25 @@ impl InternalDocumentExtractor for TranscriptionExtractor {
     }
 }
 
-#[cfg(test)]
-impl TranscriptionExtractor {
-    fn extract_sync(&self, content: &[u8], mime_type: &str, config: &ExtractionConfig) -> Result<InternalDocument> {
-        let tcfg = config.transcription.as_ref().filter(|c| c.enabled).ok_or_else(|| {
-            XbergError::transcription(
-                "Transcription requested for audio/video input, but no `transcription` \
-                 config block was provided (or `enabled` is false). \
-                 Add `transcription = { enabled = true, model = \"tiny\" }` (or equivalent) \
-                 to your ExtractionConfig.",
-            )
-        })?;
-
-        if let Some(max_b) = tcfg.max_bytes
-            && content.len() as u64 > max_b
-        {
-            return Err(XbergError::transcription(format!(
-                "Input size {} bytes exceeds transcription.max_bytes limit of {}",
-                content.len(),
-                max_b
-            )));
-        }
-
-        let pcm = decode_to_pcm(
-            content,
-            mime_type,
-            tcfg.max_bytes,
-            tcfg.max_duration_ms,
-            tcfg.timeout_ms,
-        )?;
-        let tags = crate::transcription::tags::read_audio_tags(content);
-
-        if let Some(max_d) = tcfg.max_duration_ms
-            && pcm.duration_ms > max_d
-        {
-            return Err(XbergError::transcription(format!(
-                "Decoded audio duration {} ms exceeds transcription.max_duration_ms limit of {}",
-                pcm.duration_ms, max_d
-            )));
-        }
-
-        let paths = ensure_whisper_model(
-            tcfg.model,
-            tcfg.model_cache_dir.as_deref(),
-            tcfg.allow_network,
-            tcfg.verify_hash,
-        )
-        .map_err(|e| XbergError::transcription(format!("whisper model resolution failed: {e}")))?;
-
-        let engine = get_or_build_engine(&paths)?;
-
-        let segments = engine
-            .transcribe_segments(&pcm, tcfg.language.as_deref(), tcfg.timestamps)
-            .map_err(|e| XbergError::transcription(format!("whisper inference failed: {e}")))?;
-
-        let mut doc = build_audio_document(tags, &pcm, mime_type);
-        push_transcript_elements(&mut doc, &segments, tcfg.timestamps);
-        Ok(doc)
-    }
-}
-
-/// Construct an [`InternalDocument`] with metadata derived from audio tags and decoded PCM.
+/// Construct an [`InternalDocument`] for one transcription result.
 ///
-/// Populates the common [`Metadata`] fields (title, authors, created_at, language) from tag data
-/// and attaches an [`AudioMetadata`] carrying codec/container/sample-rate/channel/bitrate info.
-/// The caller pushes transcript text as a `Paragraph` element after Whisper inference.
-fn build_audio_document(tags: AudioTags, pcm: &PcmAudio, mime_type: &str) -> InternalDocument {
+/// The document carries the decoded-audio properties reported by the
+/// SenseVoice chain (16 kHz mono; `duration_ms = 0` for trackless containers)
+/// in [`AudioMetadata`]. Container tag scraping (lofty) retired together with
+/// the Whisper chain, so common metadata (title/artist/...) is no longer
+/// populated here.
+fn build_audio_document(duration_ms: u64, mime_type: &str) -> InternalDocument {
     let audio_meta = AudioMetadata {
-        duration_ms: tags.duration_ms.or(Some(pcm.duration_ms)),
-        codec: tags.container.clone(),
-        container: tags.container,
-        sample_rate_hz: tags.sample_rate_hz.or(Some(pcm.sample_rate_hz)),
-        channels: tags.channels.or(Some(pcm.channels)),
-        bitrate: tags.bitrate,
+        duration_ms: Some(duration_ms),
+        codec: None,
+        container: None,
+        sample_rate_hz: Some(crate::transcription::sensevoice::SAMPLE_RATE_HZ),
+        channels: Some(1),
+        bitrate: None,
     };
 
-    let mut doc = InternalDocument::new("audio-transcript");
+    let mut doc = InternalDocument::new(SENSEVOICE_DOCUMENT_NAME);
     doc.mime_type = mime_type.to_string();
-    doc.metadata.title = tags.title;
-    doc.metadata.authors = tags.artist.map(|a| vec![a]);
-    doc.metadata.created_at = tags.year;
-    doc.metadata.language = tags.language;
     doc.metadata.format = Some(FormatMetadata::Audio(audio_meta));
     doc
 }
@@ -598,7 +373,7 @@ mod permit_tests {
         .await
         .expect_err("the inner error must propagate");
 
-        assert!(err.to_string().contains("whisper inference failed"), "{err}");
+        assert!(err.to_string().contains("transcription failed"), "{err}");
         assert!(err.to_string().contains("decoder rejected the clip"), "{err}");
     }
 }
@@ -607,7 +382,7 @@ mod permit_tests {
 mod tests {
     use super::*;
     use crate::core::config::ExtractionConfig;
-    use crate::core::config::transcription::{TranscriptionConfig, WhisperModel};
+    use crate::core::config::transcription::TranscriptionConfig;
 
     #[test]
     fn test_transcription_extractor_metadata() {
@@ -619,13 +394,14 @@ mod tests {
 
     #[test]
     fn test_transcription_config_defaults_roundtrip() {
-        let cfg = TranscriptionConfig {
-            model: WhisperModel::Base,
-            ..Default::default()
-        };
+        let cfg = TranscriptionConfig::default();
         let json = serde_json::to_string(&cfg).unwrap();
         let back: TranscriptionConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.model, WhisperModel::Base);
+        assert!(back.enabled);
+        assert_eq!(
+            back.backend,
+            crate::core::config::transcription::TranscriptionBackend::SenseVoice
+        );
     }
 
     fn config_with_transcription(tcfg: TranscriptionConfig) -> ExtractionConfig {
@@ -633,64 +409,6 @@ mod tests {
             transcription: Some(tcfg),
             ..Default::default()
         }
-    }
-
-    #[test]
-    fn test_sync_no_config_returns_error() {
-        let ext = TranscriptionExtractor;
-        let cfg = ExtractionConfig::default();
-        let result = ext.extract_sync(&[], "audio/mpeg", &cfg);
-        assert!(result.is_err(), "expected error when no transcription config");
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("config") || msg.contains("disabled"), "unexpected: {msg}");
-    }
-
-    #[test]
-    fn test_sync_disabled_config_returns_error() {
-        let ext = TranscriptionExtractor;
-        let tcfg = TranscriptionConfig {
-            enabled: false,
-            ..Default::default()
-        };
-        let cfg = config_with_transcription(tcfg);
-        let result = ext.extract_sync(&[], "audio/mpeg", &cfg);
-        assert!(result.is_err(), "expected error when transcription disabled");
-    }
-
-    #[test]
-    fn test_sync_size_limit_enforced() {
-        let ext = TranscriptionExtractor;
-        let tcfg = TranscriptionConfig {
-            max_bytes: Some(10),
-            ..Default::default()
-        };
-        let cfg = config_with_transcription(tcfg);
-        let oversized = vec![0u8; 11];
-        let result = ext.extract_sync(&oversized, "audio/mpeg", &cfg);
-        assert!(result.is_err(), "expected error when input exceeds max_bytes");
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("exceed") || msg.contains("limit") || msg.contains("size"),
-            "unexpected: {msg}"
-        );
-    }
-
-    #[test]
-    fn test_sync_duration_limit_enforced() {
-        let wav_path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_documents/audio/silence-1s.wav");
-        let bytes = std::fs::read(&wav_path).unwrap_or_else(|e| panic!("missing audio fixture {wav_path:?}: {e}"));
-
-        let ext = TranscriptionExtractor;
-        let tcfg = TranscriptionConfig {
-            max_duration_ms: Some(0),
-            ..Default::default()
-        };
-        let cfg = config_with_transcription(tcfg);
-        let result = ext.extract_sync(&bytes, "audio/wav", &cfg);
-        assert!(result.is_err(), "expected error when decoded duration exceeds limit");
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("duration") || msg.contains("limit"), "unexpected: {msg}");
     }
 
     #[tokio::test]
@@ -701,6 +419,21 @@ mod tests {
         assert!(result.is_err(), "expected error when no transcription config (async)");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("config") || msg.contains("disabled"), "unexpected: {msg}");
+        // The error names the current config shape, not the retired Whisper key.
+        assert!(msg.contains("backend = \"sensevoice\""), "unexpected: {msg}");
+        assert!(!msg.contains("model = \"tiny\""), "unexpected: {msg}");
+    }
+
+    #[tokio::test]
+    async fn test_async_disabled_config_returns_error() {
+        let ext = TranscriptionExtractor;
+        let tcfg = TranscriptionConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let cfg = config_with_transcription(tcfg);
+        let result = ext.extract_content(&[], "audio/mpeg", &cfg).await;
+        assert!(result.is_err(), "expected error when transcription disabled");
     }
 
     #[tokio::test]
@@ -722,10 +455,9 @@ mod tests {
     }
 
     /// Regression test for #278: `TranscriptionConfig::timeout_ms` had zero readers —
-    /// every sibling field (`max_bytes`, `max_duration_ms`, `model_cache_dir`,
-    /// `allow_network`, `verify_hash`) was enforced, but a transcription run had no
-    /// wall-clock bound at all. `apply_timeout` is the mechanism `extract_content` now
-    /// wraps the decode/model-resolution/inference pipeline in.
+    /// the sibling caps (`max_bytes`, `max_duration_ms`) were enforced, but a
+    /// transcription run had no wall-clock bound at all. `apply_timeout` is the
+    /// mechanism `extract_content` now wraps the whole pipeline in.
     #[tokio::test]
     async fn apply_timeout_returns_error_when_future_exceeds_timeout_ms() {
         let result: Result<()> = apply_timeout(Some(10), async {
@@ -764,9 +496,15 @@ mod tests {
 
     /// End-to-end wiring check: `extract_content` must actually read
     /// `transcription.timeout_ms` and apply it around the real pipeline, not just
-    /// have `apply_timeout` exist unused. A `timeout_ms: Some(0)` deadline elapses
-    /// before decode + model resolution can complete, so this exercises the real
-    /// call path without requiring network access to resolve a Whisper model.
+    /// have `apply_timeout` exist unused.
+    ///
+    /// With a zero deadline the run must always fail. Which failure wins the race
+    /// depends on the environment: with real SenseVoice assets configured
+    /// (`XBERG_TEST_SENSEVOICE_ROOT`) the 239 MB model load deterministically
+    /// loses to the 0 ms deadline and the timeout surfaces; without them the
+    /// asset precheck completes first and the missing-asset error surfaces
+    /// (the whisper-era test could assume the timeout because model loading was
+    /// always slow — that assumption does not hold for a fast asset failure).
     #[tokio::test]
     async fn extract_content_enforces_timeout_ms() {
         let wav_path =
@@ -774,127 +512,63 @@ mod tests {
         let bytes = std::fs::read(&wav_path).unwrap_or_else(|e| panic!("missing audio fixture {wav_path:?}: {e}"));
 
         let ext = TranscriptionExtractor;
-        let tcfg = TranscriptionConfig {
+        let mut tcfg = TranscriptionConfig {
             timeout_ms: Some(0),
             ..Default::default()
         };
+        if let Some(root) = std::env::var_os("XBERG_TEST_SENSEVOICE_ROOT") {
+            tcfg.model_dir = Some(std::path::PathBuf::from(root));
+        }
         let cfg = config_with_transcription(tcfg);
         let result = ext.extract_content(&bytes, "audio/wav", &cfg).await;
-        assert!(result.is_err(), "expected timeout error, got {result:?}");
+        assert!(result.is_err(), "expected a failed run, got {result:?}");
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("timeout_ms"), "unexpected message: {msg}");
-    }
-
-    fn make_pcm(duration_ms: u64) -> PcmAudio {
-        PcmAudio {
-            samples: vec![],
-            sample_rate_hz: 16_000,
-            channels: 1,
-            duration_ms,
-        }
+        assert!(
+            msg.contains("timeout_ms") || msg.contains("媒体模型缺失"),
+            "unexpected message: {msg}"
+        );
     }
 
     #[test]
-    fn test_build_audio_document_populates_common_metadata() {
-        let tags = AudioTags {
-            title: Some("My Song".to_string()),
-            artist: Some("Test Artist".to_string()),
-            year: Some("2023".to_string()),
-            language: Some("eng".to_string()),
-            ..Default::default()
-        };
-        let pcm = make_pcm(90_000);
-        let doc = build_audio_document(tags, &pcm, "audio/mpeg");
-
-        assert_eq!(doc.metadata.title.as_deref(), Some("My Song"));
-        assert_eq!(doc.metadata.authors.as_deref(), Some(&["Test Artist".to_string()][..]));
-        assert_eq!(doc.metadata.created_at.as_deref(), Some("2023"));
-        assert_eq!(doc.metadata.language.as_deref(), Some("eng"));
-        assert_eq!(doc.mime_type, "audio/mpeg");
-    }
-
-    #[test]
-    fn test_build_audio_document_populates_audio_format_metadata() {
+    fn test_build_audio_document_populates_decoded_audio_metadata() {
         use crate::types::metadata::FormatMetadata;
 
-        let tags = AudioTags {
-            duration_ms: Some(30_000),
-            sample_rate_hz: Some(44_100),
-            channels: Some(2),
-            bitrate: Some(320),
-            container: Some("mp3".to_string()),
-            ..Default::default()
-        };
-        let pcm = make_pcm(30_000);
-        let doc = build_audio_document(tags, &pcm, "audio/mpeg");
+        let doc = build_audio_document(61_250, "video/mp4");
+        assert_eq!(doc.mime_type, "video/mp4");
+        assert_eq!(doc.source_format, SENSEVOICE_DOCUMENT_NAME);
 
         let Some(FormatMetadata::Audio(ref audio)) = doc.metadata.format else {
             panic!("expected FormatMetadata::Audio, got {:?}", doc.metadata.format);
         };
-        assert_eq!(audio.duration_ms, Some(30_000));
-        assert_eq!(audio.sample_rate_hz, Some(44_100));
-        assert_eq!(audio.channels, Some(2));
-        assert_eq!(audio.bitrate, Some(320));
-        assert_eq!(audio.container.as_deref(), Some("mp3"));
+        assert_eq!(audio.duration_ms, Some(61_250));
+        assert_eq!(
+            audio.sample_rate_hz,
+            Some(crate::transcription::sensevoice::SAMPLE_RATE_HZ)
+        );
+        assert_eq!(audio.channels, Some(1));
+        assert!(audio.codec.is_none() && audio.container.is_none() && audio.bitrate.is_none());
     }
 
     #[test]
-    fn test_build_audio_document_falls_back_to_pcm_properties() {
+    fn test_build_audio_document_trackless_container_reports_zero_duration() {
         use crate::types::metadata::FormatMetadata;
 
-        let tags = AudioTags::default();
-        let pcm = make_pcm(60_000);
-        let doc = build_audio_document(tags, &pcm, "audio/wav");
-
+        let doc = build_audio_document(0, "video/mp4");
         let Some(FormatMetadata::Audio(ref audio)) = doc.metadata.format else {
             panic!("expected FormatMetadata::Audio");
         };
-        assert_eq!(
-            audio.duration_ms,
-            Some(60_000),
-            "duration should fall back to PCM value"
-        );
-        assert_eq!(
-            audio.sample_rate_hz,
-            Some(16_000),
-            "sample_rate should fall back to PCM value"
-        );
-        assert_eq!(audio.channels, Some(1), "channels should fall back to PCM value");
+        assert_eq!(audio.duration_ms, Some(0));
     }
 
-    #[test]
-    fn test_build_audio_document_empty_tags_no_common_metadata() {
-        let tags = AudioTags::default();
-        let pcm = make_pcm(0);
-        let doc = build_audio_document(tags, &pcm, "audio/flac");
-
-        assert!(doc.metadata.title.is_none(), "title should be absent for untagged file");
-        assert!(
-            doc.metadata.authors.is_none(),
-            "authors should be absent for untagged file"
-        );
-        assert!(
-            doc.metadata.created_at.is_none(),
-            "created_at should be absent for untagged file"
-        );
-        assert!(
-            doc.metadata.language.is_none(),
-            "language should be absent for untagged file"
-        );
-    }
-
-    /// SenseVoice dispatch integration test: `backend = "sensevoice"` must go
-    /// through the new chain inside `extract_content` and produce SV-06
-    /// elements. Runtime-gated on the pinned assets + real media (skipped with
-    /// a printed reason when absent):
+    /// SenseVoice end-to-end wiring check: `extract_content` must run the
+    /// SV-06 chain and produce its element structure. Runtime-gated on the
+    /// pinned assets + real media (skipped with a printed reason when absent):
     /// - `XBERG_TEST_SENSEVOICE_ROOT` — model root directory
     /// - `XBERG_TEST_SHERPA_DLL_DIR`, `XBERG_TEST_FFMPEG_DLL_DIR` — native libs
     /// - `XBERG_TEST_MEDIA_MP4` — real speech MP4
     #[cfg(feature = "transcription")]
     #[tokio::test]
-    async fn extract_content_dispatches_backend_sensevoice() {
-        use crate::core::config::transcription::TranscriptionBackend;
-
+    async fn extract_content_produces_sv06_structure_for_real_media() {
         let model_root = match std::env::var_os("XBERG_TEST_SENSEVOICE_ROOT")
             .map(std::path::PathBuf::from)
             .filter(|p| p.is_dir())
@@ -938,7 +612,6 @@ mod tests {
 
         let bytes = std::fs::read(&media).unwrap_or_else(|e| panic!("missing test media {media:?}: {e}"));
         let tcfg = TranscriptionConfig {
-            backend: TranscriptionBackend::SenseVoice,
             model_dir: Some(model_root),
             // Real model load + decode needs more than the 10 s default? No —
             // the default is 10 minutes; keep it explicit for clarity.

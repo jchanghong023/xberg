@@ -182,8 +182,7 @@ pub mod doctor;
     feature = "reranker",
     feature = "onnx-runtime",
     feature = "layout-detection",
-    feature = "auto-rotate",
-    feature = "transcription"
+    feature = "auto-rotate"
 ))]
 pub mod ort_discovery;
 
@@ -246,6 +245,8 @@ pub use core::extract::{extract, extract_batch};
 #[cfg(feature = "pdf")]
 pub use core::split::{SplitConfig, SplitSegment, SplitStrategy, split_and_extract};
 
+#[cfg(feature = "transcription-types")]
+pub use core::config::TranscriptionConfig;
 pub use core::config::{
     AccelerationConfig, BedrockConfig, CallMode, CaptioningConfig, ChunkClassificationConfig,
     ChunkClassificationDefinition, ChunkSizing, ChunkerType, ChunkingConfig, ConcurrencyConfig, ContentFilterConfig,
@@ -261,8 +262,6 @@ pub use core::config::{
 pub use core::config::{
     LateInteractionConfig, LateInteractionModelType, SparseEmbeddingConfig, SparseEmbeddingModelType,
 };
-#[cfg(feature = "transcription-types")]
-pub use core::config::{TranscriptionConfig, WhisperModel};
 #[cfg(any(feature = "url-ingestion", feature = "url-config-types"))]
 pub use crawlberg::{
     AssetCategory, AuthConfig, BrowserBackend, BrowserConfig, BrowserMode, BrowserWait, ContentConfig, CrawlConfig,

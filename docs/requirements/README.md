@@ -15,7 +15,8 @@
 | --- | --- |
 | [FORK.md](FORK.md) | 库/CLI 默认行为、配置、图片输出路径、格式抽取与文档保真 |
 | [OCR.md](OCR.md) | 图片抽取与 OCR 默认设置、后端、文字相对位置和并发资源约束 |
-| [TRANSCRIPTION.md](TRANSCRIPTION.md) | Windows 音视频解码与转写、分块并行的结果和失败顺序 |
+| [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md) | 截图 OCR 第二通道：TextSnap 固定字节模型集、确定性瓦片/合并/布局行为、本地调用接口与打包 |
+| [TRANSCRIPTION.md](TRANSCRIPTION.md) | Windows 音视频转写（FFmpeg → Silero VAD → SenseVoice INT8 唯一链路）、输出结构与失败语义 |
 | [PERFORMANCE.md](PERFORMANCE.md) | 可选性能日志、稳定阶段名和计时口径 |
 | [DELIVERY.md](DELIVERY.md) | Windows 离线包、发布流水线、自动化质量报告与测试门行为 |
 | [WORKER.md](WORKER.md) | JchTools 批次转换用的本地 stdio `worker` 进程接口（协议、串行、模型会话复用与退出语义） |
@@ -33,3 +34,5 @@
 已知未满足项见 [OCR.md](OCR.md) 的同行对齐要求，验收覆盖缺口见 [DELIVERY.md](DELIVERY.md)。没有新设产品规划或待用户决定的需求变更；已有要求继续有效，不能因当前实现或检查器未覆盖而移除。
 
 2026-09-27 worker 接口：按用户需求新增 JchTools 批次转换用的本地 stdio worker 子命令（需求与验证口径见 [WORKER.md](WORKER.md)）。实现已完成；`cargo check`（fork feature 集）与 fastcheck 通过，UT（含真实抽取路径）已编写但 `cargo test` 未运行，模型会话复用的运行时验证与调用方接入待做——按 WORKER.md 完成判据，该优化在运行时验证完成前不算完成。
+
+2026-09-27 跨仓库重构（用户目标「Xberg 同时提供两套 OCR 与 SenseVoice 转录，供 JchTools 调用」；需求草案经封闭选项确认流程，用户未逐条批复，按目标文本与推荐项实施，冲突条目修订留待追认）：新增截图 OCR 第二通道（[OCR-SNAPSHOT.md](OCR-SNAPSHOT.md)，TextSnap PP-OCRv6 small 固定字节，与文档 tiny 并存、互不回退）；转写链路替换为 FFmpeg → Silero VAD → SenseVoice INT8 并移除 Whisper/MF/symphonia（[TRANSCRIPTION.md](TRANSCRIPTION.md)，移除前完成同批合成样本新旧对照）；worker 协议扩展 `ocr_snapshot`/`snapshot_state`/`transcribe`（[WORKER.md](WORKER.md)）；打包清单同步（[DELIVERY.md](DELIVERY.md)）。实现与本地验证证据见对应文档与提交；fulltest/slowtest/远程发布门须用户授权后运行。

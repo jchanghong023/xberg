@@ -294,12 +294,12 @@ mod tests {
 
     #[test]
     fn should_map_transcription_error_to_internal_error() {
-        let error = XbergError::transcription("whisper backend failed");
+        let error = XbergError::transcription("sensevoice backend failed");
         let mcp_error = map_xberg_error_to_mcp(error);
 
         assert_eq!(mcp_error.code.0, -32603);
         assert!(mcp_error.message.contains("Transcription error"));
-        assert!(mcp_error.message.contains("whisper backend failed"));
+        assert!(mcp_error.message.contains("sensevoice backend failed"));
     }
 
     #[test]

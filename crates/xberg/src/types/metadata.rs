@@ -1525,7 +1525,7 @@ pub struct AudioMetadata {
     /// Container format (e.g. "mpeg", "mp4", "ogg", "wav").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub container: Option<String>,
-    /// Sample rate in Hz after decode (always 16000 when resampled for Whisper).
+    /// Sample rate in Hz after decode (always 16000 for the transcription chain).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sample_rate_hz: Option<u32>,
     /// Number of audio channels (1 = mono, 2 = stereo).
