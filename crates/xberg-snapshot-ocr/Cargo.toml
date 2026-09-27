@@ -1,0 +1,47 @@
+[package]
+name = "xberg-snapshot-ocr"
+# Workspace-inherited version; the crate itself is an internal port target.
+version.workspace = true
+# edition 2021 (NOT workspace 2024): keeps the ported JchTools sources
+# (`snap-ocr-core`, `snap-ocr-worker`) byte-identical, they are 2021 crates.
+edition = "2021"
+license = "MIT"
+publish = false
+description = "Screenshot OCR channel: byte-pinned PP-OCRv6 small det/rec with deterministic tiling/merge/layout, ported from the JchTools snapshot OCR implementation"
+
+[dependencies]
+# Same versions the JchTools worker used (geo-clipper 0.9 = pyclipper's
+# Clipper 6.4.2 binding; ort 2.0.0-rc.13 with load-dynamic for ORT_DYLIB_PATH).
+geo-clipper = { workspace = true }
+geo-types = { workspace = true }
+ort = { workspace = true, features = ["load-dynamic"] }
+
+[dev-dependencies]
+image = { workspace = true, features = ["png"] }
+serde_json = { workspace = true }
+
+# Deliberately NOT `[lints] workspace = true`: the workspace lint table denies
+# `print_stdout`/`print_stderr`, which the acceptance CLI example and the
+# skip-reason prints in the gated tests need. This crate keeps the JchTools
+# lint posture instead (the ported sources were zero-warning under exactly
+# these lints in their origin crates).
+[lints.rust]
+warnings = "deny"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
+# The ported snap-ocr-core modules were compiled with these allowances in
+# their origin crate (see JchTools snap-ocr-core/Cargo.toml); keep the same
+# surface so the verbatim copies stay warning-free.
+doc_markdown = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+items_after_statements = "allow"
+struct_excessive_bools = "allow"
+too_many_lines = "allow"

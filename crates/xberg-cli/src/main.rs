@@ -94,7 +94,7 @@ use commands::serve_command;
 use commands::warm_command;
 use commands::{
     BatchInputFormat, batch_command, clear_command, compiled_in_formats, doctor_command, extract_command, load_config,
-    manifest_command, stats_command, validate_file_exists, validate_output_dir, worker_command,
+    manifest_command, snapshot_ocr_command, stats_command, validate_file_exists, validate_output_dir, worker_command,
 };
 #[cfg(feature = "tree-sitter")]
 use commands::{cache_dir_command, clean_command, download_command, list_command};
@@ -303,6 +303,44 @@ enum Commands {
         /// Example: --config-json-base64 eyJvY3IiOnsiYmFja2VuZCI6InRlc3NlcmFjdCJ9fQ==
         #[arg(long)]
         config_json_base64: Option<String>,
+    },
+
+    /// Recognize one screenshot through the snapshot OCR channel (JchTools TextSnap port)
+    ///
+    /// Standalone second OCR capability (docs/requirements/OCR-SNAPSHOT.md, SNAP-18):
+    /// decodes `--image` (PNG), runs the byte-pinned `snapshot-pp-ocrv6-small-textsnap`
+    /// det/rec set, and prints the grid-layout text (`--json` for a structured report
+    /// with records and timings). Model root resolution: `--models` → `snapshot_ocr`
+    /// config block → XBERG_SNAPSHOT_MODEL_DIR → <exe dir>/models/snapshot-ocr.
+    /// Requires ORT_DYLIB_PATH to point at onnxruntime before loading.
+    SnapshotOcr {
+        /// Path to the screenshot image (PNG).
+        #[arg(long)]
+        image: PathBuf,
+
+        /// Snapshot model root directory (overrides the snapshot_ocr config block; holds det.onnx, rec.onnx, dict/dict.txt).
+        #[arg(long)]
+        models: Option<PathBuf>,
+
+        /// ONNX Runtime intra-op thread count (default: 10, the TextSnap reference).
+        #[arg(long)]
+        intra_threads: Option<usize>,
+
+        /// Emit a JSON report (text, records, load/recognize timings) instead of the layout text.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+
+        /// Path to config file (TOML, YAML, or JSON). Provides the snapshot_ocr block when --models is absent.
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+
+        /// Skip project and user config discovery and start from built-in defaults.
+        #[arg(long, conflicts_with = "config")]
+        no_config_discovery: bool,
+
+        /// Inline JSON configuration. Example: --config-json '{"snapshot_ocr":{"models_dir":"E:/assets/snapshot-models"}}'
+        #[arg(long)]
+        config_json: Option<String>,
     },
 
     /// Detect MIME type of a file
@@ -909,6 +947,23 @@ fn run_cli() -> Result<()> {
             worker_command(config)?;
         }
 
+        Commands::SnapshotOcr {
+            image,
+            models,
+            intra_threads,
+            json,
+            config: config_path,
+            no_config_discovery,
+            config_json,
+        } => {
+            // Only the snapshot_ocr block of the config matters here; the same
+            // config cascade as `extract` keeps one resolution story (SNAP-18:
+            // equivalent CLI acceptance entry for the worker channel).
+            let mut config = load_config(config_path, !no_config_discovery)?;
+            apply_json_overrides(&mut config, config_json, None)?;
+            snapshot_ocr_command(image, models, intra_threads, json, &config)?;
+        }
+
         Commands::Detect { path, format } => {
             validate_file_exists(&path)?;
 
@@ -1292,6 +1347,69 @@ mod feature_profile_tests {
         for required in ["config", "no_config_discovery", "config_json", "config_json_base64"] {
             assert!(args.iter().any(|id| id == required), "missing worker arg {required}");
         }
+    }
+
+    /// `snapshot-ocr` (SNAP-18) is registered unconditionally like `worker`: the
+    /// screenshot channel is the JchTools development/acceptance entry for the
+    /// worker's `ocr_snapshot` command and must exist in every feature profile.
+    #[test]
+    fn snapshot_ocr_command_is_always_exposed() {
+        let args = command_arg_ids("snapshot-ocr");
+        for required in [
+            "image",
+            "models",
+            "intra_threads",
+            "json",
+            "config",
+            "no_config_discovery",
+            "config_json",
+        ] {
+            assert!(
+                args.iter().any(|id| id == required),
+                "missing snapshot-ocr arg {required}"
+            );
+        }
+    }
+
+    /// The acceptance line `xberg snapshot-ocr --image <png> --models <dir> --json`
+    /// must parse into the exact fields `run_cli()` forwards into
+    /// `snapshot_ocr_command`.
+    #[test]
+    fn should_parse_snapshot_ocr_with_image_models_and_json() {
+        let cli = Cli::try_parse_from([
+            "xberg",
+            "snapshot-ocr",
+            "--image",
+            "shot.png",
+            "--models",
+            "E:/assets/snapshot-models",
+            "--intra-threads",
+            "4",
+            "--json",
+            "--no-config-discovery",
+        ])
+        .expect("clap should parse snapshot-ocr flags");
+
+        let Commands::SnapshotOcr {
+            image,
+            models,
+            intra_threads,
+            json,
+            config,
+            no_config_discovery,
+            config_json,
+        } = cli.command
+        else {
+            panic!("expected Commands::SnapshotOcr");
+        };
+
+        assert_eq!(image, PathBuf::from("shot.png"));
+        assert_eq!(models, Some(PathBuf::from("E:/assets/snapshot-models")));
+        assert_eq!(intra_threads, Some(4));
+        assert!(json);
+        assert_eq!(config, None);
+        assert!(no_config_discovery);
+        assert_eq!(config_json, None);
     }
 
     /// The contract's startup line `xberg worker --config-json <config>` must parse into

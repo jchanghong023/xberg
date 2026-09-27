@@ -18,13 +18,16 @@ mod helpers;
 use helpers::{extract_bytes_document, extract_bytes_document_blocking};
 
 use xberg::core::config::ExtractionConfig;
-use xberg::core::config::transcription::{TranscriptionConfig, WhisperModel};
+use xberg::core::config::transcription::{TranscriptionBackend, TranscriptionConfig, WhisperModel};
 
 fn config_with_transcription() -> ExtractionConfig {
     ExtractionConfig {
         transcription: Some(TranscriptionConfig {
             enabled: true,
             model: WhisperModel::Tiny,
+            // New coexistence fields (default = whisper behavior, unchanged).
+            backend: TranscriptionBackend::Whisper,
+            model_dir: None,
             language: None,
             timestamps: false,
             max_duration_ms: None,

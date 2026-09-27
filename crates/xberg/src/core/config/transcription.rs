@@ -47,6 +47,26 @@ pub struct TranscriptionConfig {
     #[serde(default)]
     pub model: WhisperModel,
 
+    /// Which transcription backend to run.
+    ///
+    /// `whisper` (default) keeps the existing Whisper ONNX pipeline unchanged.
+    /// `sensevoice` routes the input through the JchTools media chain
+    /// (FFmpeg DLL decode → Silero VAD → SenseVoice INT8) and emits the
+    /// SV-06 Markdown structure. Any other value is rejected by serde with an
+    /// "unknown variant" error naming the two valid choices.
+    #[serde(default)]
+    pub backend: TranscriptionBackend,
+
+    /// Optional model root for the `sensevoice` backend (ignored by Whisper).
+    ///
+    /// Expected to contain (directly or under `models/`) the SenseVoice
+    /// `model.int8.onnx` + `tokens.txt` and the Silero `silero_vad.onnx`.
+    /// When unset, `XBERG_SENSEVOICE_MODEL_DIR` and exe-adjacent locations are
+    /// tried. Native DLL locations use `XBERG_SHERPA_DLL_DIR` /
+    /// `XBERG_FFMPEG_DLL_DIR`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_dir: Option<PathBuf>,
+
     /// Optional language hint (ISO-639-1 code, e.g. "en", "de").
     ///
     /// When `None` (default), the current engine falls back to English.
@@ -120,6 +140,8 @@ impl Default for TranscriptionConfig {
         Self {
             enabled: true,
             model: WhisperModel::default(),
+            backend: TranscriptionBackend::default(),
+            model_dir: None,
             language: None,
             timestamps: false,
             max_duration_ms: default_max_duration_ms(),
@@ -146,6 +168,21 @@ fn default_max_bytes() -> Option<u64> {
 
 fn default_timeout_ms() -> Option<u64> {
     Some(10 * 60 * 1000)
+}
+
+/// Supported transcription backends.
+///
+/// Serialized lowercase (`"whisper"` / `"sensevoice"`); serde rejects any
+/// other value with an "unknown variant" error naming both valid choices, so
+/// typos fail loudly instead of silently falling back to Whisper.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscriptionBackend {
+    /// Whisper ONNX pipeline (existing default, unchanged).
+    #[default]
+    Whisper,
+    /// SenseVoice INT8 via sherpa-onnx + FFmpeg DLL decode + Silero VAD.
+    SenseVoice,
 }
 
 /// Supported Whisper model sizes.
@@ -201,5 +238,32 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(!json.contains("language"));
         assert!(!json.contains("model_cache_dir"));
+    }
+
+    /// `backend` defaults to `whisper` when absent, and `model_dir` is optional
+    /// (SV-11 coexistence: existing configs must parse unchanged).
+    #[test]
+    fn backend_defaults_to_whisper_and_model_dir_is_optional() {
+        let cfg: TranscriptionConfig = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert_eq!(cfg.backend, TranscriptionBackend::Whisper);
+        assert!(cfg.model_dir.is_none());
+
+        let cfg: TranscriptionConfig =
+            serde_json::from_str(r#"{"backend": "sensevoice", "model_dir": "E:/models"}"#).unwrap();
+        assert_eq!(cfg.backend, TranscriptionBackend::SenseVoice);
+        assert_eq!(cfg.model_dir.as_deref(), Some(std::path::Path::new("E:/models")));
+    }
+
+    /// An invalid backend value must be a clear error, not a silent fallback.
+    #[test]
+    fn backend_rejects_unknown_values() {
+        let err = serde_json::from_str::<TranscriptionConfig>(r#"{"backend": "wav2vec"}"#)
+            .expect_err("unknown backend must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("unknown variant"), "unexpected: {msg}");
+        assert!(
+            msg.contains("whisper") && msg.contains("sensevoice"),
+            "unexpected: {msg}"
+        );
     }
 }

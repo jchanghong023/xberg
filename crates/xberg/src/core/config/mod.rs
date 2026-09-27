@@ -30,6 +30,7 @@ pub mod redaction;
 #[cfg(any(feature = "api", feature = "mcp"))]
 pub(crate) mod request_security;
 pub mod reranker;
+pub mod snapshot_ocr;
 pub mod sparse_embedding;
 pub mod summarization;
 pub mod transcription;
@@ -76,6 +77,7 @@ pub use processing::{
     TableChunkingMode,
 };
 pub use reranker::{RerankerConfig, RerankerHead, RerankerModelType};
+pub use snapshot_ocr::{DEFAULT_INTRA_THREADS, SnapshotOcrConfig};
 pub use sparse_embedding::{SparseEmbeddingConfig, SparseEmbeddingModelType};
 #[cfg(feature = "tree-sitter")]
 pub use tree_sitter::{CodeContentMode, TreeSitterConfig, TreeSitterProcessConfig};

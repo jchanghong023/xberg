@@ -507,6 +507,21 @@ pub struct ExtractionConfig {
     #[cfg_attr(feature = "alef-meta", alef(since = "1.0.0"))]
     pub qr_codes: Option<bool>,
 
+    /// Snapshot (screenshot) OCR channel configuration (`None` = unused).
+    ///
+    /// Configures the standalone screenshot OCR channel
+    /// (`docs/requirements/OCR-SNAPSHOT.md`, SNAP-01/SNAP-02): model root and
+    /// intra-op thread count for the byte-pinned
+    /// `snapshot-pp-ocrv6-small-textsnap` set. Deliberately separate from
+    /// [`Self::ocr`] (document OCR): the two channels never share models,
+    /// sessions, or backend selection (SNAP-04). Presence of the block alone
+    /// triggers nothing — the channel only runs on an explicit `ocr_snapshot`
+    /// worker request or a `snapshot-ocr` CLI invocation. Excluded from Alef
+    /// bindings for now (internal channel with Windows CLI/worker consumers).
+    #[cfg_attr(alef, alef(skip))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_ocr: Option<super::super::snapshot_ocr::SnapshotOcrConfig>,
+
     /// Cooperative cancellation handle (`None` = no caller-initiated cancellation).
     ///
     /// Rust callers may supply a [`crate::cancellation::CancellationToken`], retain a
@@ -641,6 +656,7 @@ impl Default for ExtractionConfig {
             chunk_classification: None,
             captioning: None,
             qr_codes: None,
+            snapshot_ocr: None,
             cancel_token: None,
             source_name: None,
         }

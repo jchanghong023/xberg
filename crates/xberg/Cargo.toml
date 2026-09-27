@@ -467,6 +467,9 @@ transcription = [
     "dep:symphonia",
     "dep:lofty",
     "dep:tokenizers",
+    # SenseVoice backend (transcription::sensevoice) loads its pinned native
+    # libraries at runtime; no link-time dependency is added.
+    "dep:libloading",
     # Windows Media (ASF/WMV) containers are decoded through Media Foundation.
     # Declared only in the Windows target block below, so this is a no-op on
     # other targets, exactly like `dep:fs2` above.
@@ -1324,6 +1327,10 @@ lofty = { version = "0.25", optional = true }
 # pulls reqwest/rustls → aws-lc-rs → aws-lc-sys; the MSVC build is handled by the fix shipped in
 # xberg-io/liter-llm). hf-hub 1.0 now rides the same reqwest/aws-lc-rs stack.
 log = { workspace = true }
+# libloading: runtime loading of the pinned sherpa-onnx / FFmpeg shared libraries for the
+# SenseVoice transcription backend (transcription::sensevoice). Optional; enabled only by
+# the `transcription` feature. Same crate+version the xberg-pdfium-render crate already uses.
+libloading = { version = "0.9", optional = true }
 lopdf = { version = "0.45.0", optional = true, default-features = false }
 lru = { version = "0.18", optional = true }
 mail-parser = { version = "0.11.9", features = ["full_encoding"], optional = true }

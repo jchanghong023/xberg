@@ -236,6 +236,12 @@ tracing-appender = { workspace = true, optional = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tree-sitter-language-pack = { workspace = true, features = ["dynamic-loading", "download", "serde"], optional = true }
 xberg = { workspace = true, features = ["tokio-runtime", "simd-utf8"] }
+# Screenshot OCR channel (`snapshot-ocr` subcommand, worker `ocr_snapshot`).
+# ort uses load-dynamic, so this adds no link-time native dependency in any
+# profile; onnxruntime is resolved at run time via ORT_DYLIB_PATH.
+xberg-snapshot-ocr = { workspace = true }
+# PNG decode for `snapshot-ocr --image` (pure Rust, no native link).
+image = { workspace = true, features = ["png"] }
 
 [dev-dependencies]
 bytes = { workspace = true }

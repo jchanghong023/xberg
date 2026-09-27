@@ -26,6 +26,7 @@ pub mod ner;
 pub mod overrides;
 #[cfg(any(feature = "api", feature = "mcp"))]
 pub mod server;
+pub mod snapshot_ocr;
 #[cfg(feature = "tree-sitter")]
 pub mod tree_sitter;
 pub mod worker;
@@ -53,6 +54,7 @@ pub use formats::compiled_in_formats;
 pub use server::serve_command;
 #[cfg(feature = "mcp")]
 pub use server::{mcp_command, resolve_mcp_allowed_hosts};
+pub use snapshot_ocr::snapshot_ocr_command;
 #[cfg(feature = "tree-sitter")]
 pub use tree_sitter::{cache_dir_command, clean_command, download_command, list_command};
 pub use worker::worker_command;

@@ -170,6 +170,11 @@ async fn run_transcription_pipeline(
     mime_type: &str,
     tcfg: &crate::core::config::transcription::TranscriptionConfig,
 ) -> Result<InternalDocument> {
+    // Backend dispatch (coexistence): `sensevoice` takes the JchTools media
+    // chain; the Whisper pipeline below is the default and is untouched.
+    if tcfg.backend == crate::core::config::transcription::TranscriptionBackend::SenseVoice {
+        return run_sensevoice_pipeline(content, mime_type, tcfg).await;
+    }
     let bytes_owned = content.to_vec();
     let max_bytes_for_decode = tcfg.max_bytes;
     let max_duration_for_decode = tcfg.max_duration_ms;
@@ -228,6 +233,105 @@ async fn run_transcription_pipeline(
     let mut doc = build_audio_document(tags, &pcm, mime_type);
     push_transcript_elements(&mut doc, &segments, tcfg.timestamps);
     Ok(doc)
+}
+
+/// Document name constant used by the audio transcript extractor.
+///
+/// `extract_content` only receives anonymous bytes (no source filename), so
+/// the SV-06 `# ` header falls back to this name on the extract path. Callers
+/// with a real path (e.g. the future worker `transcribe` command) pass the
+/// real file name straight into `sensevoice::transcribe_bytes`.
+const SENSEVOICE_DOCUMENT_NAME: &str = "audio-transcript";
+
+/// SenseVoice backend pipeline: FFmpeg DLL decode → Silero VAD → SenseVoice
+/// INT8, producing the SV-06 Markdown structure.
+///
+/// Runs on the blocking thread pool under the shared transcription semaphore;
+/// the enclosing [`apply_timeout`] in `extract_content` bounds the whole call
+/// exactly like the Whisper path (on expiry the future is dropped while the
+/// blocking task finishes detached).
+async fn run_sensevoice_pipeline(
+    content: &[u8],
+    mime_type: &str,
+    tcfg: &crate::core::config::transcription::TranscriptionConfig,
+) -> Result<InternalDocument> {
+    let bytes = content.to_vec();
+    let mime_owned = mime_type.to_string();
+    let model_dir = tcfg.model_dir.clone();
+    let max_duration_ms = tcfg.max_duration_ms;
+    let name = SENSEVOICE_DOCUMENT_NAME.to_string();
+
+    let permit = TRANSCRIPTION_SEMAPHORE
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|e| XbergError::transcription(format!("semaphore closed: {e}")))?;
+    let result = task::spawn_blocking(move || {
+        let _permit = permit;
+        crate::transcription::sensevoice::transcribe_bytes(
+            &bytes,
+            &name,
+            &mime_owned,
+            model_dir.as_deref(),
+            max_duration_ms,
+        )
+    })
+    .await
+    .map_err(|e| XbergError::transcription(format!("sensevoice task panicked: {e}")))?
+    .map_err(|e| XbergError::transcription(format!("sensevoice transcription failed: {e}")))?;
+
+    let tags = crate::transcription::tags::read_audio_tags(content);
+    // AudioMetadata carries the decoded duration (0 for trackless containers);
+    // the sensevoice chain owns decoding, so no PCM samples are retained here.
+    let pcm_view = PcmAudio {
+        samples: Vec::new(),
+        sample_rate_hz: crate::transcription::sensevoice::SAMPLE_RATE_HZ,
+        channels: 1,
+        duration_ms: result.duration_ms,
+    };
+    let mut doc = build_audio_document(tags, &pcm_view, mime_type);
+    push_sensevoice_elements(&mut doc, &result);
+    Ok(doc)
+}
+
+/// Push the SV-06 document onto `doc`: `# name`, duration line, segment
+/// count, `## 转录`, then one paragraph per `[start --> end] text` segment.
+/// Each segment paragraph carries `start_ms`/`end_ms` attributes (structured
+/// timestamps for JSON consumers), mirroring the Whisper `timestamps = true`
+/// path. The identical layout is also available verbatim as
+/// `SenseVoiceResult::markdown`.
+fn push_sensevoice_elements(doc: &mut InternalDocument, result: &crate::transcription::sensevoice::SenseVoiceResult) {
+    use crate::transcription::sensevoice::{NO_AUDIO_NOTE, NO_SPEECH_NOTE, duration_line, segment_line_ms};
+
+    doc.push_element(InternalElement::text(ElementKind::Title, &result.name, 0));
+    doc.push_element(InternalElement::text(
+        ElementKind::Paragraph,
+        duration_line(result.has_audio, result.duration_ms as f32 / 1000.0),
+        0,
+    ));
+    doc.push_element(InternalElement::text(
+        ElementKind::Paragraph,
+        format!("- 语音片段: {}", result.segments.len()),
+        0,
+    ));
+    doc.push_element(InternalElement::text(ElementKind::Heading { level: 2 }, "转录", 0));
+
+    if !result.has_audio {
+        doc.push_element(InternalElement::text(ElementKind::Paragraph, NO_AUDIO_NOTE, 0));
+        return;
+    }
+    if result.segments.is_empty() {
+        doc.push_element(InternalElement::text(ElementKind::Paragraph, NO_SPEECH_NOTE, 0));
+        return;
+    }
+    for (start_ms, end_ms, text) in &result.segments {
+        let mut element = InternalElement::text(ElementKind::Paragraph, segment_line_ms(*start_ms, *end_ms, text), 0);
+        let mut attributes = AHashMap::default();
+        attributes.insert(ATTR_START_MS.to_string(), start_ms.to_string());
+        attributes.insert(ATTR_END_MS.to_string(), end_ms.to_string());
+        element.attributes = Some(attributes);
+        doc.push_element(element);
+    }
 }
 
 /// The transcription extractor.
@@ -777,5 +881,100 @@ mod tests {
             doc.metadata.language.is_none(),
             "language should be absent for untagged file"
         );
+    }
+
+    /// SenseVoice dispatch integration test: `backend = "sensevoice"` must go
+    /// through the new chain inside `extract_content` and produce SV-06
+    /// elements. Runtime-gated on the pinned assets + real media (skipped with
+    /// a printed reason when absent):
+    /// - `XBERG_TEST_SENSEVOICE_ROOT` — model root directory
+    /// - `XBERG_TEST_SHERPA_DLL_DIR`, `XBERG_TEST_FFMPEG_DLL_DIR` — native libs
+    /// - `XBERG_TEST_MEDIA_MP4` — real speech MP4
+    #[cfg(feature = "transcription")]
+    #[tokio::test]
+    async fn extract_content_dispatches_backend_sensevoice() {
+        use crate::core::config::transcription::TranscriptionBackend;
+
+        let model_root = match std::env::var_os("XBERG_TEST_SENSEVOICE_ROOT")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_dir())
+        {
+            Some(root) => root,
+            None => {
+                println!("skip：XBERG_TEST_SENSEVOICE_ROOT 不在场");
+                return;
+            }
+        };
+        let media = match std::env::var_os("XBERG_TEST_MEDIA_MP4")
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_file())
+        {
+            Some(m) => m,
+            None => {
+                println!("skip：XBERG_TEST_MEDIA_MP4 不在场");
+                return;
+            }
+        };
+        if std::env::var_os("XBERG_TEST_SHERPA_DLL_DIR").is_none()
+            || std::env::var_os("XBERG_TEST_FFMPEG_DLL_DIR").is_none()
+        {
+            println!("skip：XBERG_TEST_SHERPA_DLL_DIR / XBERG_TEST_FFMPEG_DLL_DIR 不在场");
+            return;
+        }
+
+        // Map test-gate variables onto the runtime variables the backend reads.
+        // SAFETY：测试进程内、其它测试写入的是相同值（Windows std 内部有锁）。
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var(
+                crate::transcription::sensevoice::SHERPA_DLL_DIR_ENV,
+                std::env::var_os("XBERG_TEST_SHERPA_DLL_DIR").expect("checked above"),
+            );
+            std::env::set_var(
+                crate::transcription::sensevoice::FFMPEG_DLL_DIR_ENV,
+                std::env::var_os("XBERG_TEST_FFMPEG_DLL_DIR").expect("checked above"),
+            );
+        }
+
+        let bytes = std::fs::read(&media).unwrap_or_else(|e| panic!("missing test media {media:?}: {e}"));
+        let tcfg = TranscriptionConfig {
+            backend: TranscriptionBackend::SenseVoice,
+            model_dir: Some(model_root),
+            // Real model load + decode needs more than the 10 s default? No —
+            // the default is 10 minutes; keep it explicit for clarity.
+            timeout_ms: Some(600_000),
+            ..Default::default()
+        };
+        let cfg = config_with_transcription(tcfg);
+        let ext = TranscriptionExtractor;
+        let doc = ext
+            .extract_content(&bytes, "video/mp4", &cfg)
+            .await
+            .expect("sensevoice extraction must succeed");
+
+        // SV-06 element structure: Title, duration line, segment count,
+        // `## 转录` heading, segment paragraphs with start_ms/end_ms attrs.
+        let kinds: Vec<String> = doc.elements.iter().map(|e| format!("{:?}", e.kind)).collect();
+        assert!(
+            kinds.iter().any(|k| k == "Title"),
+            "expected a Title element, got {kinds:?}"
+        );
+        let texts: Vec<&str> = doc.elements.iter().map(|e| e.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.starts_with("- 音频时长: ")),
+            "expected the duration line, got {texts:?}"
+        );
+        assert!(texts.contains(&"转录"), "expected the 转录 heading, got {texts:?}");
+        let segments: Vec<_> = doc
+            .elements
+            .iter()
+            .filter(|e| e.text.starts_with('[') && e.text.contains(" --> "))
+            .collect();
+        assert!(!segments.is_empty(), "expected transcript segment paragraphs");
+        for element in &segments {
+            let attributes = element.attributes.as_ref().expect("segment attrs");
+            assert!(attributes.contains_key("start_ms"));
+            assert!(attributes.contains_key("end_ms"));
+        }
     }
 }
