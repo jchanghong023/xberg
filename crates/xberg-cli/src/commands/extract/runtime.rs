@@ -43,7 +43,7 @@ fn batch_runtime_worker_threads(config: &ExtractionConfig, input_count: usize) -
 /// every request on a 2 MB worker.
 pub(crate) const RUNTIME_WORKER_STACK_SIZE_BYTES: usize = 16 * 1024 * 1024;
 
-fn build_runtime(config: &ExtractionConfig) -> std::io::Result<tokio::runtime::Runtime> {
+pub(crate) fn build_runtime(config: &ExtractionConfig) -> std::io::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
         .worker_threads(runtime_worker_threads(config))
         .enable_all()

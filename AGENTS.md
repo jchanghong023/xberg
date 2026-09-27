@@ -88,7 +88,7 @@
 | crate | 角色 |
 |---|---|
 | `crates/xberg` | 核心库：配置、抽取、OCR、渲染、转写、HTTP API 都在这里面 |
-| `crates/xberg-cli` | 二进制 `xberg`：clap 定义在 `src/main.rs`，子命令在 `src/commands/`（extract / cache / config / doctor / server 等） |
+| `crates/xberg-cli` | 二进制 `xberg`：clap 定义在 `src/main.rs`，子命令在 `src/commands/`（extract / batch / worker / cache / config / doctor / server 等；worker 是 JchTools 批次用的 stdio 工作进程，需求见 [WORKER.md](docs/requirements/WORKER.md)） |
 | `crates/xberg-windows-metafile` | **fork 新增**：纯 GDI 把 EMF/WMF 栅格化成 PNG |
 | `xberg-paddle-ocr` / `xberg-tesseract` / `xberg-candle-ocr` | OCR 后端 crate（本 fork 只用前两个，candle 不编） |
 | `xberg-native-pdf` / `xberg-libheif` / `xberg-gliner` | PDF 原生解析 / heic（fork 不编）/ NER gliner（fork 不编） |

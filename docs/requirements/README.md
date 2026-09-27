@@ -18,6 +18,7 @@
 | [TRANSCRIPTION.md](TRANSCRIPTION.md) | Windows 音视频解码与转写、分块并行的结果和失败顺序 |
 | [PERFORMANCE.md](PERFORMANCE.md) | 可选性能日志、稳定阶段名和计时口径 |
 | [DELIVERY.md](DELIVERY.md) | Windows 离线包、发布流水线、自动化质量报告与测试门行为 |
+| [WORKER.md](WORKER.md) | JchTools 批次转换用的本地 stdio `worker` 进程接口（协议、串行、模型会话复用与退出语义） |
 
 每项需求只在所属文档维护；跨域关系用链接表达。已有合适文档时更新该文档，新独立功能域才新增文档，不按代码目录或篇幅拆分。新增、修改、取消本地需求及预期用户可见行为时必须同步对应文档；实现方式变化不制造需求变化。
 
@@ -30,3 +31,5 @@
 同步中处理的上游问题与 fork 适配（均有提交记录）：① 上游 `0330859dbc` 把 `scan_detect/tests.rs` 追加成双份内容、`34e52a7153` 一带使 `ocr/processor/config.rs` 缓存键测试重复定义（E0428）——上游随后以 `c3107fff59` 自行修复 scan_detect，config.rs 的重复由 fork 删除其重复块；上游自带的同类 fmt 漂移由 fork `cargo fmt` 修复。② fork 适配三处上游新测试（保留覆盖、调整前提）：`should_apply_the_whole_image_psm_to_a_scan_page` 显式钉 `tesseract` 后端（fork 默认 paddle-ocr）、GH#1785 SUBTOTAL 计数与 GH#1789 byte-no-op 断言按 fork 的 Windows Tesseract（tesseract55d）行为放宽（恢复性与零破坏属性保留）。③ **fork 功能缺口修复**：GH#1789 数字修复此前不覆盖 fork 网格围栏的数据源——新增共享函数 `repair_extracted_document_numbers` 并接入共享图片 OCR 通道（`apply_ocr_result`），正文与围栏的数字保持一致。④ `pdf_numeric_footnotes::numeric_footnote_survives_public_extraction` 在 fork `#[ignore]`：fork 经公开 `extract` 入口的 native fast-path 将合成页的上标数字粘合（CLI 路径正常），函数级与上游逐字节一致、分歧在运行时数据流组合，待专门调试；fork 真实语料的 E2E（fulltest.py）不受影响。
 
 已知未满足项见 [OCR.md](OCR.md) 的同行对齐要求，验收覆盖缺口见 [DELIVERY.md](DELIVERY.md)。没有新设产品规划或待用户决定的需求变更；已有要求继续有效，不能因当前实现或检查器未覆盖而移除。
+
+2026-09-27 worker 接口：按用户需求新增 JchTools 批次转换用的本地 stdio worker 子命令（需求与验证口径见 [WORKER.md](WORKER.md)）。实现已完成；`cargo check`（fork feature 集）与 fastcheck 通过，UT（含真实抽取路径）已编写但 `cargo test` 未运行，模型会话复用的运行时验证与调用方接入待做——按 WORKER.md 完成判据，该优化在运行时验证完成前不算完成。

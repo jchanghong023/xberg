@@ -34,8 +34,11 @@ pub use manifest::{BatchInputFormat, load_batch_input_manifest};
 // re-export is legitimately unused even though the underlying const in `runtime.rs` is not
 // (it is also read locally there). Keeping the re-export preserves the stable
 // `commands::extract::RUNTIME_WORKER_STACK_SIZE_BYTES` path for builds that do enable api/mcp. ~keep
+// Re-exported for `commands::worker`, which serves a whole batch on one runtime instead
+// of building a fresh one per request like `block_on_extract` does. ~keep
 #[allow(unused_imports)]
 pub(crate) use runtime::RUNTIME_WORKER_STACK_SIZE_BYTES;
+pub(crate) use runtime::build_runtime;
 // `STAGE_TIMING_ENV_VAR` is part of this module's public path for external documentation/tooling
 // (see `crate::output`'s doc comment) but has no in-crate reader outside `timing.rs` itself;
 // `stage_timing_requested` (re-exported alongside it) is always read from within this module, so
@@ -233,7 +236,8 @@ pub fn uri_to_local_path(uri: &str) -> Result<PathBuf> {
     Ok(PathBuf::from(uri.strip_prefix("file://").unwrap_or(uri)))
 }
 
-fn single_result_from_output(mut output: ExtractionResult) -> Result<ExtractedDocument> {
+// `commands::worker` unwraps the same single-input `ExtractionResult` shape per request. ~keep
+pub(crate) fn single_result_from_output(mut output: ExtractionResult) -> Result<ExtractedDocument> {
     fail_if_errors(&output.errors)?;
     if output.results.len() != 1 {
         anyhow::bail!("Expected one extraction result, got {}.", output.results.len());

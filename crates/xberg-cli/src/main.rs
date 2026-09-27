@@ -14,6 +14,7 @@
 //! The CLI is built using `clap` for argument parsing and provides five main commands:
 //! - `extract`: Extract text/data from a single document
 //! - `batch`: Process multiple documents in parallel
+//! - `worker`: Batch-local stdio worker (line-JSON requests on stdin, one JSON response per request on stdout)
 //! - `detect`: Identify MIME type of a file
 //! - `cache`: Manage cache (clear, stats)
 //! - `serve`: Start API server (requires `api` feature)
@@ -93,7 +94,7 @@ use commands::serve_command;
 use commands::warm_command;
 use commands::{
     BatchInputFormat, batch_command, clear_command, compiled_in_formats, doctor_command, extract_command, load_config,
-    manifest_command, stats_command, validate_file_exists, validate_output_dir,
+    manifest_command, stats_command, validate_file_exists, validate_output_dir, worker_command,
 };
 #[cfg(feature = "tree-sitter")]
 use commands::{cache_dir_command, clean_command, download_command, list_command};
@@ -271,6 +272,37 @@ enum Commands {
         /// Example: {"doc1.pdf": {"force_ocr": true}, "doc2.pdf": {"output_format": "markdown"}}
         #[arg(long)]
         file_configs: Option<PathBuf>,
+    },
+
+    /// Run a batch-local stdio worker process
+    ///
+    /// Serves one batch for an embedding caller (JchTools): reads one JSON request per
+    /// line from stdin (`{"id":..,"command":"extract","path":"..","mode":"normal"}`) and
+    /// writes exactly one JSON response line per request to stdout, echoing `id`. The
+    /// extraction configuration is fixed at startup and the process (plus its loaded
+    /// models) is reused for the whole batch; stdin EOF ends the batch and the process
+    /// exits after the in-flight request. stdout carries protocol messages only —
+    /// diagnostics go to stderr. Full contract: docs/requirements/WORKER.md
+    Worker {
+        /// Path to config file (TOML, YAML, or JSON). If not specified, searches for xberg.toml/yaml/json in current and parent directories.
+        #[arg(short, long)]
+        config: Option<PathBuf>,
+
+        /// Skip project and user config discovery and start from built-in defaults.
+        #[arg(long, conflicts_with = "config")]
+        no_config_discovery: bool,
+
+        /// Inline JSON configuration. Applied after config file; the worker serves the whole batch with this fixed config.
+        ///
+        /// Example: --config-json '{"ocr":{"backend":"tesseract"},"chunking":{"max_chars":1000}}'
+        #[arg(long)]
+        config_json: Option<String>,
+
+        /// Base64-encoded JSON configuration. Useful for shell environments where quotes are problematic.
+        ///
+        /// Example: --config-json-base64 eyJvY3IiOnsiYmFja2VuZCI6InRlc3NlcmFjdCJ9fQ==
+        #[arg(long)]
+        config_json_base64: Option<String>,
     },
 
     /// Detect MIME type of a file
@@ -865,6 +897,18 @@ fn run_cli() -> Result<()> {
             batch_command(input_uris, file_configs_map, config, format, output_dir)?;
         }
 
+        Commands::Worker {
+            config: config_path,
+            no_config_discovery,
+            config_json,
+            config_json_base64,
+        } => {
+            // The batch's fixed config is resolved once here; requests carry only a path.
+            let mut config = load_config(config_path, !no_config_discovery)?;
+            apply_json_overrides(&mut config, config_json, config_json_base64)?;
+            worker_command(config)?;
+        }
+
         Commands::Detect { path, format } => {
             validate_file_exists(&path)?;
 
@@ -1237,6 +1281,47 @@ mod feature_profile_tests {
     #[test]
     fn url_ingestion_exposes_url_flag() {
         assert!(command_arg_ids("extract").iter().any(|id| id == "url"));
+    }
+
+    /// `worker` is registered unconditionally: it is the batch-local stdio process the
+    /// JchTools integration holds for a whole batch (docs/requirements/WORKER.md), so it
+    /// must exist in every feature profile, not only when api/mcp servers are compiled in.
+    #[test]
+    fn worker_command_is_always_exposed() {
+        let args = command_arg_ids("worker");
+        for required in ["config", "no_config_discovery", "config_json", "config_json_base64"] {
+            assert!(args.iter().any(|id| id == required), "missing worker arg {required}");
+        }
+    }
+
+    /// The contract's startup line `xberg worker --config-json <config>` must parse into
+    /// the exact fields `run_cli()` forwards into `worker_command` (config discovery
+    /// skipped so the assertion does not depend on the working directory).
+    #[test]
+    fn should_parse_worker_with_fixed_config_json() {
+        let cli = Cli::try_parse_from([
+            "xberg",
+            "worker",
+            "--no-config-discovery",
+            "--config-json",
+            "{\"ocr\":{}}",
+        ])
+        .expect("clap should parse worker --config-json");
+
+        let Commands::Worker {
+            config,
+            no_config_discovery,
+            config_json,
+            config_json_base64,
+        } = cli.command
+        else {
+            panic!("expected Commands::Worker");
+        };
+
+        assert_eq!(config, None);
+        assert!(no_config_discovery);
+        assert_eq!(config_json.as_deref(), Some("{\"ocr\":{}}"));
+        assert_eq!(config_json_base64, None);
     }
 
     #[cfg(not(feature = "ocr-surface"))]
