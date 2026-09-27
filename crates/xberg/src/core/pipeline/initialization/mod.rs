@@ -786,6 +786,25 @@ mod tests {
         *slot = None;
     }
 
+    /// Retry a post-processor lifecycle mutation while a concurrent, non-`#[serial]` test in
+    /// this binary holds a processor-snapshot lease. `with_registration_update` refuses such
+    /// mutations with an error whose contract says to retry after the extraction completes, and
+    /// `#[serial]` cannot order against the non-serial tests running real extractions -- so
+    /// honour the contract instead of `.unwrap()`ing an exclusivity this binary never had.
+    /// Same 250 x 20 ms budget the registry guards use, which whole-suite load has shown to be
+    /// necessary.
+    fn retry_post_processor_lifecycle_mutation<T>(mut mutation: impl FnMut() -> Result<T>) -> Result<T> {
+        for _ in 0..250 {
+            match mutation() {
+                Err(crate::XbergError::Other(message)) if message.contains("retry the lifecycle mutation") => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                outcome => return outcome,
+            }
+        }
+        mutation()
+    }
+
     /// #215: a post-processor registered after the cache was already populated
     /// must become visible on the *next* extraction, not stay invisible until
     /// something remembers to call `clear_processor_cache()`.
@@ -864,8 +883,14 @@ mod tests {
             "the processor under test must not be in the cache before it is registered"
         );
 
-        // Register a processor *after* the cache already holds a snapshot.
-        crate::plugins::register_post_processor(Arc::new(LateAddedProcessor)).unwrap();
+        // Register a processor *after* the cache already holds a snapshot. The registration is
+        // itself a lifecycle mutation that any concurrent non-serial extraction can transiently
+        // refuse, so it retries on that refusal exactly like the guard's own setup clear above.
+        let late_added: Arc<dyn PostProcessor> = Arc::new(LateAddedProcessor);
+        retry_post_processor_lifecycle_mutation(|| {
+            crate::plugins::register_post_processor(std::sync::Arc::clone(&late_added))
+        })
+        .unwrap();
 
         // Without the #215 fix, `initialize_processor_cache` is a no-op once the
         // cache is `Some(_)`, so the newly registered processor would never appear.

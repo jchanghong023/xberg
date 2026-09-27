@@ -6610,7 +6610,15 @@ mod tests {
     /// same way; before a fix it returned `true` unconditionally, which let
     /// `scanned_pages_to_ocr` enter the per-page gate (and its `whole_doc_failure` branch,
     /// selecting every page) with no backend able to run OCR on any of them.
+    ///
+    /// `#[serial]`: both operands of the assertion read the process-global OCR registry, which
+    /// the serial `pipeline_recovers_default_backend_after_global_registry_cleared` empties via
+    /// `clear_ocr_backends()` before its own pipeline run re-seeds the built-ins. A clear or
+    /// re-seed landing between the two reads flips them to opposite values -- a whole-suite
+    /// flake that always passes in isolation. The shared serial lock orders this test against
+    /// that clearer, the only test in this binary that removes the default backend.
     #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+    #[serial_test::serial]
     #[test]
     fn scanned_page_quality_gate_on_without_an_ocr_block_requires_a_registered_backend() {
         let config = ExtractionConfig {
@@ -6628,7 +6636,13 @@ mod tests {
 
     /// GH#1752 / #1338. `ocr_near_empty_fallback` unset must reproduce the derived condition:
     /// always with an `ocr` block, and without one only for genuinely absent native text.
+    ///
+    /// `#[serial]`: the final assertion's two operands read the process-global OCR registry at
+    /// different instants, and the serial `clear_ocr_backends()`-based pipeline-recovery test
+    /// can flip the default backend's presence between them; the shared serial lock orders this
+    /// test against that clearer (see the sibling gate test above for the full rationale).
     #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+    #[serial_test::serial]
     #[test]
     fn near_empty_fallback_unset_reproduces_the_1338_carve_out() {
         use crate::core::config::OcrConfig;
@@ -6660,7 +6674,16 @@ mod tests {
     /// Switched on, the fallback stops requiring *completely* empty text -- that is the whole
     /// point: a scanned page carrying only a page label or scanner stamp must reach OCR. It
     /// still consults the backend registry exactly as the derived condition does.
+    ///
+    /// `#[serial]`: every assertion compares two reads of the process-global OCR registry, and
+    /// the serial `pipeline_recovers_default_backend_after_global_registry_cleared` empties
+    /// exactly that registry via `clear_ocr_backends()` before its own pipeline run re-seeds
+    /// the built-ins. A clear or re-seed landing between a pair of reads flips them to opposite
+    /// values -- observed as a whole-suite flake that always passes in isolation (2026-09-27
+    /// fulltest gate run 2). The shared serial lock orders this test against that clearer, the
+    /// only test in this binary that removes the default backend.
     #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+    #[serial_test::serial]
     #[test]
     fn near_empty_fallback_on_without_an_ocr_block_drops_the_empty_text_requirement() {
         let opted_in = ExtractionConfig {
