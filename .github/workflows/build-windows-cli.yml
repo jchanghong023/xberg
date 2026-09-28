@@ -43,6 +43,15 @@ jobs:
         with:
           ort-version: "1.24.2"
 
+      # The snapshot/transcription assets are never downloaded by the packaging
+      # script itself: provision the byte-pinned set from the public sources the
+      # JchTools release pipeline pinned (every file size+SHA-256 verified,
+      # reused across reruns).
+      - name: Provision pinned media assets
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File "$env:GITHUB_WORKSPACE/scripts/ci/actions/provision-media-assets.ps1"
+
       - name: Build and package Windows CLI
         shell: pwsh
         run: |

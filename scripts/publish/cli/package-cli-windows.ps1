@@ -36,10 +36,12 @@ verified against a pinned size + SHA-256):
   + LICENSE.txt                                              n9.0.2 shared LGPL
   samples/silence-1s.wav                                     offline-smoke audio fixture
 
-CI asset provisioning (not automated here): a CI runner must populate
--MediaAssetRoot before invoking this script, from the same public sources the
-JchTools release pipeline uses -- each file is hash-pinned below, so any
-equivalent source works:
+CI asset provisioning: .github/workflows/build-windows-cli.yml runs
+scripts/ci/actions/provision-media-assets.ps1 before this script to populate
+-MediaAssetRoot from the same public sources the JchTools release pipeline
+pinned (size + SHA-256 verified per file; verified files are reused). Any
+equivalent provisioning works -- every file is re-verified against the pins
+below at staging time:
   snapshot models (TextSnap conversion artifacts, byte-pinned; published with
     the JchTools release assets) -> <root>/snapshot-models/
   SenseVoice + Silero VAD (k2-fsa sherpa-onnx "asr-models" release assets) ->
