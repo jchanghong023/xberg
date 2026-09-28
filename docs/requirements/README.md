@@ -23,7 +23,7 @@
 
 每项需求只在所属文档维护；跨域关系用链接表达。已有合适文档时更新该文档，新独立功能域才新增文档，不按代码目录或篇幅拆分。新增、修改、取消本地需求及预期用户可见行为时必须同步对应文档；实现方式变化不制造需求变化。
 
-2026-09-28 遗留缺口修复（用户授权「修复转换遗留缺口＋截图 OCR 效果优化」，基线数据与 B-2 裁决经全权授权按数据执行）：① PPTX txBody 段落绑定 PresentationML 前缀（`p:p`）的生成器产物此前整 shape 静默丢弃（JchTools A08），已修复并回归（[FORK.md](FORK.md) PPTX 行）。② 文档内嵌 SVG 成员此前送 OCR 原始字节必失败（"Could not determine image format"），现于 OCR 前经 resvg 栅格化（启用 text+system-fonts、共享系统字体库、外链禁用），`.svg` 引用保留（[FORK.md](FORK.md) 内嵌 SVG 行；依赖 feature 变更见 Cargo.toml resvg 段）。③ PNM 六种表示经合成边界测试确认全绿；JchTools A17 的 p6 夹具为截断输入（9/27 字节），当前行为＝优雅失败诊断，非引擎缺陷。④ 截图 OCR 效果基准（15 样本合成语料，`.tmp/snap-bench/`）：Xberg 通道与 snap-ocr-core 参考实现 15/15 逐字符一致；首轮三个"缺陷"（长行截断/双栏列距/缩进行丢字）经解剖全部为基准语料自身缺陷（画布溢出、期望列距失真、CJK 误用无字形字体），修正后长行 0.667%、双栏锚点 ≤1 半角单元、缩进行 0%；残差归因为 rec/det 模型字形能力或 SNAP-12 既有网格语义——**B-2 不实施任何参数/行为改动**，SNAP-08~12 合同零变化，XB-02 逐字符一致保持。验证：新增 6 UT 红→绿、相关模块 168 UT 绿、fastcheck 绿；fulltest/slowtest 门结果见下段补记。
+2026-09-28 遗留缺口修复（用户授权「修复转换遗留缺口＋截图 OCR 效果优化」，基线数据与 B-2 裁决经全权授权按数据执行）：① PPTX txBody 段落绑定 PresentationML 前缀（`p:p`）的生成器产物此前整 shape 静默丢弃（JchTools A08），已修复并回归（[FORK.md](FORK.md) PPTX 行）。② 文档内嵌 SVG 成员此前送 OCR 原始字节必失败（"Could not determine image format"），现于 OCR 前经 resvg 栅格化（启用 text+system-fonts、共享系统字体库、外链禁用），`.svg` 引用保留（[FORK.md](FORK.md) 内嵌 SVG 行；依赖 feature 变更见 Cargo.toml resvg 段）。③ PNM 六种表示经合成边界测试确认全绿；JchTools A17 的 p6 夹具为截断输入（9/27 字节），当前行为＝优雅失败诊断，非引擎缺陷。④ 截图 OCR 效果基准（15 样本合成语料，`.tmp/snap-bench/`）：Xberg 通道与 snap-ocr-core 参考实现 15/15 逐字符一致；首轮三个"缺陷"（长行截断/双栏列距/缩进行丢字）经解剖全部为基准语料自身缺陷（画布溢出、期望列距失真、CJK 误用无字形字体），修正后长行 0.667%、双栏锚点 ≤1 半角单元、缩进行 0%；残差归因为 rec/det 模型字形能力或 SNAP-12 既有网格语义——**B-2 不实施任何参数/行为改动**，SNAP-08~12 合同零变化，XB-02 逐字符一致保持。验证：新增 6 UT 红→绿、相关模块 168 UT 绿、fastcheck 绿；fulltest.py 结果见「实现与验证状态」2026-09-29 补记（slowtest 门未运行）。
 
 ## 实现与验证状态
 
@@ -38,3 +38,5 @@
 2026-09-27 worker 接口：按用户需求新增 JchTools 批次转换用的本地 stdio worker 子命令（需求与验证口径见 [WORKER.md](WORKER.md)）。实现已完成；`cargo check`（fork feature 集）与 fastcheck 通过，UT（含真实抽取路径）已编写但 `cargo test` 未运行，模型会话复用的运行时验证与调用方接入待做——按 WORKER.md 完成判据，该优化在运行时验证完成前不算完成。
 
 2026-09-27 跨仓库重构（用户目标「Xberg 同时提供两套 OCR 与 SenseVoice 转录，供 JchTools 调用」；需求草案经封闭选项确认流程，用户未逐条批复，按目标文本与推荐项实施，冲突条目修订留待追认）：新增截图 OCR 第二通道（[OCR-SNAPSHOT.md](OCR-SNAPSHOT.md)，TextSnap PP-OCRv6 small 固定字节，与文档 tiny 并存、互不回退）；转写链路替换为 FFmpeg → Silero VAD → SenseVoice INT8 并移除 Whisper/MF/symphonia（[TRANSCRIPTION.md](TRANSCRIPTION.md)，移除前完成同批合成样本新旧对照）；worker 协议扩展 `ocr_snapshot`/`snapshot_state`/`transcribe`（[WORKER.md](WORKER.md)）；打包清单同步（[DELIVERY.md](DELIVERY.md)）。实现与本地验证证据见对应文档与提交；fulltest/slowtest/远程发布门须用户授权后运行。
+
+2026-09-29 补记（fulltest.py，9-28 遗留缺口修复后的验收运行）：开发版 `target\debug\xberg.exe`，commit `8519fac429`（干净树），12 文件（9 主队列文档 + 3 对抗）FAIL=0 WARN=7、无提前终止；与 2026-09-27 基线（金标准 sha256 未变）比 new=0 / fixed=0 / worsened=0——9-28 的 PPTX `p:p`、内嵌 SVG 栅格化、PNM 边界三项修复未引入新问题码、未恶化（修复本身的正向验证是 9-28 新增 UT，语料不含对应夹具）。默认未含 `--deep` 音视频（wmv/mp4 两个媒体文件未测）；slowtest 门与打包/发布验证未运行。

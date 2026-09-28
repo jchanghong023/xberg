@@ -39,7 +39,7 @@
 - **验证状态必须如实区分**：已实现 / 验证通过 / 验证失败 / 未验证（写明未验证范围与原因）。环境、依赖或权限不足时说明未验证部分，不能用"已修复"描述未验证的改动（与「硬性约束」的交付要求一致）。
 - **Windows 上可用的 UT 入口**（均属编译类命令，只在用户点名时运行）：`cargo test -p xberg`、`cargo test -p xberg-cli`，或 `task test:quick`（= `cargo test --locked --lib --workspace --exclude xberg-php --exclude xberg-node --exclude xberg-wasm`，只跑 lib 单测）。`task test` / `task test:ci` 在 `.task/languages/rust.yml` 里只声明了 linux / darwin 平台，在 Windows 上不执行。
 - **test_documents 语料二进制不进 git**：`test_documents` 子模块只含源码与 `corpus.lock.json`（693 个对象的 sha256/大小清单），.pdf/.docx/.pst 等二进制须先从公开 bucket 拉取到工作树（约 618 MB，一次性）：`cd test_documents && python scripts/fetch_corpus.py`（已正确文件只做哈希校验；语料路径被子模块 .gitignore 忽略，不会弄脏父仓）。缺语料时 cargo test 会出现大量 "fixture not found" 失败；testgate fulltest 门的 `test-documents-corpus` 阶段会先做存在性预检并给出该修复命令。
-- **现状与缺口（如实记录）**：本 fork 没有自动跑 Rust 测试的 CI（上游 `ci-rust.yaml` 等编译 / 测试 workflow 被仓库守卫 skip，无守卫的 `ci-lint` 只跑治理 / 文档 / 脚本类检查，不编译 Rust、不跑 Rust 测试）；fork 新增模块多数自带 UT（`extraction/visio.rs`、`rendering/ocr_layout.rs`、`extraction/markdown_utils.rs`、`extraction/excel/images.rs`、`crates/xberg-windows-metafile`），但部分模块（如 `transcription/wmf.rs`）没有 UT，只有 fulltest 的 E2E 覆盖；上游 `e2e/` + `fixtures/` 的语言绑定 e2e 在本 fork 不运行、不作为验收依据。
+- **现状与缺口（如实记录）**：本 fork 没有自动跑 Rust 测试的 CI（上游 `ci-rust.yaml` 等编译 / 测试 workflow 被仓库守卫 skip，无守卫的 `ci-lint` 只跑治理 / 文档 / 脚本类检查，不编译 Rust、不跑 Rust 测试）；fork 新增模块多数自带 UT（`extraction/visio.rs`、`rendering/ocr_layout.rs`、`extraction/markdown_utils.rs`、`extraction/excel/images.rs`、`transcription/sensevoice/`、`crates/xberg-windows-metafile`；Whisper 链路移除后 `transcription/wmf.rs` 无 UT 的旧记录已退役），未覆盖处以需求目录各文档的缺口记录为准；上游 `e2e/` + `fixtures/` 的语言绑定 e2e 在本 fork 不运行、不作为验收依据。
 - 复用已有有效测试，不为每处修改机械新增用例；纯文档等非功能变更按实际影响验证，不运行无关完整测试。
 - 当前转换脚本只覆盖真实 CLI 抽取，不能据此声称 HTTP 服务、性能日志或每条解码回退路径完成 E2E；覆盖盲区及未满足需求见 [DELIVERY.md](docs/requirements/DELIVERY.md) 和对应需求文档。修改相关能力时补齐必要验证，未经授权不执行费时测试。
 - fork 行为改变上游测试前提时，依据需求调整前提/断言并保留有效覆盖，不删除测试来掩盖失败；与 fork 差异无关的上游测试语义保留。
@@ -102,7 +102,7 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 - `extractors/`——对外抽取器：按格式路由、embedded 子文档调度；`extraction/`——各格式底层解析（docx / pptx / excel / visio / ooxml_embedded / image_ocr / markdown_utils 等，fork 改动密集区）。
 - `rendering/`——输出渲染：Markdown（`markdown.rs`、`comrak_bridge.rs`）、HTML / djot / plain、图片 OCR 布局块（`ocr_layout.rs`，fork 新增）。
 - `pdf/`——PDF 专属：原生文本 `native/`、结构分析 `structure/`（分类/段落/页眉页脚）、表格重建 `table_reconstruct.rs`。
-- `ocr/` + `paddle_ocr/`——OCR 后端与调度；`transcription/`——Whisper 转写（`container.rs`/`wmf.rs` 为 fork 新增的 Media Foundation 通道）。
+- `ocr/` + `paddle_ocr/`——OCR 后端与调度；`transcription/`——音视频转写（`sensevoice/` 是唯一链路：FFmpeg 共享库解码 → Silero VAD → SenseVoice INT8，Whisper 已于 2026-09-27 移除，需求见 [TRANSCRIPTION.md](docs/requirements/TRANSCRIPTION.md)）。
 - `api/`——axum HTTP API（`xberg serve`）；`engine/`——引擎编排入口；`presets/`——预设；`doctor/`——诊断。
 
 ### 顶层目录
@@ -145,7 +145,7 @@ pwsh -NoProfile -File scripts/publish/cli/package-cli-windows.ps1
 ```
 
 - 需要 PowerShell ≥7.4；本地 Jobs 默认 min(30, 逻辑核数)，CI 默认 6，可用 `-Jobs N` 覆盖。CI 调用同一脚本，不能另建不同打包路径。
-- 输出 `xberg-cli-x86_64-pc-windows-msvc/` 和同名 zip。模型组成、离线正负 smoke 和 DLL 验收要求见 DELIVERY.md；实现入口为 `$Features`、`$RequiredModels`、`$TranscriptionFiles`，Paddle 清单从 `xberg.exe cache manifest` 取大小/sha256，Whisper 使用固定清单；模型正则必须恰好匹配一条。
+- 输出 `xberg-cli-x86_64-pc-windows-msvc/` 和同名 zip。模型组成、离线正负 smoke 和 DLL 验收要求见 DELIVERY.md；实现入口为 `$Features` 与 `$RequiredModels`（截图 OCR 三成员与 SenseVoice/VAD 资产的固定字节清单，逐项校验大小+SHA-256），Paddle 模型从 `xberg.exe cache manifest` 取大小/sha256；模型正则必须恰好匹配一条。
 - `target/package-models-<target>` 是跨次复用缓存，不随临时清理删除。包内执行时 `HF_HUB_CACHE` 指向 `<包>/models`，PATH 前置包目录；不要用会追加 `/hub` 的 `HF_HOME` 代替。fulltest.py 已处理这两项。
 - `python slowtest.py` 执行打包及打包版 E2E，`--skip-package` 可复用已有 zip，`--keep-tmp` 保留解压目录；脚本固定使用 `target/slowtest-tmp/`，成功即清理，否则保留。该脚本管理的目录按其固定入口处理，agent 自建一次性文件仍必须放 `.tmp/`。
 - Rust UT、`task test:quick`、`cargo clippy` 及 task runner 的其他编译入口仍须明确授权。`Taskfile.yml` / `.task/languages/rust.yml` 是入口依据，Windows 上不使用只声明 linux/darwin 的 `task test` / `task test:ci`。
