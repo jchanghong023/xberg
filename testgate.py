@@ -274,6 +274,7 @@ def _stage_env(name):
 
 def gate_fulltest():
     print("fulltest 门：当前平台（Windows）完整本地验证 —— 仅限用户明确授权后运行。", flush=True)
+    t0 = time.monotonic()
     statuses = {}
     for name, cmd, needs in FULLTEST_STAGES:
         if any(statuses.get(n) != PASS for n in needs):
@@ -297,7 +298,7 @@ def gate_fulltest():
         print(f"[fulltest] {name}: {statuses[name]}, {time.monotonic()-ts:.0f}s", flush=True)
 
     failed = [n for n, st in statuses.items() if st != PASS]
-    print(f"\nfulltest 门: {'FAIL' if failed else 'PASS'}"
+    print(f"\nfulltest 门: {'FAIL' if failed else 'PASS'}, {time.monotonic()-t0:.1f}s"
           + (f"（失败/跳过: {', '.join(failed)}）" if failed else ""), flush=True)
     return 1 if failed else 0
 
@@ -423,6 +424,7 @@ def _gh_json(args):
 def gate_slowtest(with_release_ci):
     print("slowtest 门：fulltest 门 + 打包验证（+ 可选远程发布流水线）—— 仅限用户明确授权后运行。",
           flush=True)
+    t0 = time.monotonic()
     statuses = {}
 
     ts = time.monotonic()
@@ -466,7 +468,7 @@ def gate_slowtest(with_release_ci):
 
     hard_failed = [n for n, st in statuses.items()
                    if st in (FAIL, TIMEOUT, SKIPPED_PRIOR_FAIL, UNVERIFIED)]
-    print(f"\nslowtest 门: {'FAIL' if hard_failed else 'PASS'}"
+    print(f"\nslowtest 门: {'FAIL' if hard_failed else 'PASS'}, {time.monotonic()-t0:.1f}s"
           + (f"（失败/未验证/被跳过: {', '.join(hard_failed)}）" if hard_failed else ""), flush=True)
     if statuses["release-ci"] != PASS:
         print("注意：远程发布流水线未通过（未授权/未运行/失败），本次不能宣称『完整 slowtest 已通过』。",
