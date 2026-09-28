@@ -100,6 +100,51 @@ foreach ($asset in $DirectAssets) {
   $downloaded++
 }
 
+# The offline-smoke audio fixture (32,044 bytes, pinned below like every other
+# asset). It lives in the test_documents submodule path but is NOT part of any
+# submodule commit (corpus binaries are fetched, not tracked), so it is
+# synthesized deterministically instead: a plain 44-byte PCM WAV header
+# (16 kHz, mono, 16-bit) followed by 16,000 zero samples. The pinned SHA-256
+# proves the synthesized bytes identical to the reference file, and the
+# packaging script re-verifies the pin at staging time.
+$smokeWav = Join-Path $RepoRoot "test_documents/audio/silence-1s.wav"
+$smokeWavPin = @{ SizeBytes = 32044; Sha256 = "643f8a8dc8bd9c19225afffad2becfec5426180b3749cb208abdf1a6c8354efc" }
+if (Test-Pinned -Path $smokeWav -SizeBytes $smokeWavPin.SizeBytes -Sha256 $smokeWavPin.Sha256) {
+  $reused++
+  Write-Host "  reuse smoke audio fixture"
+}
+else {
+  Write-Host "  synthesize smoke audio fixture (1s silence, 16 kHz mono 16-bit)"
+  $parent = Split-Path -Parent $smokeWav
+  if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
+  # RIFF/WAVE header for PCM 16 kHz mono 16-bit + 32,000 zero data bytes.
+  $dataSize = 32000
+  $header = [byte[]] (
+    0x52,0x49,0x46,0x46, # "RIFF"
+    0x24,0x7D,0x00,0x00, # chunk size = 36 + 32000 = 32044 (0x7D24, little-endian)
+    0x57,0x41,0x56,0x45, # "WAVE"
+    0x66,0x6D,0x74,0x20, # "fmt "
+    0x10,0x00,0x00,0x00, # fmt chunk size = 16
+    0x01,0x00,           # audio format = 1 (PCM)
+    0x01,0x00,           # channels = 1
+    0x80,0x3E,0x00,0x00, # sample rate = 16000
+    0x00,0x7D,0x00,0x00, # byte rate = 32000
+    0x02,0x00,           # block align = 2
+    0x10,0x00,           # bits per sample = 16
+    0x64,0x61,0x74,0x61, # "data"
+    0x00,0x7D,0x00,0x00  # data size = 32000
+  )
+  $silence = New-Object byte[] $dataSize
+  $bytes = New-Object byte[] (44 + $dataSize)
+  [Array]::Copy($header, 0, $bytes, 0, 44)
+  [Array]::Copy($silence, 0, $bytes, 44, $dataSize)
+  [System.IO.File]::WriteAllBytes($smokeWav, $bytes)
+  if (-not (Test-Pinned -Path $smokeWav -SizeBytes $smokeWavPin.SizeBytes -Sha256 $smokeWavPin.Sha256)) {
+    throw "synthesized smoke audio fixture does not match the pinned SHA-256"
+  }
+  $downloaded++
+}
+
 $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("xberg-media-provision-" + [System.IO.Path]::GetRandomFileName())
 try {
   foreach ($archive in $ArchiveAssets) {
