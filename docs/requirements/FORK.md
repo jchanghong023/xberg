@@ -21,10 +21,11 @@
 | 能力 | 必须保留的行为及验收条件 |
 | --- | --- |
 | Office 图元文件 | 内嵌 EMF/WMF 能栅格化为 PNG、落盘并在 Markdown 中引用，供 OCR 使用。 |
+| 内嵌 SVG | 文档内嵌的 SVG 成员在 OCR 前经本地 resvg 栅格化（外部 href 一律禁用、不取网络资源），识别文本进入既有 OCR 输出路径；`.svg` 媒体成员与引用保持原样不替换。栅格化含 `<text>` 文本渲染（系统字体，进程内共享加载一次）。 |
 | Visio | `.vsd`、`.vsdx`、`.vsdm` 均能路由到对应抽取能力并提取形状文本，扩展名与 MIME 登记一致。 |
 | Excel | xlsx 内嵌图片能抽取、落盘并 OCR；OCR 输出遵循 [OCR.md](OCR.md)。 |
 | OOXML/OLE | 内嵌 Word OLE 文本合并到宿主文档对应位置；PPTX OLE/PresentationML fallback 图片能够抽出。归属位置仍是要求，不能以“文末出现过文本”代替。 |
-| PPTX | 标题与演讲者备注归属到正确幻灯片，不串页、不重复。 |
+| PPTX | 标题与演讲者备注归属到正确幻灯片，不串页、不重复。txBody 段落绑定到 DrawingML（`a:p`）或 PresentationML（`p:p`）前缀均提取——后者是部分生成器的真实产物（JchTools A08 夹具形态），runs 与 `a:fld` 缓存字段值按文档流顺序输出，不得静默丢弃。 |
 | PDF | 有原生文本的页面不做破坏性整页 OCR 回退；保留原生文本、重建表格并按配置剔除页眉页脚。`content_filter.include_headers/include_footers` 在扁平文本与结构化两条路径一致生效，跨页重复页眉/页脚剔除也受这些开关约束。 |
 | Markdown | 图片 alt 不残留本地路径垃圾；围栏内原有文本保持原样。图片 marker 与 OCR 围栏的关系见 [OCR.md](OCR.md)。 |
 | XML/OPML | 元素标题以 ` (k: v, …)` 内联 `id`、`type`、`_note` 等属性；过滤 `xmlns*`、空值及 `xberg:` 内部标记。plain 与 Markdown 保持一致，默认配置下相关 OPML note 与 XML 保真断言成立。 |
