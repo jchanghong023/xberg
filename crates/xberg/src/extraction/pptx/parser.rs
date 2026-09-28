@@ -249,12 +249,29 @@ fn parse_sp(sp_node: &Node, xml_str: &str) -> Result<Option<ParsedContent>> {
     }
 }
 
+/// Whether `node` is a txBody paragraph element.
+///
+/// ECMA-376 types `p:txBody` (and `a:txBody` in tables) as DrawingML, so the
+/// paragraph is `<a:p>`. Some producers — including generated decks in the wild
+/// — bind the paragraph to the PresentationML prefix (`<p:p>`) while keeping
+/// `a:bodyPr`/`a:lstStyle`/`a:r`/`a:fld` in DrawingML. The runs are unchanged
+/// either way, so both bindings are accepted here; anything else is not a
+/// paragraph. See `test_extract_pptx_paragraph_with_presentationml_prefix`.
+fn is_txbody_paragraph(node: &Node) -> bool {
+    node.tag_name().name() == "p"
+        && matches!(
+            node.tag_name().namespace(),
+            Some(DRAWINGML_NAMESPACE) | Some(PRESENTATIONML_NAMESPACE)
+        )
+}
+
 pub(super) fn parse_text(tx_body_node: &Node, xml_str: &str) -> Result<TextElement> {
     let mut runs = Vec::new();
 
-    for p_node in tx_body_node.children().filter(|n| {
-        n.is_element() && n.tag_name().name() == "p" && n.tag_name().namespace() == Some(DRAWINGML_NAMESPACE)
-    }) {
+    for p_node in tx_body_node
+        .children()
+        .filter(|n| n.is_element() && is_txbody_paragraph(n))
+    {
         let mut paragraph_runs = parse_paragraph(&p_node, true, xml_str)?;
         runs.append(&mut paragraph_runs);
     }
@@ -456,9 +473,10 @@ fn parse_table_cell(tc_node: &Node) -> Result<TableCell> {
         // Table cells use the `a:txBody` schema directly (no `xml_str` slicing
         // needed for math, since cell text is treated as plain runs); pass an
         // empty document string as there is nothing to slice for OMML here.
-        for p_node in tx_body_node.children().filter(|n| {
-            n.is_element() && n.tag_name().name() == "p" && n.tag_name().namespace() == Some(DRAWINGML_NAMESPACE)
-        }) {
+        for p_node in tx_body_node
+            .children()
+            .filter(|n| n.is_element() && is_txbody_paragraph(n))
+        {
             let mut paragraph_runs = parse_paragraph(&p_node, false, "")?;
             runs.append(&mut paragraph_runs);
         }
@@ -510,9 +528,10 @@ fn parse_pic(pic_node: &Node) -> Result<ImageReference> {
 fn parse_list(tx_body_node: &Node, xml_str: &str) -> Result<ListElement> {
     let mut items = Vec::new();
 
-    for p_node in tx_body_node.children().filter(|n| {
-        n.is_element() && n.tag_name().name() == "p" && n.tag_name().namespace() == Some(DRAWINGML_NAMESPACE)
-    }) {
+    for p_node in tx_body_node
+        .children()
+        .filter(|n| n.is_element() && is_txbody_paragraph(n))
+    {
         let (level, is_ordered, has_bullet) = parse_list_properties(&p_node)?;
 
         let runs = parse_paragraph(&p_node, true, xml_str)?;

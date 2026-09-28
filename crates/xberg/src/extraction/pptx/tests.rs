@@ -223,6 +223,132 @@ fn test_extract_pptx_from_bytes_empty_data() {
     assert!(result.is_err());
 }
 
+/// Build a one-slide PPTX whose slide XML is supplied verbatim, keeping the same
+/// package skeleton as [`create_test_pptx_bytes`].
+fn create_pptx_with_raw_slide_xml(slide_xml: &str) -> Vec<u8> {
+    let mut source = create_test_pptx_bytes(vec!["placeholder"]);
+    let mut cursor = std::io::Cursor::new(&mut source);
+    {
+        let mut archive = zip::ZipArchive::new(&mut cursor).unwrap();
+        let mut members: Vec<(String, Vec<u8>)> = Vec::new();
+        for name in archive.file_names().map(str::to_string).collect::<Vec<_>>() {
+            let mut data = Vec::new();
+            use std::io::Read;
+            archive.by_name(&name).unwrap().read_to_end(&mut data).unwrap();
+            members.push((name, data));
+        }
+        let mut out = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, data) in members {
+            if name == "ppt/slides/slide1.xml" {
+                out.start_file(name, options).unwrap();
+                use std::io::Write;
+                out.write_all(slide_xml.as_bytes()).unwrap();
+            } else {
+                out.start_file(name, options).unwrap();
+                use std::io::Write;
+                out.write_all(&data).unwrap();
+            }
+        }
+        out.finish().unwrap().into_inner()
+    }
+}
+
+/// A deck whose txBody paragraph is bound to the PresentationML prefix (`p:p`)
+/// instead of the schema-mandated DrawingML `a:p` still yields its runs and the
+/// cached `a:fld` value, in document order.
+///
+/// Real-world decks always write `a:p`; this variant reproduces the shape of the
+/// JchTools acceptance fixture (A08), whose text was silently dropped before the
+/// parser learned to look past the paragraph prefix.
+#[test]
+fn test_extract_pptx_paragraph_with_presentationml_prefix() {
+    let slide_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+    <p:cSld>
+        <p:spTree>
+            <p:sp>
+                <p:nvSpPr><p:cNvPr id="9" name="TextBox"/><p:cNvSpPr/><p:nvPr/></p:nvSpPr>
+                <p:spPr><a:xfrm><a:off x="500000" y="5600000"/><a:ext cx="8000000" cy="500000"/></a:xfrm>
+                <a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr>
+                <p:txBody><a:bodyPr/><a:lstStyle/>
+                    <p:p>
+                        <a:r><a:rPr lang="zh-CN" sz="1800"/><a:t>RUN-AND-FIELD</a:t></a:r>
+                        <a:fld id="{6E1B}" type="slidenum"><a:rPr lang="zh-CN" sz="1800"/><a:t>7</a:t></a:fld>
+                        <a:r><a:rPr lang="zh-CN" sz="1800"/><a:t>-FIELD-END</a:t></a:r>
+                    </p:p>
+                </p:txBody>
+            </p:sp>
+        </p:spTree>
+    </p:cSld>
+    <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:sld>"#;
+    let pptx_bytes = create_pptx_with_raw_slide_xml(slide_xml);
+    let result = extract_pptx_from_bytes(
+        &pptx_bytes,
+        &PptxExtractionOptions {
+            extract_images: false,
+            ..Default::default()
+        },
+        &mut Vec::new(),
+    )
+    .unwrap();
+
+    assert!(
+        result.content.contains("RUN-AND-FIELD"),
+        "run text missing, content was: {}",
+        result.content
+    );
+    assert!(result.content.contains("7"), "cached field value missing");
+    assert!(
+        result.content.contains("-FIELD-END"),
+        "trailing run missing, content was: {}",
+        result.content
+    );
+}
+
+/// A title placeholder whose paragraph uses the PresentationML prefix is still
+/// recognized as the slide's title.
+#[test]
+fn test_extract_pptx_title_placeholder_with_presentationml_prefix() {
+    let slide_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">
+    <p:cSld>
+        <p:spTree>
+            <p:sp>
+                <p:nvSpPr><p:cNvPr id="2" name="Title 1"/><p:cNvSpPr/>
+                    <p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+                <p:spPr/>
+                <p:txBody><a:bodyPr/><a:lstStyle/>
+                    <p:p><a:r><a:t>PrefixTitleRun</a:t></a:r></p:p>
+                </p:txBody>
+            </p:sp>
+        </p:spTree>
+    </p:cSld>
+    <p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr>
+</p:sld>"#;
+    let pptx_bytes = create_pptx_with_raw_slide_xml(slide_xml);
+    let internal = extract_pptx_from_bytes_with_slide_contents(
+        &pptx_bytes,
+        &PptxExtractionOptions {
+            extract_images: false,
+            ..Default::default()
+        },
+        &mut Vec::new(),
+    )
+    .unwrap();
+
+    assert!(
+        internal.result.content.contains("PrefixTitleRun"),
+        "title text missing, content was: {}",
+        internal.result.content
+    );
+}
+
 /// Build a PPTX bytes with sections and optional speaker notes for integration testing.
 pub(crate) fn create_pptx_with_sections_and_notes(
     slides: &[(&str, Option<&str>)],
