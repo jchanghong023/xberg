@@ -954,6 +954,28 @@ try {
     throw "staging the bundle failed: $summary"
   }
 
+  # Unify the bundle on a single ONNX Runtime version. Windows loads DLLs by
+  # module NAME, so an exe-dir onnxruntime.dll (from ORT_LIB_LOCATION, e.g.
+  # 1.24.2) plus sherpa-onnx/onnxruntime.dll (the version sherpa-onnx was built
+  # against) makes whichever loads first win the name and starves the other
+  # consumer of its API version (observed: sherpa requesting API 27 from a
+  # 1.24.2 module). The sherpa pair is byte-pinned and verified above, and the
+  # ort client accepts it (verified: snapshot OCR + paddle run against the
+  # sherpa runtime), so the root copies are replaced with the sherpa bytes.
+  foreach ($name in @("onnxruntime.dll", "onnxruntime_providers_shared.dll")) {
+    $sherpaDll = Join-Path $Stage "sherpa-onnx/$name"
+    if (Test-Path -LiteralPath $sherpaDll) {
+      Copy-Item -LiteralPath $sherpaDll -Destination (Join-Path $Stage $name) -Force
+    }
+  }
+  $rootOrt = Join-Path $Stage "onnxruntime.dll"
+  $sherpaOrt = Join-Path $Stage "sherpa-onnx/onnxruntime.dll"
+  if ((Test-Path -LiteralPath $rootOrt) -and (Test-Path -LiteralPath $sherpaOrt) -and
+      ((Get-FileHash -LiteralPath $rootOrt -Algorithm SHA256).Hash -ne
+       (Get-FileHash -LiteralPath $sherpaOrt -Algorithm SHA256).Hash)) {
+    throw "bundle root onnxruntime.dll does not match sherpa-onnx/onnxruntime.dll after unification"
+  }
+
   # Deploy the MSVC runtime before the first run of the staged binary (smoke /
   # --version). `cache manifest` already ran off the target exe above, so CRT
   # no longer blocks model resolution -- only the in-flight download job does.
