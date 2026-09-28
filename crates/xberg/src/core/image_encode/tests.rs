@@ -177,6 +177,58 @@ fn svg_to_png_behaviour() {
     }
 }
 
+/// Rasterizing a text-bearing SVG must render the glyphs, not a blank canvas.
+///
+/// An SVG member's `<text>` is the only carrier of its content, so a raster that
+/// drops text (usvg without the `text` feature silently discards text nodes)
+/// would make SVG→OCR extraction structurally impossible. A white canvas with
+/// black text must therefore produce a non-trivial pixel histogram: this is the
+/// unit-level guard for the embedded-SVG OCR path.
+#[cfg(feature = "svg")]
+#[test]
+fn rasterize_svg_renders_text_glyphs() {
+    let svg = concat!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" width="120" height="40" viewBox="0 0 120 40">"##,
+        r##"<rect width="120" height="40" fill="#ffffff"/>"##,
+        r##"<text x="6" y="28" font-family="Arial" font-size="20" fill="#000000">SVGTextAlpha</text>"##,
+        "</svg>",
+    );
+    let options = crate::core::config::extraction::SvgOptions::default();
+    let (png, format) = super::rasterize_svg(svg.as_bytes(), ImageOutputFormat::Png, &options)
+        .expect("rasterizing a clean SVG must succeed");
+
+    assert_eq!(format, "png");
+    let decoded = image::load_from_memory(&png).expect("rasterized SVG must decode as PNG");
+    let rgba = decoded.to_rgba8();
+    let non_white = rgba.pixels().filter(|p| p[0] < 240 || p[1] < 240 || p[2] < 240).count();
+    assert!(
+        non_white > 50,
+        "text glyphs must appear in the raster ({non_white} non-white pixels); \
+         a blank canvas means usvg dropped the <text> node",
+    );
+}
+
+/// External references stay disabled when rasterizing for OCR: an `<image>` href
+/// pointing at a network URL resolves to nothing and must not abort the render.
+#[cfg(feature = "svg")]
+#[test]
+fn rasterize_svg_with_external_href_does_not_fetch_and_still_renders() {
+    let svg = concat!(
+        r##"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="40" height="40">"##,
+        r##"<rect width="40" height="40" fill="#ffffff"/>"##,
+        r##"<image x="0" y="0" width="40" height="40" xlink:href="http://127.0.0.1:9/x.png"/>"##,
+        r##"<rect x="4" y="4" width="8" height="8" fill="#000000"/>"##,
+        "</svg>",
+    );
+    let options = crate::core::config::extraction::SvgOptions::default();
+    let (png, _) = super::rasterize_svg(svg.as_bytes(), ImageOutputFormat::Png, &options)
+        .expect("external href must be ignored, not fetched");
+    let decoded = image::load_from_memory(&png).expect("rasterized SVG must decode as PNG");
+    let rgba = decoded.to_rgba8();
+    let black = rgba.pixels().filter(|p| p[0] < 16 && p[1] < 16 && p[2] < 16).count();
+    assert!(black >= 64, "local shapes must still render ({black} black pixels)");
+}
+
 #[test]
 fn corrupt_png_decode_fails() {
     let corrupt = Bytes::from_static(b"\x89PNG\r\n\x1a\ncorrupt garbage bytes here");

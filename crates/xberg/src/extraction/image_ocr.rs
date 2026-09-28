@@ -27,6 +27,9 @@
 
 use std::borrow::Cow;
 
+#[cfg(feature = "svg")]
+use crate::core::config::extraction::ImageOutputFormat;
+
 use crate::types::{ExtractedDocument, ExtractedImage};
 
 /// Why a Windows metafile could not be prepared for OCR, tagged with the pipeline stage so
@@ -497,6 +500,13 @@ fn spawn_ocr_task(join_set: &mut tokio::task::JoinSet<OcrTaskResult>, task: Pend
             let detected = crate::extraction::image_format::detect_image_format(&image.data);
             let is_metafile =
                 matches!(detected.as_ref(), "emf" | "wmf") || matches!(image.format.as_ref(), "emf" | "wmf");
+            // SVG is the other vector member an OCR backend cannot decode. Rasterize
+            // it to PNG for OCR input only — the `ExtractedImage` keeps the original
+            // SVG bytes and `.svg` reference, so the on-disk member is unchanged.
+            // Gated builds without the `svg` feature keep feeding the raw bytes and
+            // fail per-image with the backend's own decode diagnostic.
+            #[cfg(feature = "svg")]
+            let is_svg = detected.as_ref() == "svg" || image.format.as_ref() == "svg";
             let prepared: bytes::Bytes = if is_metafile {
                 tokio::task::spawn_blocking(move || {
                     prepare_image_for_ocr(&image, &image_config, &security_limits)
@@ -512,7 +522,30 @@ fn spawn_ocr_task(join_set: &mut tokio::task::JoinSet<OcrTaskResult>, task: Pend
                     source: None,
                 })?
             } else {
-                image.data.clone()
+                #[cfg(feature = "svg")]
+                if is_svg {
+                    let svg_options = image_config.svg.clone();
+                    let svg_bytes = image.data.clone();
+                    let (png_bytes, _) = tokio::task::spawn_blocking(move || {
+                        crate::core::image_encode::rasterize_svg(&svg_bytes, ImageOutputFormat::Png, &svg_options)
+                            .map_err(|warning| crate::XbergError::Ocr {
+                                message: format!("SVG rasterization for OCR failed: {warning}"),
+                                source: None,
+                            })
+                    })
+                    .await
+                    .map_err(|error| crate::XbergError::Ocr {
+                        message: format!("SVG rasterization task panicked: {}", error),
+                        source: None,
+                    })??;
+                    bytes::Bytes::from(png_bytes)
+                } else {
+                    image.data.clone()
+                }
+                #[cfg(not(feature = "svg"))]
+                {
+                    image.data.clone()
+                }
             };
 
             let backend = {

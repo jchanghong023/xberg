@@ -119,8 +119,10 @@ pdfium-render = { package = "xberg-pdfium-render", path = "./crates/xberg-pdfium
 rayon = "1.12.0"
 reqwest = { version = "0.13.5", default-features = false }
 # SVG rendering (resvg re-exports tiny_skia and usvg; default-features = false
-# drops text, system-fonts, memmap-fonts, raster-images — all pure-Rust, WASM-safe).
-resvg = { version = "0.48", default-features = false }
+# drops memmap-fonts and raster-images — all pure-Rust. `text` + `system-fonts`
+# are enabled so <text> nodes rasterize with the OS font set instead of being
+# dropped at parse (embedded-SVG OCR needs the rendered glyphs).
+resvg = { version = "0.48", default-features = false, features = ["text", "system-fonts"] }
 rusqlite = { version = "0.40", default-features = false, features = ["bundled", "hooks", "serialize"] }
 same-file = "1.0.6"
 sceptre = { version = "0.7.2", default-features = false }

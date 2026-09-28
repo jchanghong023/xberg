@@ -430,6 +430,26 @@ fn sanitize_svg(data: &[u8]) -> Result<String, EncodeWarning> {
     Ok(tree.to_string(&usvg::WriteOptions::default()))
 }
 
+/// The shared system font database for SVG text rasterization.
+///
+/// `usvg::Options::default()` starts with an *empty* fontdb, so `<text>` nodes
+/// silently rasterize as nothing even with the `text` feature enabled. The
+/// database is loaded once per process (scanning the OS font set is expensive)
+/// and shared across every `rasterize_svg` call.
+#[cfg(feature = "svg")]
+fn system_font_database() -> std::sync::Arc<resvg::usvg::fontdb::Database> {
+    use resvg::usvg::fontdb;
+
+    static FONTS: std::sync::OnceLock<std::sync::Arc<fontdb::Database>> = std::sync::OnceLock::new();
+    FONTS
+        .get_or_init(|| {
+            let mut db = fontdb::Database::new();
+            db.load_system_fonts();
+            std::sync::Arc::new(db)
+        })
+        .clone()
+}
+
 /// Rasterize SVG bytes to a pixel-based format (PNG, JPEG, WebP, HEIF).
 ///
 /// The SVG viewBox is scaled by `svg_options.render_dpi / 96.0` to produce the
@@ -437,8 +457,12 @@ fn sanitize_svg(data: &[u8]) -> Result<String, EncodeWarning> {
 /// existing raster encode path.
 ///
 /// Returns the encoded bytes and the canonical format name string on success.
+///
+/// Also used by the embedded-image OCR pass (`extraction::image_ocr`), which
+/// rasterizes declared/detected SVG members to PNG before handing them to an
+/// OCR backend; the original SVG bytes stay on the `ExtractedImage`.
 #[cfg(feature = "svg")]
-fn rasterize_svg(
+pub(crate) fn rasterize_svg(
     data: &[u8],
     target: ImageOutputFormat,
     svg_options: &SvgOptions,
@@ -455,6 +479,7 @@ fn rasterize_svg(
     let opts = usvg::Options {
         resources_dir: None,
         dpi: svg_options.render_dpi,
+        fontdb: system_font_database(),
         image_href_resolver: usvg::ImageHrefResolver {
             resolve_data: Box::new(|_, _, _| None),
             resolve_string: Box::new(|_, _| None),
