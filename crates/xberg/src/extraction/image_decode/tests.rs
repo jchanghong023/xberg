@@ -629,3 +629,44 @@ fn approved_decoder_guard(relative: &str, function: &str, path: &str) -> Option<
         _ => None,
     }
 }
+
+/// The PNM family's six representations (P1–P3 ASCII, P4–P6 binary) all decode,
+/// and a raster shorter than the header declares fails with a parsing error
+/// instead of a panic.
+///
+/// The truncated-P6 case pins the observed boundary of the acceptance corpus:
+/// `P6 3 3 255` needs 27 raster bytes, so 9 bytes are truncated input, and the
+/// documented contract for damaged input is a graceful, diagnosable failure.
+#[test]
+fn pnm_family_decodes_all_six_representations_and_truncated_p6_fails_gracefully() {
+    let limits = SecurityLimits::default();
+    let cases: [(&str, Vec<u8>); 6] = [
+        ("P1", b"P1\n3 3\n0 1 0\n1 0 1\n0 1 0\n".to_vec()),
+        ("P2", b"P2\n3 3\n255\n0 127 0\n127 0 127\n0 127 0\n".to_vec()),
+        (
+            "P3",
+            b"P3\n3 3\n255\n0 0 0 0 255 0 0 0 255\n255 0 0 0 255 0 0 0 0\n0 0 255 0 255 0 255 0 0\n".to_vec(),
+        ),
+        ("P4", b"P4\n3 3\n\x40\xa0\x40".to_vec()),
+        ("P5", b"P5\n3 3\n255\n\x00\x7f\x00\x7f\x00\x7f\x00\x7f\x00".to_vec()),
+        ("P6", {
+            let mut p6 = b"P6\n3 3\n255\n".to_vec();
+            p6.extend(vec![0u8, 128, 64].repeat(9));
+            p6
+        }),
+    ];
+
+    for (magic, bytes) in cases {
+        let decoded = decode_standard_image_with_security_limits(&bytes, &limits);
+        let image = decoded.unwrap_or_else(|error| panic!("{magic} fixture must decode: {error}"));
+        assert_eq!((image.width(), image.height()), (3, 3), "{magic} dimensions");
+    }
+
+    // 9 raster bytes for a 3×3 RGB raster (needs 27): truncated input.
+    let mut truncated = b"P6\n3 3\n255\n".to_vec();
+    truncated.extend(vec![0u8, 128, 64].repeat(3));
+    let result = decode_standard_image_with_security_limits(&truncated, &limits);
+    assert!(result.is_err(), "truncated P6 raster must fail, not silently succeed");
+    let message = result.err().map(|error| error.to_string()).unwrap_or_default();
+    assert!(!message.is_empty(), "truncated P6 must carry a diagnostic message");
+}
