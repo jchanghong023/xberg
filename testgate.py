@@ -165,47 +165,36 @@ def gate_fastcheck():
         print(f"[fastcheck] {name}: {status}{sec}" + (f" — {detail}" if detail else ""), flush=True)
         results.append((name, status))
 
+    def run_stage(name, cmd):
+        """每个阶段的统一执行口径：先查剩余预算，超时判 TIMEOUT，否则按退出码判定。
+
+        收敛成一处是为了让新增阶段只写一行——复制旧块时漏掉预算检查会让该阶段
+        绕过 60 秒硬超时的承诺。
+        """
+        if deadline - time.monotonic() <= 0:
+            stage(name, TIMEOUT, "60 秒预算耗尽")
+            return
+        ts = time.monotonic()
+        rc, timed_out = run_cmd(cmd, deadline=deadline)
+        if timed_out:
+            stage(name, TIMEOUT)
+        else:
+            stage(name, FAIL if rc != 0 else PASS, "" if rc == 0 else f"退出码 {rc}",
+                  time.monotonic() - ts)
+
     # 1) 仓库自有测试脚本语法（含本文件自身）
     bad = check_py_syntax(["fulltest.py", "slowtest.py", "testgate.py"])
     stage("py-syntax", FAIL if bad else PASS, "; ".join(bad))
 
     # 2) fulltest.py 判定器自测（AGENTS.md 允许 agent 主动运行）
-    if deadline - time.monotonic() <= 0:
-        stage("fulltest-selftest", TIMEOUT, "60 秒预算耗尽")
-    else:
-        ts = time.monotonic()
-        rc, timed_out = run_cmd([sys.executable, REPO / "fulltest.py", "--selftest"],
-                                deadline=deadline)
-        if timed_out:
-            stage("fulltest-selftest", TIMEOUT)
-        else:
-            stage("fulltest-selftest", FAIL if rc != 0 else PASS, "" if rc == 0 else f"退出码 {rc}",
-                  time.monotonic() - ts)
+    run_stage("fulltest-selftest", [sys.executable, REPO / "fulltest.py", "--selftest"])
 
     # 3) 打包 / CI 关键 PS1 解析
-    if deadline - time.monotonic() <= 0:
-        stage("ps1-parse", TIMEOUT, "60 秒预算耗尽")
-    else:
-        ts = time.monotonic()
-        rc, timed_out = run_cmd(ps1_parse_command(), deadline=deadline)
-        if timed_out:
-            stage("ps1-parse", TIMEOUT)
-        else:
-            stage("ps1-parse", FAIL if rc != 0 else PASS, "" if rc == 0 else f"退出码 {rc}",
-                  time.monotonic() - ts)
+    run_stage("ps1-parse", ps1_parse_command())
 
     # 4) cargo fmt --check（仅当前干净的 crate；见 FMT_FASTCHECK_CRATES 注释）
     for crate in FMT_FASTCHECK_CRATES:
-        if deadline - time.monotonic() <= 0:
-            stage(f"fmt-{crate}", TIMEOUT, "60 秒预算耗尽")
-            continue
-        ts = time.monotonic()
-        rc, timed_out = run_cmd(["cargo", "fmt", "--check", "-p", crate], deadline=deadline)
-        if timed_out:
-            stage(f"fmt-{crate}", TIMEOUT)
-        else:
-            stage(f"fmt-{crate}", FAIL if rc != 0 else PASS, "" if rc == 0 else f"退出码 {rc}",
-                  time.monotonic() - ts)
+        run_stage(f"fmt-{crate}", ["cargo", "fmt", "--check", "-p", crate])
 
     elapsed = time.monotonic() - t0
     failed = [s for s, st in results if st != PASS]

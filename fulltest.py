@@ -58,7 +58,6 @@ DEFAULT_SRC = Path(r"D:\测试转markdown转换效果\测试文档")
 DEFAULT_OUT = Path(r"D:\测试转markdown转换效果\测试文档_md_fulltest")
 
 AV_EXTS = {"mp4", "wmv", "asf", "mov", "mkv", "m4a", "mp3", "wav", "webm", "flv", "avi"}
-IMAGE_EXTS = {"png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff"}
 # 测试语料以中文为主；转写后端唯一且固定为 SenseVoice 中文识别（SV-01/SV-04，
 # 无语言/模型选项）。旧键 "model"/"language" 属已退役的 Whisper 配置，CLI 会
 # 以「Whisper 已移除」明确报错（SV-11）。
@@ -521,10 +520,6 @@ def token_recall(source: str, md: str):
 
 
 # ---------------------------------------------------------------- Markdown / 结构分析
-MOJIBAKE_PATTERNS = (
-    "\ufffd", "锟斤拷", "烫烫烫", "屯屯屯",
-    "â€", "Ã¤", "Ã©", "Ã¼", "â€™", "â€œ",
-)
 XML_LEAK_RE = re.compile(
     r"(?:<\?xml\b|xmlns:|<w:[a-zA-Z]|<a:t>|<a:t\b|<p:sld\b|<Relationship\b)",
     re.I,
@@ -673,6 +668,51 @@ def json_metrics(m) -> dict:
         "page_footer_body": m.get("page_footer_body") or 0,
         "bold_short_lines": m.get("bold_short_lines") or 0,
     }
+
+
+def _summary_row(name, verdict, elapsed, issues, chars=0, recall=None,
+                 num_recall=None, method=None, counts=None):
+    """终端汇总表（print_summary）逐行记录的唯一构造点。"""
+    return {"name": name, "verdict": verdict, "elapsed": elapsed,
+            "recall": recall, "num_recall": num_recall, "issues": issues,
+            "chars": chars, "method": method, "counts": counts or {}}
+
+
+def _json_result(name, verdict, elapsed, m, issues, *, golden_applied,
+                 recall_info=None, warnings=None, notes=None, counts=None,
+                 extraction_method=None, ocr=None, source_pages=None,
+                 timing=None, adversarial=False):
+    """`_quality-report.json` 逐文件记录的唯一构造点。
+
+    正常/超时/缺资产跳过/对抗四条路径共用同一组键（同 json_metrics 注释）：按统一
+    schema 读取的消费方不必区分路径。路径间只有三处差别——正常路径多 timing 两个
+    耗时字段、对抗路径多 adversarial 标记、召回组字段来自 recall_info（其余路径
+    留空值）。曾发生超时记录漏 golden.applied 被基线对比判成假「已修复」的回归：
+    构造收敛到一处后，新增字段不会再「改了三条路径漏一条」。
+    """
+    ri = recall_info or {}
+    rec = {
+        "name": name, "verdict": verdict, "elapsed_s": round(elapsed, 2),
+        "recall": ri.get("bigram"), "num_recall": ri.get("num_recall"),
+        "ident_recall": ri.get("ident_recall"),
+        "missing_numbers": ri.get("missing_nums") or [],
+        "missing_idents": ri.get("missing_id") or [],
+        "char_ratio": ri.get("char_ratio"),
+        "src_images": ri.get("src_images"),
+        "src_images_note": ri.get("src_images_note"),
+        "source_pages": source_pages,
+        "metrics": json_metrics(m), "issues": issues,
+        "warnings": warnings or [], "notes": notes or [],
+        "golden": {"applied": golden_applied},
+        "ocr": ocr, "counts": counts or {},
+        "extraction_method": extraction_method,
+    }
+    if adversarial:
+        rec["adversarial"] = True
+    if timing is not None:
+        rec["check_time_s"] = round(timing[0], 2)
+        rec["source_time_s"] = round(timing[1], 2)
+    return rec
 
 
 def judge_structure(m, issues):
@@ -2341,7 +2381,7 @@ def run_adversarial(cli: Path, adv_dir: Path, out_dir: Path, timeout: int,
         emit(f"\n[对抗] {f.name} ({f.stat().st_size/1024:.1f} KB) ...")
         exp = expect_for(f.name)
         try:
-            md_text, meta, elapsed, rc, used_cli = convert_one(
+            md_text, meta, elapsed, rc = convert_one(
                 cli, f, out_dir, min(timeout, 300), env, transcription=False, tag=tag)
         except subprocess.TimeoutExpired:
             m = structural_metrics("", out_dir / f"{tag}_images")
@@ -2377,27 +2417,16 @@ def run_adversarial(cli: Path, adv_dir: Path, out_dir: Path, timeout: int,
         mark = "✅" if verdict == "PASS" else ("⚠️ " if verdict == "WARN" else "❌")
         emit(f"{mark} [{verdict}] {f.name}   ({elapsed:.1f}s)"
              + (f"   问题: {_fmt_issues(issues)}" if issues else ""))
-        results.append({
-            "name": f.name, "verdict": verdict, "elapsed": elapsed,
-            "recall": None, "num_recall": None, "issues": issues,
-            "chars": m["chars"], "method": meta.get("extraction_method") if rc == 0 else None,
-            "counts": meta.get("counts") or {},
-        })
-        JSON_RESULTS.append({
-            "name": f.name, "verdict": verdict, "elapsed_s": round(elapsed, 2),
-            "recall": None, "num_recall": None, "ident_recall": None,
-            "missing_numbers": [], "missing_idents": [],
-            "char_ratio": None, "src_images": None, "src_images_note": None,
-            "source_pages": None,
-            "metrics": json_metrics(m), "issues": issues,
-            # 对抗路径 rc!=0 的真实原因只在 meta 里（err.txt 可能缺失/陈旧），保留进
-            # JSON，别让「图片目录创建失败」这类环境故障在报告里消失。
-            "warnings": meta.get("warnings") or [],
-            "notes": meta.get("notes") or [],
-            "golden": {"applied": bool(exp)},
-            "ocr": None, "counts": {}, "extraction_method": None,
-            "adversarial": True,
-        })
+        results.append(_summary_row(
+            f.name, verdict, elapsed, issues, chars=m["chars"],
+            method=meta.get("extraction_method") if rc == 0 else None,
+            counts=meta.get("counts") or {}))
+        # 对抗路径 rc!=0 的真实原因只在 meta 里（err.txt 可能缺失/陈旧），warnings/notes
+        # 保留进 JSON，别让「图片目录创建失败」这类环境故障在报告里消失。
+        JSON_RESULTS.append(_json_result(
+            f.name, verdict, elapsed, m, issues, golden_applied=bool(exp),
+            warnings=meta.get("warnings") or [], notes=meta.get("notes") or [],
+            adversarial=True))
     return results
 
 
@@ -2671,7 +2700,7 @@ def _stem_tags(main_files: list, adv_files: list | None = None) -> dict:
 
 def convert_one(cli: Path, src_file: Path, out_dir: Path, timeout: int, env: dict,
                 transcription: bool, tag: str | None = None):
-    """转换单个文件（只用本地编译的 CLI，不做任何回退）。返回 (md_text, meta, elapsed, returncode, used_cli)。
+    """转换单个文件（只用本地编译的 CLI，不做任何回退）。返回 (md_text, meta, elapsed, returncode)。
 
     tag：落盘产物（{tag}_images/{tag}.err.txt/{tag}.md）的命名键。同名 stem 的文件
     会互相覆盖审计产物，由 main 用 _stem_tags 预生成消歧 tag 传入；缺省退回
@@ -2693,7 +2722,7 @@ def convert_one(cli: Path, src_file: Path, out_dir: Path, timeout: int, env: dic
         except OSError:
             pass
         return ("", {"warnings": notes, "counts": {}, "languages": [], "notes": notes},
-                0.0, 1, cli)
+                0.0, 1)
     label = f"[{stem}]"
     notes = []
 
@@ -2721,7 +2750,7 @@ def convert_one(cli: Path, src_file: Path, out_dir: Path, timeout: int, env: dic
                          err_lines[0] if err_lines else "(无错误输出)")
         return ("", {"warnings": [f"退出码 {rc}: {first_err}"], "counts": {},
                      "languages": [], "notes": notes},
-                elapsed, rc, cli)
+                elapsed, rc)
 
     try:
         result, meta = parse_envelope(out)
@@ -2731,7 +2760,7 @@ def convert_one(cli: Path, src_file: Path, out_dir: Path, timeout: int, env: dic
         notes.append(f"JSON 解析失败: {parse_error}")
         return ("", {"warnings": [f"JSON 解析失败: {parse_error}"], "counts": {},
                      "languages": [], "notes": notes},
-                elapsed, 1, cli)
+                elapsed, 1)
     md_text = result.get("content", "") or ""
     try:
         n_imgs = write_images_from_json(result, img_dir)
@@ -2744,8 +2773,8 @@ def convert_one(cli: Path, src_file: Path, out_dir: Path, timeout: int, env: dic
         notes.append(f"落盘失败: {disk_error}")
         return ("", {"warnings": [f"落盘失败: {disk_error}"], "counts": {},
                      "languages": [], "notes": notes},
-                elapsed, 1, cli)
-    return md_text, meta, elapsed, rc, cli
+                elapsed, 1)
+    return md_text, meta, elapsed, rc
 
 
 # ---------------------------------------------------------------- 报告
@@ -2867,7 +2896,8 @@ def run_selftest() -> int:
     compare_baseline / baseline_block_reason / classify_adversarial_failure /
     finalize_adversarial_success，以及本行后续加入的 _toc_heading_miss /
     _toc_level_stats / structural_metrics 重复行口径 / _embedded_media_lost /
-    _judge_xlsx_shapes）必须同步加/改本函数用例——验收器自身的回归同样算回归。
+    _judge_xlsx_shapes / _json_result / _summary_row）必须同步加/改本函数用例——
+    验收器自身的回归同样算回归。
     """
     import random
     import tempfile
@@ -3312,6 +3342,35 @@ def run_selftest() -> int:
         check("a:t 实体字面量不必出现在 MD 里(不假报丢失)",
               _iss2 == [], str(_iss2))
 
+    # --- _json_result / _summary_row：四条路径共用同一组键（只有 timing/adversarial 差别） ---
+    check("summary 行键集合固定",
+          set(_summary_row("x", "PASS", 0.0, [])) ==
+          {"name", "verdict", "elapsed", "recall", "num_recall",
+           "issues", "chars", "method", "counts"})
+    _m = structural_metrics("", Path("no_such_dir"))
+    common = {"name", "verdict", "elapsed_s", "recall", "num_recall", "ident_recall",
+              "missing_numbers", "missing_idents", "char_ratio", "src_images",
+              "src_images_note", "source_pages", "metrics", "issues", "warnings",
+              "notes", "golden", "ocr", "counts", "extraction_method"}
+    rec_n = _json_result("x", "PASS", 1.0, _m, [], golden_applied=True,
+                         recall_info={"bigram": 0.9, "missing_nums": ["7"]},
+                         timing=(1.0, 2.0))
+    rec_t = _json_result("x", "FAIL", 1.0, _m, [], golden_applied=False)
+    rec_a = _json_result("x", "PASS", 1.0, _m, [], golden_applied=False,
+                         adversarial=True)
+    check("正常路径比公共键集多 timing 两个字段",
+          set(rec_n) == common | {"check_time_s", "source_time_s"}, str(sorted(rec_n)))
+    check("超时/缺资产路径与正常路径同 schema(仅无 timing)",
+          set(rec_t) == common, str(sorted(rec_t)))
+    check("对抗路径仅多 adversarial 标记",
+          set(rec_a) == common | {"adversarial"} and rec_a["adversarial"] is True,
+          str(sorted(rec_a)))
+    check("recall_info 只喂召回组字段，golden/ocr/counts 缺省不串值",
+          rec_n["recall"] == 0.9 and rec_n["missing_numbers"] == ["7"]
+          and rec_n["golden"] == {"applied": True}
+          and rec_t["recall"] is None and rec_t["golden"] == {"applied": False}
+          and rec_a["ocr"] is None and rec_a["counts"] == {})
+
     # --- ISSUE_META 登记：新问题码必须有严重度 ---
     check("JUDGE_CRASH 登记为 FAIL 级", ISSUE_META.get("JUDGE_CRASH") == "FAIL")
 
@@ -3519,26 +3578,14 @@ def main():
             verdict = issues_to_verdict(issues)
             report_file(f.name, verdict, m, None,
                         {"warnings": [], "counts": {}, "notes": ["AV_NO_ASSETS"]}, 0.0, issues)
-            results.append({
-                "name": f.name, "verdict": verdict, "elapsed": 0.0,
-                "recall": None, "num_recall": None, "issues": issues,
-                "chars": 0, "method": None, "counts": {},
-            })
-            JSON_RESULTS.append({
-                "name": f.name, "verdict": verdict, "elapsed_s": 0.0,
-                "recall": None, "num_recall": None, "ident_recall": None,
-                "missing_numbers": [], "missing_idents": [],
-                "char_ratio": None, "src_images": None, "src_images_note": None,
-                "source_pages": None,
-                "metrics": json_metrics(m), "issues": issues,
-                "warnings": [], "notes": ["AV_NO_ASSETS"],
-                "golden": {"applied": bool(exp)},
-                "ocr": None, "counts": {}, "extraction_method": None,
-            })
+            results.append(_summary_row(f.name, verdict, 0.0, issues))
+            JSON_RESULTS.append(_json_result(
+                f.name, verdict, 0.0, m, issues, golden_applied=bool(exp),
+                notes=["AV_NO_ASSETS"]))
             progress_line(i, verdict, 0.0, t_start)
             continue
         try:
-            md_text, meta, elapsed, rc, used_cli = convert_one(cli, f, out_dir, args.timeout,
+            md_text, meta, elapsed, rc = convert_one(cli, f, out_dir, args.timeout,
                                                                env, transcription=av, tag=tag)
         except subprocess.TimeoutExpired:
             meta = {"warnings": [f"超时(>{args.timeout}s)"], "counts": {}, "languages": [],
@@ -3548,25 +3595,12 @@ def main():
             issues = [make_issue("TIMEOUT", f"超时(>{args.timeout}s)")]
             verdict = "FAIL"
             report_file(f.name, verdict, m, None, meta, elapsed, issues)
-            rec = {
-                "name": f.name, "verdict": verdict, "elapsed": elapsed,
-                "recall": None, "num_recall": None, "issues": issues,
-                "chars": 0, "method": None, "counts": {},
-            }
-            results.append(rec)
-            JSON_RESULTS.append({
-                "name": f.name, "verdict": verdict, "elapsed_s": round(elapsed, 2),
-                "recall": None, "num_recall": None, "ident_recall": None,
-                "missing_numbers": [], "missing_idents": [],
-                # 与正常路径保持同一组键：按统一 schema 读取 _quality-report.json 的消费方
-                # 不会在超时文件上 KeyError，也无需区分「超时」与「字段缺失」。
-                "char_ratio": None, "src_images": None, "src_images_note": None,
-                "source_pages": None,
-                "metrics": json_metrics(m), "issues": issues,
-                "warnings": meta.get("warnings") or [], "notes": meta.get("notes") or [],
-                "golden": {"applied": bool(exp)},
-                "ocr": None, "counts": {}, "extraction_method": None,
-            })
+            results.append(_summary_row(f.name, verdict, elapsed, issues))
+            # 与正常路径保持同一组键：按统一 schema 读取 _quality-report.json 的消费方
+            # 不会在超时文件上 KeyError，也无需区分「超时」与「字段缺失」。
+            JSON_RESULTS.append(_json_result(
+                f.name, verdict, elapsed, m, issues, golden_applied=bool(exp),
+                warnings=meta.get("warnings") or [], notes=meta.get("notes") or []))
             progress_line(i, "TIMEOUT", elapsed, t_start)
             if not args.keep_going:
                 stopped_early, early_reason = True, f"{f.name} 超时"
@@ -3680,38 +3714,16 @@ def main():
         verdict = issues_to_verdict(issues)
         report_file(f.name, verdict, m, recall_info, meta, elapsed, issues,
                     ocr_info=ocr_info)
-        results.append({
-            "name": f.name, "verdict": verdict, "elapsed": elapsed,
-            "recall": recall_info.get("bigram"),
-            "num_recall": recall_info.get("num_recall"),
-            "issues": issues,
-            "chars": m["chars"],
-            "method": meta.get("extraction_method"),
-            "counts": meta.get("counts") or {},
-        })
-        JSON_RESULTS.append({
-            "name": f.name, "verdict": verdict, "elapsed_s": round(elapsed, 2),
-            # (性能打点) 检查段/源文基准段耗时（秒）；超时路径无此键，消费方按缺失处理
-            "check_time_s": round(check_s, 2),
-            "source_time_s": round(src_s, 2),
-            "recall": recall_info.get("bigram"),
-            "num_recall": recall_info.get("num_recall"),
-            "ident_recall": recall_info.get("ident_recall"),
-            "missing_numbers": recall_info.get("missing_nums") or [],
-            "missing_idents": recall_info.get("missing_id") or [],
-            "char_ratio": recall_info.get("char_ratio"),
-            "src_images": recall_info.get("src_images"),
-            "src_images_note": recall_info.get("src_images_note"),
-            "source_pages": source_pages,
-            "metrics": json_metrics(m),
-            "ocr": ocr_info,
-            "golden": {"applied": bool(exp)},
-            "counts": meta.get("counts") or {},
-            "extraction_method": meta.get("extraction_method"),
-            "issues": issues,
-            "warnings": meta.get("warnings") or [],
-            "notes": meta.get("notes") or [],
-        })
+        results.append(_summary_row(
+            f.name, verdict, elapsed, issues, chars=m["chars"],
+            recall=recall_info.get("bigram"), num_recall=recall_info.get("num_recall"),
+            method=meta.get("extraction_method"), counts=meta.get("counts") or {}))
+        JSON_RESULTS.append(_json_result(
+            f.name, verdict, elapsed, m, issues, golden_applied=bool(exp),
+            recall_info=recall_info, warnings=meta.get("warnings") or [],
+            notes=meta.get("notes") or [], counts=meta.get("counts") or {},
+            extraction_method=meta.get("extraction_method"), ocr=ocr_info,
+            source_pages=source_pages, timing=(check_s, src_s)))
         progress_line(i, verdict, elapsed, t_start)
 
         blocking = verdict == "FAIL" or (args.strict and verdict == "WARN")
