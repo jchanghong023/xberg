@@ -18,7 +18,7 @@ fn get_binary_path() -> String {
 fn cache_manifest_includes_the_complete_pinned_snapshot_model_set() {
     let empty = tempdir().expect("empty model directory");
     let output = Command::new(get_binary_path())
-        .args(["cache", "manifest", "--format", "json", "--no-config-discovery"])
+        .args(["cache", "manifest", "--format", "json"])
         .env("XBERG_SNAPSHOT_MODEL_DIR", empty.path().join("missing"))
         .current_dir(empty.path())
         .output()
