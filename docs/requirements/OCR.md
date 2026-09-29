@@ -29,4 +29,4 @@
 
 原权威清单在 2026-09-26 记录 `测试识别.png` 的同行单元格分散到相邻输出行；2026-09-29 已有标准输出仍可见这一现象。此次修正让有空间重叠依据的行按 x 排序，不再因检测器返回顺序不同而整图降级；同行列宽冲突向右让位，整行放不下时完整回退。仅一个元素的不同列不再按序号强行配成一行；中文双列宽只用于计宽，不在原文中插入占位空格。
 
-已新增几何错序、列冲突、整行超限、单元素列误配及真实 Markdown 渲染的回归测试；原有多行、缺框、容量和标签归属覆盖保留。真实 `测试识别.png` 的 CLI + PaddleOCR 验收用例为 `document_ocr_corpus_keeps_table_cells_on_one_line`，需按 AGENTS.md 授权显式运行。**本次实现和新增测试尚待 UT/真实模型验收，不能据静态修改宣布同行合并已达标。** 部分重复 OCR、图片遮挡及内容归属检查仍有盲区，见 [DELIVERY.md](DELIVERY.md)。
+已新增几何错序、列冲突、整行超限、单元素列误配及真实 Markdown 渲染的回归测试；原有多行、缺框、容量和标签归属覆盖保留。真实 `测试识别.png` 的 CLI + PaddleOCR 验收用例为 `document_ocr_corpus_keeps_table_cells_on_one_line`，需按 AGENTS.md 授权显式运行。2026-09-29 提交 `54fd6a8fa6` 的 fulltest 实际 Markdown 围栏经自动断言确认四组同行/左右顺序：口径/Tesseract/差距，同一数据集/0.58/6.24/10.8，配置/默认值/来源，ocr.enabled/true/OcrConfig::default()；该标准样例的同行缺口已有真实 CLI/PaddleOCR 输出证据。新增 Rust 用例本身尚未运行，不能把单样例通过外推到所有图片。部分重复 OCR、图片遮挡及内容归属检查仍有盲区，见 [DELIVERY.md](DELIVERY.md)。
