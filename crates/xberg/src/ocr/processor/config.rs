@@ -7,7 +7,7 @@ use crate::ocr::error::OcrError;
 use crate::ocr::types::TesseractConfig;
 use xberg_tesseract::TesseractAPI;
 
-const TESSERACT_RESULT_SCHEMA_VERSION: u8 = 11;
+const TESSERACT_RESULT_SCHEMA_VERSION: u8 = 12;
 
 /// Compute a deterministic hash of the OCR configuration.
 ///
@@ -134,6 +134,11 @@ fn hash_config_for_schema(config: &TesseractConfig, resolved_tessdata_path: &str
             hasher.update(&[0]);
         }
     }
+    // `known_full_page_scan` (GH#1894) decides whether a page bypasses the pixel-brightness
+    // preprocessing heuristic entirely, so two calls with byte-identical images can take a
+    // different preprocessing path depending on it -- the same collision risk `source_dpi` above
+    // guards against.
+    hasher.update(&[config.known_full_page_scan as u8]);
     // The resolved tessdata directory, not merely the optional override (#1787). Two configs
     // that leave `tessdata_path` unset can still resolve to different directories through
     // `TESSDATA_PREFIX`/cache/system fallbacks, and must not collide.
@@ -448,9 +453,14 @@ mod tests {
     fn test_hash_config_frames_result_schema_version() {
         let config = create_test_config();
 
+        // ~keep This pins the CURRENT version, and the number is meant to move: every bump has to
+        // come here and be justified, which is what stops a change to the cached computation from
+        // silently reusing entries computed the old way. Last moved to 12 by GH#1894, where a
+        // known-scan page takes the default preprocessing an identical image and config would
+        // otherwise have skipped -- the same image and config, a different result.
         assert_eq!(
-            TESSERACT_RESULT_SCHEMA_VERSION, 11,
-            "folding the resolved tessdata directory into the key (#1787) must invalidate schema-v10 cache entries"
+            TESSERACT_RESULT_SCHEMA_VERSION, 12,
+            "a bump must be deliberate: state here which change made an old entry wrong"
         );
         assert_ne!(
             hash_config_for_schema(&config, TEST_TESSDATA_PATH, 1),
@@ -567,8 +577,8 @@ mod tests {
     ///
     /// Uses a real (non-mocked) `TesseractAPI`. `init("", "eng")` relies on Tesseract's
     /// own compiled-in default tessdata location rather than the crate's resolver
-    /// (`resolve_tessdata_path`, which real jobs and `query_available_languages` both
-    /// use), so it gracefully skips instead of asserting when that default has no
+    /// (`resolve_tessdata_path_in`, which real jobs and `query_available_languages` both
+    /// reach), so it gracefully skips instead of asserting when that default has no
     /// "eng" data in this environment.
     ///
     /// Before the fix, `apply_tesseract_variables` never called

@@ -146,7 +146,7 @@ impl ProcessorRegistryState {
         }
     }
 
-    fn try_get_snapshot(&self) -> Option<ProcessorSnapshot> {
+    pub(crate) fn try_get_snapshot(&self) -> Option<ProcessorSnapshot> {
         let registration_epoch = self.registration_epoch.load(Ordering::SeqCst);
         if registration_update_in_progress(registration_epoch) {
             return None;

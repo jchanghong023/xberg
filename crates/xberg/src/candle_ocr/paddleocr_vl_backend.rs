@@ -96,6 +96,23 @@ fn get_or_init_engine(
     })
 }
 
+/// Parse and check the PaddleOCR-VL `backend_options`.
+///
+/// Configuration validation and every page both call this, so an invalid option
+/// fails before any page runs. ~keep
+pub(crate) fn check_backend_options(value: Option<&serde_json::Value>) -> Result<PaddleOcrVlBackendOptions> {
+    let options: PaddleOcrVlBackendOptions = parse_backend_options(value, "candle-paddleocr-vl")?;
+    for (field, value) in [
+        ("model_path", options.model_path.as_deref()),
+        ("model_id", options.model_id.as_deref()),
+        ("hf_revision", options.hf_revision.as_deref()),
+        ("cache_dir", options.cache_dir.as_deref()),
+    ] {
+        validate_optional_non_empty(value, "candle-paddleocr-vl", field)?;
+    }
+    Ok(options)
+}
+
 /// Default HuggingFace repo id for PaddleOCR-VL weights: a checksum-pinned mirror of
 /// `PaddlePaddle/PaddleOCR-VL-1.6`. Used when `backend_options` provides neither
 /// `model_path` nor a custom `model_id`.
@@ -170,16 +187,7 @@ impl PaddleOcrVlBackend {
     /// `model_id` defaults to [`DEFAULT_MODEL_ID`] and is only consulted when
     /// `model_path` is absent.
     fn parse_options(&self, config: &OcrConfig) -> Result<PaddleOcrVlOptions> {
-        let options: PaddleOcrVlBackendOptions =
-            parse_backend_options(config.backend_options.as_ref(), "candle-paddleocr-vl")?;
-        for (field, value) in [
-            ("model_path", options.model_path.as_deref()),
-            ("model_id", options.model_id.as_deref()),
-            ("hf_revision", options.hf_revision.as_deref()),
-            ("cache_dir", options.cache_dir.as_deref()),
-        ] {
-            validate_optional_non_empty(value, "candle-paddleocr-vl", field)?;
-        }
+        let options = check_backend_options(config.backend_options.as_ref())?;
         let task = match options.task {
             Some(PaddleOcrVlTaskKind::Ocr) => PaddleOcrVlTask::Ocr,
             Some(PaddleOcrVlTaskKind::Table) => PaddleOcrVlTask::Table,

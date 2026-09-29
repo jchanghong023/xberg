@@ -75,6 +75,43 @@ pub struct PdfImage {
     /// owed (e.g. a `/Decode [1 0]` inversion) on every sub-byte image.
     #[serde(skip)]
     decode_folded_in: bool,
+    /// For an `/Indexed` image, the raw index stream unpacked to one byte per
+    /// pixel (values `0..=2^bpc-1`), kept alongside the palette-expanded RGB
+    /// `data` holds for display. A colour-key `/Mask` on an Indexed image
+    /// states its range in this index space (ISO 32000-1 §8.9.6.4), not in
+    /// the expanded RGB `samples_are_raw` tracks — so that flag alone cannot
+    /// tell a consumer whether masking is possible. `None` for every other
+    /// colour space. A JPX-coded Indexed image keeps its decoded index plane
+    /// here only when it carries a colour-key `/Mask`. (GH#1899, GH#1885) ~keep
+    #[serde(skip)]
+    raw_indexed_samples: Option<Vec<u8>>,
+    /// The raw samples, one byte per component per pixel in the declared bit depth, kept only
+    /// when the dictionary carries a colour-key `/Mask` and an image unpacked from 1, 2 or 4 bits
+    /// or with a `/Decode` folded in left that space (GH#1904). The mask ranges are written in that
+    /// space, so the renderer tests the mask against these instead. An `/Indexed` image keeps its
+    /// indices in `raw_indexed_samples`. ~keep
+    #[serde(skip)]
+    color_key_samples: Option<Vec<u8>>,
+    /// The JPEG 2000 opacity channel and whether its colour is already premultiplied, kept only
+    /// when `/SMaskInData` is 1 or 2 and the image has no `/SMask`. (GH#1902) ~keep
+    #[serde(skip)]
+    soft_mask_in_data: Option<JpxSoftMaskInData>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct JpxSoftMaskInData {
+    samples: Vec<u8>,
+    premultiplied: bool,
+}
+
+impl JpxSoftMaskInData {
+    pub(crate) fn samples(&self) -> &[u8] {
+        &self.samples
+    }
+
+    pub(crate) fn is_premultiplied(&self) -> bool {
+        self.premultiplied
+    }
 }
 
 impl PdfImage {
@@ -94,6 +131,9 @@ impl PdfImage {
             rendering_intent: crate::color::RenderingIntent::default(),
             samples_are_raw: true,
             decode_folded_in: false,
+            raw_indexed_samples: None,
+            color_key_samples: None,
+            soft_mask_in_data: None,
         }
     }
 
@@ -122,6 +162,30 @@ impl PdfImage {
         self.decode_folded_in = folded;
     }
 
+    /// The raw index stream of an `/Indexed` image, one byte per pixel, kept
+    /// beside the palette-expanded RGB `data()` holds for display. `None` for
+    /// every non-Indexed image and for a JPX-coded Indexed image. See the
+    /// field docs. (GH#1899)
+    pub(crate) fn raw_indexed_samples(&self) -> Option<&[u8]> {
+        self.raw_indexed_samples.as_deref()
+    }
+
+    /// Record an `/Indexed` image's raw index plane.
+    pub(crate) fn set_raw_indexed_samples(&mut self, samples: Vec<u8>) {
+        self.raw_indexed_samples = Some(samples);
+    }
+
+    /// The raw samples a colour-key `/Mask` is tested against, when the stored samples left the
+    /// raw sample space.
+    pub(crate) fn color_key_samples(&self) -> Option<&[u8]> {
+        self.color_key_samples.as_deref()
+    }
+
+    /// The opacity channel a JPEG 2000 image carries as its soft mask (`/SMaskInData`).
+    pub(crate) fn soft_mask_in_data(&self) -> Option<&JpxSoftMaskInData> {
+        self.soft_mask_in_data.as_ref()
+    }
+
     /// Create a new PDF image with spatial metadata.
     pub fn with_spatial(
         width: u32,
@@ -147,6 +211,9 @@ impl PdfImage {
             rendering_intent: crate::color::RenderingIntent::default(),
             samples_are_raw: true,
             decode_folded_in: false,
+            raw_indexed_samples: None,
+            color_key_samples: None,
+            soft_mask_in_data: None,
         }
     }
 
@@ -194,6 +261,9 @@ impl PdfImage {
             rendering_intent: crate::color::RenderingIntent::default(),
             samples_are_raw: true,
             decode_folded_in: false,
+            raw_indexed_samples: None,
+            color_key_samples: None,
+            soft_mask_in_data: None,
         }
     }
 
@@ -749,8 +819,6 @@ fn decode_array_inverts_1bpc(decode: Option<&crate::object::Object>) -> bool {
     matches!((as_num(&arr[0]), as_num(&arr[1])), (Some(lo), Some(hi)) if lo > hi)
 }
 
-/// Per-component `(Dmin, Dmax)` pairs from a `/Decode` array, or `None` when
-/// the array is absent or does not hold `2 × ncomp` numbers.
 /// The number of inks a `/DeviceN` colour space names (ISO 32000-1 §8.6.6.5,
 /// `[/DeviceN names alternate tint]`), or `None` for any other space.
 ///
@@ -768,6 +836,8 @@ fn devicen_ink_count(cs_obj: &crate::object::Object) -> Option<usize> {
     }
 }
 
+/// Per-component `(Dmin, Dmax)` pairs from a `/Decode` array, or `None` when
+/// the array is absent or does not hold `2 × ncomp` numbers.
 fn decode_ranges(decode: Option<&crate::object::Object>, ncomp: usize) -> Option<Vec<(f32, f32)>> {
     let arr = decode.and_then(|o| o.as_array())?;
     if arr.len() != ncomp * 2 {
@@ -1335,13 +1405,13 @@ pub fn extract_image_from_xobject(
     }
 
     let ImageXObjectMetadata {
-        width,
-        height,
+        mut width,
+        mut height,
         bits_per_component,
         mut color_space,
         resolved_color_space,
         indexed_resolution,
-        direct_icc_profile,
+        mut direct_icc_profile,
         rendering_intent,
         is_jbig2,
         is_jpx,
@@ -1365,23 +1435,111 @@ pub fn extract_image_from_xobject(
     // below leave the raw space without applying /Decode, and a consumer that
     // applies it itself (plate routing) must still do so for those. ~keep
     let mut decode_folded_in = false;
+    // Populated only for an /Indexed image, whose raw index plane a colour-key
+    // /Mask needs (GH#1899); see `raw_indexed_samples` field docs. ~keep
+    let mut raw_indexed_samples: Option<Vec<u8>> = None;
+    // A colour-key /Mask is tested against the raw samples, so they are kept wherever unpacking
+    // below moves the stored samples out of that space. (GH#1904) ~keep
+    let has_color_key_mask = matches!(dict.get("Mask"), Some(crate::object::Object::Array(_)));
+    let mut color_key_samples = None;
+    // With `/SMaskInData` 1 or 2 and no `/SMask`, the JPEG 2000 opacity channel is the image's soft
+    // mask (ISO 32000-1 Table 89). A `/SMask` entry takes precedence. (GH#1902) ~keep
+    let soft_mask_in_data = (is_jpx && dict.get("SMask").is_none())
+        .then(|| {
+            dict.get("SMaskInData").and_then(|obj| match (doc, obj.as_reference()) {
+                (Some(d), Some(r)) => d.load_object(r).ok().and_then(|o| o.as_integer()),
+                _ => obj.as_integer(),
+            })
+        })
+        .flatten()
+        .filter(|value| matches!(value, 1 | 2));
+    let mut jpx_opacity = None;
     let data = if is_jbig2 {
         decode_jbig2_image(xobject, obj_ref, dict, doc, width, height)?
     } else if is_jpx {
-        let jpx_data = decode_jpx_image(xobject, obj_ref, doc, &color_space)?;
-        // The placeholder colour space set above (dict named no /ColorSpace)
-        // was never the real one; replace it with what the codestream
-        // actually decoded to, so downstream consumers of `color_space` (the
-        // colour-key /Mask component count, in particular) see the real
-        // component count rather than the placeholder's. ~keep
-        if jpx_color_space_is_placeholder && let ImageData::Raw { format, .. } = &jpx_data {
-            color_space = match format {
-                PixelFormat::Grayscale => ColorSpace::DeviceGray,
-                PixelFormat::RGB => ColorSpace::DeviceRGB,
-                PixelFormat::CMYK => ColorSpace::DeviceCMYK,
-            };
+        let JpxDecoded {
+            data: jpx_data,
+            width: jpx_width,
+            height: jpx_height,
+            palette: codestream_palette,
+            opacity,
+        } = decode_jpx_image(
+            xobject,
+            obj_ref,
+            doc,
+            &color_space,
+            jpx_color_space_is_placeholder,
+            (width, height),
+            indexed_resolution.as_ref(),
+        )?;
+        // The codestream's size is authoritative for a /JPXDecode image (ISO 32000-1 §7.4.9,
+        // GH#1900); decode_jpx_image already warned if it disagreed with the dictionary's
+        // declared /Width and /Height. Adopt it unconditionally so the pixel buffer -- always
+        // sized to the codestream -- matches the dimensions `PdfImage` reports. ~keep
+        width = jpx_width;
+        height = jpx_height;
+        jpx_opacity = opacity;
+        // An image with no `/Indexed` whose codestream carries its own palette decodes to indices,
+        // looked up here into the palette's own device space rather than RGB: a CMYK palette
+        // stays CMYK, so the image keeps its declared space and its process plates. (GH#1903) ~keep
+        let jpx_data = match (codestream_palette, jpx_data) {
+            (Some(palette), ImageData::Raw { pixels: indices, .. }) => {
+                samples_are_raw = false;
+                stored_bpc = 8;
+                ImageData::Raw {
+                    pixels: expand_indexed_to_base_samples(
+                        &indices,
+                        &palette.palette,
+                        palette.components,
+                        width,
+                        height,
+                        8,
+                    )?,
+                    format: palette.base_fmt,
+                }
+            }
+            (_, data) => data,
+        };
+        // An `/Indexed` image decodes to one index byte per pixel, looked up in the
+        // dictionary's palette exactly as any other codec's index stream is below. (GH#1885) ~keep
+        if let Some(ir) = indexed_resolution.as_ref()
+            && let ImageData::Raw { pixels: indices, .. } = &jpx_data
+        {
+            samples_are_raw = false;
+            stored_bpc = 8;
+            // A colour-key /Mask on an /Indexed image states its range in these indices, not in
+            // the RGB below. (GH#1885) ~keep
+            if has_color_key_mask {
+                raw_indexed_samples = Some(indices.clone());
+            }
+            ImageData::Raw {
+                pixels: expand_indexed_image(indices, ir, width, height, 8, rendering_intent)?,
+                format: PixelFormat::RGB,
+            }
+        } else {
+            // The placeholder colour space set above (dict named no /ColorSpace)
+            // was never the real one; replace it with what the codestream
+            // actually decoded to, so downstream consumers of `color_space` (the
+            // colour-key /Mask component count, in particular) see the real
+            // component count rather than the placeholder's. ~keep
+            if jpx_color_space_is_placeholder && let ImageData::Raw { format, .. } = &jpx_data {
+                color_space = match format {
+                    PixelFormat::Grayscale => ColorSpace::DeviceGray,
+                    PixelFormat::RGB => ColorSpace::DeviceRGB,
+                    PixelFormat::CMYK => ColorSpace::DeviceCMYK,
+                };
+                // The ICC decision above ran against the placeholder, and `/DeviceRGB` takes
+                // neither its ICCBased arm nor its DeviceCMYK one -- so the §14.11.5 OutputIntent
+                // fallback was never consulted for a codestream that turns out to be
+                // four-component, and the image reached its consumers with no profile at all.
+                // Redo that one decision now the real colour space is known. Nothing is
+                // overwritten: the placeholder provably yields `None`. (GH#1839) ~keep
+                if color_space == ColorSpace::DeviceCMYK {
+                    direct_icc_profile = doc.and_then(|d| d.output_intent_cmyk_profile());
+                }
+            }
+            jpx_data
         }
-        jpx_data
     } else if is_jpeg_only || is_jpeg_chain {
         let decoded = if let (Some(d), Some(ref_id)) = (doc.as_ref(), obj_ref) {
             d.decode_stream_with_encryption(xobject, ref_id)?
@@ -1418,22 +1576,20 @@ pub fn extract_image_from_xobject(
             expected_image_filter_output_size(dict, width, height, color_space.components(), bits_per_component)?;
         let decoded_data = decode_dimension_bounded_image_stream(doc, xobject, obj_ref, expected_filter_output_size)?;
         if let Some(ir) = indexed_resolution.as_ref() {
-            let transform = ir
-                .base_profile
-                .clone()
-                .map(|p| crate::color::Transform::new_srgb_target(p, rendering_intent));
-            let expanded = expand_indexed_to_rgb_with_transform(IndexedExpandParams {
-                raw: &decoded_data,
-                palette: &ir.palette,
-                base_fmt: ir.base_fmt,
+            let expanded =
+                expand_indexed_image(&decoded_data, ir, width, height, bits_per_component, rendering_intent)?;
+            // Palette lookup replaces index samples with 8-bit RGB, so the buffer
+            // is no longer in the space or the depth the dictionary describes. ~keep
+            samples_are_raw = false;
+            stored_bpc = 8;
+            // A colour-key /Mask on this image states its range in the raw
+            // index space, not the RGB above, so keep it too. (GH#1899) ~keep
+            raw_indexed_samples = Some(unpack_indexed_indices(
+                &decoded_data,
                 width,
                 height,
-                bpc: bits_per_component,
-                transform: transform.as_ref(),
-            })?;
-            // Palette lookup replaces index samples with RGB, so the buffer
-            // is no longer in the space the dictionary's entries describe. ~keep
-            samples_are_raw = false;
+                bits_per_component,
+            )?);
             ImageData::Raw {
                 pixels: expanded,
                 format: PixelFormat::RGB,
@@ -1525,6 +1681,11 @@ pub fn extract_image_from_xobject(
                     // Plate routing applies /Decode itself, so it needs the
                     // narrower fact: only `ranges` actually folds one in. ~keep
                     decode_folded_in = ranges.is_some();
+                    // A 16-bit sample does not fit the kept byte plane, so its mask stays skipped. ~keep
+                    if has_color_key_mask && matches!(bits_per_component, 1 | 2 | 4 | 8) {
+                        color_key_samples =
+                            Some(unpack_raw_samples(&reduced, width, height, ncomp, bits_per_component));
+                    }
                     samples
                 }
                 None => reduced,
@@ -1557,6 +1718,16 @@ pub fn extract_image_from_xobject(
     let mut image = PdfImage::new(width, height, color_space, effective_bpc, data);
     image.set_samples_are_raw(samples_are_raw);
     image.set_decode_folded_in(decode_folded_in);
+    if let Some(indices) = raw_indexed_samples {
+        image.set_raw_indexed_samples(indices);
+    }
+    image.color_key_samples = color_key_samples;
+    image.soft_mask_in_data = jpx_opacity
+        .zip(soft_mask_in_data)
+        .map(|(samples, value)| JpxSoftMaskInData {
+            samples,
+            premultiplied: value == 2,
+        });
 
     // Attach the ICC profile if we found one — prefer the direct ICCBased
     // profile, then fall back to an Indexed base's profile so the CMM has
@@ -1634,11 +1805,23 @@ pub(crate) fn resolve_icc_profile_from_obj(
 /// when the base is `ICCBased`.
 pub(crate) struct IndexedResolution {
     pub base_fmt: PixelFormat,
+    /// The bytes in each palette entry: the base's component count, which for a `/DeviceN` base is
+    /// its colorant count rather than the four `base_fmt` holds. (GH#1913) ~keep
+    pub components: usize,
     pub palette: Vec<u8>,
     /// `None` for device-dependent bases or bases we already folded
     /// colourimetrically (e.g. Lab, whose palette is rewritten to RGB
     /// before being returned).
     pub base_profile: Option<std::sync::Arc<crate::color::IccProfile>>,
+}
+
+impl IndexedResolution {
+    /// The last index the palette holds an entry for: `hival`, or lower when the lookup is short.
+    /// The expander paints any index past it black.
+    fn highest_index(&self) -> u8 {
+        let entries = self.palette.len() / self.components;
+        u8::try_from(entries.saturating_sub(1)).unwrap_or(u8::MAX)
+    }
 }
 
 /// Resolve an Indexed color space's base color space and palette lookup bytes.
@@ -1661,7 +1844,7 @@ fn resolve_indexed_palette(
 
     let base = resolve_indexed_base(doc, arr)?;
     let hival = resolve_indexed_hival(doc, arr)?;
-    let n = base.base_fmt.bytes_per_pixel();
+    let n = devicen_ink_count(&base.base_obj).unwrap_or_else(|| base.base_fmt.bytes_per_pixel());
     let Some(palette_bytes) = resolve_indexed_palette_bytes(doc, arr, hival, n)? else {
         return Ok(None);
     };
@@ -1677,6 +1860,7 @@ fn resolve_indexed_palette(
         // Lab palettes are now RGB; no base ICC profile to carry through. ~keep
         return Ok(Some(IndexedResolution {
             base_fmt: PixelFormat::RGB,
+            components: 3,
             palette: rgb_palette,
             base_profile: None,
         }));
@@ -1684,6 +1868,7 @@ fn resolve_indexed_palette(
 
     Ok(Some(IndexedResolution {
         base_fmt: base.base_fmt,
+        components: n,
         palette: palette_bytes,
         base_profile: base.base_profile,
     }))
@@ -1854,6 +2039,7 @@ fn expand_indexed_to_rgb(
         raw,
         palette,
         base_fmt,
+        components: base_fmt.bytes_per_pixel(),
         width,
         height,
         bpc,
@@ -1870,10 +2056,38 @@ struct IndexedExpandParams<'a> {
     raw: &'a [u8],
     palette: &'a [u8],
     base_fmt: PixelFormat,
+    /// Bytes per palette entry; see [`IndexedResolution::components`].
+    components: usize,
     width: u32,
     height: u32,
     bpc: u8,
     transform: Option<&'a crate::color::Transform>,
+}
+
+/// Expand an `/Indexed` image's index samples to 8-bit RGB through its resolved palette, routing
+/// CMYK palette entries through the base colour space's ICC profile when it has one.
+fn expand_indexed_image(
+    raw: &[u8],
+    ir: &IndexedResolution,
+    width: u32,
+    height: u32,
+    bpc: u8,
+    rendering_intent: crate::color::RenderingIntent,
+) -> Result<Vec<u8>> {
+    let transform = ir
+        .base_profile
+        .clone()
+        .map(|p| crate::color::Transform::new_srgb_target(p, rendering_intent));
+    expand_indexed_to_rgb_with_transform(IndexedExpandParams {
+        raw,
+        palette: &ir.palette,
+        base_fmt: ir.base_fmt,
+        components: ir.components,
+        width,
+        height,
+        bpc,
+        transform: transform.as_ref(),
+    })
 }
 
 /// Like [`expand_indexed_to_rgb`] but routes CMYK palette entries
@@ -1897,8 +2111,8 @@ fn expand_indexed_to_rgb_with_transform(params: IndexedExpandParams<'_>) -> Resu
 
     let w = params.width as usize;
     let h = params.height as usize;
-    let n = params.base_fmt.bytes_per_pixel();
-    let (bytes_per_row, output_bytes) = indexed_expand_geometry(w, h, bpc)?;
+    let n = params.components;
+    let (bytes_per_row, output_bytes) = indexed_expand_geometry(w, h, bpc, 3)?;
     validate_indexed_input_len(params.raw, bytes_per_row, h)?;
 
     let mut out = Vec::with_capacity(output_bytes);
@@ -1906,10 +2120,12 @@ fn expand_indexed_to_rgb_with_transform(params: IndexedExpandParams<'_>) -> Resu
     Ok(out)
 }
 
-/// Row-byte stride and total RGB output size for an Indexed image of size
-/// `w × h` at `bpc` bits per index, with the same overflow and 256 MiB
-/// output-size guard [`expand_indexed_to_rgb_with_transform`] always applied.
-fn indexed_expand_geometry(w: usize, h: usize, bpc: u8) -> Result<(usize, usize)> {
+/// Row-byte stride for an Indexed image of size `w × h` at `bpc` bits per
+/// index, and the total output size for `n` bytes per decoded pixel, with the
+/// same overflow and 256 MiB output-size guard [`expand_indexed_to_rgb_with_transform`]
+/// always applied. `n` is 3 for the RGB expansion; [`expand_indexed_to_base_samples`]
+/// passes its base colour space's own byte count instead. (GH#1898)
+fn indexed_expand_geometry(w: usize, h: usize, bpc: u8, n: usize) -> Result<(usize, usize)> {
     /// Hard cap on the decoded output buffer size (256 MiB). Legitimate
     /// Indexed images in real PDFs are several orders of magnitude below
     /// this — the cap only fires on pathological / adversarial inputs
@@ -1922,9 +2138,9 @@ fn indexed_expand_geometry(w: usize, h: usize, bpc: u8) -> Result<(usize, usize)
         ))
     })?;
 
-    let output_bytes = w.checked_mul(h).and_then(|v| v.checked_mul(3)).ok_or_else(|| {
+    let output_bytes = w.checked_mul(h).and_then(|v| v.checked_mul(n)).ok_or_else(|| {
         Error::Image(format!(
-            "Indexed image output size overflow: {w} × {h} × 3 exceeds usize"
+            "Indexed image output size overflow: {w} × {h} × {n} exceeds usize"
         ))
     })?;
 
@@ -1961,6 +2177,21 @@ fn validate_indexed_input_len(raw: &[u8], bytes_per_row: usize, h: usize) -> Res
         )));
     }
     Ok(())
+}
+
+/// One byte per sample from a packed sample stream of `ncomp` components at `bpc` bits (1, 2, 4
+/// or 8), with each row starting on a byte boundary. A short stream reads as zeros, as the
+/// unpacked samples do. Called only after the caller's own unpack accepted the geometry.
+fn unpack_raw_samples(raw: &[u8], width: u32, height: u32, ncomp: usize, bpc: u8) -> Vec<u8> {
+    let samples_per_row = width as usize * ncomp;
+    let bytes_per_row = (samples_per_row * usize::from(bpc)).div_ceil(8);
+    let mut out = Vec::with_capacity(samples_per_row * height as usize);
+    for y in 0..height as usize {
+        let row = raw.get(y * bytes_per_row..).unwrap_or(&[]);
+        let row = &row[..bytes_per_row.min(row.len())];
+        out.extend((0..samples_per_row).map(|i| read_indexed_pixel(row, i, bpc) as u8));
+    }
+    out
 }
 
 /// Read one packed Indexed pixel from `row` at column `x`, given index depth
@@ -2030,10 +2261,10 @@ fn decode_indexed_pixels(
                     out.push(g);
                 }
                 PixelFormat::CMYK => {
-                    let c = params.palette[off];
-                    let m = params.palette[off + 1];
-                    let y_c = params.palette[off + 2];
-                    let k = params.palette[off + 3];
+                    // A `/DeviceN` entry with other than four colorants is read as CMYK from its
+                    // first four, a missing one taken as no ink. (GH#1913) ~keep
+                    let ink = |i: usize| if i < n { params.palette[off + i] } else { 0 };
+                    let (c, m, y_c, k) = (ink(0), ink(1), ink(2), ink(3));
                     let [r, g, b] = if let Some(t) = params.transform {
                         t.convert_cmyk_pixel(c, m, y_c, k)
                     } else {
@@ -2046,6 +2277,204 @@ fn decode_indexed_pixels(
             }
         }
     }
+}
+
+/// Unpack an Indexed image's packed index stream to one byte per pixel
+/// (values `0..=2^bpc-1`), with no palette lookup. Used for colour-key
+/// `/Mask` on an Indexed image, whose range is stated in this raw index space
+/// rather than the palette-expanded RGB `expand_indexed_to_rgb_with_transform`
+/// produces for display (ISO 32000-1 §8.9.6.4). (GH#1899)
+fn unpack_indexed_indices(raw: &[u8], width: u32, height: u32, bpc: u8) -> Result<Vec<u8>> {
+    if !matches!(bpc, 1 | 2 | 4 | 8) {
+        return Err(Error::Image(format!(
+            "Indexed image has invalid /BitsPerComponent {bpc} \
+             (PDF spec requires 1, 2, 4, or 8)"
+        )));
+    }
+    let w = width as usize;
+    let h = height as usize;
+    let (bytes_per_row, output_bytes) = indexed_expand_geometry(w, h, bpc, 1)?;
+    validate_indexed_input_len(raw, bytes_per_row, h)?;
+
+    let mut out = Vec::with_capacity(output_bytes);
+    for y in 0..h {
+        let row_start = y * bytes_per_row;
+        let row_end = (row_start + bytes_per_row).min(raw.len());
+        let row: &[u8] = if row_start < raw.len() {
+            &raw[row_start..row_end]
+        } else {
+            &[]
+        };
+        for x in 0..w {
+            out.push(read_indexed_pixel(row, x, bpc) as u8);
+        }
+    }
+    Ok(out)
+}
+
+/// Expand an Indexed image's packed index stream into its base colour
+/// space's own bytes per pixel — a straight palette lookup with no RGB
+/// conversion — for separation-plate routing. `extract_image_from_xobject`
+/// always expands an Indexed image to RGB for on-screen display, which would
+/// misattribute a CMYK/Separation/DeviceN base's ink if handed to plate
+/// routing directly (GH#1898). Shares bpc validation, row geometry, and
+/// out-of-range handling with [`expand_indexed_to_rgb_with_transform`]; the
+/// only difference is the per-pixel output width (`components`, the bytes in
+/// one palette entry, instead of a fixed 3) and that the looked-up bytes are copied verbatim.
+pub(crate) fn expand_indexed_to_base_samples(
+    raw: &[u8],
+    palette: &[u8],
+    components: usize,
+    width: u32,
+    height: u32,
+    bpc: u8,
+) -> Result<Vec<u8>> {
+    if !matches!(bpc, 1 | 2 | 4 | 8) {
+        return Err(Error::Image(format!(
+            "Indexed image has invalid /BitsPerComponent {bpc} \
+             (PDF spec requires 1, 2, 4, or 8)"
+        )));
+    }
+    let w = width as usize;
+    let h = height as usize;
+    let n = components;
+    let (bytes_per_row, output_bytes) = indexed_expand_geometry(w, h, bpc, n)?;
+    validate_indexed_input_len(raw, bytes_per_row, h)?;
+
+    let mut out = Vec::with_capacity(output_bytes);
+    for y in 0..h {
+        let row_start = y * bytes_per_row;
+        let row_end = (row_start + bytes_per_row).min(raw.len());
+        let row: &[u8] = if row_start < raw.len() {
+            &raw[row_start..row_end]
+        } else {
+            &[]
+        };
+        for x in 0..w {
+            let idx = read_indexed_pixel(row, x, bpc);
+            let off = idx * n;
+            if off + n > palette.len() {
+                out.resize(out.len() + n, 0);
+                continue;
+            }
+            out.extend_from_slice(&palette[off..off + n]);
+        }
+    }
+    Ok(out)
+}
+
+/// An `/Indexed` image XObject's palette-expanded samples in its BASE colour
+/// space (e.g. raw C/M/Y/K bytes for an `/Indexed /DeviceCMYK` image), for a
+/// caller that routes ink to separation plates rather than rendering to
+/// screen.
+pub(crate) struct IndexedBaseSamples {
+    pub samples: Vec<u8>,
+    /// The bytes per pixel in `samples`, one per base component. (GH#1913) ~keep
+    pub components: usize,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Decode an `/Indexed` image XObject's samples in its base colour space,
+/// bypassing the RGB conversion [`extract_image_from_xobject`] performs for
+/// on-screen rendering.
+///
+/// ISO 32000-1 §7.4.5 puts an Indexed image's ink intent in its base colour
+/// space; separation-plate routing needs the base's own component bytes, and
+/// converting to RGB first (as the extractor does for display) would throw
+/// that intent away before routing ever sees it. (GH#1898)
+///
+/// Returns `Ok(None)` when the XObject's colour space is not `/Indexed`, or
+/// when its stream is JBIG2-, DCT- or CCITT-coded — each of those decodes
+/// through its own dedicated path in `extract_image_from_xobject` and never
+/// reaches the raw index bytes this function expects. A JPX-coded stream
+/// decodes to its index plane at the codestream's own size and is looked up
+/// here like any other. (GH#1916)
+pub(crate) fn decode_indexed_image_in_base_space(
+    doc: Option<&crate::document::PdfDocument>,
+    xobject: &crate::object::Object,
+    obj_ref: Option<ObjectRef>,
+    color_space_map: Option<&std::collections::HashMap<String, crate::object::Object>>,
+) -> Result<Option<IndexedBaseSamples>> {
+    let dict = xobject
+        .as_dict()
+        .ok_or_else(|| Error::Image("XObject is not a stream".to_string()))?;
+
+    let ImageXObjectMetadata {
+        width,
+        height,
+        bits_per_component,
+        color_space,
+        indexed_resolution,
+        is_jbig2,
+        is_jpx,
+        jpx_color_space_is_placeholder,
+        is_jpeg_only,
+        is_jpeg_chain,
+        is_ccitt,
+        ..
+    } = resolve_image_xobject_metadata(doc, dict, color_space_map)?;
+
+    let Some(ir) = indexed_resolution else {
+        return Ok(None);
+    };
+    // A JPEG 2000 index plane is one byte per pixel at the codestream's own size, whatever the
+    // dictionary's /Width, /Height and /BitsPerComponent say (ISO 32000-1 §7.4.9). (GH#1916) ~keep
+    if is_jpx {
+        let JpxDecoded {
+            data, width, height, ..
+        } = decode_jpx_image(
+            xobject,
+            obj_ref,
+            doc,
+            &color_space,
+            jpx_color_space_is_placeholder,
+            (width, height),
+            Some(&ir),
+        )?;
+        let ImageData::Raw { pixels: indices, .. } = data else {
+            return Ok(None);
+        };
+        let samples = expand_indexed_to_base_samples(&indices, &ir.palette, ir.components, width, height, 8)?;
+        return Ok(Some(IndexedBaseSamples {
+            samples,
+            components: ir.components,
+            width,
+            height,
+        }));
+    }
+    // `extract_image_from_xobject` only reaches the palette-expansion branch
+    // this mirrors when none of these codecs claims the stream first --
+    // JBIG2, DCT and CCITT each take their own decode branch there and
+    // never consult `indexed_resolution` at all, however the dictionary's
+    // `/ColorSpace` reads. Match that fallthrough exactly so this function
+    // never treats an encoded stream's bytes as a raw index plane. ~keep
+    if is_jbig2 || is_jpeg_only || is_jpeg_chain || is_ccitt {
+        return Ok(None);
+    }
+
+    let expected_size = expected_image_filter_output_size(
+        dict,
+        width,
+        height,
+        ColorSpace::Indexed.components(),
+        bits_per_component,
+    )?;
+    let decoded_data = decode_dimension_bounded_image_stream(doc, xobject, obj_ref, expected_size)?;
+    let samples = expand_indexed_to_base_samples(
+        &decoded_data,
+        &ir.palette,
+        ir.components,
+        width,
+        height,
+        bits_per_component,
+    )?;
+    Ok(Some(IndexedBaseSamples {
+        samples,
+        components: ir.components,
+        width,
+        height,
+    }))
 }
 
 /// Convert a single DeviceCMYK pixel to RGB.
@@ -2706,27 +3135,82 @@ fn pack_image_mask_rows(pixels: &[u8], width: u32, height: u32) -> Result<Vec<u8
 /// Decode a JPEG 2000 (`/JPXDecode`) image stream into raw interleaved samples.
 ///
 /// `JpxDecoder` is a pass-through, so `decode_stream_*` yields the raw JPEG 2000
-/// codestream, which OpenJPEG (`decoders::jpx::decode_jpx`) decodes to 8-bit
-/// component-interleaved samples.
+/// codestream, which `hayro-jpeg2000` (`decoders::jpx::decode_jpx`) decodes to
+/// 8-bit component-interleaved samples. An `/Indexed` image, given its resolved palette in
+/// `indexed`, decodes instead to one palette index per pixel. So does an image whose codestream
+/// carries its own palette, and that palette is returned for the caller to look the indices up in.
+///
+/// Returns the decoded pixels alongside the width and height the codestream itself declares,
+/// which the caller must use in place of the dictionary's `declared_size` -- see the size check
+/// below (GH#1900).
 fn decode_jpx_image(
     xobject: &crate::object::Object,
     obj_ref: Option<ObjectRef>,
     doc: Option<&crate::document::PdfDocument>,
     color_space: &ColorSpace,
-) -> Result<ImageData> {
+    color_space_is_placeholder: bool,
+    declared_size: (u32, u32),
+    indexed: Option<&IndexedResolution>,
+) -> Result<JpxDecoded> {
     let codestream: Vec<u8> = if let (Some(d), Some(ref_id)) = (doc.as_ref(), obj_ref) {
         d.decode_stream_with_encryption(xobject, ref_id)?
     } else {
         xobject.decode_stream_data()?
     };
 
-    let img = crate::decoders::jpx::decode_jpx(&codestream)?;
+    // ISO 32000-1 §7.4.9 puts the `/Indexed` palette in charge, so any `pclr` palette in the
+    // codestream is not applied; the caller looks the indices up. (GH#1885) An image with no
+    // `/Indexed` whose codestream carries its own palette decodes to indices the same way, and
+    // that palette is returned for the lookup. (GH#1903) ~keep
+    let codestream_palette = if indexed.is_some() {
+        None
+    } else {
+        codestream_palette_resolution(&codestream, color_space, color_space_is_placeholder)
+    };
+    if let Some(highest_index) = indexed
+        .or(codestream_palette.as_ref())
+        .map(IndexedResolution::highest_index)
+    {
+        let indices = crate::decoders::jpx::decode_jpx_indices(&codestream, highest_index)?;
+        warn_on_jpx_size_mismatch(declared_size, (indices.width, indices.height));
+        return Ok(JpxDecoded {
+            data: ImageData::Raw {
+                pixels: indices.samples,
+                format: PixelFormat::Grayscale,
+            },
+            width: indices.width,
+            height: indices.height,
+            palette: codestream_palette,
+            opacity: indices.opacity,
+        });
+    }
+    // ISO 32000-1 §7.4.9 makes the XObject's `/ColorSpace` authoritative over the codestream, and
+    // it is load-bearing rather than informational: for a BARE codestream hayro-jpeg2000 infers
+    // `Srgb` from the component count and then treats a 4th channel as alpha, so a CMYK image
+    // reports 3 colour components and loses its K plane unless the declared count contradicts it
+    // (GH#1850). `Pattern` reports 0 components and is filtered out as meaningless here.
+    //
+    // When the dictionary named no `/ColorSpace` at all, §7.4.9's authoritative entry does not
+    // exist and `color_space` is the `/DeviceRGB` placeholder resolve_image_xobject_metadata
+    // installed to let the rest of extraction run. Passing its 3 would assert a count the document
+    // never made, and for a bare four-component codestream that assertion is what dropped the K
+    // plane (GH#1883). `None` sends the decoder to the codestream's own `SIZ` header instead. ~keep
+    let declared_components = if color_space_is_placeholder {
+        None
+    } else {
+        u8::try_from(color_space.components()).ok().filter(|&n| n > 0)
+    };
+    let img = crate::decoders::jpx::decode_jpx(&codestream, declared_components)?;
 
-    // The decoded sample layout is fixed by the codestream's component count
-    // (ISO 32000-1 §7.4.9: a JPX stream carries its own colour space, which
-    // agrees with the component count). The XObject's /ColorSpace is reserved
-    // for future disambiguation (e.g. SMask/alpha handling). ~keep
-    let _ = color_space;
+    // ISO 32000-1 §7.4.9 says /Width and /Height are informative for a /JPXDecode image -- the
+    // codestream is authoritative for its own size, unlike the component count above, which has no
+    // codestream-only answer once a `/ColorSpace` is declared. A mismatch used to reach `PdfImage`
+    // as the DICTIONARY'S size paired with a buffer sized for the CODESTREAM'S: a consumer that
+    // trusts `width * height * components` either read a scrambled prefix at the wrong stride or
+    // rejected the buffer outright as the wrong length, and neither recorded why (GH#1900).
+    // Returning the codestream's own size keeps the two in agreement for every consumer. ~keep
+    warn_on_jpx_size_mismatch(declared_size, (img.width, img.height));
+
     let format = match img.num_components {
         1 => PixelFormat::Grayscale,
         3 => PixelFormat::RGB,
@@ -2738,9 +3222,77 @@ fn decode_jpx_image(
         }
     };
 
-    Ok(ImageData::Raw {
-        pixels: img.samples,
-        format,
+    Ok(JpxDecoded {
+        data: ImageData::Raw {
+            pixels: img.samples,
+            format,
+        },
+        width: img.width,
+        height: img.height,
+        palette: None,
+        opacity: img.opacity,
+    })
+}
+
+/// Record a `JpxSizeMismatch` warning when a `/JPXDecode` image's dictionary declares a size other
+/// than its codestream's. The codestream's size is the one used (ISO 32000-1 §7.4.9, GH#1900).
+fn warn_on_jpx_size_mismatch(declared: (u32, u32), codestream: (u32, u32)) {
+    if declared == codestream {
+        return;
+    }
+    let ((declared_width, declared_height), (width, height)) = (declared, codestream);
+    let msg = format!(
+        "SPEC NOTE: /JPXDecode image dictionary declares {declared_width}x{declared_height}, but \
+         its codestream's SIZ marker segment declares {width}x{height}. ISO 32000-1:2008 Section 7.4.9 \
+         treats /Width and /Height as informative for JPEG 2000, so the codestream's size is used."
+    );
+    tracing::warn!("{}", msg);
+    crate::extractors::warnings::push_global_warning(crate::extractors::warnings::Warning {
+        category: crate::extractors::warnings::WarningCategory::JpxSizeMismatch,
+        page: None,
+        message: msg,
+        spec_section: Some("7.4.9"),
+    });
+}
+
+/// A decoded `/JPXDecode` image: its samples, the codestream's own size, the codestream's
+/// palette when the samples are indices into it, and its opacity channel when it carries one.
+struct JpxDecoded {
+    data: ImageData,
+    width: u32,
+    height: u32,
+    palette: Option<IndexedResolution>,
+    opacity: Option<Vec<u8>>,
+}
+
+/// The codestream's own `pclr` palette as an [`IndexedResolution`], when the image dictionary
+/// leaves room for it: it named no `/ColorSpace`, or a device space with as many components as a
+/// palette entry. Any other declared space is authoritative (ISO 32000-1 §7.4.9) and decodes as
+/// before. ~keep
+fn codestream_palette_resolution(
+    codestream: &[u8],
+    color_space: &ColorSpace,
+    color_space_is_placeholder: bool,
+) -> Option<IndexedResolution> {
+    let palette = crate::decoders::jpx::codestream_palette(codestream)?;
+    let base_fmt = match palette.columns {
+        1 => PixelFormat::Grayscale,
+        3 => PixelFormat::RGB,
+        4 => PixelFormat::CMYK,
+        _ => return None,
+    };
+    let declared_fits = matches!(
+        color_space,
+        ColorSpace::DeviceGray | ColorSpace::DeviceRGB | ColorSpace::DeviceCMYK
+    ) && color_space.components() == usize::from(palette.columns);
+    if !color_space_is_placeholder && !declared_fits {
+        return None;
+    }
+    Some(IndexedResolution {
+        base_fmt,
+        components: usize::from(palette.columns),
+        palette: palette.entries,
+        base_profile: None,
     })
 }
 
@@ -3011,6 +3563,34 @@ mod indexed_tests {
         assert_eq!(out, vec![10, 20, 30, 0, 0, 0]);
     }
 
+    /// The highest index is the last entry the lookup actually holds, the same boundary the
+    /// expander paints black past: `hival` for a full lookup, lower for a short one.
+    #[test]
+    fn highest_index_is_the_last_entry_the_palette_holds() {
+        use crate::object::Object;
+        let highest = |hival: i64, lookup: Vec<u8>| {
+            let cs = Object::Array(vec![
+                Object::Name("Indexed".to_string()),
+                Object::Name("DeviceRGB".to_string()),
+                Object::Integer(hival),
+                Object::String(lookup),
+            ]);
+            resolve_indexed_palette(None, &cs).unwrap().unwrap().highest_index()
+        };
+        assert_eq!(highest(15, vec![7; 16 * 3]), 15, "a full lookup ends at hival");
+        assert_eq!(
+            highest(255, vec![7; 256 * 3]),
+            255,
+            "a full 256-entry lookup ends at 255"
+        );
+        assert_eq!(
+            highest(255, vec![7; 4 * 3 + 2]),
+            3,
+            "a short lookup ends at its last whole entry"
+        );
+        assert_eq!(highest(255, vec![7; 2]), 0, "a lookup with no whole entry clamps to 0");
+    }
+
     #[test]
     fn resolve_indexed_palette_truncates_to_hival() {
         use crate::object::Object;
@@ -3032,6 +3612,71 @@ mod indexed_tests {
         let raw = vec![0, 1, 2];
         let out = expand_indexed_to_rgb(&raw, &palette, fmt, 3, 1, 8).unwrap();
         assert_eq!(out, vec![10, 20, 30, 40, 50, 60, 0, 0, 0]);
+    }
+
+    /// GH#1913: a palette over a `/DeviceN` base holds one byte per colorant in each entry, and the
+    /// composite reads a two-colorant entry as CMYK with no ink in the missing two.
+    #[test]
+    fn a_devicen_palette_is_read_one_byte_per_colorant() {
+        use crate::object::Object;
+        let cs = Object::Array(vec![
+            Object::Name("Indexed".to_string()),
+            Object::Array(vec![
+                Object::Name("DeviceN".to_string()),
+                Object::Array(vec![
+                    Object::Name("Spot-A".to_string()),
+                    Object::Name("Spot-B".to_string()),
+                ]),
+                Object::Name("DeviceCMYK".to_string()),
+                Object::Null,
+            ]),
+            Object::Integer(1),
+            Object::String(vec![0xFF, 0x00, 0x00, 0xFF]),
+        ]);
+        let ir = resolve_indexed_palette(None, &cs).unwrap().unwrap();
+        assert_eq!(ir.components, 2, "one byte per colorant");
+        assert_eq!(ir.highest_index(), 1, "two entries");
+        let rgb = expand_indexed_image(&[0, 1], &ir, 2, 1, 8, crate::color::RenderingIntent::default()).unwrap();
+        assert_eq!(
+            rgb[..3],
+            cmyk_pixel_to_rgb(0xFF, 0, 0, 0),
+            "entry 0 is the first colorant"
+        );
+        assert_eq!(
+            rgb[3..],
+            cmyk_pixel_to_rgb(0, 0xFF, 0, 0),
+            "entry 1 is the second colorant"
+        );
+        let base = expand_indexed_to_base_samples(&[0, 1], &ir.palette, ir.components, 2, 1, 8).unwrap();
+        assert_eq!(
+            base,
+            vec![0xFF, 0x00, 0x00, 0xFF],
+            "the plates see each entry's own two bytes"
+        );
+    }
+
+    /// A palette over a `/Lab` base is converted to RGB when it is resolved, and the expander steps
+    /// through the converted palette three bytes per entry.
+    #[test]
+    fn a_lab_palette_is_stepped_as_rgb_after_conversion() {
+        use crate::object::Object;
+        let (black, white) = ([0u8, 128, 128], [255u8, 128, 128]);
+        let cs = Object::Array(vec![
+            Object::Name("Indexed".to_string()),
+            Object::Array(vec![
+                Object::Name("Lab".to_string()),
+                Object::Dictionary(std::collections::HashMap::new()),
+            ]),
+            Object::Integer(1),
+            Object::String([black, white].concat()),
+        ]);
+        let ir = resolve_indexed_palette(None, &cs).unwrap().unwrap();
+        assert_eq!(ir.highest_index(), 1, "two entries");
+        let d65 = [0.9505, 1.0, 1.0890];
+        let rgb = expand_indexed_image(&[0, 1], &ir, 2, 1, 8, crate::color::RenderingIntent::default()).unwrap();
+        assert_eq!(rgb[..3], lab_palette_to_rgb(&black, d65)[..], "entry 0 is Lab black");
+        assert_eq!(rgb[3..], lab_palette_to_rgb(&white, d65)[..], "entry 1 is Lab white");
+        assert_ne!(rgb[..3], rgb[3..], "the two entries differ");
     }
 
     #[test]
@@ -3766,11 +4411,19 @@ pub(crate) fn image_handle_from_xobject<'doc>(
 
     // Resolve the reported colour space via the shared helper: resource-name →
     // map entry, one indirect-ref hop, and `[/Indexed base ...]` (§8.6.6.3) →
-    // `Indexed` + de-indexed base. Default to DeviceRGB when `/ColorSpace` is
-    // absent. ~keep
+    // `Indexed` + de-indexed base. `/ColorSpace` is forbidden on an `/ImageMask`
+    // (§8.9.6.2), so route the same placeholder `resolve_image_xobject_metadata`
+    // uses through the helper when it is absent -- GH#1825: a plain DeviceRGB
+    // default here disagreed with the DeviceGray the extraction path reports for
+    // the same image. ~keep
+    let missing_color_space_default = if is_image_mask {
+        crate::object::Object::Name("DeviceGray".to_string())
+    } else {
+        crate::object::Object::Name("DeviceRGB".to_string())
+    };
     let (color_space, indexed_base) = match xobject_dict.get("ColorSpace") {
         Some(entry) => resolve_color_space_for_handle(entry, color_space_resources, Some(doc)),
-        None => (ColorSpace::DeviceRGB, None),
+        None => resolve_color_space_for_handle(&missing_color_space_default, color_space_resources, Some(doc)),
     };
 
     // Compute bbox and rotation in Phase 1 while the CTM is in scope. ~keep
@@ -3849,10 +4502,21 @@ pub(crate) fn image_handle_from_inline<'doc>(
     // Resolve the reported colour space via the same shared helper as the
     // XObject path so the two agree. For inline images a resource-name
     // `/ColorSpace` into `/Resources/ColorSpace` is explicitly legal (§8.9.7),
-    // and `[/Indexed base ...]` (§8.6.6.3) reports `Indexed` + de-indexed base. ~keep
+    // and `[/Indexed base ...]` (§8.6.6.3) reports `Indexed` + de-indexed base.
+    // `/ColorSpace` is forbidden on an `/ImageMask` (§8.9.6.2) just as it is for
+    // an XObject mask, so the missing-entry default mirrors that site's
+    // GH#1825 fix rather than defaulting to DeviceRGB unconditionally. ~keep
+    let is_image_mask = expanded
+        .get("ImageMask")
+        .is_some_and(|value| matches!(value, Object::Boolean(true)));
+    let missing_color_space_default = if is_image_mask {
+        Object::Name("DeviceGray".to_string())
+    } else {
+        Object::Name("DeviceRGB".to_string())
+    };
     let (color_space, indexed_base) = match expanded.get("ColorSpace") {
         Some(entry) => resolve_color_space_for_handle(entry, color_space_resources, Some(doc)),
-        None => (ColorSpace::DeviceRGB, None),
+        None => resolve_color_space_for_handle(&missing_color_space_default, color_space_resources, Some(doc)),
     };
 
     // Compute bbox and rotation in Phase 1 while the CTM is in scope. ~keep
@@ -4639,5 +5303,115 @@ mod image_mask_packing_tests {
             result.is_err(),
             "overflowing row_bytes * height must be rejected, not panic"
         );
+    }
+}
+
+/// Palette resolution and reported depth of expanded palette images (GH#1901, GH#1903).
+#[cfg(test)]
+mod palette_expansion_tests {
+    use super::*;
+
+    fn jpx_xobject(color_space: Option<crate::object::Object>) -> crate::object::Object {
+        use crate::object::Object;
+        const PALETTE_CMYK_JP2: &[u8] = include_bytes!("../../tests/fixtures/jpx/gh1885_palette_cmyk.jp2");
+        let mut dict = std::collections::HashMap::new();
+        dict.insert("Subtype".to_string(), Object::Name("Image".to_string()));
+        dict.insert("Width".to_string(), Object::Integer(120));
+        dict.insert("Height".to_string(), Object::Integer(40));
+        // ISO 32000-1 Table 89: a JPXDecode image's /BitsPerComponent is ignored, so this stale
+        // depth must not reach the extracted image. (GH#1901)
+        dict.insert("BitsPerComponent".to_string(), Object::Integer(4));
+        dict.insert("Filter".to_string(), Object::Name("JPXDecode".to_string()));
+        if let Some(cs) = color_space {
+            dict.insert("ColorSpace".to_string(), cs);
+        }
+        Object::Stream {
+            dict,
+            data: bytes::Bytes::from_static(PALETTE_CMYK_JP2),
+        }
+    }
+
+    /// A lossy palette JPEG 2000 image that names no `/Indexed` decodes through the codestream's
+    /// own palette, clamped, to the same samples as the same palette given as an `/Indexed` lookup
+    /// in its base space. The samples stay in the palette's device space: a CMYK palette reports
+    /// CMYK, whether the dictionary declared `/DeviceCMYK` or named no space. (GH#1903)
+    #[test]
+    fn a_codestream_palette_without_indexed_keeps_the_palette_device_space() {
+        use crate::object::Object;
+        const PALETTE_CMYK_JP2: &[u8] = include_bytes!("../../tests/fixtures/jpx/gh1885_palette_cmyk.jp2");
+        let palette = crate::decoders::jpx::codestream_palette(PALETTE_CMYK_JP2).expect("the fixture's pclr box");
+        let indexed = Object::Array(vec![
+            Object::Name("Indexed".to_string()),
+            Object::Name("DeviceCMYK".to_string()),
+            Object::Integer(255),
+            Object::String(palette.entries.clone()),
+        ]);
+        let oracle = decode_indexed_image_in_base_space(None, &jpx_xobject(Some(indexed)), None, None)
+            .expect("the /Indexed image")
+            .expect("an /Indexed image has base-space samples");
+        assert_eq!(oracle.components, 4, "the oracle is a CMYK lookup");
+        for declared in [None, Some(Object::Name("DeviceCMYK".to_string()))] {
+            let label = format!("{declared:?}");
+            let image = extract_image_from_xobject(None, &jpx_xobject(declared), None, None)
+                .unwrap_or_else(|e| panic!("{label}: the codestream palette must resolve: {e:?}"));
+            let ImageData::Raw { pixels, format } = image.data() else {
+                panic!("{label}: raw pixels expected");
+            };
+            assert_eq!(*format, PixelFormat::CMYK, "{label}");
+            assert_eq!(
+                *pixels, oracle.samples,
+                "{label}: the samples must match the /Indexed lookup"
+            );
+            assert_eq!(*image.color_space(), ColorSpace::DeviceCMYK, "{label}");
+            assert_eq!(image.bits_per_component(), 8, "{label}");
+        }
+
+        // A declared space the palette does not fit stays authoritative, and the decoder's own
+        // unclamped lookup still refuses the lossy plane.
+        let err = extract_image_from_xobject(
+            None,
+            &jpx_xobject(Some(Object::Name("DeviceRGB".to_string()))),
+            None,
+            None,
+        )
+        .expect_err("a four-column palette does not fit /DeviceRGB");
+        assert!(
+            format!("{err:?}").contains("PaletteResolutionFailed"),
+            "unexpected failure: {err:?}"
+        );
+    }
+
+    /// An expanded `/Indexed` image reports the 8 bits per component its RGB samples have, not the
+    /// dictionary's packed index depth. (GH#1901)
+    #[test]
+    fn an_expanded_indexed_image_reports_8_bits_per_component() {
+        use crate::object::Object;
+        let mut dict = std::collections::HashMap::new();
+        dict.insert("Subtype".to_string(), Object::Name("Image".to_string()));
+        dict.insert("Width".to_string(), Object::Integer(2));
+        dict.insert("Height".to_string(), Object::Integer(1));
+        dict.insert("BitsPerComponent".to_string(), Object::Integer(4));
+        dict.insert(
+            "ColorSpace".to_string(),
+            Object::Array(vec![
+                Object::Name("Indexed".to_string()),
+                Object::Name("DeviceRGB".to_string()),
+                Object::Integer(1),
+                Object::String(vec![255, 0, 0, 0, 0, 255]),
+            ]),
+        );
+        let xobject = Object::Stream {
+            dict,
+            data: bytes::Bytes::from_static(&[0x01]),
+        };
+        let image = extract_image_from_xobject(None, &xobject, None, None).expect("a 4-bit indexed image");
+        let ImageData::Raw { pixels, format } = image.data() else {
+            panic!("raw pixels expected");
+        };
+        assert_eq!(
+            (*format, pixels.as_slice()),
+            (PixelFormat::RGB, &[255, 0, 0, 0, 0, 255][..])
+        );
+        assert_eq!(image.bits_per_component(), 8);
     }
 }

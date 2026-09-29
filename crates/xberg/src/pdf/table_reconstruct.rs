@@ -10,6 +10,9 @@ pub(crate) use crate::table_core::{HocrWord, reconstruct_table, table_to_markdow
 const DENSE_NUMERIC_MIN_DATA_ROWS: usize = 6;
 const DENSE_NUMERIC_MIN_COLUMNS: usize = 6;
 const DENSE_NUMERIC_MIN_CELL_PERCENT: usize = 75;
+const RECURRING_NUMERIC_MIN_TRACKS: usize = 3;
+const RECURRING_NUMERIC_MIN_TRACK_ROWS: usize = 6;
+const RECURRING_NUMERIC_MIN_COINCIDENT_PERCENT: usize = 30;
 /// Minimum non-empty data cells for the short-numeric-table exemption. Below
 /// this there is too little evidence to call a grid a genuine table.
 const SHORT_NUMERIC_MIN_DATA_CELLS: usize = 4;
@@ -783,7 +786,7 @@ fn post_process_table_inner(
         let data_empty = empty_count == data_row_count;
         // ~keep A header-less column this sparse is what the `column_sparsity` gate below
         // rejects the whole table on, so fold it into its neighbour instead of losing the table
-        // (see `fold_sparse_headerless_column`). Guarded on an empty header for the same reason
+        // (see `fold_column_into_neighbour`). Guarded on an empty header for the same reason
         // that gate is: a column with its own label is a legitimately sparse column, not noise.
         let sparse_and_headerless = !data_empty
             && header_text.is_empty()
@@ -793,11 +796,13 @@ fn post_process_table_inner(
             } else {
                 column_is_sparse_for_ocr(empty_count, data_row_count)
             };
+        let header_fragment = !data_empty
+            && column_is_a_header_fragment(&header_text, col, processed[0].len(), empty_count, data_row_count);
 
         if data_empty {
             merge_header_only_column(&mut processed, col, header_text, column_positions.as_deref_mut());
-        } else if sparse_and_headerless {
-            fold_sparse_headerless_column(&mut processed, col, column_positions.as_deref_mut());
+        } else if sparse_and_headerless || header_fragment {
+            fold_column_into_neighbour(&mut processed, col, column_positions.as_deref_mut());
         } else {
             col += 1;
         }
@@ -827,16 +832,16 @@ fn post_process_table_inner(
 
     prune_spurious_interior_column(&mut processed, layout_guided, column_positions.as_deref_mut());
 
-    // An OCR-split row label (e.g. "ENDING FUND BALANCE" splitting into "ENDING" + "FUND
-    // BALANCE" because the horizontal gap between the two word-groups exceeds
-    // `CELL_MERGE_GAP_HEIGHT_RATIO * median word height`) mints its own near-empty column
-    // that would otherwise trip the column-sparsity gate just below and reject the entire
-    // table, even though every other column is well-formed (xberg-io/xberg#1797). Fold such
-    // a column into its left neighbour BEFORE that gate runs. Scoped to `!layout_guided`
-    // (the OCR path): a layout-guided region already has `prune_spurious_interior_column`
-    // above for its own narrower stray-column shape. ~keep
+    if layout_guided {
+        fold_coincident_fragment_columns_left(&mut processed, column_positions.as_deref_mut());
+    }
+
+    // An OCR-split row-label tail (a word-group, or the number in `Item 1`) mints its own
+    // near-empty column that would otherwise trip the sparsity/asymmetry gates below and reject
+    // the entire table. Fold it into its left neighbour before those gates run (#1797, #1928).
+    // Scoped to the OCR path; layout-guided regions have their own stray-column cleanup. ~keep
     if !layout_guided {
-        fold_sparse_word_columns_left(&mut processed, column_positions);
+        fold_sparse_label_tail_columns_left(&mut processed, column_positions);
     }
 
     let data_row_count = processed.len() - 1;
@@ -1125,7 +1130,10 @@ fn post_process_table_inner(
                 continuation_count += 1;
             }
         }
-        if eligible_transitions >= 3 && continuation_count * 10 > eligible_transitions * 4 {
+        if eligible_transitions >= 3
+            && continuation_count * 10 > eligible_transitions * 4
+            && !has_recurring_numeric_tracks(&processed)
+        {
             tracing::debug!(
                 target: "xberg::table_reconstruct",
                 reason = "row_continuation_flow",
@@ -1458,7 +1466,7 @@ fn merge_interior_column(table: &mut [Vec<String>], column: usize) {
 
 /// Whether an OCR-path (`!layout_guided`) column counts as "mostly empty", under the exact
 /// same ratio the column-sparsity rejection gate applies just after
-/// [`fold_sparse_word_columns_left`] runs. Kept as one function so the fold's eligibility bar
+/// [`fold_sparse_label_tail_columns_left`] runs. Kept as one function so the fold's eligibility bar
 /// and the rejection bar can never drift apart (xberg-io/xberg#1797).
 fn column_is_sparse_for_ocr(empty_count: usize, data_row_count: usize) -> bool {
     empty_count * 4 > data_row_count * 3
@@ -1470,9 +1478,53 @@ fn column_is_sparse_for_ocr(empty_count: usize, data_row_count: usize) -> bool {
 /// crate-private `table_core::looks_like_amount`'s narrow amount charset (any letter already
 /// disqualifies a cell from that charset), spelled out directly so an ambiguous cell that is
 /// neither clearly a word nor clearly a number (e.g. a lone "-") is excluded from
-/// [`fold_sparse_word_columns_left`] rather than assumed eligible.
+/// [`fold_sparse_label_tail_columns_left`] rather than assumed eligible.
 fn is_word_label_cell(cell: &str) -> bool {
     cell.chars().any(|ch| ch.is_alphabetic())
+}
+
+fn is_short_label_number(cell: &str) -> bool {
+    let bytes = cell.trim().as_bytes();
+    !bytes.is_empty() && bytes.len() <= 3 && bytes.iter().all(u8::is_ascii_digit)
+}
+
+fn numbered_label_stem<'a>(left: &'a str, tail: &str) -> Option<&'a str> {
+    let left = left.trim();
+    let stem = if tail.trim().is_empty() {
+        let (stem, number) = left.rsplit_once(' ')?;
+        is_short_label_number(number).then_some(stem.trim())?
+    } else {
+        if !is_short_label_number(tail) || left.chars().any(|character| character.is_ascii_digit()) {
+            return None;
+        }
+        left
+    };
+    (!stem.is_empty() && stem.chars().any(|character| character.is_alphabetic())).then_some(stem)
+}
+
+/// Whether a numeric column is the split-off number in one repeated `word + number` row-label
+/// pattern. Requiring every row to resolve to the same stem distinguishes `Item | 1` from a real
+/// integer column beside varied labels. ~keep
+fn is_numbered_label_tail(table: &[Vec<String>], column: usize) -> bool {
+    let data_rows = &table[1..];
+    if column == 0 {
+        return false;
+    }
+    let mut expected_stem: Option<&str> = None;
+    for row in data_rows {
+        let Some(left) = row.get(column - 1) else {
+            return false;
+        };
+        let tail = row.get(column).map_or("", String::as_str);
+        let Some(stem) = numbered_label_stem(left, tail) else {
+            return false;
+        };
+        if expected_stem.is_some_and(|expected| !expected.eq_ignore_ascii_case(stem)) {
+            return false;
+        }
+        expected_stem = Some(stem);
+    }
+    expected_stem.is_some()
 }
 
 /// Fold column `column` into column `column - 1` in place, space-joining whichever of the two
@@ -1497,8 +1549,7 @@ fn fold_column_into_left_neighbor(table: &mut [Vec<String>], column: usize) {
     }
 }
 
-/// Fold an un-headed, mostly-empty, purely word-valued interior column into its LEFT
-/// neighbour (xberg-io/xberg#1797).
+/// Fold an un-headed, mostly-empty row-label tail into its left neighbour (#1797, #1928).
 ///
 /// A row label that OCR splits across a horizontal gap wider than
 /// `CELL_MERGE_GAP_HEIGHT_RATIO * median word height` (e.g. "ENDING FUND BALANCE" splitting
@@ -1509,21 +1560,19 @@ fn fold_column_into_left_neighbor(table: &mut [Vec<String>], column: usize) {
 /// Folding it into its left neighbour before that gate runs recovers the table without
 /// weakening the gate for a genuinely malformed grid.
 ///
-/// Eligibility mirrors the column-sparsity gate's own bar exactly ([`column_is_sparse_for_ocr`])
-/// plus two guards that keep this narrow:
+/// Word tails mirror the column-sparsity gate's own bar exactly
+/// ([`column_is_sparse_for_ocr`]). Additional guards keep both paths narrow:
 /// - the column has no header label of its own (a legitimately sparse HEADED column, e.g. a
 ///   bank statement's "DEPOSIT", must not be folded away -- mirrors the same rule the
 ///   sparsity gate and `prune_spurious_interior_column` both already apply);
-/// - every non-empty cell in the column reads as a word ([`is_word_label_cell`]) -- a sparse
-///   NUMERIC column split by digit-width drift is
-///   [`crate::table_core::merge_disjoint_numeric_columns`]'s job, not this one, and folding a
-///   numeric fragment into a label column would corrupt it.
+/// - every non-empty cell reads as a word, or every row resolves to one repeated numbered-label
+///   stem such as `Item | 1`. A numeric or amount column beside varied labels stays separate.
 ///
 /// Column 0 is never eligible (no left neighbour to fold into), which is what keeps
 /// xberg-io/xberg#1570's numbered-list column 0 out of this fold's reach. Runs only for
 /// `!layout_guided`: the `layout_guided` path already has `prune_spurious_interior_column` for
 /// its own narrower stray-column shape.
-fn fold_sparse_word_columns_left(table: &mut [Vec<String>], mut column_positions: Option<&mut Vec<u32>>) {
+fn fold_sparse_label_tail_columns_left(table: &mut [Vec<String>], mut column_positions: Option<&mut Vec<u32>>) {
     let Some(header) = table.first() else {
         return;
     };
@@ -1541,10 +1590,11 @@ fn fold_sparse_word_columns_left(table: &mut [Vec<String>], mut column_positions
             .filter(|cell| !cell.is_empty())
             .collect();
         let empty_count = data_row_count - non_empty_cells.len();
+        let word_tail = non_empty_cells.iter().all(|cell| is_word_label_cell(cell));
+        let numbered_tail = is_numbered_label_tail(table, column);
         let eligible = !header_has_label
-            && column_is_sparse_for_ocr(empty_count, data_row_count)
             && !non_empty_cells.is_empty()
-            && non_empty_cells.iter().all(|cell| is_word_label_cell(cell));
+            && ((column_is_sparse_for_ocr(empty_count, data_row_count) && word_tail) || numbered_tail);
 
         if eligible {
             fold_column_into_left_neighbor(table, column);
@@ -1783,7 +1833,7 @@ const STRADDLE_ROW_THRESHOLD_RATIO: f64 = 0.5;
 /// Fraction of (column boundary, row) pairs crossed by a word's bounding box.
 ///
 /// A column boundary is the *start* of the next column, not the midpoint
-/// between two column positions. [`crate::table_core::detect_columns`] returns
+/// between two column positions. [`crate::table_core::reconstruct_table_with_columns`] returns
 /// each column's **median left edge**, so a midpoint between two such medians
 /// falls inside the left column's own text rather than in the gutter, and any
 /// word wider than half the column pitch straddles it — flagging legitimate
@@ -2109,6 +2159,50 @@ fn is_dense_numeric_grid(grid: &[Vec<String>]) -> bool {
 
     non_empty_cells > 0
         && numeric_cells.saturating_mul(100) >= non_empty_cells.saturating_mul(DENSE_NUMERIC_MIN_CELL_PERCENT)
+}
+
+/// Recurring numeric tracks are positive table evidence strong enough to
+/// distinguish wrapped row labels from prose flowing across inferred cells. ~keep
+fn has_recurring_numeric_tracks(grid: &[Vec<String>]) -> bool {
+    let Some(width) = grid.first().map(Vec::len) else {
+        return false;
+    };
+    let data_rows = grid.len().saturating_sub(1);
+    if data_rows < RECURRING_NUMERIC_MIN_TRACK_ROWS {
+        return false;
+    }
+    let minimum_support = data_rows
+        .saturating_mul(RECURRING_NUMERIC_MIN_COINCIDENT_PERCENT)
+        .div_ceil(100)
+        .max(RECURRING_NUMERIC_MIN_TRACK_ROWS);
+
+    let supports: Vec<usize> = (0..width)
+        .map(|column| {
+            grid.iter()
+                .skip(1)
+                .filter(|row| row.get(column).is_some_and(|cell| is_numeric_value_cell(cell.trim())))
+                .count()
+        })
+        .collect();
+    let recurring_columns: Vec<usize> = (0..width)
+        .filter(|&column| supports.get(column).copied().unwrap_or_default() >= minimum_support)
+        .collect();
+    if recurring_columns.len() < RECURRING_NUMERIC_MIN_TRACKS {
+        return false;
+    }
+
+    grid.iter()
+        .skip(1)
+        .filter(|row| {
+            recurring_columns
+                .iter()
+                .filter(|&&column| row.get(column).is_some_and(|cell| is_numeric_value_cell(cell.trim())))
+                .take(RECURRING_NUMERIC_MIN_TRACKS)
+                .count()
+                >= RECURRING_NUMERIC_MIN_TRACKS
+        })
+        .count()
+        >= minimum_support
 }
 
 /// Whether the grid's data cells are overwhelmingly numeric values, with no
@@ -2778,23 +2872,59 @@ fn looks_like_declaration_head(head: &str) -> bool {
     identifiers >= 2
 }
 
-/// Fold a header-less, overwhelmingly-empty column into its neighbour, carrying every cell's
-/// text rather than dropping it.
+/// One in ten data rows: the largest share of a column's rows that may carry text before the
+/// column is read as a real, if sparse, column rather than a split header. GH#1649's
+/// legitimately sparse DEPOSIT column carries two of nine rows (22%) and must stay a column of
+/// its own, so the bar sits well below that rather than next to it. ~keep
+const MAX_HEADER_FRAGMENT_SUPPORT_DENOMINATOR: usize = 10;
+
+/// Below this many data rows a one-in-ten share is a single cell, which is too weak a signal to
+/// restructure a small table on. ~keep
+const MIN_HEADER_FRAGMENT_DATA_ROWS: usize = 8;
+
+/// Whether a column's header is the tail of its neighbour's rather than a label of its own.
+///
+/// OCR splits a two-word column header ("Year 1") across two x-tracks when the intra-header gap
+/// reaches the cell-merge threshold, and each track mints a column. The right-hand one holds a
+/// header fragment and no data, which [`merge_header_only_column`] folds away -- but only while
+/// its data cells are *entirely* empty. A single stray glyph from a shaded row is enough to defeat
+/// that, and then the fragment column survives and shifts every value in the table one place
+/// (xberg-io/xberg#1832: measured 20 of 138 values in the right cell on
+/// `shaded_table_scan.pdf` with three such columns present, where the OCR itself read almost every
+/// value correctly).
+///
+/// Unlike its header-less sibling this is a real behaviour change for a table that passes today,
+/// since the `column_sparsity` gate deliberately exempts a column with its own label. The
+/// separation from a legitimately sparse labelled column is therefore by degree, and kept wide:
+/// see [`MAX_HEADER_FRAGMENT_SUPPORT_DENOMINATOR`]. Column 0 is never a fragment -- it is the row
+/// label. ~keep
+fn column_is_a_header_fragment(
+    header_text: &str,
+    col: usize,
+    column_count: usize,
+    empty_count: usize,
+    data_row_count: usize,
+) -> bool {
+    !header_text.is_empty()
+        && col > 0
+        && column_count > 2
+        && data_row_count >= MIN_HEADER_FRAGMENT_DATA_ROWS
+        && (data_row_count - empty_count) * MAX_HEADER_FRAGMENT_SUPPORT_DENOMINATOR <= data_row_count
+}
+
+/// Fold an overwhelmingly-empty column into its neighbour, carrying every cell's text -- header
+/// included -- rather than dropping it.
 ///
 /// The sibling [`merge_header_only_column`] already removes a column whose data cells are
-/// *entirely* empty. A column that is merely almost empty had no such path and instead reached
-/// the `column_sparsity` gate, which rejects the **whole table** over it. On a scanned page that
-/// is a routine outcome: a misread shaded row contributes two or three stray glyphs (`_`, `a`,
-/// `(DEFICIT)`) at x-positions that mint a phantom column, and three stray cells out of
-/// twenty-two rows were enough to discard an otherwise well-formed 23x7 grid entirely
-/// (xberg-io/xberg#1797, xberg-io/xberg#1832).
+/// *entirely* empty. A column that is merely almost empty had no such path. Two different
+/// callers need one, and both arise from the same thing: on a scanned page a misread shaded row
+/// contributes two or three stray glyphs (`_`, `a`, `(DEFICIT)`) at x-positions that mint a
+/// phantom column (xberg-io/xberg#1797, xberg-io/xberg#1832).
 ///
-/// This is a rescue path, never a behaviour change for a table that already passes: the caller
-/// only reaches it for a column the sparsity gate is about to reject on, and a table containing
-/// such a column returns `None` today. Folding left (right, at column 0) preserves the text --
-/// which is also usually where it belongs, since a phantom column is carved out of its
-/// neighbour's content in the first place. ~keep
-fn fold_sparse_headerless_column(table: &mut [Vec<String>], col: usize, column_positions: Option<&mut Vec<u32>>) {
+/// Folding left (right, at column 0) preserves the text -- which is also usually where it
+/// belongs, since a phantom column is carved out of its neighbour's content in the first
+/// place. ~keep
+fn fold_column_into_neighbour(table: &mut [Vec<String>], col: usize, column_positions: Option<&mut Vec<u32>>) {
     if table.is_empty() || table[0].len() < 2 {
         return;
     }
@@ -2816,6 +2946,54 @@ fn fold_sparse_headerless_column(table: &mut [Vec<String>], col: usize, column_p
         }
     }
     drop_column_position(column_positions, col);
+}
+
+/// Fold an unheaded track that is geometrically tucked against the label column, or whose
+/// populated cells are predominantly detached numeric suffixes (`%`, `)`, `]`, `}`). Both shapes
+/// are fragments of their left neighbour rather than independent columns (xberg-io/xberg#1769).
+/// ~keep
+fn fold_coincident_fragment_columns_left(table: &mut [Vec<String>], mut column_positions: Option<&mut Vec<u32>>) {
+    if table.len() < 2 || table[0].len() < 3 {
+        return;
+    }
+
+    let data_row_count = table.len() - 1;
+    let mut column = 1;
+    while column + 1 < table[0].len() {
+        let header_empty = table[0][column].trim().is_empty();
+        let populated: Vec<&str> = table[1..]
+            .iter()
+            .map(|row| row[column].trim())
+            .filter(|cell| !cell.is_empty())
+            .collect();
+        let sparse = !populated.is_empty() && populated.len() * 10 <= data_row_count;
+        let tucked_left = column_positions.as_deref().is_some_and(|positions| {
+            positions
+                .get(column - 1)
+                .zip(positions.get(column))
+                .zip(positions.get(column + 1))
+                .is_some_and(|((&left, &current), &right)| {
+                    u64::from(current.abs_diff(left)) * 4 < u64::from(right.abs_diff(current)) * 3
+                })
+        });
+        let closing_fragments = table[1..]
+            .iter()
+            .filter(|row| {
+                let cell = row[column].trim();
+                let left = row[column - 1].trim();
+                !cell.is_empty()
+                    && left.chars().any(|character| character.is_ascii_digit())
+                    && cell.chars().all(|character| matches!(character, '%' | ')' | ']' | '}'))
+            })
+            .count();
+        let predominantly_closing = !populated.is_empty() && closing_fragments * 4 >= populated.len() * 3;
+
+        if header_empty && ((sparse && tucked_left) || predominantly_closing) {
+            fold_column_into_neighbour(table, column, column_positions.as_deref_mut());
+        } else {
+            column += 1;
+        }
+    }
 }
 
 fn merge_header_only_column(
@@ -2960,7 +3138,7 @@ fn is_lone_dash_cell(text: &str) -> bool {
 }
 
 /// Whether `text` — already run through [`normalize_dash_glyphs_and_spacing`] — is a bare
-/// numeric literal: an optional leading `-`, one or more digits with at most one `.`, and
+/// numeric literal: an optional leading `-`, a mantissa as [`is_numeric_mantissa`] reads it, and
 /// an optional exponent (`e`/`E`, optional sign, one or more digits). Anything containing a
 /// letter outside that exponent marker, or no digits at all, is not a number (xberg-io/
 /// xberg#1582).
@@ -2979,21 +3157,29 @@ fn looks_like_numeric_literal(text: &str) -> bool {
     })
 }
 
-/// Whether `text` is one or more ASCII digits with at most one `.` separator.
+/// Whether `text` is an integer part and an optional `.` with fraction digits, with at
+/// least one digit on either side of the `.`. The integer part is plain digits or
+/// thousands-grouped digits (`1,234,567`), so an amount column reads as numeric however
+/// it groups its thousands (xberg-io/xberg#1914).
 fn is_numeric_mantissa(text: &str) -> bool {
-    if text.is_empty() {
+    let (integer, fraction) = text.split_once('.').unwrap_or((text, ""));
+    if !is_ascii_digits(fraction) {
         return false;
     }
-    let mut seen_dot = false;
-    let mut seen_digit = false;
-    for character in text.chars() {
-        match character {
-            '0'..='9' => seen_digit = true,
-            '.' if !seen_dot => seen_dot = true,
-            _ => return false,
-        }
+    if integer.is_empty() {
+        return !fraction.is_empty();
     }
-    seen_digit
+    let mut groups = integer.split(',');
+    let first = groups.next().unwrap_or_default();
+    if first.is_empty() || !is_ascii_digits(first) {
+        return false;
+    }
+    !integer.contains(',') || (first.len() <= 3 && groups.all(|group| group.len() == 3 && is_ascii_digits(group)))
+}
+
+/// Whether every character of `text` is an ASCII digit (true for an empty `text`).
+fn is_ascii_digits(text: &str) -> bool {
+    text.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 #[cfg(test)]
@@ -3802,6 +3988,70 @@ mod tests {
     }
 
     #[test]
+    fn test_row_continuation_accepts_wrapped_labels_with_recurring_numeric_tracks() {
+        let mut table = vec![vec![
+            "Characteristic".into(),
+            "Group A".into(),
+            "Group B".into(),
+            "Group C".into(),
+            "P A/B".into(),
+            "P A/C".into(),
+        ]];
+        for row in 0..8 {
+            table.push(vec![
+                format!("wrapped label {row}"),
+                format!("{}", 100 + row),
+                format!("{}", 200 + row),
+                format!("{}", 300 + row),
+                format!("0.0{row}"),
+                format!("0.1{row}"),
+            ]);
+        }
+
+        let result = post_process_table(table, true, false);
+        assert!(
+            result.is_some(),
+            "three or more recurring numeric tracks must override sentence-flow evidence from wrapped labels"
+        );
+    }
+
+    #[test]
+    fn test_row_continuation_rejects_prose_with_incidental_numeric_tracks() {
+        let mut table = vec![vec![
+            "Narrative".into(),
+            "Measure A".into(),
+            "Measure B".into(),
+            "Measure C".into(),
+        ]];
+        for row in 0..8 {
+            let incidental = row < 5;
+            table.push(vec![
+                format!("continuing prose row {row}"),
+                if incidental {
+                    format!("{}", 100 + row)
+                } else {
+                    "across".into()
+                },
+                if incidental {
+                    format!("{}", 200 + row)
+                } else {
+                    "several".into()
+                },
+                if incidental {
+                    format!("{}", 300 + row)
+                } else {
+                    "columns".into()
+                },
+            ]);
+        }
+
+        assert!(
+            post_process_table(table, true, false).is_none(),
+            "three incidental numeric tracks in five of eight prose rows must not bypass prose-flow rejection"
+        );
+    }
+
+    #[test]
     fn test_high_row_low_column_rejects_prose() {
         let mut table = vec![vec!["Column A".into(), "Column B".into()]];
         for i in 0..25 {
@@ -3820,6 +4070,80 @@ mod tests {
             result_guided.is_none(),
             "High-row low-column fully-filled table should be rejected (layout-guided)"
         );
+    }
+
+    #[test]
+    fn issue_1769_folds_short_label_and_value_suffix_tracks() {
+        let mut table = vec![vec![
+            "Metric".into(),
+            "".into(),
+            "DP".into(),
+            "SP-C".into(),
+            "".into(),
+            "SP-D".into(),
+            "p 1".into(),
+            "p 2".into(),
+        ]];
+        for row in 0..40 {
+            table.push(vec![
+                format!("Measure {row}"),
+                match row {
+                    0 => "GC".into(),
+                    1 => "60".into(),
+                    2 => "x".into(),
+                    _ => "".into(),
+                },
+                format!("{}", 100 + row),
+                format!("({}.6", 40 + row),
+                "%".into(),
+                format!("{}", 30 + row),
+                format!("0.{row}"),
+                format!("0.{}", row + 1),
+            ]);
+        }
+        let mut positions = vec![44, 66, 106, 145, 164, 184, 224, 259];
+
+        let processed = post_process_table_with_columns(table, true, false, &mut positions)
+            .expect("the table must remain accepted");
+
+        assert_eq!(processed[0].len(), 6);
+        assert_eq!(positions, [44, 106, 145, 184, 224, 259]);
+        assert_eq!(processed[1][0], "Measure 0 GC");
+        assert_eq!(processed[1][2], "(40.6 %");
+    }
+
+    #[test]
+    fn issue_1769_preserves_unheaded_dash_status_column() {
+        let mut table = vec![vec!["Metric".into(), "".into(), "Value".into()]];
+        for row in 0..10 {
+            table.push(vec![format!("Measure {row}"), "—".into(), format!("{}", row + 1)]);
+        }
+        let mut positions = vec![44, 106, 184];
+
+        fold_coincident_fragment_columns_left(&mut table, Some(&mut positions));
+
+        assert_eq!(table[0].len(), 3);
+        assert_eq!(positions, [44, 106, 184]);
+        assert_eq!(table[1][1], "—");
+    }
+
+    #[test]
+    fn issue_1769_handles_weighted_coordinate_gaps_above_u32() {
+        let mut table = vec![vec!["Metric".into(), "".into(), "Value".into()]];
+        for row in 0..10 {
+            table.push(vec![
+                format!("Measure {row}"),
+                if row == 0 { "tail".into() } else { "".into() },
+                format!("{}", row + 1),
+            ]);
+        }
+        let mut positions = vec![0, 1_100_000_000, 3_000_000_000];
+
+        fold_coincident_fragment_columns_left(&mut table, Some(&mut positions));
+
+        assert_eq!(table[0].len(), 2);
+        assert_eq!(positions, [0, 3_000_000_000]);
+        assert_eq!(table[1][0], "Measure 0 tail");
     }
 
     #[test]
@@ -5681,6 +6005,55 @@ mod tests {
         assert!(!looks_like_verilog_declaration_grid(&port_table));
     }
 
+    /// A column of thousands-separated amounts gets the same normalisation as a column of
+    /// plain digits: its nil dashes are emptied and `"- 5,000"` is joined to `"-5,000"`
+    /// (xberg-io/xberg#1914).
+    #[test]
+    fn comma_grouped_amount_column_is_normalized_like_plain_digits() {
+        let table = vec![
+            vec!["Item".to_string(), "Year 1".to_string(), "Year 2".to_string()],
+            vec!["Alpha".to_string(), "12,480".to_string(), "3,905".to_string()],
+            vec!["Bravo".to_string(), "-".to_string(), "- 5,000".to_string()],
+            vec!["Charlie".to_string(), "1,204,337".to_string(), "88,120".to_string()],
+            vec!["Delta".to_string(), "7,450".to_string(), "\u{2014}".to_string()],
+        ];
+        let processed = post_process_table(table, true, false).expect("amount table must be accepted");
+        assert_eq!(
+            processed[2],
+            vec!["Bravo".to_string(), String::new(), "-5,000".to_string()]
+        );
+        assert_eq!(
+            processed[4],
+            vec!["Delta".to_string(), "7,450".to_string(), String::new()]
+        );
+    }
+
+    /// Commas count as thousands separators only in groups of three digits after a first
+    /// group of one to three digits (xberg-io/xberg#1914).
+    #[test]
+    fn numeric_literal_accepts_only_well_formed_thousands_groups() {
+        for text in [
+            "7",
+            "1,234",
+            "12,345,678",
+            "-5,000",
+            "1,234.50",
+            "1,234.",
+            ".5",
+            "5.",
+            "0.25",
+            "1.5e-05",
+        ] {
+            assert!(looks_like_numeric_literal(text), "{text:?} must read as a number");
+        }
+        for text in [
+            "1,2", "12,34", "1,2345", "1234,567", "1,234,56", ",123", "1,,234", "1,234,", ".", "1.2.3", "1.234,56",
+            "a,123", "",
+        ] {
+            assert!(!looks_like_numeric_literal(text), "{text:?} must not read as a number");
+        }
+    }
+
     /// Build the reported fixture's transaction table content directly (xberg-io/xberg#1649):
     /// a header row followed by nine rows where WITHDRAWAL/DEPOSIT are mutually exclusive, so
     /// each is empty on a majority of rows and DEPOSIT in particular carries little text overall.
@@ -5768,6 +6141,113 @@ mod tests {
             post_process_table(table, false, false).is_none(),
             "an unnamed, mostly-empty column must still be treated as noise, not preserved"
         );
+    }
+
+    fn numbered_item_table_with_split_label_tail() -> Vec<Vec<String>> {
+        let mut table = vec![vec![
+            "Item".into(),
+            String::new(),
+            "Year 1".into(),
+            "Year 2".into(),
+            "Year 3".into(),
+            "Year 4".into(),
+            "Year 5".into(),
+        ]];
+        for item in 1..=14 {
+            table.push(vec![
+                "Item".into(),
+                item.to_string(),
+                format!("{},100", item),
+                format!("{},200", item),
+                format!("{},300", item),
+                format!("{},400", item),
+                format!("{},500", item),
+            ]);
+        }
+        table
+    }
+
+    /// GH#1928: a short numeric tail split from a repeated word label belongs to that label,
+    /// rather than forming a sparse column that rejects the whole OCR table. ~keep
+    #[test]
+    fn issue_1928_numbered_label_tail_is_folded_into_the_label_column() {
+        let table = numbered_item_table_with_split_label_tail();
+        assert_eq!(
+            find_data_start(&table, false),
+            0,
+            "the first reconstructed row must become the header through the established fallback"
+        );
+
+        let processed = post_process_table(table, false, false)
+            .expect("a numbered-item table must survive its OCR-split label tail");
+
+        assert_eq!(processed.len(), 15);
+        assert_eq!(
+            processed[0],
+            vec!["Item", "Year 1", "Year 2", "Year 3", "Year 4", "Year 5"]
+        );
+        for (item, row) in processed.iter().skip(1).enumerate() {
+            assert_eq!(row[0], format!("Item {}", item + 1));
+            assert_eq!(row.len(), 6, "the label tail must not remain as a column");
+        }
+    }
+
+    fn table_with_real_sparse_numeric_column(values: [&str; 6]) -> Vec<Vec<String>> {
+        let labels = ["Alpha", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot"];
+        let mut table = vec![vec![
+            "Item".into(),
+            String::new(),
+            "Year 1".into(),
+            "Year 2".into(),
+            "Year 3".into(),
+        ]];
+        table.extend(
+            labels
+                .into_iter()
+                .zip(values)
+                .enumerate()
+                .map(|(row, (label, sparse))| {
+                    vec![
+                        label.into(),
+                        sparse.into(),
+                        format!("{},100", row + 1),
+                        format!("{},200", row + 1),
+                        format!("{},300", row + 1),
+                    ]
+                }),
+        );
+        table
+    }
+
+    /// GH#1928 negative control: a real sparse integer column beside varied row labels is not a
+    /// continuation of those labels and must retain the existing rejection. ~keep
+    #[test]
+    fn issue_1928_real_sparse_integer_column_is_not_folded_into_labels() {
+        let table = table_with_real_sparse_numeric_column(["7", "", "", "12", "", ""]);
+
+        assert!(post_process_table(table, false, false).is_none());
+    }
+
+    /// GH#1928 negative control: amount syntax cannot be a short numbered-label tail. ~keep
+    #[test]
+    fn issue_1928_real_sparse_amount_column_is_not_folded_into_labels() {
+        let table = table_with_real_sparse_numeric_column(["$5,000", "", "", "$750", "", ""]);
+
+        assert!(post_process_table(table, false, false).is_none());
+    }
+
+    /// GH#1928 negative control: a populated integer column beside varied labels is real table
+    /// data, even when OCR omitted its header, and must remain a separate column. ~keep
+    #[test]
+    fn issue_1928_populated_integer_column_beside_varied_labels_is_not_folded() {
+        let table = table_with_real_sparse_numeric_column(["7", "8", "9", "10", "11", "12"]);
+        let processed = post_process_table(table, false, false).expect("the populated numeric table must survive");
+
+        assert_eq!(processed[0].len(), 5);
+        assert_eq!(processed[1][0], "Alpha");
+        assert_eq!(processed[1][1], "7");
+        assert_eq!(processed[6][0], "Foxtrot");
+        assert_eq!(processed[6][1], "12");
     }
 
     /// Negative control for xberg-io/xberg#1649's `find_data_start` fix: when the first row is

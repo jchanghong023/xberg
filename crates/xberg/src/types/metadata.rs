@@ -135,6 +135,7 @@ pub struct CodeMetadata {
     /// Hierarchical key/value data tree extracted from data-format source
     /// (JSON, YAML, TOML, XML, CSV, etc.), when data extraction was enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub data: Option<CodeDataNode>,
 }
 
@@ -489,6 +490,7 @@ pub struct Metadata {
 
     /// Page/slide/sheet structure with boundaries
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub pages: Option<PageStructure>,
 
     /// Format-specific metadata (discriminated union)
@@ -496,10 +498,12 @@ pub struct Metadata {
     /// Contains detailed metadata specific to the document format.
     /// Serialized as a nested `"format"` object with a `format_type` discriminator field.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub format: Option<FormatMetadata>,
 
     /// Image preprocessing metadata (when OCR preprocessing was applied)
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub image_preprocessing: Option<ImagePreprocessingMetadata>,
 
     /// JSON schema (for structured data extraction)
@@ -508,6 +512,7 @@ pub struct Metadata {
 
     /// Error metadata (for batch operations)
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub error: Option<ErrorMetadata>,
 
     /// Extraction duration in milliseconds (for benchmarking).
@@ -1105,6 +1110,7 @@ pub struct HtmlMetadata {
 
     /// Document text direction from `dir` attribute
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub text_direction: Option<TextDirection>,
 
     /// Open Graph metadata (og:* properties) for social media
@@ -1365,6 +1371,7 @@ pub struct BibtexMetadata {
     pub authors: Vec<String>,
     /// Earliest and latest publication years found in the bibliography.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub year_range: Option<YearRange>,
     /// Count of entries grouped by BibTeX entry type (e.g. `"article"` → 5).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1385,6 +1392,7 @@ pub struct CitationMetadata {
     pub authors: Vec<String>,
     /// Earliest and latest publication years found in the file.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub year_range: Option<YearRange>,
     /// DOI identifiers found in the citation records.
     #[serde(skip_serializing_if = "Vec::is_empty", default)]

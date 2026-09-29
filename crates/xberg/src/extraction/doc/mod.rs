@@ -104,15 +104,27 @@ pub(crate) fn extract_doc_text(content: &[u8]) -> Result<DocExtractionResult> {
     }
 
     let w_ident = u16::from_le_bytes([word_doc[0], word_doc[1]]);
-    if w_ident != 0xA5EC {
+    if !matches!(w_ident, 0xA5DC | 0xA5EC) {
         return Err(XbergError::parsing(format!(
-            "Invalid DOC magic number: 0x{w_ident:04X}, expected 0xA5EC"
+            "Invalid DOC magic number: 0x{w_ident:04X}, expected 0xA5DC or 0xA5EC"
         )));
     }
 
     let n_fib = u16::from_le_bytes([word_doc[2], word_doc[3]]);
-
     let flags_a = u16::from_le_bytes([word_doc[0x0A], word_doc[0x0B]]);
+    if w_ident == 0xA5DC || (0x0065..=0x0068).contains(&n_fib) {
+        if flags_a & 0x0004 != 0 {
+            return Err(XbergError::parsing(
+                "Fast-saved Word 6/95 documents are not supported; save the document without fast-save history and retry",
+            ));
+        }
+        return extract_text_word6(&word_doc).map(|text| DocExtractionResult {
+            content: text,
+            metadata,
+            processing_warnings: Vec::new(),
+            paragraphs: Vec::new(),
+        });
+    }
     let use_1table = (flags_a & 0x0200) != 0;
 
     let table_stream_name = if use_1table { "/1Table" } else { "/0Table" };
@@ -121,22 +133,12 @@ pub(crate) fn extract_doc_text(content: &[u8]) -> Result<DocExtractionResult> {
 
     let mut processing_warnings = Vec::new();
 
-    if n_fib >= 101 {
-        extract_text_word97(&word_doc, &table_stream, &mut processing_warnings).map(|main| DocExtractionResult {
-            content: main.content,
-            metadata,
-            processing_warnings,
-            paragraphs: main.paragraphs,
-        })
-    } else {
-        extract_text_word6(&word_doc).map(|text| DocExtractionResult {
-            content: text,
-            metadata,
-            processing_warnings,
-            // Word 6/95 has no FKP paragraph properties this reader understands.
-            paragraphs: Vec::new(),
-        })
-    }
+    extract_text_word97(&word_doc, &table_stream, &mut processing_warnings).map(|main| DocExtractionResult {
+        content: main.content,
+        metadata,
+        processing_warnings,
+        paragraphs: main.paragraphs,
+    })
 }
 
 /// Index of `ccpText` (main document CP count) in the FIB's `FibRgLw97`
@@ -469,15 +471,20 @@ fn extract_text_word6(word_doc: &[u8]) -> Result<String> {
         return Err(XbergError::parsing("Word 6/95 file too short"));
     }
 
-    let ccp_text = u32::from_le_bytes([word_doc[0x4C], word_doc[0x4D], word_doc[0x4E], word_doc[0x4F]]) as usize;
+    let ccp_text = u32::from_le_bytes([word_doc[0x34], word_doc[0x35], word_doc[0x36], word_doc[0x37]]) as usize;
 
     let fc_min = u32::from_le_bytes([word_doc[0x18], word_doc[0x19], word_doc[0x1A], word_doc[0x1B]]) as usize;
 
-    if fc_min + ccp_text > word_doc.len() {
+    let Some(fc_mac) = fc_min.checked_add(ccp_text) else {
+        return Err(XbergError::parsing(
+            "Word 6/95 text range overflows the document stream",
+        ));
+    };
+    if fc_mac > word_doc.len() {
         return extract_text_fallback(word_doc, ccp_text);
     }
 
-    let text_bytes = &word_doc[fc_min..fc_min + ccp_text];
+    let text_bytes = &word_doc[fc_min..fc_mac];
     let mut result = String::with_capacity(ccp_text);
 
     for &b in text_bytes {

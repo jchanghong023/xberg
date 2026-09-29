@@ -668,3 +668,222 @@ fn cmyk_jpeg_app14_inversion_round_trips_to_correct_plate() {
          inversion; got M={magenta_v} Y={yellow_v} K={black_v}"
     );
 }
+
+/// A four-component JPEG 2000 image on a `/DeviceCMYK` XObject paints the process plates.
+///
+/// The module used to document a JPX skip path ("no pure-Rust JP2 decoder is bundled") guarded by
+/// a predicate that returned `false` unconditionally, so the branch was unreachable and the
+/// statement false: `hayro-jpeg2000` is a non-optional dependency and a JPX image is decoded and
+/// routed by its colour space like any other. This pins that, so the claim cannot come back
+/// undetected. See GH#1855.
+///
+/// The fixture is a 16x16 lossless codestream with one channel saturated per quadrant, so each
+/// plate is checked at a sample point no other channel can reach. It is a bare codestream rather
+/// than a JP2 container because a four-component JP2 has no enumerated colour-space value to
+/// declare, and the PDF's `/ColorSpace` is what decides routing regardless. Built with
+/// `opj_compress -i quad.raw -o out.j2k -F 16,16,4,8,u -r 1 -n 3`; note that OpenJPEG's raw
+/// reader is **component-planar**, so interleaved input silently produces a valid codestream of
+/// the wrong image -- and it round-trips through `opj_decompress` byte-identical either way,
+/// because the writer shares the convention.
+const CMYK_QUADRANTS_J2K: &[u8] = include_bytes!("fixtures/jpx/gh1855_cmyk_quadrants.j2k");
+
+fn build_pdf_with_jpx_image(codestream: &[u8], width: u32, height: u32, color_space: Option<&str>) -> Vec<u8> {
+    let content = b"q\n50 0 0 50 25 25 cm\n/Im1 Do\nQ\n";
+    let mut buf = Vec::new();
+    let mut offsets = Vec::new();
+    buf.extend_from_slice(b"%PDF-1.5\n");
+
+    offsets.push(buf.len());
+    buf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    offsets.push(buf.len());
+    buf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+    offsets.push(buf.len());
+    buf.extend_from_slice(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
+           /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >>\nendobj\n",
+    );
+    offsets.push(buf.len());
+    let hdr = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len());
+    buf.extend_from_slice(hdr.as_bytes());
+    buf.extend_from_slice(content);
+    buf.extend_from_slice(b"\nendstream\nendobj\n");
+    offsets.push(buf.len());
+    let color_space = color_space.map_or(String::new(), |space| format!(" /ColorSpace {space}"));
+    let img_hdr = format!(
+        "5 0 obj\n<< /Type /XObject /Subtype /Image /Width {w} /Height {h} \
+         {color_space} /BitsPerComponent 8 /Filter /JPXDecode /Length {len} >>\nstream\n",
+        w = width,
+        h = height,
+        len = codestream.len()
+    );
+    buf.extend_from_slice(img_hdr.as_bytes());
+    buf.extend_from_slice(codestream);
+    buf.extend_from_slice(b"\nendstream\nendobj\n");
+    finalize_pdf(buf, offsets)
+}
+
+/// Wrap a bare JPEG 2000 codestream in the minimal JP2 box structure, declaring CMYK through an
+/// enumerated `colr` box.
+///
+/// Load-bearing, not cosmetic: `hayro-jpeg2000` reads a *bare* codestream's colour space by
+/// assuming `Srgb` for any image with three or more components, ignoring the `Csiz` field, and
+/// then reconciles the 4-vs-3 mismatch by treating the fourth channel as alpha. So this fixture,
+/// whose codestream does declare `Csiz=4`, decodes as 3-component RGB unless the colour space is
+/// stated in a JP2 box, where `jp2::parse` reads it directly. `/JPXDecode` accepts either form.
+/// ~keep
+fn wrap_as_cmyk_jp2(codestream: &[u8]) -> Vec<u8> {
+    fn jp2_box(tag: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + data.len());
+        out.extend_from_slice(&((8 + data.len()) as u32).to_be_bytes());
+        out.extend_from_slice(tag);
+        out.extend_from_slice(data);
+        out
+    }
+
+    const ENUM_CS_CMYK: u32 = 12;
+    let signature_box = jp2_box(b"jP  ", &[0x0D, 0x0A, 0x87, 0x0A]);
+    let mut ftyp_data = b"jp2 ".to_vec();
+    ftyp_data.extend_from_slice(&0u32.to_be_bytes());
+    ftyp_data.extend_from_slice(b"jp2 ");
+    let ftyp_box = jp2_box(b"ftyp", &ftyp_data);
+    let mut colr_data = vec![1u8, 0, 0];
+    colr_data.extend_from_slice(&ENUM_CS_CMYK.to_be_bytes());
+    let colr_box = jp2_box(b"colr", &colr_data);
+    let jp2h_box = jp2_box(b"jp2h", &colr_box);
+    let jp2c_box = jp2_box(b"jp2c", codestream);
+
+    [signature_box, ftyp_box, jp2h_box, jp2c_box].concat()
+}
+
+#[test]
+fn jpx_cmyk_image_routes_channels_to_process_plates() {
+    let doc = PdfDocument::from_bytes(build_pdf_with_jpx_image(
+        &wrap_as_cmyk_jp2(CMYK_QUADRANTS_J2K),
+        16,
+        16,
+        Some("/DeviceCMYK"),
+    ))
+    .expect("parse");
+    let plates = render_separations(&doc, 0, 72).expect("render");
+
+    let quadrant_samples = [
+        ("Cyan", 35u32, 35u32),
+        ("Magenta", 60, 35),
+        ("Yellow", 35, 60),
+        ("Black", 60, 60),
+    ];
+    for (ink, x, y) in quadrant_samples {
+        let value = sample(plate(&plates, ink), x, y);
+        assert!(
+            value > 200,
+            "the {ink} quadrant of a JPXDecode DeviceCMYK image must reach the {ink} plate; \
+             got {value} at ({x}, {y})"
+        );
+        for (other, _, _) in quadrant_samples.iter().filter(|(other, _, _)| *other != ink) {
+            let bleed = sample(plate(&plates, other), x, y);
+            assert!(
+                bleed < 50,
+                "the {ink} quadrant must leave the {other} plate near zero; got {bleed}"
+            );
+        }
+    }
+
+    assert_eq!(
+        sample(plate(&plates, "Cyan"), 5, 5),
+        0,
+        "plates stay untouched outside the image bbox"
+    );
+}
+
+#[test]
+fn a_gray_jpx_without_a_colorspace_routes_to_the_black_plate() {
+    const GRAY_JP2: &[u8] = include_bytes!("fixtures/jpx/gh1885_indices_grey.jp2");
+    let doc = PdfDocument::from_bytes(build_pdf_with_jpx_image(GRAY_JP2, 120, 40, None)).expect("parse");
+    let plates = render_separations(&doc, 0, 72).expect("render");
+    let black = plate(&plates, "Black");
+    assert!(
+        black.data.chunks_exact(4).any(|pixel| pixel[0] > 200),
+        "the grayscale image's dark glyphs must reach the Black plate"
+    );
+    for ink in ["Cyan", "Magenta", "Yellow"] {
+        assert!(
+            plate(&plates, ink).data.chunks_exact(4).all(|pixel| pixel[0] < 50),
+            "the grayscale image must not reach the {ink} plate"
+        );
+    }
+}
+
+/// GH#1898: the separation classifier had no arm for `/Indexed`, so an
+/// Indexed image always resolved to `Unknown` and was skipped before
+/// extraction, whatever ink intent its base colour space carried.
+///
+/// Build a single-page PDF with a 2x2 `/Indexed /DeviceCMYK` image whose
+/// palette's only entry (index 0, `hival` 1) is pure cyan; every pixel's raw
+/// sample is index 0. The palette stream is a separate indirect object, the
+/// same pattern `test_indexed_palette_starts_with_cr.rs` uses.
+fn build_pdf_with_indexed_cmyk_image(indices: &[u8], width: u32, height: u32) -> Vec<u8> {
+    let content = b"q\n50 0 0 50 25 25 cm\n/Im1 Do\nQ\n";
+    // hival=1 needs (1+1)*4 = 8 palette bytes: index 0 = pure cyan
+    // CMYK(255,0,0,0), index 1 is unused by this fixture. ~keep
+    let palette: [u8; 8] = [255, 0, 0, 0, 0, 0, 0, 0];
+
+    let mut buf = Vec::new();
+    let mut offsets = Vec::new();
+    buf.extend_from_slice(b"%PDF-1.4\n");
+
+    offsets.push(buf.len());
+    buf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    offsets.push(buf.len());
+    buf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+    offsets.push(buf.len());
+    buf.extend_from_slice(
+        b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] \
+           /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >>\nendobj\n",
+    );
+    offsets.push(buf.len());
+    let hdr = format!("4 0 obj\n<< /Length {} >>\nstream\n", content.len());
+    buf.extend_from_slice(hdr.as_bytes());
+    buf.extend_from_slice(content);
+    buf.extend_from_slice(b"\nendstream\nendobj\n");
+    offsets.push(buf.len());
+    let img_hdr = format!(
+        "5 0 obj\n<< /Type /XObject /Subtype /Image /Width {w} /Height {h} \
+         /ColorSpace 6 0 R /BitsPerComponent 8 /Length {len} >>\nstream\n",
+        w = width,
+        h = height,
+        len = indices.len()
+    );
+    buf.extend_from_slice(img_hdr.as_bytes());
+    buf.extend_from_slice(indices);
+    buf.extend_from_slice(b"\nendstream\nendobj\n");
+    offsets.push(buf.len());
+    buf.extend_from_slice(b"6 0 obj\n[/Indexed /DeviceCMYK 1 7 0 R]\nendobj\n");
+    offsets.push(buf.len());
+    let pal_hdr = format!("7 0 obj\n<< /Length {} >>\nstream\n", palette.len());
+    buf.extend_from_slice(pal_hdr.as_bytes());
+    buf.extend_from_slice(&palette);
+    buf.extend_from_slice(b"\nendstream\nendobj\n");
+    finalize_pdf(buf, offsets)
+}
+
+#[test]
+fn indexed_cmyk_image_routes_base_ink_to_cyan_plate() {
+    // 2x2 image, every raw sample is palette index 0 = pure cyan CMYK(255,0,0,0). ~keep
+    let indices: Vec<u8> = vec![0, 0, 0, 0];
+    let doc = PdfDocument::from_bytes(build_pdf_with_indexed_cmyk_image(&indices, 2, 2)).expect("parse");
+    let plates = render_separations(&doc, 0, 72).expect("render");
+
+    let cyan = plate(&plates, "Cyan");
+    assert!(
+        sample(cyan, 50, 50) > 200,
+        "an /Indexed /DeviceCMYK image's pure-cyan palette entry must reach the \
+         Cyan plate; got {}",
+        sample(cyan, 50, 50)
+    );
+    let magenta = plate(&plates, "Magenta");
+    assert_eq!(
+        sample(magenta, 50, 50),
+        0,
+        "the palette entry carries no magenta; the Magenta plate must stay untouched"
+    );
+}

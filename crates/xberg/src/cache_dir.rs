@@ -4,7 +4,7 @@
 //! cached data (models, OCR results, tessdata, etc.). This avoids per-CWD
 //! `.xberg/` directories and uses platform-appropriate global cache locations.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Resolve the xberg cache base directory (without a module suffix).
 ///
@@ -12,8 +12,13 @@ use std::path::PathBuf;
 /// the top-level xberg cache directory.
 #[allow(dead_code)]
 pub(crate) fn resolve_cache_base() -> PathBuf {
-    if let Ok(env_path) = std::env::var("XBERG_CACHE_DIR") {
-        return PathBuf::from(env_path);
+    cache_base_for(std::env::var("XBERG_CACHE_DIR").ok().as_deref().map(Path::new))
+}
+
+/// The cache base for a given `XBERG_CACHE_DIR` value, without reading the environment.
+pub(crate) fn cache_base_for(env_override: Option<&Path>) -> PathBuf {
+    if let Some(env_path) = env_override {
+        return env_path.to_path_buf();
     }
     if let Some(cache) = dirs::cache_dir() {
         return cache.join("xberg");

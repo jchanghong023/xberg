@@ -34,6 +34,13 @@ public class CloudOcrBackend : IOcrBackend
 
     public bool SupportsLanguage(string lang) => _langs.Contains(lang);
 
+    // The cloud service offers the same languages whatever the extraction config asks for, so
+    // both config-aware members delegate to the config-independent set above. A backend whose
+    // language support depends on the config (a model chosen per request, say) would read it here.
+    public List<string> SupportedLanguagesFor(OcrConfig config) => _langs;
+
+    public bool SupportsLanguageFor(OcrConfig config, string language) => _langs.Contains(language);
+
     public ExtractedDocument ProcessImage(byte[] imageBytes, OcrConfig config)
     {
         using var form = new MultipartFormDataContent();

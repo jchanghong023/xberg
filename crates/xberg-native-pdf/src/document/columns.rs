@@ -1048,7 +1048,8 @@ impl PdfDocument {
     ///
     /// Tries the same three detectors, in the same order, that the text path
     /// in `text_assembly.rs` uses, plus the density probe that finds the tight
-    /// (10-14 pt) gutters the cover scan misses. Each returns `None` on
+    /// (10-14 pt) gutters the cover scan misses, and last `line_corridor_gutter`
+    /// (GH#1809) for the lopsided pages all three decline on. Each returns `None` on
     /// single-column, grid/form/table and off-centre pages (see the
     /// `detect_column_gutter_rejects_*` tests), so a caller that gates on
     /// `Some` is unchanged on all of those.
@@ -1081,6 +1082,183 @@ impl PdfDocument {
         Self::prose_two_column_gutter(spans)
             .or_else(|| Self::density_central_gutter(spans))
             .or_else(|| Self::classifier_column_gutter(spans))
+            // GH#1809: a fourth question the three detectors above never ask. All three
+            // are MASS detectors: left-edge clusters each holding a share of the page's
+            // spans, central density mass, or a whole-page classifier verdict. A page
+            // whose right column fills only its top third presents none of that and gets
+            // `None` three times, although the corridor between its two columns is empty
+            // from the top of the page to the bottom. ~keep
+            .or_else(|| Self::line_corridor_gutter(spans))
+    }
+
+    /// The page's sole empty x-corridor with a real population of spans on each flank,
+    /// or `None`.
+    ///
+    /// GH#1809. Unlike the three detectors `detect_column_gutter` tries first, this asks
+    /// nothing about MASS -- how much of the page a side holds, or how its spans cluster
+    /// -- only whether an x-interval is empty of ink and how many spans flank it. It
+    /// declines on a single column (no corridor), on a grid or table (a census of the
+    /// page's own rows, below), and on a label/value form (its one corridor is wider
+    /// than a gutter can be relative to the content it splits). ~keep
+    pub(super) fn line_corridor_gutter(spans: &[crate::layout::TextSpan]) -> Option<f32> {
+        // Matches `prose_two_column_gutter`'s own 12pt corridor floor, and doubles as the
+        // gap width the grid-row census counts: `pdf::native::text::line_has_grid_row_gaps`
+        // resolves to 11.9pt at A4 width, so the two agree on every gap either would
+        // classify on a real page. ~keep
+        const MIN_GUTTER_PTS: f32 = 12.0;
+        // A corridor wider than this share of the content it splits is not a gutter but
+        // the space inside a label/value form -- the reporter's own corridor is 41pt of
+        // 521pt of content, a form's runs to ~230pt of the same width. ~keep
+        const MAX_GUTTER_CONTENT_FRACTION: f32 = 0.25;
+        // A span this wide relative to the content it sits in is full-width furniture (a
+        // running header, a banner) and straddles any real corridor by construction --
+        // the same bridge exclusion `prose_two_column_gutter` applies at its own 60%. ~keep
+        const FURNITURE_CONTENT_FRACTION: f32 = 0.6;
+        const MIN_SPANS_PER_SIDE: usize = 4;
+        // A line whose ink opens this many internal gaps is a multi-column TABLE ROW,
+        // never a body line -- `line_has_grid_row_gaps`' own threshold (GH#1742/#1756).
+        // One such line is a kerning accident; two that agree are a grid, and on a grid
+        // this detector declines OUTRIGHT rather than merely skipping those rows. Merely
+        // skipping them is not enough, measured: with GH#1756's 27 journal-table rows
+        // skipped, its page still leaves exactly one qualifying corridor (291.0..306.6,
+        // the genuine gutter) and the detector answers `Some(298.8)` where
+        // `detect_column_gutter_also_declines_on_the_sparse_table_rows_pages_gh1756`
+        // requires `None`. Declining on the census instead keeps every grid page -- that
+        // one, and the 38-row ACN financial table -- on the behaviour it has today. ~keep
+        const MIN_GRID_ROW_GAP_COUNT: usize = 4;
+        const MIN_GRID_ROWS_FOR_A_TABLE: usize = 2;
+
+        let lines = Self::corridor_lines(spans);
+        let grid_rows = lines
+            .iter()
+            .filter(|line| {
+                Self::corridor_line_gap_count(spans, line.as_slice(), MIN_GUTTER_PTS) >= MIN_GRID_ROW_GAP_COUNT
+            })
+            .count();
+        if grid_rows >= MIN_GRID_ROWS_FOR_A_TABLE {
+            return None;
+        }
+
+        let mut extents: Vec<(f32, f32)> = lines
+            .iter()
+            .flatten()
+            .map(|&index| (spans[index].bbox.left(), spans[index].bbox.right()))
+            .filter(|&(left, right)| left.is_finite() && right.is_finite() && right > left)
+            .collect();
+        if extents.len() < MIN_SPANS_PER_SIDE * 2 {
+            return None;
+        }
+        let content_min = extents.iter().map(|&(left, _)| left).fold(f32::INFINITY, f32::min);
+        let content_max = extents
+            .iter()
+            .map(|&(_, right)| right)
+            .fold(f32::NEG_INFINITY, f32::max);
+        let content_width = content_max - content_min;
+        if !(content_width.is_finite() && content_width > 0.0) {
+            return None;
+        }
+        extents.retain(|&(left, right)| right - left < content_width * FURNITURE_CONTENT_FRACTION);
+        if extents.len() < MIN_SPANS_PER_SIDE * 2 {
+            return None;
+        }
+        Self::sole_corridor_midpoint(
+            &mut extents,
+            MIN_GUTTER_PTS,
+            content_width * MAX_GUTTER_CONTENT_FRACTION,
+            MIN_SPANS_PER_SIDE,
+        )
+    }
+
+    /// `spans`' non-blank indices grouped into baseline runs, each sorted left to right.
+    ///
+    /// Mirrors `pdf::native::text::group_into_lines`, tolerance included: a new line
+    /// opens when a span's `y` differs from its group's ANCHOR by more than the
+    /// tolerance, so gradual drift across a page does not chain into one line. ~keep
+    fn corridor_lines(spans: &[crate::layout::TextSpan]) -> Vec<Vec<usize>> {
+        const LINE_Y_TOLERANCE_PTS: f32 = 0.5;
+
+        let mut order: Vec<usize> = (0..spans.len()).collect();
+        order.retain(|&index| !spans[index].text.trim().is_empty());
+        order.sort_by(|&a, &b| {
+            spans[b]
+                .bbox
+                .y
+                .total_cmp(&spans[a].bbox.y)
+                .then_with(|| spans[a].bbox.x.total_cmp(&spans[b].bbox.x))
+        });
+        let mut lines: Vec<Vec<usize>> = Vec::new();
+        let mut anchor_y = f32::NAN;
+        for index in order {
+            let y = spans[index].bbox.y;
+            if lines.is_empty() || (anchor_y - y).abs() > LINE_Y_TOLERANCE_PTS {
+                anchor_y = y;
+                lines.push(Vec::new());
+            }
+            lines.last_mut().expect("just pushed above").push(index);
+        }
+        for line in &mut lines {
+            line.sort_by(|&a, &b| spans[a].bbox.x.total_cmp(&spans[b].bbox.x));
+        }
+        lines
+    }
+
+    /// How many gaps of at least `min_gutter` `line`'s ink opens between its own spans.
+    ///
+    /// A zero-width span counts and holds its x: the empty cell of a table row is marked
+    /// with a U+200B, which `trim` does not remove, and dropping it would close the gap
+    /// that makes the row a grid row (GH#1756). ~keep
+    fn corridor_line_gap_count(spans: &[crate::layout::TextSpan], line: &[usize], min_gutter: f32) -> usize {
+        let mut gaps = 0usize;
+        let mut running_right = f32::NEG_INFINITY;
+        for &index in line {
+            let (left, right) = (spans[index].bbox.left(), spans[index].bbox.right());
+            if running_right.is_finite() && left - running_right >= min_gutter {
+                gaps += 1;
+            }
+            running_right = running_right.max(right);
+        }
+        gaps
+    }
+
+    /// The midpoint of the one corridor at least `min_gutter` and at most `max_gutter`
+    /// wide that `extents` leaves, when there is exactly one and both flanks carry at
+    /// least `min_per_side` spans.
+    ///
+    /// Exactly one is the discriminator, not the widest: a page with several qualifying
+    /// corridors is a form or a grid, and picking one of them would place a gutter inside
+    /// its content (GH#1809). ~keep
+    fn sole_corridor_midpoint(
+        extents: &mut [(f32, f32)],
+        min_gutter: f32,
+        max_gutter: f32,
+        min_per_side: usize,
+    ) -> Option<f32> {
+        extents.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut corridors: Vec<(f32, f32)> = Vec::new();
+        let mut running_right = extents.first()?.1;
+        for &(left, right) in &extents[1..] {
+            if left - running_right >= min_gutter {
+                corridors.push((running_right, left));
+            }
+            running_right = running_right.max(right);
+        }
+        // Every corridor counts toward the "exactly one" test, `max_gutter` is applied
+        // only afterwards: a second corridor is evidence of a form whatever its width, so
+        // measuring the width first would let a form through on its narrow corridor while
+        // its wide one was discarded unseen. ~keep
+        if corridors.len() != 1 {
+            return None;
+        }
+        let (left, right) = corridors[0];
+        if right - left > max_gutter {
+            return None;
+        }
+        let left_count = extents
+            .iter()
+            .filter(|&&(_, extent_right)| extent_right <= left)
+            .count();
+        let right_count = extents.iter().filter(|&&(extent_left, _)| extent_left >= right).count();
+        (left_count >= min_per_side && right_count >= min_per_side).then_some((left + right) / 2.0)
     }
 
     pub(super) fn is_multi_column_page(spans: &[crate::layout::TextSpan]) -> bool {

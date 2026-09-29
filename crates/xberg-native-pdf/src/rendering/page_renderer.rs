@@ -3820,7 +3820,28 @@ impl PageRenderer {
                 // raw component samples all fall within their [min,max] range is
                 // made fully transparent. ~keep
                 let ncomp = pdf_image.color_space().components();
-                if !pdf_image.samples_are_raw() {
+                if *pdf_image.color_space() == crate::extractors::images::ColorSpace::Indexed {
+                    // An Indexed image's colour-key range is stated in its raw
+                    // INDEX space (ncomp=1), not the palette-expanded RGB
+                    // `samples_are_raw` tracks -- that flag is always false here
+                    // once the palette lookup runs, which used to make this
+                    // masking unreachable. The extractor keeps the index plane
+                    // alongside the RGB precisely so this can read it. (GH#1899) ~keep
+                    match (pdf_image.raw_indexed_samples(), parse_color_key_mask(mask_array, ncomp)) {
+                        (Some(indices), Some(ranges)) => {
+                            apply_color_key_mask_to_indices(indices, &ranges, &mut rgba_image);
+                        }
+                        (None, _) => {
+                            tracing::warn!(
+                                "Skipping colour-key /Mask: no raw index plane recorded for this \
+                                 Indexed image (JPX-coded Indexed images are not yet covered)"
+                            );
+                        }
+                        (_, None) => {
+                            tracing::warn!("Ignoring malformed color-key /Mask array (ncomp={})", ncomp);
+                        }
+                    }
+                } else if pdf_image.color_key_samples().is_none() && !pdf_image.samples_are_raw() {
                     // The extractor mapped a non-default /Decode into the
                     // stored samples, so they are no longer in the space the
                     // /Mask ranges are expressed in. Masking them here would
@@ -3872,6 +3893,33 @@ impl PageRenderer {
                     }
                 }
             }
+        }
+
+        // The extractor keeps the opacity channel only when the image has no /SMask, so the
+        // two soft masks never both apply. ~keep
+        let mut color_is_premultiplied = false;
+        if let Some(soft_mask) = pdf_image.soft_mask_in_data() {
+            let opacity = soft_mask.samples();
+            if opacity.len() == rgba_image.width() as usize * rgba_image.height() as usize {
+                for (pixel, &alpha) in rgba_image.pixels_mut().zip(opacity) {
+                    if soft_mask.is_premultiplied() {
+                        let prior_alpha = u32::from(pixel[3]);
+                        for component in &mut pixel.0[..3] {
+                            *component = ((u32::from(*component) * prior_alpha) / 255) as u8;
+                        }
+                    }
+                    pixel[3] = ((u32::from(pixel[3]) * u32::from(alpha)) / 255) as u8;
+                }
+                color_is_premultiplied = soft_mask.is_premultiplied();
+            } else {
+                tracing::warn!("Ignoring /SMaskInData: the opacity channel does not match the image size");
+            }
+        }
+
+        // A tiny_skia pixmap holds premultiplied RGBA. `/SMaskInData 2` already supplies colour
+        // premultiplied by its opacity; every other decoded image needs the conversion here. ~keep
+        if !color_is_premultiplied {
+            premultiply_rgba(&mut rgba_image);
         }
 
         let src_w = rgba_image.width();
@@ -8528,7 +8576,11 @@ fn build_logical_color<'a>(
     }
 }
 
-/// Resize an RGBA (straight-alpha) byte buffer using SIMD-accelerated bilinear filtering.
+/// Resize a premultiplied RGBA byte buffer using SIMD-accelerated bilinear filtering.
+///
+/// The resizer's default treats alpha as straight and multiplies every pixel by it before
+/// filtering, then divides it out after; on a premultiplied buffer that leaves a soft edge with
+/// more colour than its opacity allows, so the alpha pass is turned off. (GH#1905)
 ///
 /// Returns `None` on failure (zero dimensions, SIMD dispatch error) so callers
 /// can fall back to tiny_skia's own resampling path.
@@ -8545,7 +8597,9 @@ fn resize_rgba(src: &[u8], src_w: u32, src_h: u32, dst_w: u32, dst_h: u32) -> Op
         .resize(
             &src_img,
             &mut dst_img,
-            &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Bilinear)),
+            &ResizeOptions::new()
+                .resize_alg(ResizeAlg::Convolution(FilterType::Bilinear))
+                .use_alpha(false),
         )
         .ok()?;
     Some(dst_img.into_vec())
@@ -8744,16 +8798,25 @@ fn color_key_pixel_masked(components: &[u8], ranges: &[(u32, u32)]) -> bool {
         .all(|(&c, &(lo, hi))| (c as u32) >= lo && (c as u32) <= hi)
 }
 
+/// Convert a straight-alpha RGBA image to the premultiplied form a tiny_skia pixmap holds.
+fn premultiply_rgba(rgba: &mut image::RgbaImage) {
+    for pixel in rgba.pixels_mut().filter(|pixel| pixel[3] != u8::MAX) {
+        let [r, g, b, a] = pixel.0;
+        let premultiplied = tiny_skia::ColorU8::from_rgba(r, g, b, a).premultiply();
+        pixel.0 = [premultiplied.red(), premultiplied.green(), premultiplied.blue(), a];
+    }
+}
+
 /// Apply a colour-key `/Mask` to an already-decoded RGBA image by zeroing the
 /// alpha of every source pixel whose raw component samples all fall within the
 /// mask ranges.
 ///
 /// Colour-key masking is defined against the raw pre-Decode samples. Those are
-/// only recoverable from an 8-bit `ImageData::Raw` buffer whose per-pixel byte
-/// count matches `ranges.len()`. For anything else (JPEG, non-8-bit depths, or a
-/// palette-expanded Indexed image whose original indices are lost) the ranges
-/// cannot be mapped onto the decoded pixels, so masking is skipped rather than
-/// applied incorrectly.
+/// the raw samples the extractor kept when it moved the stored samples out of
+/// that space, or else an 8-bit `ImageData::Raw` buffer whose per-pixel byte
+/// count matches `ranges.len()`. For anything else (JPEG, 16-bit depths) the
+/// ranges cannot be mapped onto the decoded pixels, so masking is skipped
+/// rather than applied incorrectly.
 fn apply_color_key_mask(
     image: &crate::extractors::images::PdfImage,
     ranges: &[(u32, u32)],
@@ -8762,19 +8825,28 @@ fn apply_color_key_mask(
     use crate::extractors::images::ImageData;
 
     let ncomp = ranges.len();
-    let ImageData::Raw { pixels, format } = image.data() else {
-        tracing::warn!("color-key /Mask: non-raw (e.g. JPEG) image, skipping");
-        return;
+    let pixels = if let Some(samples) = image.color_key_samples() {
+        if samples.len() != image.width() as usize * image.height() as usize * ncomp {
+            tracing::warn!("color-key /Mask: {ncomp} ranges do not fit the image's raw samples, skipping");
+            return;
+        }
+        samples
+    } else {
+        let ImageData::Raw { pixels, format } = image.data() else {
+            tracing::warn!("color-key /Mask: non-raw (e.g. JPEG) image, skipping");
+            return;
+        };
+        if image.bits_per_component() != 8 || format.bytes_per_pixel() != ncomp {
+            tracing::warn!(
+                "color-key /Mask: unsupported layout (bpc={}, bpp={}, ncomp={}), skipping",
+                image.bits_per_component(),
+                format.bytes_per_pixel(),
+                ncomp
+            );
+            return;
+        }
+        pixels.as_slice()
     };
-    if image.bits_per_component() != 8 || format.bytes_per_pixel() != ncomp {
-        tracing::warn!(
-            "color-key /Mask: unsupported layout (bpc={}, bpp={}, ncomp={}), skipping",
-            image.bits_per_component(),
-            format.bytes_per_pixel(),
-            ncomp
-        );
-        return;
-    }
     let w = rgba.width() as usize;
     let h = rgba.height() as usize;
     if pixels.len() < w * h * ncomp {
@@ -8785,6 +8857,29 @@ fn apply_color_key_mask(
         for x in 0..w {
             let base = (y * w + x) * ncomp;
             if color_key_pixel_masked(&pixels[base..base + ncomp], ranges) {
+                rgba.get_pixel_mut(x as u32, y as u32)[3] = 0;
+            }
+        }
+    }
+}
+
+/// Apply a colour-key `/Mask` to an `/Indexed` image's raw index plane (one
+/// byte per pixel -- ISO 32000-1 §8.9.6.4 gives an Indexed colour space
+/// exactly one component), zeroing alpha for every pixel whose index falls in
+/// the masked range. Reads the index the extractor kept alongside the
+/// palette-expanded RGB `apply_color_key_mask` reads, because the mask's
+/// range is stated in index space, not in that RGB. (GH#1899)
+fn apply_color_key_mask_to_indices(indices: &[u8], ranges: &[(u32, u32)], rgba: &mut image::RgbaImage) {
+    let w = rgba.width() as usize;
+    let h = rgba.height() as usize;
+    if indices.len() < w * h {
+        tracing::warn!("color-key /Mask: index buffer too small, skipping");
+        return;
+    }
+    for y in 0..h {
+        for x in 0..w {
+            let idx = indices[y * w + x];
+            if color_key_pixel_masked(std::slice::from_ref(&idx), ranges) {
                 rgba.get_pixel_mut(x as u32, y as u32)[3] = 0;
             }
         }

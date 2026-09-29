@@ -904,6 +904,34 @@ Select the CoreML compute units when the CoreML execution provider is active. Un
 export XBERG_COREML_UNITS=cpu_and_ne
 ```
 
+## PDF Backend Configuration
+
+### PDFIUM_DYNAMIC_LIB_PATH
+
+**Type**: `String` (directory path)
+**Default**: Not set (the system library search path is used)
+
+Directory containing the platform `libpdfium` shared library, read when
+`PdfBackend::Pdfium` is selected. Xberg compiles the pdfium engine into the Python, Node,
+PHP, Ruby and Elixir packages for Linux and Apple Silicon but never bundles the library
+itself, so this is how you supply it.
+
+```bash title="Pdfium Setup"
+# Linux / macOS — directory, not the file itself
+export PDFIUM_DYNAMIC_LIB_PATH=/usr/local/lib
+
+# Windows
+set PDFIUM_DYNAMIC_LIB_PATH=C:\path\to\pdfium\bin
+```
+
+Use pdfium release **7678**, the release Xberg's bindings were generated against. Symbols
+are resolved at `dlopen` time, so a mismatched library can abort the process rather than
+raise an error. `PDFIUM_STATIC_LIB_PATH` is the build-time alternative: set it when
+building from source to link pdfium statically instead of loading it at run time.
+
+See [Pdfium PDF backend](/getting-started/installation/#pdfium-pdf-backend) for the full
+setup and the platforms it is unavailable on.
+
 ## See Also
 
 - [Configuration Guide](/reference/configuration/) - Detailed configuration file format and options

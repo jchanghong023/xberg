@@ -333,6 +333,27 @@ pub fn build(b: *std.Build) void {
     ocr_backend_management_run.step.dependOn(&format_specific_run.step);
     test_step.dependOn(&ocr_backend_management_run.step);
 
+    // Registered by hand: this file is `user_owned` in alef.toml, so the generator emits
+    // src/pdf_test.zig but never wires it up. A new e2e category therefore needs its block
+    // added here or the suite reports green having run none of its tests (GH#1877). It sets
+    // its own env via setenv() and needs no mock server, unlike the url/plugin blocks. ~keep
+    const pdf_module = b.createModule(.{
+        .root_source_file = b.path("src/pdf_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    pdf_module.addImport("xberg", xberg_module);
+    const pdf_tests = b.addTest(.{
+        .name = "pdf_test",
+        .root_module = pdf_module,
+        .use_llvm = true,
+    });
+    pdf_tests.root_module.addRPath(.{ .cwd_relative = ffi_path_abs });
+    const pdf_run = b.addRunArtifact(pdf_tests);
+    pdf_run.step.dependOn(&ocr_backend_management_run.step);
+    test_step.dependOn(&pdf_run.step);
+
     const plugin_api_module = b.createModule(.{
         .root_source_file = b.path("src/plugin_api_test.zig"),
         .target = target,
@@ -360,7 +381,7 @@ pub fn build(b: *std.Build) void {
             plugin_api_run.setEnvironmentVariable(_entry.key_ptr.*, _entry.value_ptr.*);
         }
     }
-    plugin_api_run.step.dependOn(&ocr_backend_management_run.step);
+    plugin_api_run.step.dependOn(&pdf_run.step);
     test_step.dependOn(&plugin_api_run.step);
 
     const post_processor_management_module = b.createModule(.{
@@ -648,5 +669,4 @@ pub fn build(b: *std.Build) void {
     }
     validator_management_run.step.dependOn(&url_run.step);
     test_step.dependOn(&validator_management_run.step);
-
 }

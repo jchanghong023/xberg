@@ -29,7 +29,6 @@ const MIN_PROSE_LINES_PER_SIDE: usize = 4;
 const MIN_PROSE_LINE_ALPHA_CHARS: usize = 8;
 const MIN_PROSE_LINE_WORDS: usize = 3;
 const MIN_PROSE_ALPHA_RATIO: f32 = 0.55;
-const MIN_SIDE_BALANCE_RATIO: f32 = 0.15;
 const MIN_VERTICAL_OVERLAP_RATIO: f32 = 0.35;
 const PROSE_LINE_Y_TOLERANCE_PTS: f32 = 4.0;
 const INLINE_SCRIPT_LOOKBACK: usize = 8;
@@ -133,24 +132,88 @@ fn prose_like(text: &str, monospace_spans: usize, span_count: usize) -> bool {
         && alpha_chars as f32 / alphanumeric_chars.max(1) as f32 >= MIN_PROSE_ALPHA_RATIO
 }
 
+/// Bucket `spans` into visual lines, anchored (not chained) on `y`, top to bottom, each
+/// left-to-right x-sorted. Mirrors `pdf::native::text::group_into_lines`'s anchoring rule
+/// for the same span type; this module has no `SpanLine` of its own to reuse it from. ~keep
+fn group_spans_into_lines<'a>(
+    spans: &[&'a xberg_native_pdf::layout::TextSpan],
+) -> Vec<Vec<&'a xberg_native_pdf::layout::TextSpan>> {
+    let mut order: Vec<usize> = (0..spans.len()).collect();
+    order.sort_by(|&left, &right| {
+        spans[right]
+            .bbox
+            .y
+            .total_cmp(&spans[left].bbox.y)
+            .then_with(|| spans[left].bbox.x.total_cmp(&spans[right].bbox.x))
+    });
+    let mut lines: Vec<Vec<&xberg_native_pdf::layout::TextSpan>> = Vec::new();
+    let mut anchor_y = f32::NAN;
+    for index in order {
+        let y = spans[index].bbox.y;
+        if lines.is_empty() || (anchor_y - y).abs() > PROSE_LINE_Y_TOLERANCE_PTS {
+            anchor_y = y;
+            lines.push(Vec::new());
+        }
+        lines.last_mut().expect("just pushed above").push(spans[index]);
+    }
+    for line in &mut lines {
+        line.sort_by(|left, right| left.bbox.x.total_cmp(&right.bbox.x));
+    }
+    lines
+}
+
+/// True if `line` opens an internal gap at least `MIN_COLUMN_GUTTER_PTS` wide between
+/// consecutive inked spans -- the shape of a table row (a label column beside a value
+/// column), never one prose line.
+///
+/// GH#1806: joining a line's spans into one string before counting it as prose evidence,
+/// without this guard, reads "Regional revenue annual total" -- a four-column financial
+/// table's own header row -- as a single prose line, and a four-row table then counts as
+/// two balanced columns of running text. ~keep
+fn line_has_internal_gap(line: &[&xberg_native_pdf::layout::TextSpan]) -> bool {
+    line.windows(2)
+        .any(|pair| pair[1].bbox.x - (pair[0].bbox.x + pair[0].bbox.width) >= MIN_COLUMN_GUTTER_PTS)
+}
+
+/// GH#1806: `prose_like` wants three words and eight letters, and this used to ask it of
+/// each SPAN with `span_count` hardcoded to 1. A producer that writes every word as its
+/// own `Tm`+`TJ` therefore contributed ZERO prose lines and its two-column pages were
+/// never recognised. The unit is the line: spans are grouped into lines first, their text
+/// joined, and the line's real span and monospace counts passed through, so the
+/// monospace-majority test still fires correctly on a run of numbered code lines. ~keep
 fn side_support(spans: Vec<&xberg_native_pdf::layout::TextSpan>) -> SideSupport {
-    let mut prose_line_ys: Vec<_> = spans
-        .into_iter()
-        .filter(|span| prose_like(&span.text, usize::from(span.is_monospace), 1))
-        .map(|span| span.bbox.y)
+    let lines = group_spans_into_lines(&spans);
+    let mut prose_line_ys: Vec<f32> = lines
+        .iter()
+        .filter(|line| !line_has_internal_gap(line))
+        .filter(|line| {
+            let joined = line.iter().map(|span| span.text.as_str()).collect::<Vec<_>>().join(" ");
+            let monospace_count = line.iter().filter(|span| span.is_monospace).count();
+            prose_like(&joined, monospace_count, line.len())
+        })
+        .map(|line| line.first().map_or(0.0, |span| span.bbox.y))
         .collect();
     prose_line_ys.sort_by(f32::total_cmp);
     prose_line_ys.dedup_by(|left, right| (*left - *right).abs() <= PROSE_LINE_Y_TOLERANCE_PTS);
     SideSupport { prose_line_ys }
 }
 
+// GH#1809: `has_balanced_vertical_support` used to also require
+// `left_count.min(right_count) / left_count.max(right_count) >= MIN_SIDE_BALANCE_RATIO`.
+// How much text each side holds says nothing about whether the two sides are columns: a
+// short sidebar, a declaration, or a signature block beside running text is an ordinary
+// layout, not evidence against one. On the reporter's page the ratio was 10/73 = 0.137
+// against a 0.15 floor -- both sides already clear `MIN_PROSE_LINES_PER_SIDE`, and what
+// actually decides "these are columns" is whether the two sides stand BESIDE each other
+// with a real vertical overlap, which `MIN_VERTICAL_OVERLAP_RATIO` below already tests.
+// The ratio is deleted, not loosened: `academic_columns_with_crossing_regions_use_column_
+// aware` passes at 7/26 = 0.27 today and keeps passing unchanged without it. ~keep
 fn has_balanced_vertical_support(left: &SideSupport, right: &SideSupport) -> bool {
     let left_count = left.prose_line_ys.len();
     let right_count = right.prose_line_ys.len();
     if left_count < MIN_PROSE_LINES_PER_SIDE || right_count < MIN_PROSE_LINES_PER_SIDE {
         return false;
     }
-    let balance = left_count.min(right_count) as f32 / left_count.max(right_count) as f32;
     let extent = |ys: &[f32]| {
         let low = ys.iter().copied().fold(f32::INFINITY, f32::min);
         let high = ys.iter().copied().fold(f32::NEG_INFINITY, f32::max);
@@ -160,7 +223,7 @@ fn has_balanced_vertical_support(left: &SideSupport, right: &SideSupport) -> boo
     let (right_low, right_high) = extent(&right.prose_line_ys);
     let overlap = (left_high.min(right_high) - left_low.max(right_low)).max(0.0);
     let shorter_extent = (left_high - left_low).min(right_high - right_low);
-    balance >= MIN_SIDE_BALANCE_RATIO && shorter_extent > 0.0 && overlap / shorter_extent >= MIN_VERTICAL_OVERLAP_RATIO
+    shorter_extent > 0.0 && overlap / shorter_extent >= MIN_VERTICAL_OVERLAP_RATIO
 }
 
 fn select_reading_order(
@@ -1133,6 +1196,65 @@ mod tests {
         spans
     }
 
+    /// One span per word, each `Tm`+`TJ` of its own -- the shape a producer emits when it
+    /// never merges runs on the same line. Words are spaced 6.6pt apart (an 11pt font's
+    /// rough average advance) starting at `x`, on one line at `y`.
+    fn text_span_words(text: &str, x: f32, y: f32) -> Vec<TextSpan> {
+        const CHAR_ADVANCE_PTS: f32 = 6.6;
+        const WORD_GAP_PTS: f32 = 6.6;
+        let mut cursor = x;
+        text.split_whitespace()
+            .map(|word| {
+                let width = word.len() as f32 * CHAR_ADVANCE_PTS;
+                let span = text_span(word, cursor, y, width);
+                cursor += width + WORD_GAP_PTS;
+                span
+            })
+            .collect()
+    }
+
+    /// `prose_columns`, with every line's text split into one span per word. GH#1806:
+    /// `side_support` used to test `prose_like` per SPAN with `span_count` hardcoded to 1,
+    /// so a single word (never 3+ words, `MIN_PROSE_LINE_WORDS`) could never pass and this
+    /// page counted zero prose lines on either side. ~keep
+    fn per_word_prose_columns() -> Vec<TextSpan> {
+        let mut spans = Vec::new();
+        for (index, text) in [
+            "Left column has substantive prose",
+            "Readers continue through this passage",
+            "The final sentence completes support",
+            "A fourth line strengthens the evidence",
+            "The fifth line confirms a real column",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            spans.extend(text_span_words(text, 50.0, 700.0 - index as f32 * 18.0));
+        }
+        for (index, text) in [
+            "Right column also contains prose",
+            "Its paragraph has balanced evidence",
+            "Another sentence closes the column",
+            "A fourth line continues on this side",
+            "The fifth line completes the passage",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            spans.extend(text_span_words(text, 340.0, 700.0 - index as f32 * 18.0));
+        }
+        spans
+    }
+
+    #[test]
+    fn per_word_producer_two_column_page_uses_column_aware_gh1806() {
+        assert_eq!(
+            super::select_reading_order(&per_word_prose_columns(), 612.0, 792.0),
+            ReadingOrder::ColumnAware,
+            "a page written one span per word must still be recognised as two-column prose"
+        );
+    }
+
     #[test]
     fn single_column_code_gutter_uses_top_to_bottom() {
         let mut spans = Vec::new();
@@ -1396,6 +1518,42 @@ mod tests {
         }
         assert_eq!(
             super::select_reading_order(&spans, 612.0, 792.0),
+            ReadingOrder::ColumnAware
+        );
+    }
+
+    /// GH#1809: a short second column (4 lines) beside a long first one (30 lines) is an
+    /// ordinary layout -- a sidebar, a signature block, a short second column that simply
+    /// runs out of content -- not evidence against reading the page as two columns. The
+    /// deleted balance ratio required `min(left, right) / max(left, right) >= 0.15`; here
+    /// 4/30 = 0.133 falls just short of it while the two sides still stand cleanly beside
+    /// each other with full vertical overlap. ~keep
+    #[test]
+    fn short_right_column_uses_column_aware_gh1809() {
+        const LEFT_LINES: usize = 30;
+        // The floor `MIN_PROSE_LINES_PER_SIDE` sets: one line fewer and the page is
+        // refused by that gate instead, and the ratio's removal would prove nothing. ~keep
+        const RIGHT_LINES: usize = super::MIN_PROSE_LINES_PER_SIDE;
+
+        let mut spans = Vec::new();
+        for index in 0..LEFT_LINES {
+            spans.push(text_span(
+                "The quick review committee examined every document",
+                35.0,
+                800.0 - index as f32 * 10.0,
+                245.0,
+            ));
+        }
+        for index in 0..RIGHT_LINES {
+            spans.push(text_span(
+                "Short right column notes appear here",
+                321.0,
+                800.0 - index as f32 * 10.0,
+                235.0,
+            ));
+        }
+        assert_eq!(
+            super::select_reading_order(&spans, 595.0, 842.0),
             ReadingOrder::ColumnAware
         );
     }

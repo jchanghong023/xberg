@@ -539,6 +539,19 @@ impl InternalDocumentBuilder {
         }
     }
 
+    /// Record the measured dominant font size (in points) for an already-pushed
+    /// element. An out-of-range index is silently ignored.
+    ///
+    /// `pdf`-gated to match `InternalElement::set_measured_font_size`, which it wraps:
+    /// the sole caller is the PDF structure assembly, and an ungated wrapper would fail
+    /// to compile under a bare `ocr-pipeline` build.
+    #[cfg(feature = "pdf")]
+    pub fn set_measured_font_size(&mut self, index: u32, font_size_pt: f32) {
+        if let Some(elem) = self.doc.elements.get_mut(index as usize) {
+            elem.set_measured_font_size(font_size_pt);
+        }
+    }
+
     /// Set annotations on an already-pushed element.
     pub fn set_annotations(&mut self, index: u32, annotations: Vec<TextAnnotation>) {
         if let Some(elem) = self.doc.elements.get_mut(index as usize) {

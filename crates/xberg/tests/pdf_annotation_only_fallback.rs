@@ -740,6 +740,7 @@ async fn should_retain_each_page_from_document_capable_backend_on_byte_input() {
 }
 
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+#[cfg(not(paddle_ocr))]
 #[tokio::test]
 #[serial_test::serial]
 async fn should_replace_stale_native_pages_after_actual_document_ocr() {

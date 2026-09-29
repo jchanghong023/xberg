@@ -44,6 +44,16 @@ const SUPPRESS_IMAGE_OCR_RENDER_ATTRIBUTE: &str = "xberg:internal:suppress-image
 /// `DocumentNode::attributes` with no change needed in `extraction::derive`.
 const LIST_ITEM_SOURCE_LABEL_ATTRIBUTE: &str = "list_marker";
 
+/// Attribute key carrying the measured dominant font size (in points) that the PDF
+/// structure pipeline computed, stamped by `pdf::structure::assembly::push_paragraph_element`.
+///
+/// Internal-only plumbing, unlike [`LIST_ITEM_SOURCE_LABEL_ATTRIBUTE`]: filtered out of
+/// [`public_attributes`](InternalElement::public_attributes) alongside
+/// [`SUPPRESS_IMAGE_OCR_RENDER_ATTRIBUTE`]. Distinct from the OCR-only, public
+/// `HOCR_FONT_SIZE_ATTRIBUTE` (`ocr::hocr_parser`), gated under `feature = "ocr"` and thus
+/// unusable from a bare `pdf` build.
+const MEASURED_FONT_SIZE_ATTRIBUTE: &str = "xberg:internal:font-size-pt";
+
 #[cfg_attr(alef, alef(skip))]
 /// Deterministic element identifier, generated via blake3 hashing.
 ///
@@ -753,7 +763,7 @@ impl InternalElement {
         let original = self.attributes.as_ref()?;
         let attributes: std::collections::HashMap<String, String> = original
             .iter()
-            .filter(|(key, _)| key.as_str() != SUPPRESS_IMAGE_OCR_RENDER_ATTRIBUTE)
+            .filter(|(key, _)| !is_internal_only_attribute(key))
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect();
         if attributes.is_empty() && !original.is_empty() {
@@ -762,6 +772,37 @@ impl InternalElement {
             Some(attributes)
         }
     }
+
+    /// Record the measured dominant font size (in points) for this element.
+    ///
+    /// Non-finite or non-positive values are ignored rather than stored, since a
+    /// bogus measurement is worse than falling back to the default at read time.
+    #[cfg(feature = "pdf")]
+    pub(crate) fn set_measured_font_size(&mut self, font_size_pt: f32) {
+        if !font_size_pt.is_finite() || font_size_pt <= 0.0 {
+            return;
+        }
+        self.attributes
+            .get_or_insert_with(AHashMap::new)
+            .insert(MEASURED_FONT_SIZE_ATTRIBUTE.to_string(), font_size_pt.to_string());
+    }
+
+    /// The measured font size set via [`set_measured_font_size`](Self::set_measured_font_size).
+    ///
+    /// The attribute map survives a cache round-trip as plain strings, so the stored value is
+    /// treated as untrusted and re-validated as finite and positive before being returned.
+    #[cfg(feature = "pdf")]
+    pub(crate) fn measured_font_size(&self) -> Option<f32> {
+        let raw = self.attributes.as_ref()?.get(MEASURED_FONT_SIZE_ATTRIBUTE)?;
+        let value: f32 = raw.parse().ok()?;
+        (value.is_finite() && value > 0.0).then_some(value)
+    }
+}
+
+/// Attribute keys that are internal plumbing and must never reach the public
+/// `DocumentNode::attributes` surface.
+fn is_internal_only_attribute(key: &str) -> bool {
+    key == SUPPRESS_IMAGE_OCR_RENDER_ATTRIBUTE || key == MEASURED_FONT_SIZE_ATTRIBUTE
 }
 
 /// [`InternalElement::list_item_source_label`], for renderers that flatten an

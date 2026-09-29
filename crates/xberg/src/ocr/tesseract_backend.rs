@@ -6,16 +6,27 @@
 use crate::Result;
 use crate::core::config::OcrConfig;
 use crate::ocr::processor::OcrProcessor;
+use crate::ocr::processor::validation::TessdataEnv;
 use crate::plugins::{OcrBackend, OcrBackendType, Plugin};
 use crate::types::ExtractedDocument;
 use ahash::AHashMap;
 use async_trait::async_trait;
 use once_cell::sync::OnceCell;
+use parking_lot::RwLock;
 use std::borrow::Cow;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const USE_CACHE_BACKEND_OPTION: &str = "use_cache";
+
+/// Memo key for the available-language probe: `(probe languages, tessdata_path override,
+/// TESSDATA_PREFIX, XBERG_CACHE_DIR)`.
+///
+/// Every component is something tessdata resolution actually reads, so two calls differing in any
+/// one of them can resolve different directories and must not serve each other's answer. Keying on
+/// the override alone (GH#1857's fix) let two calls under different environments, or for different
+/// languages, collide. GH#1891. ~keep
+type LanguagesMemoKey = (Vec<String>, Option<PathBuf>, Option<String>, Option<PathBuf>);
 
 fn select_output_ocr_elements(
     elements: Option<Vec<crate::types::OcrElement>>,
@@ -45,7 +56,11 @@ use crate::ocr::types::TesseractConfig as InternalTesseractConfig;
 #[cfg_attr(alef, alef(skip))]
 pub struct TesseractBackend {
     processor: OnceCell<Arc<OcrProcessor>>,
-    available_languages: OnceCell<Vec<String>>,
+    // Keyed by everything the answer depends on rather than a single cell: the language list is a
+    // property of the resolved tessdata directory, and one cell would serve whichever caller asked
+    // first to every later one. See GH#1857 for the override half and [`LanguagesMemoKey`] for why
+    // the key is not the override alone. ~keep
+    available_languages: RwLock<AHashMap<LanguagesMemoKey, Arc<[String]>>>,
     #[cfg(not(target_arch = "wasm32"))]
     concurrency: OnceCell<Arc<tokio::sync::Semaphore>>,
 }
@@ -58,7 +73,7 @@ impl TesseractBackend {
     pub(crate) fn new() -> Self {
         Self {
             processor: OnceCell::new(),
-            available_languages: OnceCell::new(),
+            available_languages: RwLock::new(AHashMap::new()),
             #[cfg(not(target_arch = "wasm32"))]
             concurrency: OnceCell::new(),
         }
@@ -125,6 +140,7 @@ impl TesseractBackend {
         internal.security_limits = config.security_limits.clone();
         internal.tessdata_path = config.tessdata_path.clone();
         internal.source_dpi = Self::source_dpi_from_backend_options(config);
+        internal.known_full_page_scan = Self::known_full_page_scan_from_backend_options(config);
         if let Some(use_cache) = Self::use_cache_from_backend_options(config) {
             internal.use_cache = use_cache;
         }
@@ -160,47 +176,148 @@ impl TesseractBackend {
         crate::extraction::image::explicit_source_dpi_from_ocr_config(config)
     }
 
+    /// Read the PDF OCR route's scan-detection signal out of `backend_options` (GH#1894).
+    ///
+    /// An absent or non-boolean value is "not a known scan", matching every non-PDF caller
+    /// (standalone image OCR, direct API callers), which never stamp this key and must keep
+    /// deciding preprocessing from the pixel-brightness heuristic.
+    fn known_full_page_scan_from_backend_options(config: &OcrConfig) -> bool {
+        config
+            .backend_options
+            .as_ref()
+            .and_then(|options| options.get(crate::core::config::ocr::KNOWN_FULL_PAGE_SCAN_BACKEND_OPTION))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
     /// Get cached available languages, lazily querying Tesseract if needed.
     ///
-    /// Uses `OnceCell` to ensure the Tesseract API is only queried once.
-    /// Falls back to hardcoded language list if dynamic querying fails.
-    fn get_cached_languages(&self) -> &[String] {
-        self.available_languages
-            .get_or_init(|| match self.query_available_languages() {
-                Ok(langs) => langs,
-                Err(_) => Self::fallback_languages(),
-            })
+    /// `languages` are the languages the caller's config asks for, `override_path` is
+    /// `OcrConfig.tessdata_path` (or `None`). Both, plus the two environment values on
+    /// `tessdata_env`, take part in tessdata resolution, so all four make up the memo key -- see
+    /// [`LanguagesMemoKey`]. Falls back to a hardcoded language list if dynamic querying fails.
+    ///
+    /// ~keep The key carries the languages the probe will actually resolve with, not the caller's
+    /// raw request: every language no searched directory holds collapses onto the same English
+    /// datapath and therefore the same answer, so a caller walking a long language list through
+    /// `supports_language` allocates one Tesseract engine rather than one per language.
+    fn get_cached_languages(
+        &self,
+        languages: &[String],
+        override_path: Option<&Path>,
+        tessdata_env: &TessdataEnv,
+    ) -> Arc<[String]> {
+        let probe_languages = Self::probe_languages(languages, override_path, tessdata_env);
+        let key = Self::languages_memo_key(&probe_languages, override_path, tessdata_env);
+        if let Some(cached) = self.available_languages.read().get(&key) {
+            return Arc::clone(cached);
+        }
+        // The write lock is deliberately not held across the query below: it allocates a native
+        // Tesseract engine and can trigger a language-pack download, and blocking every other
+        // caller of this backend on that is worse than a concurrent miss querying the same
+        // directory twice. The first writer wins; both answers enumerate the same directory. ~keep
+        let available: Arc<[String]> =
+            match Self::query_available_languages(&probe_languages, override_path, tessdata_env) {
+                Ok(available) => Arc::from(available),
+                Err(_) => Arc::from(Self::fallback_languages()),
+            };
+        Arc::clone(self.available_languages.write().entry(key).or_insert(available))
+    }
+
+    /// Build the memo key for one probe. `languages` are the probe languages
+    /// [`Self::probe_languages`] selected, not the caller's raw request. See [`LanguagesMemoKey`].
+    fn languages_memo_key(
+        languages: &[String],
+        override_path: Option<&Path>,
+        tessdata_env: &TessdataEnv,
+    ) -> LanguagesMemoKey {
+        (
+            languages.to_vec(),
+            override_path.map(Path::to_path_buf),
+            tessdata_env.tessdata_prefix.clone(),
+            tessdata_env.cache_dir.clone(),
+        )
+    }
+
+    /// The languages to resolve the probe's tessdata directory with.
+    ///
+    /// The caller's own languages when some already-present directory holds them all, and
+    /// [`crate::core::config::ocr::DEFAULT_OCR_LANGUAGE`] otherwise. The fallback is what keeps
+    /// this probe from resolving a directory it would first have to download into: a caller asking
+    /// about a language this machine does not have gets the historical English-datapath
+    /// enumeration, which answers "no" without touching the network. GH#1891. ~keep
+    fn probe_languages(languages: &[String], override_path: Option<&Path>, tessdata_env: &TessdataEnv) -> Vec<String> {
+        let resolvable = !languages.is_empty()
+            && crate::ocr::processor::validation::existing_tessdata_dir_for(languages, override_path, tessdata_env)
+                .is_some();
+        if resolvable {
+            languages.to_vec()
+        } else {
+            vec![crate::core::config::ocr::DEFAULT_OCR_LANGUAGE.to_string()]
+        }
     }
 
     /// Query available languages from the Tesseract API.
     ///
-    /// Creates a temporary Tesseract API instance and initializes it with
-    /// the default English language to query available languages.
+    /// Creates a temporary Tesseract API instance, initializes it against the same tessdata
+    /// directory a real job asking for `probe_languages` would resolve, and enumerates that
+    /// directory.
+    ///
+    /// `probe_languages` must already have been through [`Self::probe_languages`]: that is what
+    /// keeps a language no searched directory holds from sending resolution down its
+    /// download-and-materialize path.
     ///
     /// # Returns
     ///
     /// Returns a vector of available language codes, or an error if querying fails.
-    fn query_available_languages(&self) -> Result<Vec<String>> {
+    fn query_available_languages(
+        probe_languages: &[String],
+        override_path: Option<&Path>,
+        tessdata_env: &TessdataEnv,
+    ) -> Result<Vec<String>> {
         // An empty datapath here used to hand libtesseract its own compiled-in default,
         // which appends an extra `tessdata` directory level that the real OCR job's
         // resolver (`resolve_tessdata_path`) never adds. That mismatch made this probe
         // fail and log a misleading "couldn't load any languages" error on a layout where
         // every real job already succeeds. Resolving through the same function the job
         // uses keeps the two in agreement. See GH#1671.
-        let tessdata_path = crate::ocr::processor::validation::resolve_tessdata_path(&["eng".to_string()], None)
-            .map_err(|e| crate::XbergError::Ocr {
+        //
+        // `override_path` is threaded through as the same first argument a real job passes
+        // (`processor/execution.rs`'s `config.tessdata_path.as_deref()`); a hardcoded `None`
+        // here searched a different chain than the job, so this probe could deny a language the
+        // job loads without trouble -- the agreement GH#1671 established, broken for callers with
+        // a configured `tessdata_path`. See GH#1857.
+        //
+        // The languages are threaded through for the same reason the override is, and it is the
+        // same agreement: `tessdata_search_dirs` accepts a candidate directory only when
+        // `all_languages_exist` holds for the languages it is given, so a hardcoded `eng` here
+        // rejected a `tessdata_path` holding only the caller's own language, fell through to
+        // another directory, and denied a language every real job with that config loads. See
+        // GH#1891. `probe_languages` is what keeps the fallback from downloading. ~keep
+        let tessdata_path =
+            crate::ocr::processor::validation::resolve_tessdata_path_in(probe_languages, override_path, tessdata_env)
+                .map_err(|e| crate::XbergError::Ocr {
                 message: format!("Failed to resolve tessdata path for language query: {}", e),
                 source: Some(Box::new(e)),
             })?;
+
+        // ~keep Initialize with a language the resolved directory is known to hold, not a
+        // hardcoded `eng`: `resolve_tessdata_path_in` guarantees that only for the languages it
+        // was asked about, so on a datapath holding just the caller's language `init` with `eng`
+        // fails and the probe falls back to the hardcoded list.
+        let init_language = probe_languages
+            .first()
+            .map_or(crate::core::config::ocr::DEFAULT_OCR_LANGUAGE, String::as_str);
 
         let api = xberg_tesseract::TesseractAPI::new().map_err(|e| crate::XbergError::Ocr {
             message: format!("Failed to allocate Tesseract engine: {}", e),
             source: Some(Box::new(e)),
         })?;
-        api.init(&tessdata_path, "eng").map_err(|e| crate::XbergError::Ocr {
-            message: format!("Failed to initialize Tesseract for language query: {}", e),
-            source: Some(Box::new(e)),
-        })?;
+        api.init(&tessdata_path, init_language)
+            .map_err(|e| crate::XbergError::Ocr {
+                message: format!("Failed to initialize Tesseract for language query: {}", e),
+                source: Some(Box::new(e)),
+            })?;
 
         api.get_available_languages().map_err(|e| crate::XbergError::Ocr {
             message: format!("Failed to query available Tesseract languages: {}", e),
@@ -498,16 +615,52 @@ impl OcrBackend for TesseractBackend {
         })
     }
 
+    /// ~keep Probes for `lang` itself, not for English: with no config there is no other statement
+    /// of intent, and a datapath holding only `lang` is exactly the layout GH#1891 is about. The
+    /// answer is still read off the enumerated directory, so an absent language still reads `false`
+    /// -- `probe_languages` declines to resolve one that is nowhere on disk.
     fn supports_language(&self, lang: &str) -> bool {
-        self.get_cached_languages().contains(&lang.to_string())
+        self.get_cached_languages(&[lang.to_string()], None, &TessdataEnv::from_process())
+            .iter()
+            .any(|language| language == lang)
+    }
+
+    /// ~keep Probes with the config's own effective languages, which is what a real job with this
+    /// config resolves with (`processor/execution.rs`); a hardcoded `eng` made this deny a language
+    /// the job loads without trouble whenever `tessdata_path` held only that language. GH#1891.
+    fn supports_language_for(&self, config: &OcrConfig, language: &str) -> bool {
+        self.get_cached_languages(
+            &config.effective_tesseract_language(),
+            config.tessdata_path.as_deref(),
+            &TessdataEnv::from_process(),
+        )
+        .iter()
+        .any(|candidate| candidate == language)
     }
 
     fn backend_type(&self) -> OcrBackendType {
         OcrBackendType::Tesseract
     }
 
+    /// ~keep No config and no language to ask about, so this keeps probing the English datapath:
+    /// there is nothing else to resolve with. `supported_languages_for` is the accurate answer for
+    /// a caller that has a config.
     fn supported_languages(&self) -> Vec<String> {
-        self.get_cached_languages().to_vec()
+        self.get_cached_languages(
+            &[crate::core::config::ocr::DEFAULT_OCR_LANGUAGE.to_string()],
+            None,
+            &TessdataEnv::from_process(),
+        )
+        .to_vec()
+    }
+
+    fn supported_languages_for(&self, config: &OcrConfig) -> Vec<String> {
+        self.get_cached_languages(
+            &config.effective_tesseract_language(),
+            config.tessdata_path.as_deref(),
+            &TessdataEnv::from_process(),
+        )
+        .to_vec()
     }
 
     fn supports_table_detection(&self) -> bool {
@@ -550,7 +703,10 @@ impl OcrBackend for TesseractBackend {
 /// "unknown language code, download would also fail" (fail).
 #[cfg(not(target_arch = "wasm32"))]
 fn probe_tessdata(config: &OcrConfig) -> crate::doctor::DoctorCheck {
-    let dirs = crate::ocr::processor::validation::tessdata_search_dirs(config.tessdata_path.as_deref());
+    let dirs = crate::ocr::processor::validation::tessdata_search_dirs(
+        config.tessdata_path.as_deref(),
+        &TessdataEnv::from_process(),
+    );
     probe_tessdata_in_dirs(config, &dirs)
 }
 
@@ -809,10 +965,135 @@ fn is_compact_cjk_char(character: char) -> bool {
 }
 
 #[cfg(test)]
-#[allow(unsafe_code)]
 mod tests {
     use super::*;
-    use serial_test::serial;
+
+    /// The probe's historical request: English only.
+    fn eng() -> Vec<String> {
+        vec!["eng".to_string()]
+    }
+
+    /// GH#1891. A `tessdata_path` holding only the caller's own language must satisfy the probe,
+    /// because it satisfies a real job: `tessdata_search_dirs` accepts a candidate directory only
+    /// when `all_languages_exist` holds for the languages it is given, so the hardcoded `eng` the
+    /// probe used to pass rejected the override and fell through to the rest of the chain.
+    ///
+    /// Asserted on the resolution step rather than through `query_available_languages`, so it needs
+    /// no Tesseract engine and no real model bytes -- `all_languages_exist` is a file-existence
+    /// check, which is exactly the step that was being handed the wrong languages. Nothing reads or
+    /// writes the process environment, so this needs no `#[serial]`.
+    #[test]
+    fn the_probe_resolves_a_tessdata_path_holding_only_the_requested_language() {
+        let root = tempfile::tempdir().expect("must create a temp dir for the fixture");
+        let override_dir = root.path().join("tess-deu");
+        let prefix_dir = root.path().join("prefix");
+        std::fs::create_dir_all(&override_dir).expect("must create the override directory");
+        std::fs::create_dir_all(&prefix_dir).expect("must create the prefix directory");
+        std::fs::write(override_dir.join("deu.traineddata"), b"not-a-real-model").expect("must write deu.traineddata");
+        std::fs::write(prefix_dir.join("eng.traineddata"), b"not-a-real-model").expect("must write eng.traineddata");
+
+        let tessdata_env = TessdataEnv {
+            tessdata_prefix: Some(prefix_dir.to_string_lossy().into_owned()),
+            cache_dir: None,
+        };
+        let requested = vec!["deu".to_string()];
+
+        assert_eq!(
+            TesseractBackend::probe_languages(&requested, Some(&override_dir), &tessdata_env),
+            requested,
+            "the probe must ask for the caller's own languages when a searched directory holds them"
+        );
+        assert_eq!(
+            crate::ocr::processor::validation::existing_tessdata_dir_for(
+                &requested,
+                Some(&override_dir),
+                &tessdata_env
+            )
+            .as_deref(),
+            override_dir.to_str(),
+            "and must resolve the configured tessdata_path, exactly as a real job with this config \
+             does -- asking for `eng` resolved the TESSDATA_PREFIX directory instead"
+        );
+    }
+
+    /// GH#1891. A language nowhere on disk must not make the probe resolve a directory it would
+    /// first have to create and download into: `supports_language_for` is a question about this
+    /// machine, and answering it must not reach the network.
+    #[test]
+    fn the_probe_falls_back_to_english_for_a_language_no_searched_directory_holds() {
+        let root = tempfile::tempdir().expect("must create a temp dir for the fixture");
+        let prefix_dir = root.path().join("prefix");
+        std::fs::create_dir_all(&prefix_dir).expect("must create the prefix directory");
+        std::fs::write(prefix_dir.join("eng.traineddata"), b"not-a-real-model").expect("must write eng.traineddata");
+
+        let tessdata_env = TessdataEnv {
+            tessdata_prefix: Some(prefix_dir.to_string_lossy().into_owned()),
+            cache_dir: None,
+        };
+
+        assert_eq!(
+            TesseractBackend::probe_languages(&["zzz_absent".to_string()], None, &tessdata_env),
+            eng(),
+            "an absent language must fall back to English rather than being resolved by download"
+        );
+        assert_eq!(
+            TesseractBackend::probe_languages(&[], None, &tessdata_env),
+            eng(),
+            "and an empty request must too: `all_languages_exist` rejects every directory for an \
+             empty language list, which would send resolution down the same download path"
+        );
+    }
+
+    /// GH#1891, the memo half. The key must cover every input tessdata resolution reads, not the
+    /// `tessdata_path` override alone (GH#1857's fix): `TESSDATA_PREFIX` and `XBERG_CACHE_DIR` both
+    /// feed `tessdata_search_dirs`, and the probe languages decide which candidate is accepted.
+    /// Keyed on the key builder rather than on two live probes so it needs no Tesseract engine --
+    /// with no engine both probes return the same hardcoded fallback list, which cannot distinguish
+    /// a correct key from a colliding one.
+    #[test]
+    fn the_language_memo_key_covers_every_input_resolution_reads() {
+        let override_path = std::path::Path::new("/opt/tess-deu");
+        let env_a = TessdataEnv {
+            tessdata_prefix: Some("/a/tessdata".to_string()),
+            cache_dir: None,
+        };
+        let env_b = TessdataEnv {
+            tessdata_prefix: Some("/b/tessdata".to_string()),
+            cache_dir: None,
+        };
+        let env_c = TessdataEnv {
+            tessdata_prefix: Some("/a/tessdata".to_string()),
+            cache_dir: Some(std::path::PathBuf::from("/cache")),
+        };
+
+        let baseline = TesseractBackend::languages_memo_key(&eng(), Some(override_path), &env_a);
+
+        assert_eq!(
+            baseline,
+            TesseractBackend::languages_memo_key(&eng(), Some(override_path), &env_a),
+            "the same inputs must produce the same key, or nothing is ever memoized"
+        );
+        assert_ne!(
+            baseline,
+            TesseractBackend::languages_memo_key(&eng(), None, &env_a),
+            "the tessdata_path override must take part in the key (GH#1857)"
+        );
+        assert_ne!(
+            baseline,
+            TesseractBackend::languages_memo_key(&eng(), Some(override_path), &env_b),
+            "TESSDATA_PREFIX must take part in the key: it is a search directory of its own"
+        );
+        assert_ne!(
+            baseline,
+            TesseractBackend::languages_memo_key(&eng(), Some(override_path), &env_c),
+            "XBERG_CACHE_DIR must take part in the key: it contributes two search directories"
+        );
+        assert_ne!(
+            baseline,
+            TesseractBackend::languages_memo_key(&["deu".to_string()], Some(override_path), &env_a),
+            "and the probe languages must too: they decide which candidate directory is accepted"
+        );
+    }
 
     // Needs real, loadable eng.traineddata with no network fetch to distinguish a
     // resolved-directory probe from a silent fallback; `bundle-tessdata-eng` is the
@@ -821,7 +1102,6 @@ mod tests {
     // need this feature; it is only how this test gets deterministic fixture bytes.
     #[cfg(feature = "bundle-tessdata-eng")]
     #[test]
-    #[serial]
     fn query_available_languages_resolves_the_same_tessdata_directory_the_real_job_uses() {
         let temp_dir = tempfile::tempdir().expect("must create a temp dir for the fixture");
         let tessdata_dir = temp_dir.path().join("tessdata");
@@ -836,30 +1116,16 @@ mod tests {
         std::fs::write(tessdata_dir.join("zzz_probe_marker.traineddata"), b"not-a-real-model")
             .expect("must write the marker file");
 
-        let previous = std::env::var("XBERG_CACHE_DIR").ok();
-        unsafe { std::env::set_var("XBERG_CACHE_DIR", temp_dir.path()) };
-        // `resolve_tessdata_path` checks `TESSDATA_PREFIX` before `XBERG_CACHE_DIR` (by
-        // design -- an explicit TESSDATA_PREFIX is meant to win). CI's unit-test runner
-        // (scripts/lib/tessdata.sh::setup_tessdata) sets TESSDATA_PREFIX process-wide to
-        // the runner's real tessdata directory before `cargo test` starts, so without
-        // clearing it here the probe resolves THAT directory -- which already has every
-        // language this test requests -- instead of this fixture, and the marker is never
-        // found. Clear it for the duration of the test so XBERG_CACHE_DIR is actually
-        // reached, matching the resolver's documented precedence. ~keep
-        let previous_tessdata_prefix = std::env::var("TESSDATA_PREFIX").ok();
-        unsafe { std::env::remove_var("TESSDATA_PREFIX") };
-
-        let backend = TesseractBackend::new();
-        let languages = backend.supported_languages();
-
-        match previous {
-            Some(value) => unsafe { std::env::set_var("XBERG_CACHE_DIR", value) },
-            None => unsafe { std::env::remove_var("XBERG_CACHE_DIR") },
-        }
-        match previous_tessdata_prefix {
-            Some(value) => unsafe { std::env::set_var("TESSDATA_PREFIX", value) },
-            None => unsafe { std::env::remove_var("TESSDATA_PREFIX") },
-        }
+        // `TESSDATA_PREFIX` ranks above `XBERG_CACHE_DIR`, and CI's unit-test runner
+        // (scripts/lib/tessdata.sh::setup_tessdata) exports it before `cargo test` starts.
+        // Passing no prefix makes the probe reach this fixture without changing the
+        // process environment that parallel tests read. ~keep
+        let tessdata_env = TessdataEnv {
+            tessdata_prefix: None,
+            cache_dir: Some(temp_dir.path().to_path_buf()),
+        };
+        let languages = TesseractBackend::query_available_languages(&eng(), None, &tessdata_env)
+            .expect("the probe must resolve the fixture tessdata directory and read its languages");
 
         assert!(
             languages.iter().any(|lang| lang == "zzz_probe_marker"),
@@ -904,7 +1170,6 @@ mod tests {
     // sourcing real `eng.traineddata` bytes the way described above instead of through the
     // bundled feature, so it runs and protects the shipping path. See GH#1671.
     #[test]
-    #[serial]
     fn query_available_languages_resolves_the_same_tessdata_directory_the_real_job_uses_under_pdf_ocr() {
         let Some(eng_bytes) = real_eng_traineddata_bytes_from_sibling_build_dir() else {
             eprintln!(
@@ -925,27 +1190,13 @@ mod tests {
         std::fs::write(tessdata_dir.join("zzz_probe_marker.traineddata"), b"not-a-real-model")
             .expect("must write the marker file");
 
-        let previous = std::env::var("XBERG_CACHE_DIR").ok();
-        unsafe { std::env::set_var("XBERG_CACHE_DIR", temp_dir.path()) };
-        // See the identical guard in the sibling `bundle-tessdata-eng` test above:
-        // `resolve_tessdata_path` checks `TESSDATA_PREFIX` before `XBERG_CACHE_DIR`, and
-        // CI's unit-test runner sets TESSDATA_PREFIX process-wide before `cargo test`
-        // starts, so this fixture is never reached unless the prefix is cleared here too.
-        // ~keep
-        let previous_tessdata_prefix = std::env::var("TESSDATA_PREFIX").ok();
-        unsafe { std::env::remove_var("TESSDATA_PREFIX") };
-
-        let backend = TesseractBackend::new();
-        let languages = backend.supported_languages();
-
-        match previous {
-            Some(value) => unsafe { std::env::set_var("XBERG_CACHE_DIR", value) },
-            None => unsafe { std::env::remove_var("XBERG_CACHE_DIR") },
-        }
-        match previous_tessdata_prefix {
-            Some(value) => unsafe { std::env::set_var("TESSDATA_PREFIX", value) },
-            None => unsafe { std::env::remove_var("TESSDATA_PREFIX") },
-        }
+        // See the sibling `bundle-tessdata-eng` test above for why no prefix is passed. ~keep
+        let tessdata_env = TessdataEnv {
+            tessdata_prefix: None,
+            cache_dir: Some(temp_dir.path().to_path_buf()),
+        };
+        let languages = TesseractBackend::query_available_languages(&eng(), None, &tessdata_env)
+            .expect("the probe must resolve the fixture tessdata directory and read its languages");
 
         assert!(
             languages.iter().any(|lang| lang == "zzz_probe_marker"),
@@ -953,6 +1204,193 @@ mod tests {
              OCR job resolves (XBERG_CACHE_DIR/tessdata here), not silently fall back to the \
              hardcoded language list; got: {languages:?}"
         );
+    }
+
+    /// GH#1857: the probe must search `OcrConfig.tessdata_path` first, exactly as a real job does
+    /// (`processor/execution.rs`'s `config.tessdata_path.as_deref()`). Both candidate directories
+    /// hold loadable `eng.traineddata`, so the resolver genuinely chooses between them. Nothing
+    /// reads or writes the process environment: the `TESSDATA_PREFIX` value is an argument on
+    /// `TessdataEnv` (GH#1846), so this needs no `#[serial]`.
+    #[test]
+    fn query_available_languages_prefers_the_configured_tessdata_path_over_tessdata_prefix() {
+        let Some(eng_bytes) = real_eng_traineddata_bytes_from_sibling_build_dir() else {
+            eprintln!(
+                "skipping: no real eng.traineddata in a sibling xberg-tesseract build OUT_DIR; \
+                 this environment did not build xberg-tesseract the way this test expects"
+            );
+            return;
+        };
+
+        let root = tempfile::tempdir().expect("must create a temp dir for the fixture");
+        let override_dir = root.path().join("override");
+        let prefix_dir = root.path().join("prefix");
+        for (dir, marker) in [
+            (&override_dir, "zzz_override_marker"),
+            (&prefix_dir, "zzz_prefix_marker"),
+        ] {
+            std::fs::create_dir_all(dir).expect("must create the fixture directory");
+            std::fs::write(dir.join("eng.traineddata"), &eng_bytes).expect("must write eng.traineddata");
+            std::fs::write(dir.join(format!("{marker}.traineddata")), b"not-a-real-model")
+                .expect("must write the marker file");
+        }
+
+        let tessdata_env = TessdataEnv {
+            tessdata_prefix: Some(prefix_dir.to_string_lossy().into_owned()),
+            cache_dir: None,
+        };
+        let languages = TesseractBackend::query_available_languages(&eng(), Some(&override_dir), &tessdata_env)
+            .expect("the probe must resolve the configured tessdata directory");
+
+        assert!(
+            languages.iter().any(|language| language == "zzz_override_marker"),
+            "the probe must enumerate the configured tessdata_path; got: {languages:?}"
+        );
+        assert!(
+            !languages.iter().any(|language| language == "zzz_prefix_marker"),
+            "the configured tessdata_path outranks TESSDATA_PREFIX, as it does for a real job; \
+             got: {languages:?}"
+        );
+    }
+
+    /// The language memo must be keyed by the override. A single cell would serve whichever
+    /// caller asked first to every later one, which is the second half of GH#1857 and is
+    /// invisible to the test above (that one never populates the memo twice).
+    #[test]
+    fn the_language_memo_is_keyed_by_the_configured_tessdata_path() {
+        let Some(eng_bytes) = real_eng_traineddata_bytes_from_sibling_build_dir() else {
+            eprintln!("skipping: no real eng.traineddata in a sibling xberg-tesseract build OUT_DIR");
+            return;
+        };
+
+        let root = tempfile::tempdir().expect("must create a temp dir for the fixture");
+        let override_dir = root.path().join("override");
+        let prefix_dir = root.path().join("prefix");
+        for (dir, marker) in [
+            (&override_dir, "zzz_override_marker"),
+            (&prefix_dir, "zzz_prefix_marker"),
+        ] {
+            std::fs::create_dir_all(dir).expect("must create the fixture directory");
+            std::fs::write(dir.join("eng.traineddata"), &eng_bytes).expect("must write eng.traineddata");
+            std::fs::write(dir.join(format!("{marker}.traineddata")), b"not-a-real-model")
+                .expect("must write the marker file");
+        }
+
+        let tessdata_env = TessdataEnv {
+            tessdata_prefix: Some(prefix_dir.to_string_lossy().into_owned()),
+            cache_dir: None,
+        };
+        let backend = TesseractBackend::new();
+
+        let with_override = backend.get_cached_languages(&eng(), Some(&override_dir), &tessdata_env);
+        let without_override = backend.get_cached_languages(&eng(), None, &tessdata_env);
+
+        assert!(
+            with_override.iter().any(|language| language == "zzz_override_marker"),
+            "the override key must enumerate the override directory; got: {with_override:?}"
+        );
+        assert!(
+            without_override.iter().any(|language| language == "zzz_prefix_marker"),
+            "the no-override key must enumerate TESSDATA_PREFIX; got: {without_override:?}"
+        );
+        assert!(
+            !without_override
+                .iter()
+                .any(|language| language == "zzz_override_marker"),
+            "a single memo cell would have replayed the override's list here; got: {without_override:?}"
+        );
+    }
+
+    /// The production call sites read `TESSDATA_PREFIX` and `XBERG_CACHE_DIR` from the
+    /// process environment. The variables are set only on a child run of this test binary,
+    /// so no thread in this process sees the environment change.
+    #[test]
+    fn production_call_sites_read_tessdata_prefix_and_xberg_cache_dir() {
+        let Some(eng_bytes) = real_eng_traineddata_bytes_from_sibling_build_dir() else {
+            eprintln!(
+                "skipping: no real eng.traineddata found in a sibling xberg-tesseract build \
+                 OUT_DIR; this environment did not build xberg-tesseract the way this test expects"
+            );
+            return;
+        };
+
+        let root = tempfile::tempdir().expect("must create a temp dir for the fixture");
+        let prefix_dir = root.path().join("prefix");
+        let cache_tessdata_dir = root.path().join("cache").join("tessdata");
+        std::fs::create_dir_all(&prefix_dir).expect("must create the prefix fixture dir");
+        std::fs::create_dir_all(&cache_tessdata_dir).expect("must create the cache fixture dir");
+        std::fs::write(prefix_dir.join("zzz_prefix_marker.traineddata"), b"not-a-real-model")
+            .expect("must write the prefix marker");
+        std::fs::write(cache_tessdata_dir.join("eng.traineddata"), &eng_bytes).expect("must write eng.traineddata");
+        std::fs::write(
+            cache_tessdata_dir.join("zzz_cache_marker.traineddata"),
+            b"not-a-real-model",
+        )
+        .expect("must write the cache marker");
+
+        let child = "ocr::tesseract_backend::tests::production_call_sites_read_tessdata_env_child";
+        let status = std::process::Command::new(std::env::current_exe().expect("must find the test binary"))
+            .arg("--exact")
+            .arg(child)
+            .arg("--ignored")
+            .arg("--nocapture")
+            .env("XBERG_TESSDATA_ENV_TEST_ROOT", root.path())
+            .env("TESSDATA_PREFIX", &prefix_dir)
+            .env("XBERG_CACHE_DIR", root.path().join("cache"))
+            .status()
+            .expect("must launch the isolated tessdata environment test");
+        assert!(status.success(), "isolated test {child} failed with {status}");
+    }
+
+    #[test]
+    #[ignore = "run in an isolated subprocess by production_call_sites_read_tessdata_prefix_and_xberg_cache_dir"]
+    fn production_call_sites_read_tessdata_env_child() {
+        let root =
+            std::path::PathBuf::from(std::env::var_os("XBERG_TESSDATA_ENV_TEST_ROOT").expect("test fixture root"));
+        let prefix_dir = root.join("prefix").to_string_lossy().into_owned();
+        let cache_dir = root.join("cache");
+        let cache_tessdata_dir = cache_dir.join("tessdata").to_string_lossy().into_owned();
+
+        let resolve = |language: &str| {
+            crate::ocr::processor::validation::resolve_tessdata_path(&[language.to_string()], None)
+                .expect("the job resolver must find the fixture language")
+        };
+        assert_eq!(
+            resolve("zzz_prefix_marker"),
+            prefix_dir,
+            "job resolver, TESSDATA_PREFIX"
+        );
+        assert_eq!(
+            resolve("zzz_cache_marker"),
+            cache_tessdata_dir,
+            "job resolver, XBERG_CACHE_DIR"
+        );
+        assert_eq!(
+            crate::cache_dir::resolve_cache_base(),
+            cache_dir,
+            "cache base, XBERG_CACHE_DIR"
+        );
+
+        let backend = TesseractBackend::new();
+        let languages = backend.supported_languages();
+        assert!(
+            languages.iter().any(|lang| lang == "zzz_cache_marker"),
+            "the language probe must scan XBERG_CACHE_DIR/tessdata; got: {languages:?}"
+        );
+
+        for (language, dir) in [
+            ("zzz_prefix_marker", &prefix_dir),
+            ("zzz_cache_marker", &cache_tessdata_dir),
+        ] {
+            let config = OcrConfig {
+                language: vec![language.to_string()],
+                ..OcrConfig::default()
+            };
+            let check = backend.probe(&config);
+            assert!(
+                check.message.ends_with(&format!(" at {dir}")),
+                "the doctor probe must find {language} in {dir}; got: {check:?}"
+            );
+        }
     }
 
     #[test]
@@ -1322,6 +1760,40 @@ mod tests {
                 "hint {hint} must be treated as unknown"
             );
         }
+    }
+
+    /// GH#1894: the PDF OCR route's own scan-detection signal must reach the internal config so
+    /// `prepare_ocr_image` can bypass the pixel-brightness heuristic for a page it already knows
+    /// is a whole-page scan.
+    ///
+    /// Negative control (delete the `backend_options` line, leaving `..Default::default()`):
+    /// fails with `assertion failed: backend.config_to_tesseract(&ocr_config).known_full_page_scan`
+    /// — proving this test actually reads the hint rather than the field's own default.
+    #[test]
+    fn should_read_known_full_page_scan_hint_from_backend_options() {
+        let backend = TesseractBackend::new();
+        let ocr_config = OcrConfig {
+            backend: "tesseract".to_string(),
+            backend_options: Some(serde_json::json!({ "known_full_page_scan": true })),
+            ..Default::default()
+        };
+
+        assert!(backend.config_to_tesseract(&ocr_config).known_full_page_scan);
+    }
+
+    /// Callers that never stamp the hint — standalone image OCR, plugin callers, direct API
+    /// callers — must keep the pre-GH#1894 behaviour of judging every image by pixel brightness.
+    ///
+    /// Fails on unfixed code by not compiling (the field does not exist).
+    #[test]
+    fn should_default_known_full_page_scan_to_false_when_no_hint_is_supplied() {
+        let backend = TesseractBackend::new();
+        let ocr_config = OcrConfig {
+            backend: "tesseract".to_string(),
+            ..Default::default()
+        };
+
+        assert!(!backend.config_to_tesseract(&ocr_config).known_full_page_scan);
     }
 
     #[test]

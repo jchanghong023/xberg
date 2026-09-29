@@ -146,6 +146,29 @@ in one request when a pipeline receives documents from multiple sources.
 
 <ApiSnippetGroup topic="batch/extract_batch_uri_basic" />
 
+### Python OCR Progress
+
+Python callers can receive one event whenever an OCR page attempt completes. The callback runs outside the extraction worker, and an exception from it is logged and ignored.
+
+```python title="ocr_progress.py"
+from xberg import ExtractInput, ProgressEvent, extract_batch
+
+
+def report(event: ProgressEvent) -> None:
+    print(event.input_index, event.page, event.total, event.completed, event.backend)
+
+
+output = await extract_batch(
+    [
+        ExtractInput(kind="uri", uri="first.pdf"),
+        ExtractInput(kind="uri", uri="second.pdf"),
+    ],
+    on_progress=report,
+)
+```
+
+`page` is 1-based. `input_index` is the zero-based position in `extract_batch`; it is `None` for `extract`.
+
 ### Per-Input Configuration
 
 When a batch contains a mix of document types that need different settings,

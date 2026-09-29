@@ -13,6 +13,83 @@ fn test_limits(max_files_in_archive: usize) -> SecurityLimits {
     }
 }
 
+/// Build an OLE workbook followed by a ZIP central directory whose local-file
+/// header is corrupt. ZIP discovery accepts the central directory, then security
+/// accounting fails when it seeks back to the bogus local header. This mirrors
+/// the false ZIP detection in #1938 while keeping the outer CFB independently
+/// valid. ~keep
+#[cfg(feature = "office")]
+fn legacy_xls_with_misleading_embedded_zip() -> Vec<u8> {
+    use std::io::{Seek as _, Write as _};
+
+    let mut compound = cfb::CompoundFile::create(Cursor::new(Vec::new())).expect("create OLE workbook");
+    compound
+        .create_stream("/Workbook")
+        .expect("create Workbook stream")
+        .write_all(b"synthetic workbook stream")
+        .expect("write Workbook stream");
+    let ole = compound.into_inner().into_inner();
+
+    let mut cursor = Cursor::new(ole);
+    cursor
+        .seek(std::io::SeekFrom::End(0))
+        .expect("seek after OLE container");
+    let mut zip = zip::ZipWriter::new(cursor);
+    zip.start_file("drs/shapexml.xml", zip::write::SimpleFileOptions::default())
+        .expect("start embedded ZIP member");
+    zip.write_all(b"<shape/>").expect("write embedded ZIP member");
+    let mut bytes = zip.finish().expect("finish embedded ZIP").into_inner();
+
+    let local_header = bytes
+        .windows(4)
+        .rposition(|window| window == b"PK\x03\x04")
+        .expect("embedded ZIP local header");
+    bytes[local_header] = b'X';
+    bytes
+}
+
+#[test]
+#[cfg(feature = "office")]
+fn should_not_validate_ole_xls_as_zip_at_bytes_boundary() {
+    let bytes = legacy_xls_with_misleading_embedded_zip();
+    let error = read_excel_bytes(&bytes, ".XLS", &test_limits(10_000))
+        .expect_err("synthetic workbook payload is intentionally not valid BIFF");
+
+    assert!(
+        !error.to_string().contains("Archive entry"),
+        "the OLE workbook must reach the XLS parser instead of ZIP validation: {error}"
+    );
+}
+
+#[test]
+#[cfg(feature = "office")]
+fn should_not_validate_ole_xls_as_zip_at_file_boundary() {
+    let directory = tempfile::tempdir().expect("create temporary directory");
+    let path = directory.path().join("legacy.XLS");
+    std::fs::write(&path, legacy_xls_with_misleading_embedded_zip()).expect("write synthetic XLS");
+
+    let error = read_excel_file(path.to_str().expect("UTF-8 path"), &test_limits(10_000))
+        .expect_err("synthetic workbook payload is intentionally not valid BIFF");
+
+    assert!(
+        !error.to_string().contains("Archive entry"),
+        "the OLE workbook must reach the XLS parser instead of ZIP validation: {error}"
+    );
+}
+
+#[test]
+#[cfg(feature = "office")]
+fn should_keep_zip_validation_for_zip_backed_spreadsheets() {
+    let bytes = legacy_xls_with_misleading_embedded_zip();
+    let error = read_excel_bytes(&bytes, ".xlsx", &test_limits(10_000))
+        .expect_err("corrupt ZIP local header must fail security accounting");
+
+    assert!(
+        error.to_string().contains("Archive entry"),
+        "ZIP-backed spreadsheets must retain ZIP security validation: {error}"
+    );
+}
+
 /// Regression test for #102: office metadata was computed only for the OOXML
 /// spreadsheet extensions, so an `.ods` reached `ExcelWorkbook` with an empty
 /// metadata map — no title, no author, no dates — even though ODT and ODP read

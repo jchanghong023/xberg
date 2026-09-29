@@ -6,7 +6,7 @@
 # for. 0.83.0 additionally fixes the php/napi/pyo3 mirror defaults, the elixir bytes
 # hop and the typescript/wasm mock-url builder that this repo's e2e legs were red on.
 # ~keep
-alef_version = "0.95.0"
+alef_version = "0.102.0"
 languages = [
   "python",
   "node",
@@ -589,6 +589,7 @@ WebUI = "WebUI"
 traineddata = "traineddata"
 
 [workspace.poly.per-file-ignores]
+"packages/python/xberg/__init__.py" = ["F811"]
 # Alef config and its generated derivatives. All three grow with the size of the surface alef
 # manages and with the quality-debt baseline below -- alef.toml is where that baseline is
 # written, so paying it down makes this file shorter, never longer. A line count on declarative
@@ -608,7 +609,7 @@ traineddata = "traineddata"
 "tools/benchmark-harness/baselines/initial_baseline.json" = ["file-too-long"]
 "tools/benchmark-harness/guardrails.json" = ["file-too-long"]
 # --- quality-debt baseline (generated) ---
-# 504 size/complexity findings across 198 files that predate these metrics, listed per file
+# 490 size/complexity findings across 184 files that predate these metrics, listed per file
 # rather than switching the rules off, so the metrics still fire on every file NOT listed
 # here -- new code stays covered, and each path below is one discrete unit of work.
 #
@@ -629,7 +630,6 @@ traineddata = "traineddata"
 "crates/xberg-candle-ocr/src/models/paddleocr_vl/model.rs" = ["file-too-long", "function-too-long", "nesting-too-deep"]
 "crates/xberg-cli/src/commands/overrides/mod.rs" = ["type-too-long"]
 "crates/xberg-cli/src/main.rs" = ["file-too-long", "function-too-long", "type-too-long"]
-"crates/xberg-cli/tests/commands_test.rs" = ["file-too-long"]
 "crates/xberg-native-pdf/src/content/operators.rs" = ["file-too-long", "type-too-long"]
 "crates/xberg-native-pdf/src/content/parser.rs" = ["cyclomatic-complexity", "file-too-long", "function-too-long"]
 "crates/xberg-native-pdf/src/converters/text_post_processor.rs" = [
@@ -794,22 +794,9 @@ traineddata = "traineddata"
 "crates/xberg-native-pdf/src/text/bidi.rs" = ["cyclomatic-complexity", "file-too-long"]
 "crates/xberg-native-pdf/src/xfa/parser.rs" = ["cyclomatic-complexity", "function-too-long", "nesting-too-deep"]
 "crates/xberg-native-pdf/src/xref.rs" = ["cyclomatic-complexity", "file-too-long", "function-too-long"]
-"crates/xberg-native-pdf/tests/extraction_api_regression.rs" = ["file-too-long"]
-"crates/xberg-native-pdf/tests/test_46_round2_qa_pass.rs" = ["file-too-long"]
-"crates/xberg-native-pdf/tests/test_46_round3_qa_pass.rs" = ["file-too-long"]
-"crates/xberg-native-pdf/tests/test_46_round4_qa_pass.rs" = ["file-too-long"]
-"crates/xberg-native-pdf/tests/test_ocg_ink_filtering.rs" = ["file-too-long"]
-"crates/xberg-native-pdf/tests/test_render_ocg_filtering.rs" = ["file-too-long"]
 "crates/xberg-native-pdf/tests/test_render_output_intent.rs" = ["file-too-long"]
-"crates/xberg-native-pdf/tests/test_render_resolution_pipeline_qa_wave2.rs" = ["file-too-long"]
-"crates/xberg-native-pdf/tests/test_render_resolution_pipeline_qa_wave3.rs" = ["file-too-long"]
-"crates/xberg-native-pdf/tests/test_render_resolution_pipeline_qa_wave4.rs" = ["file-too-long"]
 "crates/xberg-native-pdf/tests/test_separation_rendering.rs" = ["file-too-long"]
-"crates/xberg-native-pdf/tests/test_struct_actualtext_probes.rs" = ["file-too-long"]
 "crates/xberg-native-pdf/tests/test_transparency_flattening_audit.rs" = ["file-too-long"]
-"crates/xberg-native-pdf/tests/test_transparency_flattening_qa_round2.rs" = ["file-too-long"]
-"crates/xberg-native-pdf/tests/test_vertical_writing_mode_qa_probes.rs" = ["file-too-long"]
-"crates/xberg-native-pdf/tests/test_word_boundary_detection.rs" = ["file-too-long"]
 "crates/xberg-paddle-ocr/src/ocr_lite.rs" = ["too-many-parameters"]
 "crates/xberg-pdfium-render/src/bindgen/pdfium_7678.rs" = ["file-too-long"]
 "crates/xberg-pdfium-render/src/bindings.rs" = ["file-too-long", "too-many-parameters", "type-too-long"]
@@ -1475,6 +1462,23 @@ sources = [
 features = [
   "full",
   "pdf",
+  # GH#1863 reverses the decision recorded on `[crates.ffi].extra_features` below, for the
+  # bindings that inherit THIS array (python, node, ruby, php, elixir) only. That note keeps
+  # `pdf-pdfium` declare-only because the engine dlopen()s libpdfium at run time, so
+  # compiling it in hands a consumer a backend that fails with MissingDependency unless they
+  # install the library; leaving it out instead fails with "rebuild with --features
+  # pdf-pdfium", which is the better message of the two. The trade is real and is being taken
+  # the other way now because these five bindings ship prebuilt artifacts nobody can rebuild:
+  # `PdfBackend::Pdfium` is documented in every one of their generated API references, so the
+  # good error message was being paid for with an API surface that advertises a value no
+  # published wheel, addon or gem can honour. The install guide now names
+  # PDFIUM_DYNAMIC_LIB_PATH, which is what made the MissingDependency path actionable enough
+  # to accept. The feature compiles xberg-pdfium-render in and links nothing
+  # (crates/xberg-pdfium-render/build.rs is a no-op without PDFIUM_STATIC_LIB_PATH /
+  # PDFIUM_DYNAMIC_LIB_PATH); reported cost is +182 KB on an abi3 wheel. It does NOT reach
+  # the Windows or Intel-macOS artifacts, which build from the `windows-target` /
+  # `macos-intel-target` aggregates, nor wasm/android/ios, which cannot dlopen at all. ~keep
+  "pdf-pdfium",
   "ocr",
   "paddle-ocr",
   "paddle-ocr-types",
@@ -1527,7 +1531,25 @@ features = [
 [[crates.source_crates]]
 name = "crawlberg"
 from_registry = true
-sources = ["src/types/config.rs", "src/types/discovery.rs", "src/types/results.rs", "src/net/ssrf.rs"]
+sources = [
+  "src/types/config.rs",
+  # crawlberg 1.7.2 split `types/config.rs` and `net/ssrf.rs` into sibling module
+  # directories, so a `sources` list naming only the two flat files no longer reaches the
+  # definitions: all eight of CrawlConfig's typed fields sanitize to `String`, and
+  # `SsrfPolicy.allowlist` degrades one level further to `Vec<String>` because `HostMatcher`
+  # lives in `matcher.rs`. Measured on alef 0.97.1, 0.98.0 and 0.99.0 alike -- this is not a
+  # generator regression. It surfaced only when the lock moved 1.7.1 -> 1.8.0, because
+  # `alef all` did not fail on `lossy_sanitized_surface` before 0.99.0 and would have shipped
+  # the degraded surface silently. ~keep
+  "src/types/config/primitives.rs",
+  "src/types/config/sections.rs",
+  "src/types/config/credentials.rs",
+  "src/types/discovery.rs",
+  "src/types/results.rs",
+  "src/net/ssrf.rs",
+  "src/net/ssrf/policy.rs",
+  "src/net/ssrf/matcher.rs",
+]
 roots = ["crawlberg::CrawlConfig", "crawlberg::MapResult"]
 
 [[crates.source_crates]]
@@ -1546,6 +1568,7 @@ html-to-markdown-rs = { workspace = true, default-features = false }
 
 [crates.python]
 module_name = "_xberg"
+extra_init_imports = { ".progress" = ["ProgressEvent", "ProgressCallback", "extract", "extract_batch"] }
 exclude_types = ["PooledString"]
 exclude_functions = [
   "calculate_quality_score",
@@ -1979,6 +2002,10 @@ wasm-bindgen-test = "0.3"
 # declarations in `include/xberg.h`, because no `mod` statement ever compiled
 # them. Re-add a name here only alongside a module that builds. ~keep
 ffi = []
+python = ["progress"]
+
+[crates.custom_registrations.python]
+functions = ["progress::extract_with_progress", "progress::extract_batch_with_progress"]
 
 [crates.ffi]
 prefix = "xberg"
@@ -1997,7 +2024,10 @@ visitor_callbacks = false
 # zig/java/C consumers who build libxberg_ffi themselves a documented opt-in at
 # zero cost to everyone else. `extra_features` exists only on `[crates.ffi]`
 # and `[crates.wasm]`, so the other bindings have no declare-only key and
-# cannot be given the same opt-in without an alef change.
+# cannot be given the same opt-in without an alef change. That absence is why
+# GH#1863 enabled the feature outright in the shared `[[crates]].features` array
+# instead; this declare-only entry still stands for FFI, whose consumers build
+# libxberg_ffi themselves.
 #
 # `ocr-wasm` appears in emitted `any(feature = "ocr", feature = "ocr-wasm")`
 # gates. Alef declares every discovered gate and otherwise enables it by default,
@@ -2159,7 +2189,6 @@ exclude_functions = [
   "list_reranker_presets",
   "parse_citations",
   "parse_footnote_definitions",
-  "pdf_page_count",
   "redact",
   "register_document_extractor",
   "register_builtin",
@@ -2320,7 +2349,6 @@ exclude_functions = [
   "list_reranker_presets",
   "parse_citations",
   "parse_footnote_definitions",
-  "pdf_page_count",
   "redact",
   "register_builtin",
   "render_pdf_page_to_png",
@@ -3117,7 +3145,6 @@ functions = [
   "extract_keywords",
   "extract_region_with_vlm",
   "extract_region_with_vlm_usage",
-  "pdf_page_count",
   "render_pdf_page_to_png",
   "redact",
   "summarize",
@@ -3525,6 +3552,27 @@ module = "xberg"
 async = false
 returns_result = false
 args = []
+
+[crates.e2e.calls.pdf_page_count]
+result_is_simple = true
+function = "pdf_page_count"
+module = "xberg"
+async = false
+returns_result = true
+args = [
+  { name = "pdf_bytes", field = "input.pdf_bytes", type = "bytes" },
+  { name = "password", field = "input.password", type = "string", optional = true },
+]
+
+[crates.e2e.calls.pdf_page_count.overrides.c]
+# ~keep The C export returns the page count as uintptr_t (usize), not the char* every other
+# simple-result call returns, so the C e2e recipe cannot infer the binding type from result_is_simple.
+raw_c_result_type = "uintptr_t"
+
+[crates.e2e.calls.pdf_page_count.overrides.go]
+# ~keep The Go binding returns the page count as a plain uint, not a pointer, so the Go e2e
+# recipe must not nil-check or dereference the result.
+result_is_pointer = false
 
 [crates.e2e.calls.extract_batch]
 function = "extract_batch"

@@ -343,6 +343,7 @@ pub struct OcrElement {
 
     /// Rotation information (if detected).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub rotation: Option<OcrRotation>,
 
     /// Page number (1-indexed).

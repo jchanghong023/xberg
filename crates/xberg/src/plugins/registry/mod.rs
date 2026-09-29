@@ -243,8 +243,13 @@ pub(crate) mod test_support {
             /// Holds this registry's lock for the lifetime of a test and leaves the registry
             /// empty both on entry and on exit, so every test sees a known-empty registry no
             /// matter what ran before it — and a failing assertion cannot leak a registration.
+            // ~keep Liveness is configuration-dependent: the only consumers are compiled out on
+            // narrow feature legs, so `-D dead-code` fires there and nowhere else. A hand-kept
+            // union-of-consumers `cfg` is what drifted here and failed the 1.3.0 publish (GH#1951).
+            #[allow(dead_code)]
             pub(crate) struct $guard(#[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
 
+            #[allow(dead_code)]
             impl $guard {
                 pub(crate) fn acquire() -> Self {
                     static $lock: std::sync::Mutex<()> = std::sync::Mutex::new(());

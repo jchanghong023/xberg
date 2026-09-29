@@ -455,8 +455,10 @@ fn capabilities_report_each_backend_declared_languages() {
         languages: vec!["fra".to_string()],
     });
 
-    let capabilities =
-        capabilities_from_snapshot(vec![("alpha-ocr".to_string(), alpha), ("beta-ocr".to_string(), beta)]);
+    let capabilities = capabilities_from_snapshot(
+        vec![("alpha-ocr".to_string(), alpha), ("beta-ocr".to_string(), beta)],
+        &OcrConfig::default(),
+    );
 
     assert_eq!(
         capabilities,
@@ -486,7 +488,10 @@ fn capabilities_are_ordered_by_backend_name() {
 
     // Fed reversed (zed before alpha), to fail if the helper's own sort is ever dropped
     // and it started trusting caller/registry order instead.
-    let capabilities = capabilities_from_snapshot(vec![("zed-ocr".to_string(), zed), ("alpha-ocr".to_string(), alpha)]);
+    let capabilities = capabilities_from_snapshot(
+        vec![("zed-ocr".to_string(), zed), ("alpha-ocr".to_string(), alpha)],
+        &OcrConfig::default(),
+    );
 
     let names: Vec<&str> = capabilities.iter().map(|capability| capability.name.as_str()).collect();
     assert_eq!(names, vec!["alpha-ocr", "zed-ocr"]);
@@ -496,7 +501,7 @@ fn capabilities_are_ordered_by_backend_name() {
 fn a_backend_that_does_not_declare_languages_reports_an_empty_list() {
     let backend: Arc<dyn OcrBackend> = Arc::new(UndeclaredLanguagesBackend { name: "undeclared-ocr" });
 
-    let capabilities = capabilities_from_snapshot(vec![("undeclared-ocr".to_string(), backend)]);
+    let capabilities = capabilities_from_snapshot(vec![("undeclared-ocr".to_string(), backend)], &OcrConfig::default());
 
     assert_eq!(
         capabilities[0].supported_languages,

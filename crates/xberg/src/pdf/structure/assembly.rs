@@ -748,9 +748,28 @@ fn push_table_element(builder: &mut InternalDocumentBuilder, table: &crate::type
     builder.push_table(table.clone(), page, bbox)
 }
 
+/// Convert a single PdfParagraph to the appropriate InternalElement and push it,
+/// then stamp the element with `para`'s measured dominant font size.
+///
+/// Thin wrapper around [`push_paragraph_element_by_kind`], which has one exit per
+/// `ElementKind` it can produce (heading, code, formula, list item, furniture,
+/// caption, plain paragraph). Stamping at every one of those exits would be
+/// fragile to keep in sync as branches change, so this wrapper stamps once, after
+/// the fact, on whatever index was returned.
+fn push_paragraph_element(
+    builder: &mut InternalDocumentBuilder,
+    para: &PdfParagraph,
+    page: Option<u32>,
+    hyphen_witnesses: &super::pipeline::HyphenWitnesses,
+) -> u32 {
+    let element_index = push_paragraph_element_by_kind(builder, para, page, hyphen_witnesses);
+    builder.set_measured_font_size(element_index, para.dominant_font_size);
+    element_index
+}
+
 /// Convert a single PdfParagraph to the appropriate InternalElement and push it.
 /// Returns the element index.
-fn push_paragraph_element(
+fn push_paragraph_element_by_kind(
     builder: &mut InternalDocumentBuilder,
     para: &PdfParagraph,
     page: Option<u32>,
@@ -913,6 +932,7 @@ fn emit_caption_elements(
                     y1: bb.3 as f64,
                 });
                 let caption_idx = builder.push_paragraph(trimmed, annotations, page, bbox);
+                builder.set_measured_font_size(caption_idx, para.dominant_font_size);
                 builder.push_relationship(
                     caption_idx,
                     RelationshipTarget::Index(parent_elem_idx),

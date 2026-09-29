@@ -3195,6 +3195,17 @@ typedef struct XBERGXbergOcrBackendVTable {
   int32_t (*supported_languages)(const void *user_data, char **out_result,
                                  char **out_error);
   /**
+   * Optional: languages usable under `config`, defaulting to ignoring it.
+   * GH#1857.
+   */
+  int32_t (*supported_languages_for)(const void *user_data, const char *config,
+                                     char **out_result, char **out_error);
+  /**
+   * Optional: whether `language` is supported under `config`. GH#1857.
+   */
+  int32_t (*supports_language_for)(const void *user_data, const char *config,
+                                   const char *language);
+  /**
    * Optional: Check if the backend supports table detection.
    *
    * Defaults to `false`. Override if your backend can detect and extract
@@ -4654,6 +4665,20 @@ char *xberg_browser_config_endpoint(XBERGAlefHandle handle);
  * Pointer must be a valid handle returned by this library.
  */
 uint64_t xberg_browser_config_timeout(XBERGAlefHandle handle);
+
+/**
+ * Get the `overall_timeout` field from a `BrowserConfig`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint64_t xberg_browser_config_overall_timeout(XBERGAlefHandle handle);
+
+/**
+ * Get the `shutdown_timeout` field from a `BrowserConfig`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint64_t xberg_browser_config_shutdown_timeout(XBERGAlefHandle handle);
 
 /**
  * Get the `wait` field from a `BrowserConfig`.
@@ -6192,6 +6217,13 @@ uintptr_t xberg_content_config_wrap_width(XBERGAlefHandle handle);
 int32_t xberg_content_config_include_document_structure(XBERGAlefHandle handle);
 
 /**
+ * Get the `extract_metadata` field from a `ContentConfig`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+int32_t xberg_content_config_extract_metadata(XBERGAlefHandle handle);
+
+/**
  * Create a `ContentFilterConfig` from a JSON string. Returns null on failure.
  * # Safety
  * JSON string must be valid UTF-8 and null-terminated.
@@ -6682,6 +6714,15 @@ char *xberg_conversion_options_exclude_selectors(XBERGAlefHandle handle);
  */
 XBERGAlefHandle xberg_conversion_options_tier_strategy(XBERGAlefHandle handle);
 
+/**
+ * Get the `base_url` field from a `ConversionOptions`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_conversion_options_base_url(XBERGAlefHandle handle);
+
 #if defined(XBERG_FEATURE_OFFICE)
 /**
  * Create a `CoreProperties` from a JSON string. Returns null on failure.
@@ -7082,6 +7123,36 @@ char *xberg_crawl_config_include_paths(XBERGAlefHandle handle);
 char *xberg_crawl_config_exclude_paths(XBERGAlefHandle handle);
 
 /**
+ * Get the `path_patterns_match_query` field from a `CrawlConfig`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+int32_t xberg_crawl_config_path_patterns_match_query(XBERGAlefHandle handle);
+
+/**
+ * Get the `dedup_include_query` field from a `CrawlConfig`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+int32_t xberg_crawl_config_dedup_include_query(XBERGAlefHandle handle);
+
+/**
+ * Get the `strip_tracking_params` field from a `CrawlConfig`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+int32_t xberg_crawl_config_strip_tracking_params(XBERGAlefHandle handle);
+
+/**
+ * Get the `tracking_params` field from a `CrawlConfig`.
+ * A non-null returned pointer is owned by the caller.
+ * It must be freed with `xberg_free_string`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+char *xberg_crawl_config_tracking_params(XBERGAlefHandle handle);
+
+/**
  * Get the `custom_headers` field from a `CrawlConfig`.
  * A non-null returned pointer is owned by the caller.
  * It must be freed with `xberg_free_string`.
@@ -7139,6 +7210,27 @@ uintptr_t xberg_crawl_config_retry_count(XBERGAlefHandle handle);
  * Pointer must be a valid handle returned by this library.
  */
 char *xberg_crawl_config_retry_codes(XBERGAlefHandle handle);
+
+/**
+ * Get the `retry_initial_delay_ms` field from a `CrawlConfig`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint64_t xberg_crawl_config_retry_initial_delay_ms(XBERGAlefHandle handle);
+
+/**
+ * Get the `retry_max_delay_ms` field from a `CrawlConfig`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+uint64_t xberg_crawl_config_retry_max_delay_ms(XBERGAlefHandle handle);
+
+/**
+ * Get the `rate_limit_jitter_ratio` field from a `CrawlConfig`.
+ * # Safety
+ * Pointer must be a valid handle returned by this library.
+ */
+double xberg_crawl_config_rate_limit_jitter_ratio(XBERGAlefHandle handle);
 
 /**
  * Get the `cookies_enabled` field from a `CrawlConfig`.
@@ -30013,6 +30105,30 @@ char *xberg_list_ocr_backend_capabilities(void);
 uintptr_t xberg_list_ocr_backend_capabilities_len(void);
 
 /**
+ * `list_ocr_backend_capabilities`, reporting each backend's languages under
+ * `config`.
+ *
+ * Tesseract's language list is a property of the tessdata directory it
+ * resolves, and `config.tessdata_path` is the first entry of that search chain.
+ * The config-less form always answers for the no-override chain, which can be a
+ * different directory than the one a job using `config` will load from. Use
+ * this form when `config.tessdata_path` is set. See GH#1857.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
+ */
+char *xberg_list_ocr_backend_capabilities_for(XBERGAlefHandle config);
+
+/**
+ * Return the byte length of the C string most recently returned by
+ * `xberg_list_ocr_backend_capabilities_for` on this thread. Returns 0 when the
+ * primary call returned null or failed before producing a string. Enables safe
+ * slice construction in Zig and Java FFM Panama without a NUL-scan.
+ * \note SAFETY: Pointer arguments are ignored and are present only to keep the
+ * companion ABI aligned with `xberg_list_ocr_backend_capabilities_for`.
+ */
+uintptr_t xberg_list_ocr_backend_capabilities_for_len(XBERGAlefHandle _config);
+
+/**
  * List all registered OCR backends.
  *
  * Returns the names of all OCR backends currently registered in the global
@@ -30282,6 +30398,39 @@ double xberg_max_sim_score(XBERGAlefHandle query, XBERGAlefHandle doc);
  */
 int32_t xberg_ocr_backend_supports_language(const char *backend,
                                             const char *language);
+
+/**
+ * `ocr_backend_supports_language`, answering under `config`.
+ *
+ * Use this, not the config-less form, when the caller sets
+ * `OcrConfig.tessdata_path`: the config-less form checks the no-override search
+ * chain and can deny a language the job would load without trouble. See
+ * GH#1857.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
+ */
+int32_t xberg_ocr_backend_supports_language_for(const char *backend,
+                                                const char *language,
+                                                XBERGAlefHandle config);
+
+#if defined(XBERG_FEATURE_PDF)
+/**
+ * Count the pages in a PDF without rendering any of them.
+ *
+ * Opens the document and returns its page count from the PDF structure. No page
+ * is rasterized, so this is cheap relative to `render_pdf_page_to_png` â
+ * use it when you only need the count (e.g. to drive a render loop over the
+ * pages).
+ * \param pdf_bytes Raw PDF file bytes
+ * \param password Optional password for encrypted PDFs
+ * \note Returns `XbergError::Parsing` if the PDF cannot be opened,
+ * authenticated, or its page count read.
+ * \note SAFETY: Caller must ensure all pointer arguments are valid or null.
+ * Returned pointers must be freed with the appropriate free function.
+ */
+uintptr_t xberg_pdf_page_count(const uint8_t *pdf_bytes,
+                               uintptr_t pdf_bytes_len, const char *password);
+#endif
 
 #if defined(XBERG_FEATURE_MARKDOWN_FOOTNOTES)
 /**

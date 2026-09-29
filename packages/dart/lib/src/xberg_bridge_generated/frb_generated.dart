@@ -271,7 +271,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.13.0';
 
   @override
-  int get rustContentHash => -1277317953;
+  int get rustContentHash => -731871621;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -1075,6 +1075,8 @@ abstract class RustLibApi extends BaseApi {
     required FutureOr<bool> Function(String) supportsLanguage,
     required FutureOr<OcrBackendType> Function() backendType,
     required FutureOr<List<String>> Function() supportedLanguages,
+    required FutureOr<List<String>> Function(OcrConfig) supportedLanguagesFor,
+    required FutureOr<bool> Function(OcrConfig, String) supportsLanguageFor,
     required FutureOr<bool> Function() supportsTableDetection,
     required FutureOr<bool> Function() supportsDocumentProcessing,
     required FutureOr<bool> Function() emitsStructuredMarkdown,
@@ -1588,6 +1590,10 @@ abstract class RustLibApi extends BaseApi {
 
   Future<List<OcrBackendCapabilities>> crateListOcrBackendCapabilities();
 
+  Future<List<OcrBackendCapabilities>> crateListOcrBackendCapabilitiesFor({
+    required OcrConfig config,
+  });
+
   Future<List<String>> crateListOcrBackends();
 
   Future<List<String>> crateListPostProcessors();
@@ -1620,6 +1626,17 @@ abstract class RustLibApi extends BaseApi {
   Future<bool> crateOcrBackendSupportsLanguage({
     required String backend,
     required String language,
+  });
+
+  Future<bool> crateOcrBackendSupportsLanguageFor({
+    required String backend,
+    required String language,
+    required OcrConfig config,
+  });
+
+  Future<PlatformInt64> cratePdfPageCount({
+    required List<int> pdfBytes,
+    String? password,
   });
 
   Future<void> crateRegisterDocumentExtractor({
@@ -9452,6 +9469,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     required FutureOr<bool> Function(String) supportsLanguage,
     required FutureOr<OcrBackendType> Function() backendType,
     required FutureOr<List<String>> Function() supportedLanguages,
+    required FutureOr<List<String>> Function(OcrConfig) supportedLanguagesFor,
+    required FutureOr<bool> Function(OcrConfig, String) supportsLanguageFor,
     required FutureOr<bool> Function() supportsTableDetection,
     required FutureOr<bool> Function() supportsDocumentProcessing,
     required FutureOr<bool> Function() emitsStructuredMarkdown,
@@ -9485,6 +9504,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           );
           sse_encode_DartFn_Inputs__Output_list_String_AnyhowException(
             supportedLanguages,
+            serializer,
+          );
+          sse_encode_DartFn_Inputs_ocr_config_Output_list_String_AnyhowException(
+            supportedLanguagesFor,
+            serializer,
+          );
+          sse_encode_DartFn_Inputs_ocr_config_String_Output_bool_AnyhowException(
+            supportsLanguageFor,
             serializer,
           );
           sse_encode_DartFn_Inputs__Output_bool_AnyhowException(
@@ -9532,6 +9559,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           supportsLanguage,
           backendType,
           supportedLanguages,
+          supportedLanguagesFor,
+          supportsLanguageFor,
           supportsTableDetection,
           supportsDocumentProcessing,
           emitsStructuredMarkdown,
@@ -9555,6 +9584,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           "supportsLanguage",
           "backendType",
           "supportedLanguages",
+          "supportedLanguagesFor",
+          "supportsLanguageFor",
           "supportsTableDetection",
           "supportsDocumentProcessing",
           "emitsStructuredMarkdown",
@@ -14451,6 +14482,39 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<List<OcrBackendCapabilities>> crateListOcrBackendCapabilitiesFor({
+    required OcrConfig config,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_box_autoadd_ocr_config(config, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 385,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_ocr_backend_capabilities,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateListOcrBackendCapabilitiesForConstMeta,
+        argValues: [config],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateListOcrBackendCapabilitiesForConstMeta =>
+      const TaskConstMeta(
+        debugName: "list_ocr_backend_capabilities_for",
+        argNames: ["config"],
+      );
+
+  @override
   Future<List<String>> crateListOcrBackends() {
     return handler.executeNormal(
       NormalTask(
@@ -14459,7 +14523,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 385,
+            funcId: 386,
             port: port_,
           );
         },
@@ -14486,7 +14550,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 386,
+            funcId: 387,
             port: port_,
           );
         },
@@ -14513,7 +14577,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 387,
+            funcId: 388,
             port: port_,
           );
         },
@@ -14540,7 +14604,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 388,
+            funcId: 389,
             port: port_,
           );
         },
@@ -14567,7 +14631,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 389,
+            funcId: 390,
             port: port_,
           );
         },
@@ -14594,7 +14658,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 390,
+            funcId: 391,
             port: port_,
           );
         },
@@ -14621,7 +14685,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 391,
+            funcId: 392,
             port: port_,
           );
         },
@@ -14653,7 +14717,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 392,
+            funcId: 393,
             port: port_,
           );
         },
@@ -14685,7 +14749,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 393,
+            funcId: 394,
             port: port_,
           );
         },
@@ -14719,7 +14783,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 394,
+            funcId: 395,
             port: port_,
           );
         },
@@ -14753,7 +14817,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 395,
+            funcId: 396,
             port: port_,
           );
         },
@@ -14775,6 +14839,77 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<bool> crateOcrBackendSupportsLanguageFor({
+    required String backend,
+    required String language,
+    required OcrConfig config,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(backend, serializer);
+          sse_encode_String(language, serializer);
+          sse_encode_box_autoadd_ocr_config(config, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 397,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_bool,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCrateOcrBackendSupportsLanguageForConstMeta,
+        argValues: [backend, language, config],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateOcrBackendSupportsLanguageForConstMeta =>
+      const TaskConstMeta(
+        debugName: "ocr_backend_supports_language_for",
+        argNames: ["backend", "language", "config"],
+      );
+
+  @override
+  Future<PlatformInt64> cratePdfPageCount({
+    required List<int> pdfBytes,
+    String? password,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_list_prim_u_8_loose(pdfBytes, serializer);
+          sse_encode_opt_String(password, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 398,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_i_64,
+          decodeErrorData: sse_decode_String,
+        ),
+        constMeta: kCratePdfPageCountConstMeta,
+        argValues: [pdfBytes, password],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCratePdfPageCountConstMeta => const TaskConstMeta(
+    debugName: "pdf_page_count",
+    argNames: ["pdfBytes", "password"],
+  );
+
+  @override
   Future<void> crateRegisterDocumentExtractor({
     required DocumentExtractorDartImpl impl,
   }) {
@@ -14789,7 +14924,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 396,
+            funcId: 399,
             port: port_,
           );
         },
@@ -14825,7 +14960,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 397,
+            funcId: 400,
             port: port_,
           );
         },
@@ -14859,7 +14994,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 398,
+            funcId: 401,
             port: port_,
           );
         },
@@ -14894,7 +15029,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 399,
+            funcId: 402,
             port: port_,
           );
         },
@@ -14927,7 +15062,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 400,
+            funcId: 403,
             port: port_,
           );
         },
@@ -14960,7 +15095,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 401,
+            funcId: 404,
             port: port_,
           );
         },
@@ -14996,7 +15131,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 402,
+            funcId: 405,
             port: port_,
           );
         },
@@ -15030,7 +15165,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 403,
+            funcId: 406,
             port: port_,
           );
         },
@@ -15058,7 +15193,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 404,
+            funcId: 407,
             port: port_,
           );
         },
@@ -15089,7 +15224,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 405,
+            funcId: 408,
             port: port_,
           );
         },
@@ -15120,7 +15255,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 406,
+            funcId: 409,
             port: port_,
           );
         },
@@ -15150,7 +15285,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 407,
+            funcId: 410,
             port: port_,
           );
         },
@@ -15181,7 +15316,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 408,
+            funcId: 411,
             port: port_,
           );
         },
@@ -15209,7 +15344,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 409,
+            funcId: 412,
             port: port_,
           );
         },
@@ -15240,7 +15375,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 410,
+            funcId: 413,
             port: port_,
           );
         },
@@ -15271,7 +15406,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 411,
+            funcId: 414,
             port: port_,
           );
         },
@@ -15305,7 +15440,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 412,
+            funcId: 415,
             port: port_,
           );
         },
@@ -15966,6 +16101,77 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       if (rawOutput != null) {
         serializer.buffer.putUint8(0);
         sse_encode_extracted_document(rawOutput.value, serializer);
+      } else {
+        serializer.buffer.putUint8(1);
+        sse_encode_AnyhowException(rawError!.value, serializer);
+      }
+      final output = serializer.intoRaw();
+
+      generalizedFrbRustBinding.dartFnDeliverOutput(
+        callId: callId,
+        ptr: output.ptr,
+        rustVecLen: output.rustVecLen,
+        dataLen: output.dataLen,
+      );
+    };
+  }
+
+  Future<void> Function(int, dynamic)
+  encode_DartFn_Inputs_ocr_config_Output_list_String_AnyhowException(
+    FutureOr<List<String>> Function(OcrConfig) raw,
+  ) {
+    return (callId, rawArg0) async {
+      final arg0 = dco_decode_ocr_config(rawArg0);
+
+      Box<List<String>>? rawOutput;
+      Box<AnyhowException>? rawError;
+      try {
+        rawOutput = Box(await raw(arg0));
+      } catch (e, s) {
+        rawError = Box(AnyhowException("$e\n\n$s"));
+      }
+
+      final serializer = SseSerializer(generalizedFrbRustBinding);
+      assert((rawOutput != null) ^ (rawError != null));
+      if (rawOutput != null) {
+        serializer.buffer.putUint8(0);
+        sse_encode_list_String(rawOutput.value, serializer);
+      } else {
+        serializer.buffer.putUint8(1);
+        sse_encode_AnyhowException(rawError!.value, serializer);
+      }
+      final output = serializer.intoRaw();
+
+      generalizedFrbRustBinding.dartFnDeliverOutput(
+        callId: callId,
+        ptr: output.ptr,
+        rustVecLen: output.rustVecLen,
+        dataLen: output.dataLen,
+      );
+    };
+  }
+
+  Future<void> Function(int, dynamic, dynamic)
+  encode_DartFn_Inputs_ocr_config_String_Output_bool_AnyhowException(
+    FutureOr<bool> Function(OcrConfig, String) raw,
+  ) {
+    return (callId, rawArg0, rawArg1) async {
+      final arg0 = dco_decode_ocr_config(rawArg0);
+      final arg1 = dco_decode_String(rawArg1);
+
+      Box<bool>? rawOutput;
+      Box<AnyhowException>? rawError;
+      try {
+        rawOutput = Box(await raw(arg0, arg1));
+      } catch (e, s) {
+        rawError = Box(AnyhowException("$e\n\n$s"));
+      }
+
+      final serializer = SseSerializer(generalizedFrbRustBinding);
+      assert((rawOutput != null) ^ (rawError != null));
+      if (rawOutput != null) {
+        serializer.buffer.putUint8(0);
+        sse_encode_bool(rawOutput.value, serializer);
       } else {
         serializer.buffer.putUint8(1);
         sse_encode_AnyhowException(rawError!.value, serializer);
@@ -16660,6 +16866,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   @protected
   FutureOr<ExtractedDocument> Function(Uint8List, OcrConfig)
   dco_decode_DartFn_Inputs_list_prim_u_8_strict_ocr_config_Output_extracted_document_AnyhowException(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError('');
+  }
+
+  @protected
+  FutureOr<List<String>> Function(OcrConfig)
+  dco_decode_DartFn_Inputs_ocr_config_Output_list_String_AnyhowException(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    throw UnimplementedError('');
+  }
+
+  @protected
+  FutureOr<bool> Function(OcrConfig, String)
+  dco_decode_DartFn_Inputs_ocr_config_String_Output_bool_AnyhowException(
     dynamic raw,
   ) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -17946,22 +18170,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   BrowserConfig dco_decode_browser_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 13)
-      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
+    if (arr.length != 15)
+      throw Exception('unexpected arr length: expect 15 but see ${arr.length}');
     return BrowserConfig(
       mode: dco_decode_browser_mode(arr[0]),
       backend: dco_decode_browser_backend(arr[1]),
       endpoint: dco_decode_opt_String(arr[2]),
       timeout: dco_decode_i_64(arr[3]),
-      wait: dco_decode_browser_wait(arr[4]),
-      waitSelector: dco_decode_opt_String(arr[5]),
-      extraWait: dco_decode_opt_box_autoadd_i_64(arr[6]),
-      proxy: dco_decode_opt_box_autoadd_proxy_config(arr[7]),
-      blockUrlPatterns: dco_decode_list_String(arr[8]),
-      evalScript: dco_decode_opt_String(arr[9]),
-      robotsUserAgent: dco_decode_opt_String(arr[10]),
-      captureNetworkEvents: dco_decode_bool(arr[11]),
-      sessionAffinity: dco_decode_bool(arr[12]),
+      overallTimeout: dco_decode_i_64(arr[4]),
+      shutdownTimeout: dco_decode_i_64(arr[5]),
+      wait: dco_decode_browser_wait(arr[6]),
+      waitSelector: dco_decode_opt_String(arr[7]),
+      extraWait: dco_decode_opt_box_autoadd_i_64(arr[8]),
+      proxy: dco_decode_opt_box_autoadd_proxy_config(arr[9]),
+      blockUrlPatterns: dco_decode_list_String(arr[10]),
+      evalScript: dco_decode_opt_String(arr[11]),
+      robotsUserAgent: dco_decode_opt_String(arr[12]),
+      captureNetworkEvents: dco_decode_bool(arr[13]),
+      sessionAffinity: dco_decode_bool(arr[14]),
     );
   }
 
@@ -18361,8 +18587,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ContentConfig dco_decode_content_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 12)
-      throw Exception('unexpected arr length: expect 12 but see ${arr.length}');
+    if (arr.length != 13)
+      throw Exception('unexpected arr length: expect 13 but see ${arr.length}');
     return ContentConfig(
       outputFormat: dco_decode_String(arr[0]),
       preprocessingPreset: dco_decode_String(arr[1]),
@@ -18376,6 +18602,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       wrap: dco_decode_bool(arr[9]),
       wrapWidth: dco_decode_i_64(arr[10]),
       includeDocumentStructure: dco_decode_bool(arr[11]),
+      extractMetadata: dco_decode_bool(arr[12]),
     );
   }
 
@@ -18422,8 +18649,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ConversionOptions dco_decode_conversion_options(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 43)
-      throw Exception('unexpected arr length: expect 43 but see ${arr.length}');
+    if (arr.length != 44)
+      throw Exception('unexpected arr length: expect 44 but see ${arr.length}');
     return ConversionOptions(
       headingStyle: dco_decode_heading_style(arr[0]),
       listIndentType: dco_decode_list_indent_type(arr[1]),
@@ -18468,6 +18695,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       maxDepth: dco_decode_opt_box_autoadd_i_64(arr[40]),
       excludeSelectors: dco_decode_list_String(arr[41]),
       tierStrategy: dco_decode_tier_strategy(arr[42]),
+      baseUrl: dco_decode_opt_String(arr[43]),
     );
   }
 
@@ -18500,8 +18728,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   CrawlConfig dco_decode_crawl_config(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 47)
-      throw Exception('unexpected arr length: expect 47 but see ${arr.length}');
+    if (arr.length != 54)
+      throw Exception('unexpected arr length: expect 54 but see ${arr.length}');
     return CrawlConfig(
       maxDepth: dco_decode_opt_box_autoadd_i_64(arr[0]),
       maxPages: dco_decode_opt_box_autoadd_i_64(arr[1]),
@@ -18518,39 +18746,46 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       allowSubdomains: dco_decode_bool(arr[12]),
       includePaths: dco_decode_list_String(arr[13]),
       excludePaths: dco_decode_list_String(arr[14]),
-      customHeaders: dco_decode_Map_String_String_None(arr[15]),
-      requestTimeout: dco_decode_i_64(arr[16]),
-      rateLimitMs: dco_decode_opt_box_autoadd_i_64(arr[17]),
-      maxRedirects: dco_decode_i_64(arr[18]),
-      retryCount: dco_decode_i_64(arr[19]),
-      retryCodes: dco_decode_list_prim_i_64_strict(arr[20]),
-      cookiesEnabled: dco_decode_bool(arr[21]),
-      auth: dco_decode_opt_box_autoadd_auth_config(arr[22]),
-      maxBodySize: dco_decode_opt_box_autoadd_i_64(arr[23]),
-      removeTags: dco_decode_list_String(arr[24]),
-      content: dco_decode_content_config(arr[25]),
-      mapLimit: dco_decode_opt_box_autoadd_i_64(arr[26]),
-      mapSearch: dco_decode_opt_String(arr[27]),
-      downloadAssets: dco_decode_bool(arr[28]),
-      assetTypes: dco_decode_list_asset_category(arr[29]),
-      maxAssetSize: dco_decode_opt_box_autoadd_i_64(arr[30]),
-      browser: dco_decode_browser_config(arr[31]),
-      proxy: dco_decode_opt_box_autoadd_proxy_config(arr[32]),
-      userAgents: dco_decode_list_String(arr[33]),
-      captureScreenshot: dco_decode_bool(arr[34]),
-      followDocumentUrls: dco_decode_bool(arr[35]),
-      documentUrlDepth: dco_decode_opt_box_autoadd_i_64(arr[36]),
-      downloadDocuments: dco_decode_bool(arr[37]),
-      documentMaxSize: dco_decode_opt_box_autoadd_i_64(arr[38]),
-      documentMimeTypes: dco_decode_list_String(arr[39]),
-      documentOutputDir: dco_decode_opt_String(arr[40]),
+      pathPatternsMatchQuery: dco_decode_bool(arr[15]),
+      dedupIncludeQuery: dco_decode_bool(arr[16]),
+      stripTrackingParams: dco_decode_bool(arr[17]),
+      trackingParams: dco_decode_list_String(arr[18]),
+      customHeaders: dco_decode_Map_String_String_None(arr[19]),
+      requestTimeout: dco_decode_i_64(arr[20]),
+      rateLimitMs: dco_decode_opt_box_autoadd_i_64(arr[21]),
+      maxRedirects: dco_decode_i_64(arr[22]),
+      retryCount: dco_decode_i_64(arr[23]),
+      retryCodes: dco_decode_list_prim_i_64_strict(arr[24]),
+      retryInitialDelayMs: dco_decode_i_64(arr[25]),
+      retryMaxDelayMs: dco_decode_i_64(arr[26]),
+      rateLimitJitterRatio: dco_decode_f_64(arr[27]),
+      cookiesEnabled: dco_decode_bool(arr[28]),
+      auth: dco_decode_opt_box_autoadd_auth_config(arr[29]),
+      maxBodySize: dco_decode_opt_box_autoadd_i_64(arr[30]),
+      removeTags: dco_decode_list_String(arr[31]),
+      content: dco_decode_content_config(arr[32]),
+      mapLimit: dco_decode_opt_box_autoadd_i_64(arr[33]),
+      mapSearch: dco_decode_opt_String(arr[34]),
+      downloadAssets: dco_decode_bool(arr[35]),
+      assetTypes: dco_decode_list_asset_category(arr[36]),
+      maxAssetSize: dco_decode_opt_box_autoadd_i_64(arr[37]),
+      browser: dco_decode_browser_config(arr[38]),
+      proxy: dco_decode_opt_box_autoadd_proxy_config(arr[39]),
+      userAgents: dco_decode_list_String(arr[40]),
+      captureScreenshot: dco_decode_bool(arr[41]),
+      followDocumentUrls: dco_decode_bool(arr[42]),
+      documentUrlDepth: dco_decode_opt_box_autoadd_i_64(arr[43]),
+      downloadDocuments: dco_decode_bool(arr[44]),
+      documentMaxSize: dco_decode_opt_box_autoadd_i_64(arr[45]),
+      documentMimeTypes: dco_decode_list_String(arr[46]),
+      documentOutputDir: dco_decode_opt_String(arr[47]),
       documentContentEncoding:
-          dco_decode_opt_box_autoadd_document_content_encoding(arr[41]),
-      warcOutput: dco_decode_opt_String(arr[42]),
-      browserProfile: dco_decode_opt_String(arr[43]),
-      saveBrowserProfile: dco_decode_bool(arr[44]),
-      ssrf: dco_decode_ssrf_policy(arr[45]),
-      ssrfDenyPrivateExplicit: dco_decode_opt_box_autoadd_bool(arr[46]),
+          dco_decode_opt_box_autoadd_document_content_encoding(arr[48]),
+      warcOutput: dco_decode_opt_String(arr[49]),
+      browserProfile: dco_decode_opt_String(arr[50]),
+      saveBrowserProfile: dco_decode_bool(arr[51]),
+      ssrf: dco_decode_ssrf_policy(arr[52]),
+      ssrfDenyPrivateExplicit: dco_decode_opt_box_autoadd_bool(arr[53]),
     );
   }
 
@@ -26545,6 +26780,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_backend = sse_decode_browser_backend(deserializer);
     var var_endpoint = sse_decode_opt_String(deserializer);
     var var_timeout = sse_decode_i_64(deserializer);
+    var var_overallTimeout = sse_decode_i_64(deserializer);
+    var var_shutdownTimeout = sse_decode_i_64(deserializer);
     var var_wait = sse_decode_browser_wait(deserializer);
     var var_waitSelector = sse_decode_opt_String(deserializer);
     var var_extraWait = sse_decode_opt_box_autoadd_i_64(deserializer);
@@ -26559,6 +26796,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       backend: var_backend,
       endpoint: var_endpoint,
       timeout: var_timeout,
+      overallTimeout: var_overallTimeout,
+      shutdownTimeout: var_shutdownTimeout,
       wait: var_wait,
       waitSelector: var_waitSelector,
       extraWait: var_extraWait,
@@ -27047,6 +27286,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_wrap = sse_decode_bool(deserializer);
     var var_wrapWidth = sse_decode_i_64(deserializer);
     var var_includeDocumentStructure = sse_decode_bool(deserializer);
+    var var_extractMetadata = sse_decode_bool(deserializer);
     return ContentConfig(
       outputFormat: var_outputFormat,
       preprocessingPreset: var_preprocessingPreset,
@@ -27060,6 +27300,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       wrap: var_wrap,
       wrapWidth: var_wrapWidth,
       includeDocumentStructure: var_includeDocumentStructure,
+      extractMetadata: var_extractMetadata,
     );
   }
 
@@ -27156,6 +27397,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_maxDepth = sse_decode_opt_box_autoadd_i_64(deserializer);
     var var_excludeSelectors = sse_decode_list_String(deserializer);
     var var_tierStrategy = sse_decode_tier_strategy(deserializer);
+    var var_baseUrl = sse_decode_opt_String(deserializer);
     return ConversionOptions(
       headingStyle: var_headingStyle,
       listIndentType: var_listIndentType,
@@ -27200,6 +27442,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       maxDepth: var_maxDepth,
       excludeSelectors: var_excludeSelectors,
       tierStrategy: var_tierStrategy,
+      baseUrl: var_baseUrl,
     );
   }
 
@@ -27260,12 +27503,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_allowSubdomains = sse_decode_bool(deserializer);
     var var_includePaths = sse_decode_list_String(deserializer);
     var var_excludePaths = sse_decode_list_String(deserializer);
+    var var_pathPatternsMatchQuery = sse_decode_bool(deserializer);
+    var var_dedupIncludeQuery = sse_decode_bool(deserializer);
+    var var_stripTrackingParams = sse_decode_bool(deserializer);
+    var var_trackingParams = sse_decode_list_String(deserializer);
     var var_customHeaders = sse_decode_Map_String_String_None(deserializer);
     var var_requestTimeout = sse_decode_i_64(deserializer);
     var var_rateLimitMs = sse_decode_opt_box_autoadd_i_64(deserializer);
     var var_maxRedirects = sse_decode_i_64(deserializer);
     var var_retryCount = sse_decode_i_64(deserializer);
     var var_retryCodes = sse_decode_list_prim_i_64_strict(deserializer);
+    var var_retryInitialDelayMs = sse_decode_i_64(deserializer);
+    var var_retryMaxDelayMs = sse_decode_i_64(deserializer);
+    var var_rateLimitJitterRatio = sse_decode_f_64(deserializer);
     var var_cookiesEnabled = sse_decode_bool(deserializer);
     var var_auth = sse_decode_opt_box_autoadd_auth_config(deserializer);
     var var_maxBodySize = sse_decode_opt_box_autoadd_i_64(deserializer);
@@ -27311,12 +27561,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       allowSubdomains: var_allowSubdomains,
       includePaths: var_includePaths,
       excludePaths: var_excludePaths,
+      pathPatternsMatchQuery: var_pathPatternsMatchQuery,
+      dedupIncludeQuery: var_dedupIncludeQuery,
+      stripTrackingParams: var_stripTrackingParams,
+      trackingParams: var_trackingParams,
       customHeaders: var_customHeaders,
       requestTimeout: var_requestTimeout,
       rateLimitMs: var_rateLimitMs,
       maxRedirects: var_maxRedirects,
       retryCount: var_retryCount,
       retryCodes: var_retryCodes,
+      retryInitialDelayMs: var_retryInitialDelayMs,
+      retryMaxDelayMs: var_retryMaxDelayMs,
+      rateLimitJitterRatio: var_rateLimitJitterRatio,
       cookiesEnabled: var_cookiesEnabled,
       auth: var_auth,
       maxBodySize: var_maxBodySize,
@@ -36565,6 +36822,30 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_DartFn_Inputs_ocr_config_Output_list_String_AnyhowException(
+    FutureOr<List<String>> Function(OcrConfig) self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_DartOpaque(
+      encode_DartFn_Inputs_ocr_config_Output_list_String_AnyhowException(self),
+      serializer,
+    );
+  }
+
+  @protected
+  void sse_encode_DartFn_Inputs_ocr_config_String_Output_bool_AnyhowException(
+    FutureOr<bool> Function(OcrConfig, String) self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_DartOpaque(
+      encode_DartFn_Inputs_ocr_config_String_Output_bool_AnyhowException(self),
+      serializer,
+    );
+  }
+
+  @protected
   void sse_encode_DartOpaque(Object self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_isize(
@@ -38218,6 +38499,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_browser_backend(self.backend, serializer);
     sse_encode_opt_String(self.endpoint, serializer);
     sse_encode_i_64(self.timeout, serializer);
+    sse_encode_i_64(self.overallTimeout, serializer);
+    sse_encode_i_64(self.shutdownTimeout, serializer);
     sse_encode_browser_wait(self.wait, serializer);
     sse_encode_opt_String(self.waitSelector, serializer);
     sse_encode_opt_box_autoadd_i_64(self.extraWait, serializer);
@@ -38607,6 +38890,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.wrap, serializer);
     sse_encode_i_64(self.wrapWidth, serializer);
     sse_encode_bool(self.includeDocumentStructure, serializer);
+    sse_encode_bool(self.extractMetadata, serializer);
   }
 
   @protected
@@ -38696,6 +38980,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_box_autoadd_i_64(self.maxDepth, serializer);
     sse_encode_list_String(self.excludeSelectors, serializer);
     sse_encode_tier_strategy(self.tierStrategy, serializer);
+    sse_encode_opt_String(self.baseUrl, serializer);
   }
 
   @protected
@@ -38742,12 +39027,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self.allowSubdomains, serializer);
     sse_encode_list_String(self.includePaths, serializer);
     sse_encode_list_String(self.excludePaths, serializer);
+    sse_encode_bool(self.pathPatternsMatchQuery, serializer);
+    sse_encode_bool(self.dedupIncludeQuery, serializer);
+    sse_encode_bool(self.stripTrackingParams, serializer);
+    sse_encode_list_String(self.trackingParams, serializer);
     sse_encode_Map_String_String_None(self.customHeaders, serializer);
     sse_encode_i_64(self.requestTimeout, serializer);
     sse_encode_opt_box_autoadd_i_64(self.rateLimitMs, serializer);
     sse_encode_i_64(self.maxRedirects, serializer);
     sse_encode_i_64(self.retryCount, serializer);
     sse_encode_list_prim_i_64_strict(self.retryCodes, serializer);
+    sse_encode_i_64(self.retryInitialDelayMs, serializer);
+    sse_encode_i_64(self.retryMaxDelayMs, serializer);
+    sse_encode_f_64(self.rateLimitJitterRatio, serializer);
     sse_encode_bool(self.cookiesEnabled, serializer);
     sse_encode_opt_box_autoadd_auth_config(self.auth, serializer);
     sse_encode_opt_box_autoadd_i_64(self.maxBodySize, serializer);

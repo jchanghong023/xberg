@@ -197,6 +197,20 @@ jobs:
         if: ${{ needs.prepare.outputs.target_sha != '' }}
         run: git checkout --progress --force ${{ needs.prepare.outputs.target_sha }}
 
+      # Resolved after "Ensure target commit" so it is the commit actually built, not whatever
+      # `checkout_ref` pointed at. The builder cannot derive it: `.dockerignore` excludes
+      # `**/.git/`, so build.rs falls back to `""` and every image at one crate version shares an
+      # OCR cache key space (#1845) -- including a `force_republish` rebuild at an unchanged
+      # version, which is exactly when serving pre-fix entries is worst. Asserted non-empty
+      # because an empty `--build-arg` looks identical to the bug.
+      - name: Resolve build id
+        id: build_id
+        run: |
+          set -euo pipefail
+          id=$(git rev-parse HEAD)
+          [ -n "$id" ] || { echo "::error::git rev-parse HEAD produced an empty build id"; exit 1; }
+          echo "value=$id" >> "$GITHUB_OUTPUT"
+
       # scripts/ci/docker/test_docker.py bind-mounts test_documents at /data and exercises
       # /data/{pdf,docx,images,doc}/* fixtures across the core/full/cli container tests. ~keep
       - name: Fetch test_documents fixtures
@@ -249,7 +263,7 @@ jobs:
 
       - name: Build test image
         if: ${{ steps.gate.outputs.go == 'true' }}
-        run: docker build -f ${{ matrix.dockerfile }} --platform ${{ matrix.platform.docker }} --build-arg ONNXRUNTIME_VERSION=${{ env.ORT_VERSION }} -t xberg-publish:${{ matrix.variant }}-test .
+        run: docker build -f ${{ matrix.dockerfile }} --platform ${{ matrix.platform.docker }} --build-arg ONNXRUNTIME_VERSION=${{ env.ORT_VERSION }} --build-arg XBERG_BUILD_ID=${{ steps.build_id.outputs.value }} -t xberg-publish:${{ matrix.variant }}-test .
 
       - name: Run Docker tests
         if: ${{ steps.gate.outputs.go == 'true' }}
@@ -273,6 +287,7 @@ jobs:
           platforms: ${{ matrix.platform.docker }}
           build-args: |
             ONNXRUNTIME_VERSION=${{ env.ORT_VERSION }}
+            XBERG_BUILD_ID=${{ steps.build_id.outputs.value }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.description=Xberg document intelligence - ${{ matrix.variant }} variant

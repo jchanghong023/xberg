@@ -38,3 +38,4 @@ pub(crate) const OCR_IMAGE_PREPROCESSING_METADATA_KEY: &str = "image_preprocessi
 /// sized, preprocessed, or rotated pages in a multi-page document; a consumer joins this
 /// array to an `OcrElement` through the element's own `page_number` instead.
 pub(crate) const OCR_PAGE_COORDINATE_FRAMES_METADATA_KEY: &str = "ocr_page_coordinate_frames";
+pub(crate) const OCR_PAGE_SEGMENTATION_MODES_METADATA_KEY: &str = "ocr_page_segmentation_modes";

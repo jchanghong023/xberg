@@ -1,0 +1,48 @@
+{
+  "use_cache": false,
+  "output_format": "markdown",
+  "chunking": {
+    "chunker_type": "markdown",
+    "max_characters": 3500,
+    "overlap": 0
+  },
+  "images": {
+    "extract_images": true,
+    "run_ocr_on_images": false,
+    "max_images_per_page": 10,
+    "max_image_dimension": 2000
+  },
+  "language_detection": {
+    "enabled": false
+  },
+  "force_ocr": false,
+  "layout": {
+    "strategy": "auto",
+    "apply_heuristics": true,
+    "table_model": "tatr"
+  },
+  "ocr": {
+    "enabled": true,
+    "backend": "tesseract",
+    "language": ["eng"]
+  },
+  "pdf_options": {
+    "extract_images": true,
+    "ocr_inline_images": false
+  },
+  "extraction_timeout_secs": 60,
+  "security_limits": {
+    "max_archive_size": 524288000,
+    "max_content_size": 524288000,
+    "max_files_in_archive": 20000,
+    "max_table_cells": 2000000
+  },
+  "disable_ocr": false,
+  "ocr_strategy": {
+    "mode": "scanned_pages",
+    "min_confidence": 0.7
+  },
+  "pages": {
+    "extract_pages": true
+  }
+}

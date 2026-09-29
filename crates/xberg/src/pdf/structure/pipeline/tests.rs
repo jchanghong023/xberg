@@ -6853,3 +6853,111 @@ fn stub_line_beneath_a_heading_run_is_not_read_as_the_column_gh1758() {
     );
     assert_eq!(texts[1], "Panel B", "the stub stays out of the heading");
 }
+
+/// GH#1806: a left column's last line and the right column's first body line, on a page
+/// whose reading order is `TopToBottom`, whose boxes overlap by 2.5pt in y so no
+/// paragraph gap separates them, and which agree on every other break signal (font, role,
+/// weight, list marker, section number). `crossed_gap` only tests the VERTICAL axis, so
+/// before this fix nothing prevented the two from being read as one paragraph, welding
+/// two unrelated sentences from opposite columns into one full-width element.
+#[test]
+fn blocks_to_paragraphs_does_not_weld_across_the_column_corridor_gh1806() {
+    let segments = vec![
+        column_seg(
+            "Left column opening line of the short band under the figure",
+            38.0,
+            251.0,
+            140.0,
+        ),
+        column_seg(
+            "continuing the left column's own paragraph text here",
+            38.0,
+            251.0,
+            129.0,
+        ),
+        column_seg(
+            "and this is the left column's very last line of the band",
+            38.0,
+            251.0,
+            118.0,
+        ),
+        column_seg(
+            "Right column opens its own paragraph on this very line",
+            307.0,
+            251.0,
+            120.5,
+        ),
+        column_seg(
+            "and continues here with the right column's second line",
+            307.0,
+            251.0,
+            109.0,
+        ),
+        column_seg(
+            "and a third right column line completes the band here",
+            307.0,
+            251.0,
+            98.0,
+        ),
+    ];
+
+    let corridor = page_column_corridor(&segments);
+    assert_eq!(
+        corridor,
+        Some((289.0, 307.0)),
+        "the 18pt gutter must be found as the page's sole corridor"
+    );
+
+    let paragraphs = blocks_to_paragraphs(segments, &[], &[]);
+    let texts: Vec<String> = paragraphs.iter().map(paragraph_segment_text).collect();
+    assert_eq!(
+        texts.len(),
+        2,
+        "the left column's band and the right column's band must stay two elements, got {texts:?}"
+    );
+    assert!(
+        texts[0].ends_with("very last line of the band"),
+        "left column text must not carry right-column text: {:?}",
+        texts[0]
+    );
+    assert!(
+        texts[1].starts_with("Right column opens"),
+        "right column text must not carry left-column text: {:?}",
+        texts[1]
+    );
+}
+
+/// Control for GH#1806: the same near-tied baselines and identical style signals, but
+/// with no second column present at all -- `page_column_corridor` finds no corridor
+/// (fewer than two surviving extents once there is only one column), and the lines merge
+/// exactly as they did before this fix.
+#[test]
+fn blocks_to_paragraphs_merges_normally_without_a_column_corridor_gh1806() {
+    let segments = vec![
+        column_seg(
+            "Left column opening line of the short band under the figure",
+            38.0,
+            251.0,
+            140.0,
+        ),
+        column_seg(
+            "and this is the left column's very last line of the band",
+            38.0,
+            251.0,
+            129.0,
+        ),
+    ];
+
+    assert_eq!(
+        page_column_corridor(&segments),
+        None,
+        "a single column must present no corridor"
+    );
+
+    let paragraphs = blocks_to_paragraphs(segments, &[], &[]);
+    assert_eq!(
+        paragraphs.len(),
+        1,
+        "with no corridor, the two lines merge as before this fix"
+    );
+}

@@ -432,6 +432,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  FutureOr<List<String>> Function(OcrConfig)
+  dco_decode_DartFn_Inputs_ocr_config_Output_list_String_AnyhowException(
+    dynamic raw,
+  );
+
+  @protected
+  FutureOr<bool> Function(OcrConfig, String)
+  dco_decode_DartFn_Inputs_ocr_config_String_Output_bool_AnyhowException(
+    dynamic raw,
+  );
+
+  @protected
   Object dco_decode_DartOpaque(dynamic raw);
 
   @protected
@@ -6568,6 +6580,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void
   sse_encode_DartFn_Inputs_list_prim_u_8_strict_ocr_config_Output_extracted_document_AnyhowException(
     FutureOr<ExtractedDocument> Function(Uint8List, OcrConfig) self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_DartFn_Inputs_ocr_config_Output_list_String_AnyhowException(
+    FutureOr<List<String>> Function(OcrConfig) self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_DartFn_Inputs_ocr_config_String_Output_bool_AnyhowException(
+    FutureOr<bool> Function(OcrConfig, String) self,
     SseSerializer serializer,
   );
 

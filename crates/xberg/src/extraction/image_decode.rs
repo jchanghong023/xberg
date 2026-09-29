@@ -249,7 +249,7 @@ pub(crate) fn decode_standard_image_with_security_limits(
 
 // Same reasoning as `decode_standard_image_with_security_limits` above; this one is additionally
 // reached from `clone_dynamic_image_to_rgb8_with_security_limits`, whose own gate
-// (`layout-detection` + `ocr`/`ocr-wasm`) is already covered by the `ocr` arms here. ~keep
+// (`layout-detection` + `pdf` + `ocr`/`ocr-wasm`) is already covered by the `pdf` arm here. ~keep
 #[cfg(any(
     test,
     feature = "image-encode",
@@ -287,7 +287,11 @@ pub(crate) fn validate_image_live_bytes(
     ImageDecodeBudget::from_security_limits(limits).validate(width, height, peak_bytes)
 }
 
-#[cfg(all(feature = "layout-detection", any(feature = "ocr", feature = "ocr-wasm")))]
+#[cfg(all(
+    feature = "layout-detection",
+    feature = "pdf",
+    any(feature = "ocr", feature = "ocr-wasm")
+))]
 pub(crate) fn clone_dynamic_image_to_rgb8_with_security_limits(
     image: &image::DynamicImage,
     limits: &SecurityLimits,

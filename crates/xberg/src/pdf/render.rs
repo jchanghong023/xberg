@@ -415,6 +415,15 @@ pub fn take_xberg_native_pdf_render_warnings() -> Vec<ProcessingWarning> {
     ENGINE_PENDING_WARNINGS.with(|pending| std::mem::take(&mut *pending.borrow_mut()))
 }
 
+// ~keep Liveness is configuration-dependent: the only consumers are compiled out on
+// narrow feature legs, so `-D dead-code` fires there and nowhere else. A hand-kept
+// union-of-consumers `cfg` is what drifted here and failed the 1.3.0 publish (GH#1951).
+#[cfg(feature = "pdf")]
+#[allow(dead_code)]
+pub(crate) fn record_render_warning(warning: ProcessingWarning) {
+    ENGINE_PENDING_WARNINGS.with(|pending| push_warning_deduped(&mut pending.borrow_mut(), warning));
+}
+
 /// Deposit warnings drained on another thread into *this* thread's pending buffer, so a later
 /// [`take_xberg_native_pdf_render_warnings`] here returns them.
 ///
@@ -428,13 +437,19 @@ pub fn take_xberg_native_pdf_render_warnings() -> Vec<ProcessingWarning> {
 ///
 /// Deduped on arrival, matching the per-thread drain's own behaviour: the same engine
 /// diagnostic raised on several pages is one warning to the caller. ~keep
-/// Render `page_indices` across the rayon pool, keeping each page's render warnings.
+/// Render `page_indices` across the rayon pool, keeping each page's render warnings **in page
+/// order**.
 ///
 /// The per-page drain has to happen on the worker that rendered, because
 /// [`ENGINE_PENDING_WARNINGS`] is thread-local; the collected set is then deposited into the
 /// calling thread's buffer, where the extractor's own drain finds it. Lives here rather than at
 /// the two call sites so the thread-affinity rule is stated once, next to the buffer it is about
-/// (xberg-io/xberg#1847). ~keep
+/// (xberg-io/xberg#1847).
+///
+/// Each page's warnings ride back with that page's result rather than going into one shared list
+/// as workers finish, because a shared list holds them in completion order and makes the caller's
+/// `processing_warnings` vary run to run on identical input (xberg-io/xberg#1851). rayon's
+/// indexed `collect` preserves `page_indices`' order, so merging afterwards needs no sort. ~keep
 #[cfg(all(
     feature = "pdf",
     any(feature = "ocr", feature = "ocr-pipeline"),
@@ -447,26 +462,62 @@ pub(crate) fn par_render_pages_collecting_warnings<T: Send>(
 ) -> crate::Result<Vec<T>> {
     use rayon::prelude::*;
 
-    let collected: std::sync::Mutex<Vec<ProcessingWarning>> = std::sync::Mutex::default();
-    let rendered: crate::Result<Vec<T>> = page_indices
+    let rendered: Vec<(T, Vec<ProcessingWarning>)> = page_indices
         .into_par_iter()
-        .map(|page_index| {
-            let page = render(page_index);
-            let warnings = take_xberg_native_pdf_render_warnings();
-            if !warnings.is_empty()
-                && let Ok(mut collected) = collected.lock()
-            {
-                collected.extend(warnings);
-            }
-            page
-        })
-        .collect();
-    absorb_render_warnings(collected.into_inner().unwrap_or_default());
-    rendered
+        .map(|page_index| render(page_index).map(|page| (page, take_xberg_native_pdf_render_warnings())))
+        .collect::<crate::Result<Vec<_>>>()?;
+
+    let mut pages = Vec::with_capacity(rendered.len());
+    let mut warnings = Vec::new();
+    for (page, page_warnings) in rendered {
+        pages.push(page);
+        warnings.extend(page_warnings);
+    }
+    absorb_render_warnings(warnings);
+    Ok(pages)
 }
 
-#[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
-pub(crate) fn absorb_render_warnings(warnings: Vec<ProcessingWarning>) {
+#[cfg(all(
+    feature = "pdf",
+    any(feature = "ocr", feature = "ocr-pipeline"),
+    feature = "tokio-runtime",
+    not(target_arch = "wasm32")
+))]
+pub(crate) fn par_render_pages_collecting_results<T: Send>(
+    page_indices: Vec<usize>,
+    render: impl Fn(usize) -> crate::Result<T> + Sync + Send,
+) -> Vec<(usize, crate::Result<T>)> {
+    use rayon::prelude::*;
+
+    let rendered: Vec<(usize, crate::Result<T>, Vec<ProcessingWarning>)> = page_indices
+        .into_par_iter()
+        .map(|page_index| {
+            let result = render(page_index);
+            (page_index, result, take_xberg_native_pdf_render_warnings())
+        })
+        .collect();
+
+    let mut outcomes = Vec::with_capacity(rendered.len());
+    let mut warnings = Vec::new();
+    for (page_index, result, page_warnings) in rendered {
+        outcomes.push((page_index, result));
+        warnings.extend(page_warnings);
+    }
+    absorb_render_warnings(warnings);
+    outcomes
+}
+
+// ~keep The cfg is the caller's, not a looser one: this has one call site,
+// `par_render_pages_collecting_warnings` above, and a helper gated wider than the union of
+// its call sites is dead code on whichever leg falls in the gap -- here `wasm-target`, which
+// no local gate builds (GH#1861).
+#[cfg(all(
+    feature = "pdf",
+    any(feature = "ocr", feature = "ocr-pipeline"),
+    feature = "tokio-runtime",
+    not(target_arch = "wasm32")
+))]
+fn absorb_render_warnings(warnings: Vec<ProcessingWarning>) {
     if warnings.is_empty() {
         return;
     }
@@ -911,10 +962,19 @@ pub(crate) fn open_pdf_document(pdf_bytes: &[u8], password: Option<&str>) -> Res
     })?;
 
     if let Some(pwd) = password {
-        doc.authenticate(pwd.as_bytes()).map_err(|e| XbergError::Parsing {
+        // `authenticate` reports a rejected password as `Ok(false)`, not as an `Err`, so the
+        // bool is the only signal that the password was wrong. Dropping it accepted every
+        // wrong password silently. ~keep
+        let authenticated = doc.authenticate(pwd.as_bytes()).map_err(|e| XbergError::Parsing {
             message: format!("Failed to authenticate PDF: {e}"),
             source: None,
         })?;
+        if !authenticated {
+            return Err(XbergError::Parsing {
+                message: "Failed to authenticate PDF: the supplied password was rejected".to_string(),
+                source: None,
+            });
+        }
     }
 
     Ok(doc)

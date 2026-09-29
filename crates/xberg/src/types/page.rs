@@ -139,6 +139,7 @@ pub struct PageInfo {
 
     /// Dimensions in points (PDF) or pixels (images).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub dimensions: Option<PageDimensions>,
 
     /// Number of images on this page
@@ -215,12 +216,14 @@ pub struct PageContent {
 
     /// OCR image preprocessing applied to this page's raster.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub image_preprocessing: Option<super::ImagePreprocessingMetadata>,
 
     /// Hierarchy information for the page (when hierarchy extraction is enabled)
     ///
     /// Contains text hierarchy levels (H1-H6) extracted from the page content.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub hierarchy: Option<PageHierarchy>,
 
     /// Whether this page is blank (no meaningful text content)
@@ -263,6 +266,7 @@ pub struct PageContent {
 
     /// Aggregate OCR confidence for this page. `None` when the page was not OCR'd.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub ocr_confidence: Option<PageOcrConfidence>,
 }
 
@@ -452,6 +456,7 @@ pub struct HierarchicalBlock {
     ///
     /// Contains left, top, right, and bottom coordinates in PDF units.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub bbox: Option<HierarchicalBoundingBox>,
 }
 

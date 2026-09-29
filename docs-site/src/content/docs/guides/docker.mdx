@@ -260,12 +260,16 @@ The published Core and Full images cover most use cases. For specialized needs, 
 | `Dockerfile.musl-ffi`     | Static C FFI library for language bindings (Go, Ruby, PHP, Elixir)                    |
 | `Dockerfile.musl-rustler` | MUSL-based Rustler NIF for Elixir                                                     |
 
+Every Dockerfile that compiles Rust requires `XBERG_BUILD_ID` as a build argument. It is folded into
+the OCR cache key so two builds of the same crate version never serve each other's cached results;
+the build fails rather than defaulting to an empty value.
+
 ### CLI Image
 
 A stripped-down image with only the CLI binary. No server, no API — just extraction:
 
 ```bash title="Terminal"
-docker build -f docker/Dockerfile.cli -t xberg-cli .
+docker build -f docker/Dockerfile.cli --build-arg XBERG_BUILD_ID="$(git rev-parse HEAD)" -t xberg-cli .
 
 docker run -v $(pwd):/data xberg-cli extract /data/document.pdf
 docker run -v $(pwd):/data xberg-cli batch /data/*.pdf --format json
@@ -277,8 +281,8 @@ docker run -v $(pwd):/data xberg-cli detect /data/unknown-file.bin
 These produce binaries with zero dynamic library dependencies. A single file that runs on any Linux — Alpine, scratch containers, bare EC2 instances, whatever.
 
 ```bash title="Terminal"
-docker build -f docker/Dockerfile.musl-build -t xberg-musl-build .
-docker build -f docker/Dockerfile.musl-ffi -t xberg-musl-ffi .
+docker build -f docker/Dockerfile.musl-build --build-arg XBERG_BUILD_ID="$(git rev-parse HEAD)" -t xberg-musl-build .
+docker build -f docker/Dockerfile.musl-ffi --build-arg XBERG_BUILD_ID="$(git rev-parse HEAD)" -t xberg-musl-ffi .
 ```
 
 The FFI variant builds a shared library used by the Go, Ruby, PHP, and Elixir bindings for portable cross-platform distribution.

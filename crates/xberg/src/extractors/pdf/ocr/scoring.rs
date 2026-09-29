@@ -1351,12 +1351,12 @@ pub(crate) fn evaluate_per_page_ocr(
             })
             .sum::<usize>()
             == native_text.chars().filter(|character| *character == '\u{FFFD}').count();
-    let can_defer_absolute_garbage_threshold = boundaries.len() > 1
-        && boundary_count_matches_pages
+    let can_evaluate_every_page = boundary_count_matches_pages
         && all_boundaries_are_valid
         && boundaries_are_ordered
         && page_numbers_are_complete
         && all_garbage_is_covered;
+    let can_defer_absolute_garbage_threshold = boundaries.len() > 1 && can_evaluate_every_page;
 
     // Defer the aggregate absolute count only when every page can be evaluated; otherwise
     // the document-level check is the only way to preserve the configured fallback threshold. ~keep
@@ -1367,8 +1367,12 @@ pub(crate) fn evaluate_per_page_ocr(
         !can_defer_absolute_garbage_threshold,
     );
 
-    if document_decision.whole_doc_failure {
+    if document_decision.whole_doc_failure && !can_evaluate_every_page {
         return document_decision;
+    }
+    if can_evaluate_every_page {
+        document_decision.fallback = false;
+        document_decision.whole_doc_failure = false;
     }
 
     let mut failing_pages: Vec<u32> = Vec::with_capacity(boundaries.len());

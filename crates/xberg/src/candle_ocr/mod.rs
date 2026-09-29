@@ -80,6 +80,32 @@ use crate::core::config::{AccelerationConfig, ExecutionProviderType, OcrConfig};
 ))]
 use xberg_candle_ocr::DevicePreference;
 
+/// Check `backend_options` for the candle backend named `backend`.
+///
+/// Uses the same check the backend runs on each page. A backend that is not a
+/// compiled candle backend has nothing to check here. ~keep
+#[cfg(any(
+    feature = "candle-trocr",
+    feature = "candle-paddleocr-vl",
+    all(
+        not(target_arch = "wasm32"),
+        any(feature = "candle-glm-ocr", feature = "candle-deepseek-ocr")
+    )
+))]
+pub(crate) fn validate_backend_options(backend: &str, value: Option<&serde_json::Value>) -> crate::Result<()> {
+    match crate::plugins::registry::canonical_ocr_backend_name(backend).as_str() {
+        #[cfg(feature = "candle-trocr")]
+        "candle-trocr" => trocr_backend::check_backend_options(value).map(drop),
+        #[cfg(feature = "candle-paddleocr-vl")]
+        "candle-paddleocr-vl" => paddleocr_vl_backend::check_backend_options(value).map(drop),
+        #[cfg(all(feature = "candle-glm-ocr", not(target_arch = "wasm32")))]
+        "candle-glm-ocr" => glm_ocr_backend::check_backend_options(value).map(drop),
+        #[cfg(all(feature = "candle-deepseek-ocr", not(target_arch = "wasm32")))]
+        "candle-deepseek-ocr" => deepseek_ocr_backend::check_backend_options(value).map(drop),
+        _ => Ok(()),
+    }
+}
+
 /// Resolve a candle [`DevicePreference`] from the centralised acceleration
 /// config plus a validated backend-specific device override.
 ///

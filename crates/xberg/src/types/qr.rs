@@ -21,6 +21,7 @@ pub struct QrCode {
     /// (`x`, `y` of the top-left corner; `width`, `height` of the rectangle).
     /// `None` if the decoder did not report a bounding box.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub bbox: Option<QrBoundingBox>,
 }
 

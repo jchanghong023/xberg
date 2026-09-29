@@ -4,7 +4,12 @@
 FROM alpine:3.21 AS builder
 
 ARG RUST_TOOLCHAIN=nightly-2026-03-10
-ARG PDFIUM_VERSION=7881
+# Must equal the binding set compiled into xberg-pdfium-render
+# (`src/lib.rs` includes `bindgen/pdfium_7678.rs`, the only one in the tree). The engine
+# dlopen()s this library at run time, so a mismatch is not a build error: a missing symbol
+# surfaces as MissingDependency via the 446-symbol probe, but a symbol whose signature or
+# struct layout changed is undetected (build.rs sets layout_tests(false)). ~keep
+ARG PDFIUM_VERSION=7678
 
 WORKDIR /build
 
@@ -62,7 +67,14 @@ COPY crates/xberg-windows-metafile/ crates/xberg-windows-metafile/
 
 RUN sed -i '/xberg-py/d; /xberg_rb/d; /xberg-node/d; /xberg-ffi/d; /xberg-jni/d; /xberg-php/d; /xberg-rag/d; /xberg_rustler/d; /xberg_nif/d; /packages\/dart\/rust/d; /packages\/swift\/rust/d; /\"crates\/xberg-wasm\"/d; /^\[profile\.release\.package\.xberg-wasm\]$/,$d; /benchmark-harness/d; /e2e-generator/d; /e2e\/rust/d' Cargo.toml
 
-RUN cargo build --release --package xberg-cli --features all && \
+# See #1845: `.dockerignore` excludes `**/.git/`, so build.rs's git derivation fails even though
+# `git` is installed above, and XBERG_BUILD_ID falls back to `""` -- collapsing the OCR cache key
+# space across every image at the same crate version. Unset is a hard failure; an empty value
+# would fall back through build.rs's `!id.is_empty()` check and silently restore it. ~keep
+ARG XBERG_BUILD_ID
+
+RUN : "${XBERG_BUILD_ID:?must be passed: --build-arg XBERG_BUILD_ID=<commit sha>; see crates/xberg/build.rs}" && \
+    cargo build --release --package xberg-cli --features all && \
     cp target/release/xberg /build/xberg && \
     strip /build/xberg
 
@@ -96,10 +108,17 @@ LABEL org.opencontainers.image.source="https://github.com/xberg-io/xberg"
 LABEL org.opencontainers.image.description="Xberg document intelligence - CLI variant"
 LABEL org.opencontainers.image.licenses="MIT"
 
+ARG XBERG_BUILD_ID
+
 # Read at runtime by extract_core_pdfium's bind_once() -- see
 # crates/xberg/src/extractors/pdf/pdfium_engine.rs. Set explicitly rather than
 # relying on musl's default dlopen search path, which is not guaranteed to
 # include /usr/local/lib.
 ENV PDFIUM_DYNAMIC_LIB_PATH=/usr/local/lib
+
+# Inspection only: `cache_version_tag` reads this through `env!`, so it is baked in at compile
+# time and a runtime value changes nothing. Present so `docker inspect` can report which build id
+# the binary carries. ~keep
+ENV XBERG_BUILD_ID=${XBERG_BUILD_ID}
 
 ENTRYPOINT ["xberg"]

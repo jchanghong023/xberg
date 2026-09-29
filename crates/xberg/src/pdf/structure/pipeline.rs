@@ -1975,6 +1975,76 @@ fn visual_line_texts(lines: &[SegmentData]) -> Vec<String> {
     texts
 }
 
+// GH#1806: values mirror the column-gutter bounds already measured for the equivalent
+// span-level question in `pdf::native::text` (`MIN_DENSE_COLUMN_GUTTER_FRACTION`/`_PTS`,
+// `MAX_DENSE_COLUMN_GUTTER_FRACTION`, `FULL_WIDTH_FURNITURE_FRACTION`), restated here
+// against this consumer's own content-width estimate rather than re-derived from
+// scratch. ~keep
+const PARAGRAPH_COLUMN_GUTTER_MIN_FRACTION: f32 = 0.02;
+const PARAGRAPH_COLUMN_GUTTER_MIN_PTS: f32 = 10.0;
+const PARAGRAPH_COLUMN_GUTTER_MAX_FRACTION: f32 = 0.25;
+const PARAGRAPH_FULL_WIDTH_FURNITURE_FRACTION: f32 = 0.55;
+
+/// The page's single column corridor, from `lines`' own geometry: an x-interval (in each
+/// segment's own upright reading frame) that no segment's ink occupies. `None` when the
+/// page presents no such corridor (a single column) or several (a grid/form/table) --
+/// several qualifying corridors is the same "not a two-column page" signal
+/// `document::columns::prose_two_column_gutter` already applies at the span level.
+///
+/// GH#1806: computed here, from `SegmentData`, rather than threaded down from
+/// `native::hierarchy`'s own span-level gutter detection. This grouper is the only
+/// consumer of the result, and threading it through would add a per-page channel through
+/// `extract_all_segments`, `SegmentStructureConfig` and `PageInput` for one bool per
+/// paragraph boundary. This is a MERGE-SUPPRESSION consumer only -- it can suppress a
+/// break vote's absence, never force one -- so a corridor found here that later turns out
+/// not to be a real column gutter can only leave two segments un-merged, never wrongly
+/// merge or reorder anything. ~keep
+fn page_column_corridor(lines: &[SegmentData]) -> Option<(f32, f32)> {
+    let mut extents: Vec<(f32, f32)> = lines
+        .iter()
+        .filter(|line| !line.text.trim().is_empty())
+        .map(SegmentData::upright_advance_extent)
+        .filter(|&(left, right)| left.is_finite() && right.is_finite() && right > left)
+        .collect();
+    if extents.len() < 2 {
+        return None;
+    }
+    let content_min = extents.iter().map(|&(left, _)| left).fold(f32::INFINITY, f32::min);
+    let content_max = extents
+        .iter()
+        .map(|&(_, right)| right)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let content_width = content_max - content_min;
+    if !(content_width.is_finite() && content_width > 0.0) {
+        return None;
+    }
+
+    // A full-width line (a title, a running header, a footer) straddles any real column
+    // corridor by construction and must not be read as occupying "one side" of it. ~keep
+    let furniture_width = content_width * PARAGRAPH_FULL_WIDTH_FURNITURE_FRACTION;
+    extents.retain(|&(left, right)| right - left < furniture_width);
+    if extents.len() < 2 {
+        return None;
+    }
+    let min_gutter = (content_width * PARAGRAPH_COLUMN_GUTTER_MIN_FRACTION).max(PARAGRAPH_COLUMN_GUTTER_MIN_PTS);
+    let max_gutter = content_width * PARAGRAPH_COLUMN_GUTTER_MAX_FRACTION;
+    extents.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let mut corridors: Vec<(f32, f32)> = Vec::new();
+    let mut running_right = extents[0].1;
+    for &(left, right) in &extents[1..] {
+        if left - running_right >= min_gutter {
+            corridors.push((running_right, left));
+        }
+        running_right = running_right.max(right);
+    }
+    let mut qualifying = corridors
+        .into_iter()
+        .filter(|&(left, right)| right - left <= max_gutter);
+    let first = qualifying.next()?;
+    qualifying.next().is_none().then_some(first)
+}
+
 fn blocks_to_paragraphs(
     lines: Vec<SegmentData>,
     heading_map: &[(f32, Option<u8>)],
@@ -1986,6 +2056,7 @@ fn blocks_to_paragraphs(
 
     let gap_info = super::classify::precompute_gap_info(heading_map);
     let visual_line_texts = visual_line_texts(&lines);
+    let column_corridor = page_column_corridor(&lines);
 
     let mut paragraphs: Vec<PdfParagraph> = Vec::new();
     let mut current_lines: Vec<&SegmentData> = Vec::new();
@@ -2146,6 +2217,24 @@ fn blocks_to_paragraphs(
                     };
                     gap_y < upper && gap_y > lower
                 });
+            // GH#1806: two lines on opposite sides of the page's column corridor, sharing
+            // no horizontal extent at all, are not one paragraph -- whatever reading order
+            // the page is in. The existing terms vote on rotation, font, role, weight, list
+            // marker, section number and VERTICAL gap; none of them has a horizontal term,
+            // so a left column's last line and the right column's first body line, whose
+            // boxes happened to overlap by a couple of points in y, were merged into one
+            // full-width element. A full-width line straddles the corridor by construction
+            // (see `page_column_corridor`), so it can never satisfy "opposite sides" and is
+            // unaffected; a heading's own two sides sharing a baseline are two entries in
+            // `lines`, not one, so `starts_new_line` (required here) already excludes that
+            // case, which `find_heading_runs` handles on its own path (GH#1809). ~keep
+            let crosses_column_corridor = starts_new_line
+                && column_corridor.is_some_and(|(corridor_left, corridor_right)| {
+                    let (prev_left, prev_right) = prev.upright_advance_extent();
+                    let (line_left, line_right) = line.upright_advance_extent();
+                    (prev_right <= corridor_left && line_left >= corridor_right)
+                        || (line_right <= corridor_left && prev_left >= corridor_right)
+                });
             rotation_change
                 || font_change
                 || role_change
@@ -2154,6 +2243,7 @@ fn blocks_to_paragraphs(
                 || starts_section
                 || follows_section
                 || crossed_gap
+                || crosses_column_corridor
         };
 
         if should_break && !current_lines.is_empty() {

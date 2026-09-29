@@ -5,7 +5,12 @@
 mod helpers;
 use helpers::extract_bytes_document_blocking;
 
-use xberg::core::config::{ExtractionConfig, OutputFormat, PdfConfig};
+use xberg::core::config::{ExtractionConfig, OutputFormat};
+// Only the `layout-detection`-gated test builds a `PdfConfig`, so the import carries the same
+// gate: a helper's cfg must equal the union of its users' cfgs, or a narrow feature leg fails on
+// `unused_imports` under `-D warnings`. ~keep
+#[cfg(feature = "layout-detection")]
+use xberg::core::config::PdfConfig;
 
 const ISSUE_1484_PDF: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -85,6 +90,11 @@ fn native_two_column_pdf_uses_column_block_reading_order() {
     assert_eq!(normalized_content(&ExtractionConfig::default()), expected);
 }
 
+// `pdf_options.reading_order` is rejected by config validation without `layout-detection`
+// ("requires the layout-detection feature"), so on a `pdf`-only build this test cannot pass --
+// it is the only test in the file that sets the option, which is why the file-level
+// `#![cfg(feature = "pdf")]` is not enough for it. ~keep
+#[cfg(feature = "layout-detection")]
 #[test]
 fn explicit_reading_order_uses_column_block_reading_order() {
     let config = ExtractionConfig {

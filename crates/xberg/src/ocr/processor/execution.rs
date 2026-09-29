@@ -25,7 +25,10 @@ use crate::ocr::preprocessing::preprocess_pix;
 use crate::ocr::preprocessing::should_invert_for_polarity;
 #[cfg(feature = "pdf")]
 use crate::ocr::table::post_process_table;
-use crate::ocr::table::{extract_words_from_tsv, reconstruct_table_with_columns, table_to_markdown};
+use crate::ocr::table::{
+    TableWords, extract_table_words_from_tsv, extract_words_from_tsv, reconstruct_table_with_columns,
+    shading_mark_keep_mask, table_to_markdown,
+};
 #[cfg(test)]
 use crate::ocr::types::BatchItemResult;
 use crate::ocr::types::TesseractConfig;
@@ -53,8 +56,8 @@ fn doc_orientation_detector() -> &'static crate::doc_orientation::DocOrientation
 }
 
 use crate::table_core::{
-    HocrWord, MIN_TABLE_CANDIDATE_WORDS, cluster_words_into_table_regions, detect_rows, drop_leading_caption_row,
-    median_word_height, merge_disjoint_numeric_columns,
+    HocrWord, MIN_TABLE_CANDIDATE_WORDS, cluster_word_indices_into_table_regions, detect_rows,
+    drop_leading_caption_row, median_word_height, merge_disjoint_numeric_columns,
 };
 use crate::types::OcrElement;
 
@@ -490,6 +493,126 @@ fn recognize_quantity_region(
     })
 }
 
+/// The words of one table region, each with the box Tesseract read for it at the same index.
+struct TableRegion {
+    words: Vec<HocrWord>,
+    read_boxes: Vec<HocrWord>,
+}
+
+impl TableRegion {
+    fn push(&mut self, word: HocrWord) {
+        self.read_boxes.push(word.clone());
+        self.words.push(word);
+    }
+
+    /// Drop the shading marks Tesseract read as words, from `words` and `read_boxes` together.
+    ///
+    /// The decision reads `read_boxes`, not `words`: `words` may already have been moved onto its
+    /// row's line band, which pulls a mark's height towards the row median and hides it from the
+    /// filter. Filtering both vectors with one mask keeps the same-index invariant `bounding_box`
+    /// relies on. ~keep
+    fn drop_shading_marks(&mut self, row_threshold_ratio: f64) {
+        let keep = shading_mark_keep_mask(&self.read_boxes, row_threshold_ratio);
+        debug_assert_eq!(
+            self.words.len(),
+            self.read_boxes.len(),
+            "TableRegion vectors must stay parallel"
+        );
+        self.words = std::mem::take(&mut self.words)
+            .into_iter()
+            .zip(&keep)
+            .filter(|(_, keep)| **keep)
+            .map(|(word, _)| word)
+            .collect();
+        self.read_boxes = std::mem::take(&mut self.read_boxes)
+            .into_iter()
+            .zip(&keep)
+            .filter(|(_, keep)| **keep)
+            .map(|(word, _)| word)
+            .collect();
+    }
+
+    /// Remove the frame strokes produced by normalized shaded bands when Tesseract reads them as
+    /// leading `[` glyphs or outer-edge `|` words. Requiring repeated bracket-prefixed alphabetic
+    /// words at the same left edge distinguishes this raster artifact from real bracketed content;
+    /// the caller additionally gates it on shaded-row normalization. ~keep
+    fn drop_normalized_band_edge_glyphs(&mut self) {
+        if self.read_boxes.len() < 2 {
+            return;
+        }
+        let left = self.read_boxes.iter().map(|word| word.left).min().unwrap_or(0);
+        let right = self
+            .read_boxes
+            .iter()
+            .map(|word| word.left.saturating_add(word.width))
+            .max()
+            .unwrap_or(0);
+        let edge_tolerance = median_word_height(&self.read_boxes).max(1);
+        let is_bracket_prefix = |word: &HocrWord| {
+            word.left <= left.saturating_add(edge_tolerance)
+                && word
+                    .text
+                    .strip_prefix('[')
+                    .is_some_and(|rest| !rest.is_empty() && rest.chars().all(|character| character.is_alphabetic()))
+        };
+        if self.read_boxes.iter().filter(|word| is_bracket_prefix(word)).count() < 2 {
+            return;
+        }
+
+        let keep: Vec<bool> = self
+            .read_boxes
+            .iter()
+            .map(|word| {
+                let word_right = word.left.saturating_add(word.width);
+                word.text != "|"
+                    || !(word.left <= left.saturating_add(edge_tolerance)
+                        || word_right.saturating_add(edge_tolerance) >= right)
+            })
+            .collect();
+        for (word, read_box) in self.words.iter_mut().zip(&mut self.read_boxes) {
+            if is_bracket_prefix(read_box) {
+                word.text.remove(0);
+                read_box.text.remove(0);
+            }
+        }
+        self.words = std::mem::take(&mut self.words)
+            .into_iter()
+            .zip(&keep)
+            .filter(|(_, keep)| **keep)
+            .map(|(word, _)| word)
+            .collect();
+        self.read_boxes = std::mem::take(&mut self.read_boxes)
+            .into_iter()
+            .zip(&keep)
+            .filter(|(_, keep)| **keep)
+            .map(|(word, _)| word)
+            .collect();
+    }
+
+    /// The box around the words as Tesseract read them, underscore marks included. The text
+    /// outside the table is picked by the centres of the same boxes, so every word of the table
+    /// falls inside it. ~keep
+    fn bounding_box(&self) -> OcrTableBoundingBox {
+        OcrTableBoundingBox {
+            left: self.read_boxes.iter().map(|w| w.left).min().unwrap_or(0),
+            top: self.read_boxes.iter().map(|w| w.top).min().unwrap_or(0),
+            right: self.read_boxes.iter().map(|w| w.left + w.width).max().unwrap_or(0),
+            bottom: self.read_boxes.iter().map(|w| w.top + w.height).max().unwrap_or(0),
+        }
+    }
+}
+
+/// Split the table words into vertically separated regions, one table each.
+fn table_regions(table_words: &TableWords) -> Vec<TableRegion> {
+    cluster_word_indices_into_table_regions(&table_words.words)
+        .into_iter()
+        .map(|indices| TableRegion {
+            words: indices.iter().map(|&i| table_words.words[i].clone()).collect(),
+            read_boxes: indices.iter().map(|&i| table_words.read_boxes[i].clone()).collect(),
+        })
+        .collect()
+}
+
 /// Build content with OCR tables inlined at their correct vertical positions.
 ///
 /// Parses TSV word positions to separate table words from non-table words,
@@ -683,31 +806,100 @@ fn flatten_hocr_elements_to_text(elements: &[crate::types::internal::InternalEle
 /// paragraph level, using the paragraph's own bbox centre, so `internal_document` agrees
 /// with `content` regardless of `output_format` (the string rebuild above is skipped for
 /// Plain/Djot output, but the duplication it was masking is not). ~keep
+///
+/// A table only claims its region when it kept the region's words — see
+/// [`table_retains_region_words`] (xberg-io/xberg#1884).
 fn filter_elements_covered_by_tables(
     elements: Vec<crate::types::internal::InternalElement>,
     tables: &[OcrTable],
 ) -> Vec<crate::types::internal::InternalElement> {
-    let table_bboxes: Vec<_> = tables.iter().filter_map(|t| t.bounding_box.as_ref()).collect();
-    if table_bboxes.is_empty() {
+    let mut claiming_bboxes: Vec<&OcrTableBoundingBox> = Vec::new();
+    for table in tables {
+        let Some(bbox) = table.bounding_box.as_ref() else {
+            continue;
+        };
+        if table_retains_region_words(&elements, bbox, &table.cells) {
+            claiming_bboxes.push(bbox);
+        } else {
+            tracing::warn!(
+                target: "xberg::ocr::tables",
+                left = bbox.left,
+                top = bbox.top,
+                right = bbox.right,
+                bottom = bbox.bottom,
+                table_rows = table.cells.len(),
+                "reconstructed table dropped words from its region; keeping the region's lines in the page document"
+            );
+        }
+    }
+    if claiming_bboxes.is_empty() {
         return elements;
     }
 
     elements
         .into_iter()
         .filter(|element| {
-            let Some(bbox) = element.bbox.as_ref() else {
-                return true;
-            };
-            let center_x = (bbox.x0 + bbox.x1) / 2.0;
-            let center_y = (bbox.y0 + bbox.y1) / 2.0;
-            !table_bboxes.iter().any(|table_bbox| {
-                center_x >= table_bbox.left as f64
-                    && center_x <= table_bbox.right as f64
-                    && center_y >= table_bbox.top as f64
-                    && center_y <= table_bbox.bottom as f64
-            })
+            !claiming_bboxes
+                .iter()
+                .any(|table_bbox| element_center_within_table(element, table_bbox))
         })
         .collect()
+}
+
+/// Whether `element`'s bbox centre lies inside `table_bbox`.
+///
+/// Shared by [`filter_elements_covered_by_tables`] and [`table_retains_region_words`] so a table is
+/// judged for word retention against exactly the elements it would remove — two copies of this test
+/// could disagree and make the retention check answer about a different set of lines than the filter
+/// then deletes. An element with no geometry is not covered by any table. ~keep
+fn element_center_within_table(
+    element: &crate::types::internal::InternalElement,
+    table_bbox: &OcrTableBoundingBox,
+) -> bool {
+    let Some(bbox) = element.bbox.as_ref() else {
+        return false;
+    };
+    let center_x = (bbox.x0 + bbox.x1) / 2.0;
+    let center_y = (bbox.y0 + bbox.y1) / 2.0;
+    center_x >= table_bbox.left as f64
+        && center_x <= table_bbox.right as f64
+        && center_y >= table_bbox.top as f64
+        && center_y <= table_bbox.bottom as f64
+}
+
+/// Whether `cells` still carries the words of the elements `table_bbox` covers
+/// (xberg-io/xberg#1884).
+///
+/// Reconstruction can lose a region's words outright: a wrapped label splits across two rows, a
+/// value glues onto its label, the interior cells of a sparse row vanish (`73 | | | |` for a line
+/// that read `73 4 4 4 4 -`). Removing the region's lines on the strength of a table that no longer
+/// carries them deletes those words from the page entirely — they are in neither the paragraphs nor
+/// the table. When this returns false the lines stay and the table is still emitted in `tables`, so
+/// the structured form is never lost either; the cost is the #1571 duplication for that one region,
+/// which is strictly better than losing content.
+///
+/// Judged by [`should_adopt_table_rebuild`], the same absolute word-count rule the standalone-image
+/// rebuild uses (GH#1599), and against the table's non-empty cell tokens rather than its markdown,
+/// whose `|`/`---` syntax would pad the count. ~keep
+fn table_retains_region_words(
+    elements: &[crate::types::internal::InternalElement],
+    table_bbox: &OcrTableBoundingBox,
+    cells: &[Vec<String>],
+) -> bool {
+    let region_text = elements
+        .iter()
+        .filter(|element| element_center_within_table(element, table_bbox))
+        .map(|element| element.text.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let cell_text = cells
+        .iter()
+        .flatten()
+        .map(|cell| cell.trim())
+        .filter(|cell| !cell.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    should_adopt_table_rebuild(&region_text, &cell_text)
 }
 
 /// Minimum confidence for accepting orientation detection results.
@@ -773,6 +965,16 @@ struct PreparedOcrImage {
 /// Both branches below honour it: the unpreprocessed branch reports it verbatim instead of the
 /// [`RAW_IMAGE_SOURCE_DPI`] assumption, and the preprocessed branch feeds it to DPI normalization
 /// so the resize scales from the real resolution.
+///
+/// `known_full_page_scan` is the PDF OCR route's own scan-detection density check result, when
+/// the caller knows it (`TesseractConfig::known_full_page_scan`); `false` for every caller that
+/// does not, including bare images handed in by a user. When `true`, the default preprocessing
+/// path is taken unconditionally instead of deferring to [`should_apply_default_preprocessing`]'s
+/// pixel-brightness heuristic -- a known scan page must not skip the default resample,
+/// binarisation and deskew just because shaded table rows or a grey background read as dark
+/// (GH#1894). The heuristic remains the only signal for a caller with no scan-detection result of
+/// its own.
+#[allow(clippy::too_many_arguments)]
 fn prepare_ocr_image(
     rgb_data: Vec<u8>,
     width: u32,
@@ -781,9 +983,10 @@ fn prepare_ocr_image(
     images_config: Option<&crate::core::config::ImageExtractionConfig>,
     ci_debug_enabled: bool,
     known_source_dpi: Option<f64>,
+    known_full_page_scan: bool,
 ) -> PreparedOcrImage {
     let Some(preprocessing) = preprocessing else {
-        if should_apply_default_preprocessing(&rgb_data, width, height) {
+        if known_full_page_scan || should_apply_default_preprocessing(&rgb_data, width, height) {
             return prepare_preprocessed_ocr_image(
                 rgb_data,
                 width,
@@ -1485,6 +1688,22 @@ fn extract_elements_via_iterator(
 /// set `security_limits` explicitly (GH#1554: `load_image_for_ocr` previously hardcoded
 /// this default unconditionally, ignoring a caller's own configured, possibly higher,
 /// limit). ~keep
+/// A region's grid with the two cleanups that every reader of it depends on: the GH#1649
+/// leading section-caption row dropped, then disjoint right-aligned numeric columns merged.
+///
+/// Extracted because the blank-quantity retry path rebuilt the grid with a bare
+/// `reconstruct_table_with_columns` and silently discarded both, so any table that hit the
+/// retry got its caption row back in row 0 and its amount columns un-merged -- and left
+/// `column_positions` describing a grid that no longer existed. Both call sites must run all
+/// three steps or neither. ~keep
+fn reconstruct_cleaned_table(words: &[HocrWord], config: &TesseractConfig) -> (Vec<Vec<String>>, Vec<u32>) {
+    let (mut table, mut column_positions) =
+        reconstruct_table_with_columns(words, config.table_column_threshold, config.table_row_threshold_ratio);
+    drop_leading_caption_row(&mut table);
+    merge_disjoint_numeric_columns(&mut table, &mut column_positions, median_word_height(words));
+    (table, column_positions)
+}
+
 fn security_limits_for_ocr(
     tesseract_config: &TesseractConfig,
     extraction_config: Option<&ExtractionConfig>,
@@ -1494,6 +1713,26 @@ fn security_limits_for_ocr(
         .clone()
         .or_else(|| extraction_config.and_then(|config| config.security_limits.clone()))
         .unwrap_or_default()
+}
+
+/// The symbols of every word with an underscore, which table reconstruction reads to cut a mark
+/// out of a word. Empty when Tesseract gives no result iterator or cannot read the symbols: the
+/// cut then estimates each piece's box from its share of the word's characters. ~keep
+fn underscore_word_symbols(api: &TesseractAPI) -> Vec<xberg_tesseract::WordSymbols> {
+    match api
+        .get_iterator()
+        .and_then(|iterator| iterator.extract_word_symbols(|text| text.contains('_')))
+    {
+        Ok(words) => words,
+        Err(error) => {
+            tracing::debug!(
+                target: "xberg::ocr::tables",
+                %error,
+                "Tesseract symbol boxes unavailable; underscore marks are cut by character share"
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// Perform OCR on an image using Tesseract.
@@ -1554,6 +1793,7 @@ pub(super) fn perform_ocr(
         images_config,
         ci_debug_enabled,
         known_source_dpi,
+        config.known_full_page_scan,
     );
     #[cfg_attr(not(auto_rotate), allow(unused_mut))]
     let mut image_data = prepared_image.data;
@@ -1822,6 +2062,10 @@ pub(super) fn perform_ocr(
     } else {
         None
     };
+    let table_mark_symbols = match tsv_data_for_tables.as_deref() {
+        Some(tsv) if config.enable_table_detection && tsv.contains('_') => underscore_word_symbols(&api),
+        _ => Vec::new(),
+    };
 
     let mut hocr_document: Option<InternalDocument> = None;
     let mut dictionary_filtered_line_count = 0usize;
@@ -2032,26 +2276,37 @@ pub(super) fn perform_ocr(
     if config.enable_table_detection {
         let tsv_data = tsv_data_for_tables.as_ref().unwrap();
 
-        let words = extract_words_from_tsv(tsv_data, config.table_min_confidence)?;
-        let regions = cluster_words_into_table_regions(&words);
+        let words = extract_table_words_from_tsv(tsv_data, config.table_min_confidence, &table_mark_symbols)?;
 
-        for (region_index, mut region_words) in regions.into_iter().enumerate() {
-            if region_words.len() < MIN_TABLE_CANDIDATE_WORDS {
+        for (region_index, mut region) in table_regions(&words).into_iter().enumerate() {
+            if region.words.len() < MIN_TABLE_CANDIDATE_WORDS {
                 tracing::debug!(
                     target: "xberg::ocr::tables",
                     region_index,
-                    word_count = region_words.len(),
+                    word_count = region.words.len(),
                     min_required = MIN_TABLE_CANDIDATE_WORDS,
                     "OCR table region skipped: below MIN_TABLE_CANDIDATE_WORDS"
                 );
                 continue;
             }
+            // The minimum above counts every word Tesseract read, before shading marks are
+            // dropped, so a dropped mark changes a table's cells but never whether a table is
+            // attempted at all (GH#1858). ~keep
+            region.drop_shading_marks(config.table_row_threshold_ratio);
+            if config
+                .preprocessing
+                .as_ref()
+                .is_some_and(|preprocessing| preprocessing.normalize_shaded_rows)
+            {
+                region.drop_normalized_band_edge_glyphs();
+            }
 
-            let region_left = region_words.iter().map(|w| w.left).min().unwrap_or(0);
-            let region_top = region_words.iter().map(|w| w.top).min().unwrap_or(0);
-            let region_right = region_words.iter().map(|w| w.left + w.width).max().unwrap_or(0);
-            let region_bottom = region_words.iter().map(|w| w.top + w.height).max().unwrap_or(0);
-            let word_preview: String = region_words
+            let region_left = region.words.iter().map(|w| w.left).min().unwrap_or(0);
+            let region_top = region.words.iter().map(|w| w.top).min().unwrap_or(0);
+            let region_right = region.words.iter().map(|w| w.left + w.width).max().unwrap_or(0);
+            let region_bottom = region.words.iter().map(|w| w.top + w.height).max().unwrap_or(0);
+            let word_preview: String = region
+                .words
                 .iter()
                 .take(12)
                 .map(|w| w.text.as_str())
@@ -2061,20 +2316,12 @@ pub(super) fn perform_ocr(
                 .take(200)
                 .collect();
 
-            let (mut table, mut column_positions) = reconstruct_table_with_columns(
-                &region_words,
-                config.table_column_threshold,
-                config.table_row_threshold_ratio,
-            );
-            // A section caption sharing this region with the real header row (#1649) always sits
-            // in row 0, ahead of any right-aligned-amount column split, so drop it first. ~keep
-            drop_leading_caption_row(&mut table);
-            merge_disjoint_numeric_columns(&mut table, &mut column_positions, median_word_height(&region_words));
+            let (mut table, column_positions) = reconstruct_cleaned_table(&region.words, config);
             let retry_region = if let Some((quantity_column, blank_row)) = quantity_retry_column_index(&table) {
-                let row_positions = detect_rows(&region_words, config.table_row_threshold_ratio);
+                let row_positions = detect_rows(&region.words, config.table_row_threshold_ratio);
                 if row_positions.len() == table.len() {
                     quantity_retry_region(
-                        &region_words,
+                        &region.words,
                         quantity_column,
                         blank_row,
                         &row_positions,
@@ -2090,19 +2337,14 @@ pub(super) fn perform_ocr(
             };
             let recovered = recover_blank_quantity_word(&api, config, retry_region.as_ref(), width, height);
             if let Some(recovered) = recovered {
-                region_words.push(recovered);
-                table = reconstruct_table_with_columns(
-                    &region_words,
-                    config.table_column_threshold,
-                    config.table_row_threshold_ratio,
-                )
-                .0;
+                region.push(recovered);
+                table = reconstruct_cleaned_table(&region.words, config).0;
             }
 
             tracing::debug!(
                 target: "xberg::ocr::tables",
                 region_index,
-                word_count = region_words.len(),
+                word_count = region.words.len(),
                 left = region_left,
                 top = region_top,
                 right = region_right,
@@ -2127,21 +2369,11 @@ pub(super) fn perform_ocr(
 
             let markdown_table = table_to_markdown(&cleaned);
 
-            let left = region_words.iter().map(|w| w.left).min().unwrap_or(0);
-            let top = region_words.iter().map(|w| w.top).min().unwrap_or(0);
-            let right = region_words.iter().map(|w| w.left + w.width).max().unwrap_or(0);
-            let bottom = region_words.iter().map(|w| w.top + w.height).max().unwrap_or(0);
-
             tables.push(OcrTable {
                 cells: cleaned,
                 markdown: markdown_table,
                 page_number: config.page_number,
-                bounding_box: Some(OcrTableBoundingBox {
-                    left,
-                    top,
-                    right,
-                    bottom,
-                }),
+                bounding_box: Some(region.bounding_box()),
             });
         }
 
@@ -2467,6 +2699,7 @@ mod tests {
     use crate::ocr::hocr_parser::{
         HOCR_FONT_SIZE_ATTRIBUTE, parse_hocr_to_internal_document_with_page_offset_and_stats,
     };
+    use crate::table_core::cluster_words_into_table_regions;
     use serial_test::serial;
     use tempfile::tempdir;
 
@@ -2968,6 +3201,125 @@ mod tests {
         words
     }
 
+    /// A row of `values` grid words plus one tall low-confidence `=` mark between the first two.
+    fn value_row_with_a_mark(values: u32) -> Vec<crate::table_core::HocrWord> {
+        let mut words = table_grid_words(0, 100, 1, values);
+        words.push(crate::table_core::HocrWord {
+            confidence: 10.0,
+            ..word_at(45, 88, 10, 45, "=")
+        });
+        words
+    }
+
+    #[test]
+    fn a_region_counts_its_words_before_its_marks_are_dropped() {
+        let at_minimum = value_row_with_a_mark(MIN_TABLE_CANDIDATE_WORDS as u32 - 1);
+        assert_eq!(
+            at_minimum.len(),
+            MIN_TABLE_CANDIDATE_WORDS,
+            "the mark is what brings this region up to the minimum, which is the point of the test"
+        );
+
+        let mut region = TableRegion {
+            words: at_minimum.clone(),
+            read_boxes: at_minimum,
+        };
+        region.drop_shading_marks(0.5);
+
+        assert_eq!(region.words.len(), MIN_TABLE_CANDIDATE_WORDS - 1, "the mark is dropped");
+        assert_eq!(
+            region.read_boxes.len(),
+            region.words.len(),
+            "both vectors stay parallel"
+        );
+        assert!(region.words.iter().all(|word| word.text != "="));
+    }
+
+    /// The line-row pass (GH#1834) rewrites each word's box onto its row's band but leaves
+    /// `read_boxes` as Tesseract read them. A mark whose normalised box matches the row must still
+    /// be dropped, or GH#1858's filter silently stops firing whenever GH#1834 runs ahead of it.
+    /// Keyed on `words` instead, this region keeps the `=` and the two values glue into one cell.
+    #[test]
+    fn a_mark_normalised_onto_its_row_band_is_still_dropped() {
+        let words = value_row_with_a_mark(MIN_TABLE_CANDIDATE_WORDS as u32 - 1);
+        let read_boxes = words.clone();
+        let band_top = words.iter().map(|word| word.top).min().expect("the row has words");
+        let band_height = words.iter().map(|word| word.height).max().expect("the row has words");
+        let normalised: Vec<_> = words
+            .into_iter()
+            .map(|word| crate::table_core::HocrWord {
+                top: band_top,
+                height: band_height,
+                ..word
+            })
+            .collect();
+        assert!(
+            normalised.iter().all(|word| word.height == band_height),
+            "the normalisation must erase the height anomaly, or this proves nothing"
+        );
+
+        let mut region = TableRegion {
+            words: normalised,
+            read_boxes,
+        };
+        region.drop_shading_marks(0.5);
+
+        assert!(
+            region.words.iter().all(|word| word.text != "="),
+            "the mark must be dropped on its read box, not its normalised one: {:?}",
+            region.words.iter().map(|word| word.text.as_str()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            region.read_boxes.len(),
+            region.words.len(),
+            "both vectors stay parallel"
+        );
+    }
+
+    #[test]
+    fn normalized_band_frame_glyphs_are_removed_from_table_edges() {
+        let words = vec![
+            word_at(95, 100, 3, 20, "|"),
+            word_at(100, 100, 70, 20, "[TOTAL"),
+            word_at(300, 100, 60, 20, "1,000"),
+            word_at(700, 100, 3, 20, "|"),
+            word_at(100, 140, 70, 20, "[TOTAL"),
+            word_at(300, 140, 60, 20, "2,000"),
+            word_at(700, 140, 3, 20, "|"),
+        ];
+        let mut region = TableRegion {
+            read_boxes: words.clone(),
+            words,
+        };
+
+        region.drop_normalized_band_edge_glyphs();
+
+        let texts: Vec<&str> = region.words.iter().map(|word| word.text.as_str()).collect();
+        assert_eq!(texts, ["TOTAL", "1,000", "TOTAL", "2,000"]);
+        assert_eq!(region.read_boxes.len(), region.words.len());
+    }
+
+    #[test]
+    fn one_bracketed_label_does_not_license_edge_glyph_cleanup() {
+        let words = vec![
+            word_at(100, 100, 90, 20, "[Pending]"),
+            word_at(300, 100, 60, 20, "1,000"),
+            word_at(700, 100, 3, 20, "|"),
+            word_at(100, 140, 70, 20, "Account"),
+            word_at(300, 140, 60, 20, "2,000"),
+        ];
+        let mut region = TableRegion {
+            read_boxes: words.clone(),
+            words,
+        };
+
+        region.drop_normalized_band_edge_glyphs();
+
+        let texts: Vec<&str> = region.words.iter().map(|word| word.text.as_str()).collect();
+        assert_eq!(texts, ["[Pending]", "1,000", "|", "Account", "2,000"]);
+        assert_eq!(region.read_boxes.len(), region.words.len());
+    }
+
     #[test]
     fn cluster_words_into_table_regions_separates_two_distant_tables() {
         // Two 3x3 grids of words (9 words each) far apart vertically: a real
@@ -2999,6 +3351,115 @@ mod tests {
     #[test]
     fn cluster_words_into_table_regions_empty_input_yields_no_regions() {
         assert!(cluster_words_into_table_regions(&[]).is_empty());
+    }
+
+    const TSV_HEADER: &str =
+        "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext\n";
+
+    /// The last row's label is two words on one Tesseract line, and shading stretched the first
+    /// word's box down past the table. Its row takes the line's typical box, so a bounding box
+    /// built from those boxes ends above the centre of the stretched word as Tesseract read it,
+    /// and the text rebuild printed that word a second time below the table.
+    #[test]
+    fn a_stretched_edge_row_word_is_inside_its_table_and_prints_once() {
+        let tsv = format!(
+            "{TSV_HEADER}\
+5\t1\t1\t1\t1\t1\t100\t120\t90\t26\t90\tAlpha\n\
+5\t1\t2\t1\t1\t1\t600\t120\t60\t26\t90\t10\n\
+5\t1\t3\t1\t1\t1\t800\t120\t60\t26\t90\t20\n\
+5\t1\t4\t1\t1\t1\t100\t170\t90\t26\t90\tBravo\n\
+5\t1\t5\t1\t1\t1\t600\t170\t60\t26\t90\t30\n\
+5\t1\t6\t1\t1\t1\t800\t170\t60\t26\t90\t40\n\
+5\t1\t7\t1\t1\t1\t100\t220\t100\t62\t90\tCharlie\n\
+5\t1\t7\t1\t1\t2\t210\t220\t80\t26\t90\tTail\n\
+5\t1\t8\t1\t1\t1\t600\t220\t60\t26\t90\t50\n\
+5\t1\t9\t1\t1\t1\t800\t220\t60\t26\t90\t60\n"
+        );
+        let words = extract_table_words_from_tsv(&tsv, 0.0, &[]).unwrap();
+        let regions = table_regions(&words);
+        assert_eq!(regions.len(), 1);
+        let region = &regions[0];
+        let cells = reconstruct_table_with_columns(&region.words, 20, 0.5).0;
+        let tables = [OcrTable {
+            markdown: table_to_markdown(&cells),
+            cells,
+            page_number: 1,
+            bounding_box: Some(region.bounding_box()),
+        }];
+
+        let content = build_content_with_inline_tables(&tsv, &tables, 0.0);
+
+        assert!(content.contains("Charlie Tail"), "the label shares its row: {content}");
+        assert_eq!(
+            content.matches("Charlie").count(),
+            1,
+            "the stretched word prints once, in the table: {content}"
+        );
+    }
+
+    /// A last-column value arrives with a long underscore mark fused on. The table cuts the mark
+    /// off, but the text rebuild reads the whole word, whose centre sits right of the value. The
+    /// bounding box covers the whole word, so the value prints once, in the table.
+    #[test]
+    fn an_edge_value_cut_from_its_underscore_mark_prints_once() {
+        let tsv = format!(
+            "{TSV_HEADER}\
+5\t1\t1\t1\t1\t1\t100\t120\t90\t26\t90\tAlpha\n\
+5\t1\t2\t1\t1\t1\t600\t120\t60\t26\t90\t10\n\
+5\t1\t3\t1\t1\t1\t800\t120\t60\t26\t90\t20\n\
+5\t1\t4\t1\t1\t1\t100\t170\t90\t26\t90\tBravo\n\
+5\t1\t5\t1\t1\t1\t600\t170\t60\t26\t90\t30\n\
+5\t1\t6\t1\t1\t1\t800\t170\t320\t26\t90\t47______________\n\
+5\t1\t7\t1\t1\t1\t100\t220\t90\t26\t90\tCharlie\n\
+5\t1\t8\t1\t1\t1\t600\t220\t60\t26\t90\t50\n\
+5\t1\t9\t1\t1\t1\t800\t220\t60\t26\t90\t60\n"
+        );
+        let words = extract_table_words_from_tsv(&tsv, 0.0, &[]).unwrap();
+        let regions = table_regions(&words);
+        assert_eq!(regions.len(), 1);
+        let region = &regions[0];
+        let cells = reconstruct_table_with_columns(&region.words, 20, 0.5).0;
+        let tables = [OcrTable {
+            markdown: table_to_markdown(&cells),
+            cells,
+            page_number: 1,
+            bounding_box: Some(region.bounding_box()),
+        }];
+
+        let content = build_content_with_inline_tables(&tsv, &tables, 0.0);
+
+        assert!(
+            tables[0].cells.iter().flatten().any(|cell| cell == "47"),
+            "the value sits in its table cell: {:?}",
+            tables[0].cells
+        );
+        assert_eq!(
+            content.matches("47").count(),
+            1,
+            "the value prints once, in the table: {content}"
+        );
+    }
+
+    #[test]
+    fn a_word_pushed_onto_a_table_region_widens_its_bounding_box() {
+        let mut region = TableRegion {
+            words: table_grid_words(0, 0, 2, 2),
+            read_boxes: table_grid_words(0, 0, 2, 2),
+        };
+        let before = region.bounding_box();
+        let below = HocrWord {
+            text: "7".to_string(),
+            left: before.left,
+            top: before.bottom + 40,
+            width: 10,
+            height: 10,
+            confidence: 90.0,
+        };
+
+        region.push(below.clone());
+
+        assert_eq!(region.bounding_box().bottom, below.top + below.height);
+        assert_eq!(region.words.len(), region.read_boxes.len());
     }
 
     fn text_element_with_font_size(text: &str, font_size: Option<f64>) -> crate::types::internal::InternalElement {
@@ -3047,9 +3508,16 @@ mod tests {
     }
 
     fn table_at(left: u32, top: u32, right: u32, bottom: u32) -> OcrTable {
+        table_at_with_cells(left, top, right, bottom, vec![vec!["cell".to_string()]])
+    }
+
+    /// A table at a bbox whose cells are given explicitly, because `filter_elements_covered_by_tables`
+    /// now decides per table whether its cells kept the covered lines' words (#1884), so the cells are
+    /// part of every case's input and not incidental filler. ~keep
+    fn table_at_with_cells(left: u32, top: u32, right: u32, bottom: u32, cells: Vec<Vec<String>>) -> OcrTable {
         OcrTable {
-            cells: vec![vec!["cell".to_string()]],
-            markdown: "| cell |".to_string(),
+            markdown: table_to_markdown(&cells),
+            cells,
             page_number: 1,
             bounding_box: Some(OcrTableBoundingBox {
                 left,
@@ -3060,13 +3528,18 @@ mod tests {
         }
     }
 
+    /// One row of cells from whitespace-separated text, for tables that must retain a paragraph's words.
+    fn cells_of(text: &str) -> Vec<Vec<String>> {
+        vec![text.split_whitespace().map(str::to_string).collect()]
+    }
+
     #[test]
     fn filter_elements_covered_by_tables_drops_paragraph_inside_table_bbox() {
         // A paragraph whose bbox is fully inside (so its centre is inside) a detected
         // table's bbox must be removed -- this is the #1571 duplication itself: the
         // paragraph's words are also the table's cells.
         let elements = vec![paragraph_with_bbox("Apple 50 10 00", 10.0, 10.0, 90.0, 30.0)];
-        let tables = vec![table_at(0, 0, 100, 100)];
+        let tables = vec![table_at_with_cells(0, 0, 100, 100, cells_of("Apple 50 10 00"))];
 
         let filtered = filter_elements_covered_by_tables(elements, &tables);
 
@@ -3085,7 +3558,7 @@ mod tests {
             paragraph_with_bbox("Vehicle Maintenance Guide", 10.0, 0.0, 90.0, 15.0),
             paragraph_with_bbox("Apple 50 10 00", 10.0, 50.0, 90.0, 70.0),
         ];
-        let tables = vec![table_at(0, 40, 100, 140)];
+        let tables = vec![table_at_with_cells(0, 40, 100, 140, cells_of("Apple 50 10 00"))];
 
         let filtered = filter_elements_covered_by_tables(elements, &tables);
 
@@ -3095,6 +3568,50 @@ mod tests {
             "only the paragraph centred inside the table bbox should be dropped"
         );
         assert_eq!(filtered[0].text, "Vehicle Maintenance Guide");
+    }
+
+    #[test]
+    fn filter_elements_covered_by_tables_keeps_lines_whose_words_the_table_dropped() {
+        // xberg-io/xberg#1884: reconstruction lost the interior cells of a sparse row -- the line
+        // read "73 4 4 4 4 -" and the table carries only "73". Removing the line would delete those
+        // five words from the page: they are in neither the paragraphs nor the table.
+        let elements = vec![paragraph_with_bbox("73 4 4 4 4 -", 10.0, 10.0, 90.0, 30.0)];
+        let sparse_row = vec![vec![
+            "73".to_string(),
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
+        ]];
+        let tables = vec![table_at_with_cells(0, 0, 100, 100, sparse_row)];
+
+        let filtered = filter_elements_covered_by_tables(elements, &tables);
+
+        assert_eq!(
+            filtered.len(),
+            1,
+            "a table that dropped the region's words must not claim it"
+        );
+        assert_eq!(filtered[0].text, "73 4 4 4 4 -");
+    }
+
+    #[test]
+    fn filter_elements_covered_by_tables_claims_only_the_tables_that_retained_their_words() {
+        // The decision is per table, not per page (#1884): a faithful table still removes its own
+        // region's duplicate lines even when another table on the same page lost words.
+        let elements = vec![
+            paragraph_with_bbox("Apple 50 10 00", 10.0, 10.0, 90.0, 30.0),
+            paragraph_with_bbox("Pear 61 11 01", 10.0, 210.0, 90.0, 230.0),
+        ];
+        let tables = vec![
+            table_at_with_cells(0, 0, 100, 100, cells_of("Apple 50 10 00")),
+            table_at_with_cells(0, 200, 100, 300, cells_of("Pear")),
+        ];
+
+        let filtered = filter_elements_covered_by_tables(elements, &tables);
+
+        assert_eq!(filtered.len(), 1, "{filtered:?}");
+        assert_eq!(filtered[0].text, "Pear 61 11 01");
     }
 
     #[test]
@@ -3463,16 +3980,8 @@ mod tests {
     /// into a fresh temp directory, so tests can build two DIFFERENT resolved tessdata
     /// directories that both OCR successfully, without depending on any specific host path.
     /// Returns `None` when no Tesseract/tessdata is available in this environment.
-    /// Deliberately does NOT go through `resolve_tessdata_path(_, None)`: that resolution
-    /// reads the process-global `XBERG_CACHE_DIR`/`TESSDATA_PREFIX` env vars, which other
-    /// tests in this binary (`ocr::tesseract_backend::tests`) mutate with `std::env::set_var`
-    /// while running concurrently. A test that raced that mutation could resolve a directory
-    /// another thread deletes mid-scan, crashing the whole process with an uncaught C++
-    /// `filesystem_error` out of Tesseract's own `GetAvailableLanguagesAsVector` — not a
-    /// logic bug in the code under test, just an unsafe shared-state race. Sourcing real
-    /// `eng.traineddata` bytes from the sibling `xberg-tesseract` build's own `OUT_DIR`
-    /// instead (mirroring `tesseract_backend::tests::real_eng_traineddata_bytes_from_sibling_build_dir`)
-    /// avoids touching that shared state at all.
+    /// Sources real `eng.traineddata` bytes from the sibling `xberg-tesseract` build's own
+    /// `OUT_DIR`, mirroring `tesseract_backend::tests::real_eng_traineddata_bytes_from_sibling_build_dir`.
     fn real_eng_traineddata_bytes_from_sibling_build_dir() -> Option<Vec<u8>> {
         let this_out_dir = std::path::PathBuf::from(env!("OUT_DIR"));
         let build_dir = this_out_dir.parent()?.parent()?;
@@ -3776,13 +4285,60 @@ mod tests {
     fn test_prepare_ocr_image_without_config_preserves_shadowed_rgb() {
         let rgb_data = vec![0, 1, 2, 3, 4, 5];
 
-        let prepared = prepare_ocr_image(rgb_data.clone(), 2, 1, None, None, false, None);
+        let prepared = prepare_ocr_image(rgb_data.clone(), 2, 1, None, None, false, None, false);
 
         assert_eq!(prepared.data, rgb_data);
         assert_eq!(prepared.width, 2);
         assert_eq!(prepared.height, 1);
         assert_eq!(prepared.source_dpi, RAW_IMAGE_SOURCE_DPI);
         assert!(!prepared.apply_pix_preprocessing);
+    }
+
+    /// GH#1894: a page the PDF OCR route already knows is a whole-page scan must take the
+    /// default preprocessing regardless of how dark the raster reads, rather than being judged
+    /// by `should_apply_default_preprocessing`'s pixel-brightness heuristic. This all-black
+    /// fixture fails that heuristic outright (mean luminance 0.0), so the only thing that can
+    /// route it through preprocessing is `known_full_page_scan`.
+    ///
+    /// Negative control (flip `true` to `false` on the call below): fails with
+    /// `assertion failed: prepared.apply_pix_preprocessing` — proving the pixel test alone
+    /// would have rejected this fixture, which is exactly the GH#1894 defect.
+    #[test]
+    fn should_apply_default_preprocessing_for_a_known_scan_page_however_dark() {
+        const SAMPLE_PIXEL_COUNT: usize = 16;
+        let rgb_data = vec![0u8; SAMPLE_PIXEL_COUNT * RGB_CHANNEL_COUNT];
+        assert!(
+            !should_apply_default_preprocessing(&rgb_data, SAMPLE_PIXEL_COUNT as u32, 1),
+            "fixture must fail the pixel-brightness heuristic on its own"
+        );
+
+        let prepared = prepare_ocr_image(rgb_data, SAMPLE_PIXEL_COUNT as u32, 1, None, None, false, None, true);
+
+        assert!(
+            prepared.apply_pix_preprocessing,
+            "a known scan page must take default preprocessing even when the pixels read as dark"
+        );
+    }
+
+    /// Control for the test above: the identical dark fixture with no scan-detection signal
+    /// (`known_full_page_scan: false`, the value every non-PDF caller passes) must keep the
+    /// pre-GH#1894 behaviour and skip preprocessing, so bare images handed to the standalone
+    /// image extractor are unaffected by this fix.
+    ///
+    /// Negative control (flip `false` to `true` on the call below): fails with
+    /// `assertion failed: !prepared.apply_pix_preprocessing` — proving this test actually
+    /// distinguishes the two code paths rather than passing regardless of the flag.
+    #[test]
+    fn should_keep_pixel_test_for_a_dark_image_with_no_scan_signal() {
+        const SAMPLE_PIXEL_COUNT: usize = 16;
+        let rgb_data = vec![0u8; SAMPLE_PIXEL_COUNT * RGB_CHANNEL_COUNT];
+
+        let prepared = prepare_ocr_image(rgb_data, SAMPLE_PIXEL_COUNT as u32, 1, None, None, false, None, false);
+
+        assert!(
+            !prepared.apply_pix_preprocessing,
+            "a bare dark image with no scan signal must still be judged by pixel brightness"
+        );
     }
 
     #[test]
@@ -3879,6 +4435,7 @@ mod tests {
             None,
             false,
             Some(300.0),
+            false,
         );
 
         assert!(!prepared.apply_pix_preprocessing);
@@ -3908,6 +4465,7 @@ mod tests {
                 None,
                 false,
                 Some(300.0),
+                false,
             );
 
             assert!(
@@ -3953,6 +4511,7 @@ mod tests {
             None,
             false,
             Some(300.0),
+            false,
         );
         assert!(
             !prepared.apply_pix_preprocessing,
@@ -3983,6 +4542,7 @@ mod tests {
             None,
             false,
             Some(300.0),
+            false,
         );
         assert!(!prepared.apply_pix_preprocessing, "a solid blob is not text structure");
         assert_eq!(prepared.data, rgb_data);
@@ -4012,6 +4572,7 @@ mod tests {
             None,
             false,
             Some(300.0),
+            false,
         );
         assert!(
             prepared.apply_pix_preprocessing,
@@ -4051,6 +4612,7 @@ mod tests {
             None,
             false,
             Some(300.0),
+            false,
         );
         assert!(
             !prepared.apply_pix_preprocessing,
@@ -4091,7 +4653,7 @@ mod tests {
         const HEIGHT: u32 = 4;
         let rgb_data = vec![u8::MAX; WIDTH as usize * HEIGHT as usize * RGB_CHANNEL_COUNT];
 
-        let prepared = prepare_ocr_image(rgb_data, WIDTH, HEIGHT, None, None, false, None);
+        let prepared = prepare_ocr_image(rgb_data, WIDTH, HEIGHT, None, None, false, None, false);
 
         assert!(prepared.apply_pix_preprocessing);
         let preprocessing = prepared
@@ -4122,7 +4684,7 @@ mod tests {
             ..Default::default()
         };
 
-        let prepared = prepare_ocr_image(rgb_data, 2, 2, Some(&preprocessing), None, false, None);
+        let prepared = prepare_ocr_image(rgb_data, 2, 2, Some(&preprocessing), None, false, None, false);
 
         assert!(prepared.apply_pix_preprocessing);
         assert_eq!(prepared.preprocessing.unwrap().target_dpi, 72);
@@ -4218,6 +4780,7 @@ mod tests {
             None,
             false,
             Some(KNOWN_RENDER_DPI),
+            false,
         );
 
         assert_eq!(
@@ -4257,6 +4820,7 @@ mod tests {
             None,
             false,
             None,
+            false,
         );
 
         assert_eq!(
@@ -4278,7 +4842,7 @@ mod tests {
     fn should_default_to_72_dpi_for_unpreprocessed_raw_image_without_known_dpi() {
         let rgb_data = vec![0, 1, 2, 3, 4, 5];
 
-        let prepared = prepare_ocr_image(rgb_data.clone(), 2, 1, None, None, false, None);
+        let prepared = prepare_ocr_image(rgb_data.clone(), 2, 1, None, None, false, None, false);
 
         assert_eq!(prepared.data, rgb_data, "the raster must pass through untouched");
         assert_eq!(prepared.source_dpi, RAW_IMAGE_SOURCE_DPI);
@@ -4295,7 +4859,7 @@ mod tests {
         const KNOWN_RENDER_DPI: f64 = 150.0;
         let rgb_data = vec![0, 1, 2, 3, 4, 5];
 
-        let prepared = prepare_ocr_image(rgb_data, 2, 1, None, None, false, Some(KNOWN_RENDER_DPI));
+        let prepared = prepare_ocr_image(rgb_data, 2, 1, None, None, false, Some(KNOWN_RENDER_DPI), false);
 
         assert_eq!(prepared.source_dpi, 150);
         assert!(!prepared.apply_pix_preprocessing);
@@ -4442,6 +5006,7 @@ mod tests {
                 Some(&images_config),
                 false,
                 known_source_dpi,
+                false,
             );
 
             assert_eq!(prepared.width, TEST_IMAGE_SIDE);
@@ -4472,6 +5037,7 @@ mod tests {
                 Some(&images_config),
                 false,
                 known_source_dpi,
+                false,
             );
 
             assert_eq!(
@@ -4499,6 +5065,7 @@ mod tests {
                 Some(&images_config),
                 false,
                 known_source_dpi,
+                false,
             );
 
             let metadata = prepared

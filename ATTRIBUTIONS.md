@@ -369,8 +369,9 @@ High-level idiomatic Rust wrapper around Pdfium, forked and vendored for xberg:
   under MIT, retaining the upstream copyright notice below.
 - **Author**: Alastair Carey (<alastair@alastaircarey.com>), Copyright (c) 2022-2026
 - **Forked Version**: 0.8.x-era, with bindings generated against pdfium 7678 (`src/bindings/version.rs`,
-  `src/bindgen/pdfium_7678.rs`); the runtime binary pin used by `scripts/download_pdfium_runtime.sh`
-  and `.task/languages/rust.yml` is a newer, verified-compatible 7881
+  `src/bindgen/pdfium_7678.rs`). The runtime binary staged by `scripts/download_pdfium_runtime.sh`, the
+  two system installers and the Docker images is the same 7678, because the bindings are the ABI
+  contract and only one binding set exists in the tree
 - **Location**: `crates/xberg-pdfium-render/`
 - **Purpose**: PDF structure-tree and content-mark access, text extraction and rendering via
   Google's Pdfium library

@@ -545,6 +545,24 @@ pub(crate) const SOURCE_DPI_BACKEND_OPTION: &str = "source_dpi";
 #[allow(dead_code)]
 pub(crate) const PAGE_ROTATION_DEGREES_BACKEND_OPTION: &str = "page_rotation_degrees";
 
+/// [`OcrConfig::backend_options`] key carrying whether the PDF OCR route's scan-detection density
+/// check classified this page as a whole-page raster scan.
+///
+/// Stamped per page alongside [`SOURCE_DPI_BACKEND_OPTION`] (see
+/// `crate::extractors::pdf::ocr::pipeline::ocr_config_with_page_rotation_hint`), which is the only
+/// caller that can know it: it already runs `crate::pdf::scan_detect::full_page_raster_density`
+/// per page to decide the default Tesseract PSM. `config_to_tesseract` reads this to make a known
+/// scan page take Tesseract's default OCR preprocessing (resample, binarisation, deskew)
+/// unconditionally, however dark the raster is -- the pixel-brightness heuristic
+/// (`should_apply_default_preprocessing`) is tuned for a caller with no other signal and misses a
+/// scanned page with shaded rows or a grey background (GH#1894). A bare image handed to the
+/// standalone image extractor carries no such signal and keeps the pixel test.
+///
+/// Declared here rather than as a literal at each end so the producer and the consumer
+/// (`ocr::tesseract_backend::TesseractBackend::config_to_tesseract`) cannot drift apart.
+#[allow(dead_code)]
+pub(crate) const KNOWN_FULL_PAGE_SCAN_BACKEND_OPTION: &str = "known_full_page_scan";
+
 fn default_priority() -> u32 {
     100
 }
@@ -1068,6 +1086,9 @@ impl OcrConfig {
     /// Typos in backend names are caught at configuration validation time, not at runtime.
     /// Also validates pipeline stage backends when a pipeline is configured.
     ///
+    /// Also validates, for the backend and each pipeline stage, the options only that backend
+    /// parses: a compiled candle backend's `backend_options` and any `paddle_ocr_config`.
+    ///
     /// Also validates every non-blank entry of `language` (and, per pipeline stage, its
     /// `language` override) as an ISO 639 code, and the `vlm_fallback` quality threshold as a
     /// `[0.0, 1.0]` confidence value. OCR quality thresholds are validated against their
@@ -1095,6 +1116,11 @@ impl OcrConfig {
         }
         self.validate_quality_thresholds()?;
         validate_tesseract_tuning(self.tesseract_config.as_ref())?;
+        validate_backend_owned_options(
+            &self.backend,
+            self.backend_options.as_ref(),
+            self.paddle_ocr_config.as_ref(),
+        )?;
         if let Some(ref pipeline) = self.pipeline {
             for stage in &pipeline.stages {
                 validate_ocr_backend(&stage.backend)?;
@@ -1103,6 +1129,11 @@ impl OcrConfig {
                     validate_languages(languages)?;
                 }
                 validate_tesseract_tuning(stage.tesseract_config.as_ref())?;
+                validate_backend_owned_options(
+                    &stage.backend,
+                    stage.backend_options.as_ref(),
+                    stage.paddle_ocr_config.as_ref(),
+                )?;
             }
         } else if self.vlm_fallback != VlmFallbackPolicy::Disabled && self.vlm_config.is_none() {
             return Err(XbergError::validation(
@@ -1331,6 +1362,47 @@ fn validate_tesseract_tuning(tesseract_config: Option<&crate::types::TesseractCo
     crate::core::config_validation::validate_tesseract_thresholding_method(tesseract_config.thresholding_method)?;
     if let Some(ref preprocessing) = tesseract_config.preprocessing {
         crate::core::config_validation::validate_image_preprocessing_config(preprocessing)?;
+    }
+    Ok(())
+}
+
+/// Validate the settings that only a backend parses: a candle backend's `backend_options` and a
+/// `paddle_ocr_config` override.
+///
+/// This runs the same check the backend runs on each page, so an invalid value fails the
+/// extraction before any page runs. The automatic OCR route keeps native text when a page
+/// fails, so a value first rejected on a page would surface only as a warning. ~keep
+#[cfg_attr(
+    not(all(
+        paddle_ocr,
+        any(
+            feature = "candle-trocr",
+            feature = "candle-paddleocr-vl",
+            all(
+                not(target_arch = "wasm32"),
+                any(feature = "candle-glm-ocr", feature = "candle-deepseek-ocr")
+            )
+        )
+    )),
+    allow(unused_variables)
+)]
+fn validate_backend_owned_options(
+    backend: &str,
+    backend_options: Option<&serde_json::Value>,
+    paddle_ocr_config: Option<&serde_json::Value>,
+) -> Result<(), XbergError> {
+    #[cfg(any(
+        feature = "candle-trocr",
+        feature = "candle-paddleocr-vl",
+        all(
+            not(target_arch = "wasm32"),
+            any(feature = "candle-glm-ocr", feature = "candle-deepseek-ocr")
+        )
+    ))]
+    crate::candle_ocr::validate_backend_options(backend, backend_options)?;
+    #[cfg(paddle_ocr)]
+    if let Some(paddle_ocr_config) = paddle_ocr_config {
+        crate::paddle_ocr::parse_paddle_ocr_config(paddle_ocr_config)?;
     }
     Ok(())
 }

@@ -19,6 +19,17 @@ use crate::types::ExtractedDocument;
 use xberg_candle_ocr::DevicePreference;
 use xberg_candle_ocr::models::{TrocrEngine, TrocrVariant};
 
+/// Parse and check the TrOCR `backend_options`.
+///
+/// Configuration validation and every page both call this, so an invalid option
+/// fails before any page runs. ~keep
+pub(crate) fn check_backend_options(value: Option<&serde_json::Value>) -> Result<TrocrBackendOptions> {
+    let options: TrocrBackendOptions = parse_backend_options(value, "candle-trocr")?;
+    validate_optional_non_empty(options.cache_dir.as_deref(), "candle-trocr", "cache_dir")?;
+    validate_optional_non_empty(options.hf_revision.as_deref(), "candle-trocr", "hf_revision")?;
+    Ok(options)
+}
+
 /// `TrocrVariant` is `PartialEq + Eq + Copy` but does not derive `Hash`.
 /// We map it to a `u8` discriminant to form a hashable pool key.
 fn variant_discriminant(v: TrocrVariant) -> u8 {
@@ -182,9 +193,7 @@ impl TrocrBackend {
     /// Device selection is delegated to [`crate::candle_ocr::resolve_device_preference`]
     /// so the central `AccelerationConfig` is honoured.
     fn parse_options(config: &OcrConfig) -> Result<TrocrOptions> {
-        let options: TrocrBackendOptions = parse_backend_options(config.backend_options.as_ref(), "candle-trocr")?;
-        validate_optional_non_empty(options.cache_dir.as_deref(), "candle-trocr", "cache_dir")?;
-        validate_optional_non_empty(options.hf_revision.as_deref(), "candle-trocr", "hf_revision")?;
+        let options = check_backend_options(config.backend_options.as_ref())?;
         let variant = options.variant.map(|variant| match variant {
             CandleTrocrVariant::BasePrinted => TrocrVariant::BasePrinted,
             CandleTrocrVariant::LargePrinted => TrocrVariant::LargePrinted,

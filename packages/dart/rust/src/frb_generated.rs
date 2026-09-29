@@ -40,7 +40,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.13.0";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1277317953;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -731871621;
 
 // Section: executor
 
@@ -6992,6 +6992,12 @@ fn wire__crate__create_ocr_backend_dart_impl_impl(
             let api_supported_languages = decode_DartFn_Inputs__Output_list_String_AnyhowException(
                 <flutter_rust_bridge::DartOpaque>::sse_decode(&mut deserializer),
             );
+            let api_supported_languages_for = decode_DartFn_Inputs_ocr_config_Output_list_String_AnyhowException(
+                <flutter_rust_bridge::DartOpaque>::sse_decode(&mut deserializer),
+            );
+            let api_supports_language_for = decode_DartFn_Inputs_ocr_config_String_Output_bool_AnyhowException(
+                <flutter_rust_bridge::DartOpaque>::sse_decode(&mut deserializer),
+            );
             let api_supports_table_detection = decode_DartFn_Inputs__Output_bool_AnyhowException(
                 <flutter_rust_bridge::DartOpaque>::sse_decode(&mut deserializer),
             );
@@ -7021,6 +7027,8 @@ fn wire__crate__create_ocr_backend_dart_impl_impl(
                         api_supports_language,
                         api_backend_type,
                         api_supported_languages,
+                        api_supported_languages_for,
+                        api_supports_language_for,
                         api_supports_table_detection,
                         api_supports_document_processing,
                         api_emits_structured_markdown,
@@ -11315,6 +11323,34 @@ fn wire__crate__list_ocr_backend_capabilities_impl(
         },
     )
 }
+fn wire__crate__list_ocr_backend_capabilities_for_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "list_ocr_backend_capabilities_for",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(ptr_, rust_vec_len_, data_len_)
+            };
+            let mut deserializer = flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_config = <crate::OcrConfig>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::list_ocr_backend_capabilities_for(api_config)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
 fn wire__crate__list_ocr_backends_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -11626,6 +11662,66 @@ fn wire__crate__ocr_backend_supports_language_impl(
             move |context| {
                 transform_result_sse::<_, String>((move || {
                     let output_ok = crate::ocr_backend_supports_language(api_backend, api_language)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+fn wire__crate__ocr_backend_supports_language_for_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "ocr_backend_supports_language_for",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(ptr_, rust_vec_len_, data_len_)
+            };
+            let mut deserializer = flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_backend = <String>::sse_decode(&mut deserializer);
+            let api_language = <String>::sse_decode(&mut deserializer);
+            let api_config = <crate::OcrConfig>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::ocr_backend_supports_language_for(api_backend, api_language, api_config)?;
+                    std::result::Result::Ok(output_ok)
+                })())
+            }
+        },
+    )
+}
+#[cfg(feature = "pdf")]
+fn wire__crate__pdf_page_count_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "pdf_page_count",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(ptr_, rust_vec_len_, data_len_)
+            };
+            let mut deserializer = flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_pdf_bytes = <Vec<u8>>::sse_decode(&mut deserializer);
+            let api_password = <Option<String>>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, String>((move || {
+                    let output_ok = crate::pdf_page_count(api_pdf_bytes, api_password)?;
                     std::result::Result::Ok(output_ok)
                 })())
             }
@@ -12222,6 +12318,8 @@ const _: fn() = || {
         let _: crate::BrowserBackend = BrowserConfig.backend;
         let _: Option<String> = BrowserConfig.endpoint;
         let _: i64 = BrowserConfig.timeout;
+        let _: i64 = BrowserConfig.overall_timeout;
+        let _: i64 = BrowserConfig.shutdown_timeout;
         let _: crate::BrowserWait = BrowserConfig.wait;
         let _: Option<String> = BrowserConfig.wait_selector;
         let _: Option<i64> = BrowserConfig.extra_wait;
@@ -12416,6 +12514,7 @@ const _: fn() = || {
         let _: bool = ContentConfig.wrap;
         let _: i64 = ContentConfig.wrap_width;
         let _: bool = ContentConfig.include_document_structure;
+        let _: bool = ContentConfig.extract_metadata;
     }
     {
         let ContentFilterConfig = None::<crate::ContentFilterConfig>.unwrap();
@@ -12475,6 +12574,7 @@ const _: fn() = || {
         let _: Option<i64> = ConversionOptions.max_depth;
         let _: Vec<String> = ConversionOptions.exclude_selectors;
         let _: crate::TierStrategy = ConversionOptions.tier_strategy;
+        let _: Option<String> = ConversionOptions.base_url;
     }
     {
         let CoreProperties = None::<crate::CoreProperties>.unwrap();
@@ -12511,12 +12611,19 @@ const _: fn() = || {
         let _: bool = CrawlConfig.allow_subdomains;
         let _: Vec<String> = CrawlConfig.include_paths;
         let _: Vec<String> = CrawlConfig.exclude_paths;
+        let _: bool = CrawlConfig.path_patterns_match_query;
+        let _: bool = CrawlConfig.dedup_include_query;
+        let _: bool = CrawlConfig.strip_tracking_params;
+        let _: Vec<String> = CrawlConfig.tracking_params;
         let _: std::collections::HashMap<String, String> = CrawlConfig.custom_headers;
         let _: i64 = CrawlConfig.request_timeout;
         let _: Option<i64> = CrawlConfig.rate_limit_ms;
         let _: i64 = CrawlConfig.max_redirects;
         let _: i64 = CrawlConfig.retry_count;
         let _: Vec<i64> = CrawlConfig.retry_codes;
+        let _: i64 = CrawlConfig.retry_initial_delay_ms;
+        let _: i64 = CrawlConfig.retry_max_delay_ms;
+        let _: f64 = CrawlConfig.rate_limit_jitter_ratio;
         let _: bool = CrawlConfig.cookies_enabled;
         let _: Option<crate::AuthConfig> = CrawlConfig.auth;
         let _: Option<i64> = CrawlConfig.max_body_size;
@@ -15395,6 +15502,60 @@ fn decode_DartFn_Inputs_list_prim_u_8_strict_ocr_config_Output_extracted_documen
         flutter_rust_bridge::for_generated::convert_into_dart_fn_future(body(dart_opaque.clone(), arg0, arg1))
     }
 }
+fn decode_DartFn_Inputs_ocr_config_Output_list_String_AnyhowException(
+    dart_opaque: flutter_rust_bridge::DartOpaque,
+) -> impl Fn(crate::OcrConfig) -> flutter_rust_bridge::DartFnFuture<Vec<String>> {
+    use flutter_rust_bridge::IntoDart;
+
+    async fn body(dart_opaque: flutter_rust_bridge::DartOpaque, arg0: crate::OcrConfig) -> Vec<String> {
+        let args = vec![arg0.into_into_dart().into_dart()];
+        let message = FLUTTER_RUST_BRIDGE_HANDLER.dart_fn_invoke(dart_opaque, args).await;
+
+        let mut deserializer = flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+        let action = deserializer.cursor.read_u8().unwrap();
+        let ans = match action {
+            0 => std::result::Result::Ok(<Vec<String>>::sse_decode(&mut deserializer)),
+            1 => std::result::Result::Err(<flutter_rust_bridge::for_generated::anyhow::Error>::sse_decode(
+                &mut deserializer,
+            )),
+            _ => unreachable!(),
+        };
+        deserializer.end();
+        let ans = ans.expect("Dart throws exception but Rust side assume it is not failable");
+        ans
+    }
+
+    move |arg0: crate::OcrConfig| {
+        flutter_rust_bridge::for_generated::convert_into_dart_fn_future(body(dart_opaque.clone(), arg0))
+    }
+}
+fn decode_DartFn_Inputs_ocr_config_String_Output_bool_AnyhowException(
+    dart_opaque: flutter_rust_bridge::DartOpaque,
+) -> impl Fn(crate::OcrConfig, String) -> flutter_rust_bridge::DartFnFuture<bool> {
+    use flutter_rust_bridge::IntoDart;
+
+    async fn body(dart_opaque: flutter_rust_bridge::DartOpaque, arg0: crate::OcrConfig, arg1: String) -> bool {
+        let args = vec![arg0.into_into_dart().into_dart(), arg1.into_into_dart().into_dart()];
+        let message = FLUTTER_RUST_BRIDGE_HANDLER.dart_fn_invoke(dart_opaque, args).await;
+
+        let mut deserializer = flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+        let action = deserializer.cursor.read_u8().unwrap();
+        let ans = match action {
+            0 => std::result::Result::Ok(<bool>::sse_decode(&mut deserializer)),
+            1 => std::result::Result::Err(<flutter_rust_bridge::for_generated::anyhow::Error>::sse_decode(
+                &mut deserializer,
+            )),
+            _ => unreachable!(),
+        };
+        deserializer.end();
+        let ans = ans.expect("Dart throws exception but Rust side assume it is not failable");
+        ans
+    }
+
+    move |arg0: crate::OcrConfig, arg1: String| {
+        flutter_rust_bridge::for_generated::convert_into_dart_fn_future(body(dart_opaque.clone(), arg0, arg1))
+    }
+}
 flutter_rust_bridge::frb_generated_moi_arc_impl_value!(
     flutter_rust_bridge::for_generated::RustAutoOpaqueInner<Arc<dyn DocumentExtractor + Send + Sync>>
 );
@@ -16206,6 +16367,8 @@ impl SseDecode for crate::BrowserConfig {
         let mut var_backend = <crate::BrowserBackend>::sse_decode(deserializer);
         let mut var_endpoint = <Option<String>>::sse_decode(deserializer);
         let mut var_timeout = <i64>::sse_decode(deserializer);
+        let mut var_overallTimeout = <i64>::sse_decode(deserializer);
+        let mut var_shutdownTimeout = <i64>::sse_decode(deserializer);
         let mut var_wait = <crate::BrowserWait>::sse_decode(deserializer);
         let mut var_waitSelector = <Option<String>>::sse_decode(deserializer);
         let mut var_extraWait = <Option<i64>>::sse_decode(deserializer);
@@ -16220,6 +16383,8 @@ impl SseDecode for crate::BrowserConfig {
             backend: var_backend,
             endpoint: var_endpoint,
             timeout: var_timeout,
+            overall_timeout: var_overallTimeout,
+            shutdown_timeout: var_shutdownTimeout,
             wait: var_wait,
             wait_selector: var_waitSelector,
             extra_wait: var_extraWait,
@@ -16804,6 +16969,7 @@ impl SseDecode for crate::ContentConfig {
         let mut var_wrap = <bool>::sse_decode(deserializer);
         let mut var_wrapWidth = <i64>::sse_decode(deserializer);
         let mut var_includeDocumentStructure = <bool>::sse_decode(deserializer);
+        let mut var_extractMetadata = <bool>::sse_decode(deserializer);
         return crate::ContentConfig {
             output_format: var_outputFormat,
             preprocessing_preset: var_preprocessingPreset,
@@ -16817,6 +16983,7 @@ impl SseDecode for crate::ContentConfig {
             wrap: var_wrap,
             wrap_width: var_wrapWidth,
             include_document_structure: var_includeDocumentStructure,
+            extract_metadata: var_extractMetadata,
         };
     }
 }
@@ -16922,6 +17089,7 @@ impl SseDecode for crate::ConversionOptions {
         let mut var_maxDepth = <Option<i64>>::sse_decode(deserializer);
         let mut var_excludeSelectors = <Vec<String>>::sse_decode(deserializer);
         let mut var_tierStrategy = <crate::TierStrategy>::sse_decode(deserializer);
+        let mut var_baseUrl = <Option<String>>::sse_decode(deserializer);
         return crate::ConversionOptions {
             heading_style: var_headingStyle,
             list_indent_type: var_listIndentType,
@@ -16966,6 +17134,7 @@ impl SseDecode for crate::ConversionOptions {
             max_depth: var_maxDepth,
             exclude_selectors: var_excludeSelectors,
             tier_strategy: var_tierStrategy,
+            base_url: var_baseUrl,
         };
     }
 }
@@ -17026,12 +17195,19 @@ impl SseDecode for crate::CrawlConfig {
         let mut var_allowSubdomains = <bool>::sse_decode(deserializer);
         let mut var_includePaths = <Vec<String>>::sse_decode(deserializer);
         let mut var_excludePaths = <Vec<String>>::sse_decode(deserializer);
+        let mut var_pathPatternsMatchQuery = <bool>::sse_decode(deserializer);
+        let mut var_dedupIncludeQuery = <bool>::sse_decode(deserializer);
+        let mut var_stripTrackingParams = <bool>::sse_decode(deserializer);
+        let mut var_trackingParams = <Vec<String>>::sse_decode(deserializer);
         let mut var_customHeaders = <std::collections::HashMap<String, String>>::sse_decode(deserializer);
         let mut var_requestTimeout = <i64>::sse_decode(deserializer);
         let mut var_rateLimitMs = <Option<i64>>::sse_decode(deserializer);
         let mut var_maxRedirects = <i64>::sse_decode(deserializer);
         let mut var_retryCount = <i64>::sse_decode(deserializer);
         let mut var_retryCodes = <Vec<i64>>::sse_decode(deserializer);
+        let mut var_retryInitialDelayMs = <i64>::sse_decode(deserializer);
+        let mut var_retryMaxDelayMs = <i64>::sse_decode(deserializer);
+        let mut var_rateLimitJitterRatio = <f64>::sse_decode(deserializer);
         let mut var_cookiesEnabled = <bool>::sse_decode(deserializer);
         let mut var_auth = <Option<crate::AuthConfig>>::sse_decode(deserializer);
         let mut var_maxBodySize = <Option<i64>>::sse_decode(deserializer);
@@ -17074,12 +17250,19 @@ impl SseDecode for crate::CrawlConfig {
             allow_subdomains: var_allowSubdomains,
             include_paths: var_includePaths,
             exclude_paths: var_excludePaths,
+            path_patterns_match_query: var_pathPatternsMatchQuery,
+            dedup_include_query: var_dedupIncludeQuery,
+            strip_tracking_params: var_stripTrackingParams,
+            tracking_params: var_trackingParams,
             custom_headers: var_customHeaders,
             request_timeout: var_requestTimeout,
             rate_limit_ms: var_rateLimitMs,
             max_redirects: var_maxRedirects,
             retry_count: var_retryCount,
             retry_codes: var_retryCodes,
+            retry_initial_delay_ms: var_retryInitialDelayMs,
+            retry_max_delay_ms: var_retryMaxDelayMs,
+            rate_limit_jitter_ratio: var_rateLimitJitterRatio,
             cookies_enabled: var_cookiesEnabled,
             auth: var_auth,
             max_body_size: var_maxBodySize,
@@ -26284,44 +26467,48 @@ fn pde_ffi_dispatcher_primary_impl(
         382 => wire__crate__list_document_extractors_impl(port, ptr, rust_vec_len, data_len),
         383 => wire__crate__list_embedding_backends_impl(port, ptr, rust_vec_len, data_len),
         384 => wire__crate__list_ocr_backend_capabilities_impl(port, ptr, rust_vec_len, data_len),
-        385 => wire__crate__list_ocr_backends_impl(port, ptr, rust_vec_len, data_len),
-        386 => wire__crate__list_post_processors_impl(port, ptr, rust_vec_len, data_len),
-        387 => wire__crate__list_renderers_impl(port, ptr, rust_vec_len, data_len),
-        388 => wire__crate__list_reranker_backends_impl(port, ptr, rust_vec_len, data_len),
-        389 => wire__crate__list_supported_formats_impl(port, ptr, rust_vec_len, data_len),
-        390 => wire__crate__list_tokenizer_backends_impl(port, ptr, rust_vec_len, data_len),
-        391 => wire__crate__list_validators_impl(port, ptr, rust_vec_len, data_len),
+        385 => wire__crate__list_ocr_backend_capabilities_for_impl(port, ptr, rust_vec_len, data_len),
+        386 => wire__crate__list_ocr_backends_impl(port, ptr, rust_vec_len, data_len),
+        387 => wire__crate__list_post_processors_impl(port, ptr, rust_vec_len, data_len),
+        388 => wire__crate__list_renderers_impl(port, ptr, rust_vec_len, data_len),
+        389 => wire__crate__list_reranker_backends_impl(port, ptr, rust_vec_len, data_len),
+        390 => wire__crate__list_supported_formats_impl(port, ptr, rust_vec_len, data_len),
+        391 => wire__crate__list_tokenizer_backends_impl(port, ptr, rust_vec_len, data_len),
+        392 => wire__crate__list_validators_impl(port, ptr, rust_vec_len, data_len),
         #[cfg(feature = "url-ingestion")]
-        392 => wire__crate__map_url_impl(port, ptr, rust_vec_len, data_len),
+        393 => wire__crate__map_url_impl(port, ptr, rust_vec_len, data_len),
         #[cfg(any(
             any(feature = "late-interaction-presets", feature = "late-interaction"),
             feature = "late-interaction-presets"
         ))]
-        393 => wire__crate__max_sim_rank_impl(port, ptr, rust_vec_len, data_len),
+        394 => wire__crate__max_sim_rank_impl(port, ptr, rust_vec_len, data_len),
         #[cfg(any(
             any(feature = "late-interaction-presets", feature = "late-interaction"),
             feature = "late-interaction-presets"
         ))]
-        394 => wire__crate__max_sim_score_impl(port, ptr, rust_vec_len, data_len),
-        395 => wire__crate__ocr_backend_supports_language_impl(port, ptr, rust_vec_len, data_len),
-        396 => wire__crate__register_document_extractor_impl(port, ptr, rust_vec_len, data_len),
-        397 => wire__crate__register_embedding_backend_impl(port, ptr, rust_vec_len, data_len),
-        398 => wire__crate__register_ocr_backend_impl(port, ptr, rust_vec_len, data_len),
-        399 => wire__crate__register_post_processor_impl(port, ptr, rust_vec_len, data_len),
-        400 => wire__crate__register_renderer_impl(port, ptr, rust_vec_len, data_len),
-        401 => wire__crate__register_reranker_backend_impl(port, ptr, rust_vec_len, data_len),
-        402 => wire__crate__register_tokenizer_backend_impl(port, ptr, rust_vec_len, data_len),
-        403 => wire__crate__register_validator_impl(port, ptr, rust_vec_len, data_len),
-        404 => wire__crate__unregister_document_extractor_impl(port, ptr, rust_vec_len, data_len),
-        405 => wire__crate__unregister_embedding_backend_impl(port, ptr, rust_vec_len, data_len),
-        406 => wire__crate__unregister_ocr_backend_impl(port, ptr, rust_vec_len, data_len),
-        407 => wire__crate__unregister_post_processor_impl(port, ptr, rust_vec_len, data_len),
-        408 => wire__crate__unregister_renderer_impl(port, ptr, rust_vec_len, data_len),
-        409 => wire__crate__unregister_reranker_backend_impl(port, ptr, rust_vec_len, data_len),
-        410 => wire__crate__unregister_tokenizer_backend_impl(port, ptr, rust_vec_len, data_len),
-        411 => wire__crate__unregister_validator_impl(port, ptr, rust_vec_len, data_len),
+        395 => wire__crate__max_sim_score_impl(port, ptr, rust_vec_len, data_len),
+        396 => wire__crate__ocr_backend_supports_language_impl(port, ptr, rust_vec_len, data_len),
+        397 => wire__crate__ocr_backend_supports_language_for_impl(port, ptr, rust_vec_len, data_len),
+        #[cfg(feature = "pdf")]
+        398 => wire__crate__pdf_page_count_impl(port, ptr, rust_vec_len, data_len),
+        399 => wire__crate__register_document_extractor_impl(port, ptr, rust_vec_len, data_len),
+        400 => wire__crate__register_embedding_backend_impl(port, ptr, rust_vec_len, data_len),
+        401 => wire__crate__register_ocr_backend_impl(port, ptr, rust_vec_len, data_len),
+        402 => wire__crate__register_post_processor_impl(port, ptr, rust_vec_len, data_len),
+        403 => wire__crate__register_renderer_impl(port, ptr, rust_vec_len, data_len),
+        404 => wire__crate__register_reranker_backend_impl(port, ptr, rust_vec_len, data_len),
+        405 => wire__crate__register_tokenizer_backend_impl(port, ptr, rust_vec_len, data_len),
+        406 => wire__crate__register_validator_impl(port, ptr, rust_vec_len, data_len),
+        407 => wire__crate__unregister_document_extractor_impl(port, ptr, rust_vec_len, data_len),
+        408 => wire__crate__unregister_embedding_backend_impl(port, ptr, rust_vec_len, data_len),
+        409 => wire__crate__unregister_ocr_backend_impl(port, ptr, rust_vec_len, data_len),
+        410 => wire__crate__unregister_post_processor_impl(port, ptr, rust_vec_len, data_len),
+        411 => wire__crate__unregister_renderer_impl(port, ptr, rust_vec_len, data_len),
+        412 => wire__crate__unregister_reranker_backend_impl(port, ptr, rust_vec_len, data_len),
+        413 => wire__crate__unregister_tokenizer_backend_impl(port, ptr, rust_vec_len, data_len),
+        414 => wire__crate__unregister_validator_impl(port, ptr, rust_vec_len, data_len),
         #[cfg(feature = "markdown-footnotes")]
-        412 => wire__crate__verify_excerpt_impl(port, ptr, rust_vec_len, data_len),
+        415 => wire__crate__verify_excerpt_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }
@@ -26979,6 +27166,8 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::BrowserConfig> {
             self.0.backend.into_into_dart().into_dart(),
             self.0.endpoint.into_into_dart().into_dart(),
             self.0.timeout.into_into_dart().into_dart(),
+            self.0.overall_timeout.into_into_dart().into_dart(),
+            self.0.shutdown_timeout.into_into_dart().into_dart(),
             self.0.wait.into_into_dart().into_dart(),
             self.0.wait_selector.into_into_dart().into_dart(),
             self.0.extra_wait.into_into_dart().into_dart(),
@@ -27632,6 +27821,7 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::ContentConfig> {
             self.0.wrap.into_into_dart().into_dart(),
             self.0.wrap_width.into_into_dart().into_dart(),
             self.0.include_document_structure.into_into_dart().into_dart(),
+            self.0.extract_metadata.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -27757,6 +27947,7 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::ConversionOptions> {
             self.0.max_depth.into_into_dart().into_dart(),
             self.0.exclude_selectors.into_into_dart().into_dart(),
             self.0.tier_strategy.into_into_dart().into_dart(),
+            self.0.base_url.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -27815,12 +28006,19 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::CrawlConfig> {
             self.0.allow_subdomains.into_into_dart().into_dart(),
             self.0.include_paths.into_into_dart().into_dart(),
             self.0.exclude_paths.into_into_dart().into_dart(),
+            self.0.path_patterns_match_query.into_into_dart().into_dart(),
+            self.0.dedup_include_query.into_into_dart().into_dart(),
+            self.0.strip_tracking_params.into_into_dart().into_dart(),
+            self.0.tracking_params.into_into_dart().into_dart(),
             self.0.custom_headers.into_into_dart().into_dart(),
             self.0.request_timeout.into_into_dart().into_dart(),
             self.0.rate_limit_ms.into_into_dart().into_dart(),
             self.0.max_redirects.into_into_dart().into_dart(),
             self.0.retry_count.into_into_dart().into_dart(),
             self.0.retry_codes.into_into_dart().into_dart(),
+            self.0.retry_initial_delay_ms.into_into_dart().into_dart(),
+            self.0.retry_max_delay_ms.into_into_dart().into_dart(),
+            self.0.rate_limit_jitter_ratio.into_into_dart().into_dart(),
             self.0.cookies_enabled.into_into_dart().into_dart(),
             self.0.auth.into_into_dart().into_dart(),
             self.0.max_body_size.into_into_dart().into_dart(),
@@ -34612,6 +34810,8 @@ impl SseEncode for crate::BrowserConfig {
         <crate::BrowserBackend>::sse_encode(self.backend, serializer);
         <Option<String>>::sse_encode(self.endpoint, serializer);
         <i64>::sse_encode(self.timeout, serializer);
+        <i64>::sse_encode(self.overall_timeout, serializer);
+        <i64>::sse_encode(self.shutdown_timeout, serializer);
         <crate::BrowserWait>::sse_encode(self.wait, serializer);
         <Option<String>>::sse_encode(self.wait_selector, serializer);
         <Option<i64>>::sse_encode(self.extra_wait, serializer);
@@ -35104,6 +35304,7 @@ impl SseEncode for crate::ContentConfig {
         <bool>::sse_encode(self.wrap, serializer);
         <i64>::sse_encode(self.wrap_width, serializer);
         <bool>::sse_encode(self.include_document_structure, serializer);
+        <bool>::sse_encode(self.extract_metadata, serializer);
     }
 }
 
@@ -35205,6 +35406,7 @@ impl SseEncode for crate::ConversionOptions {
         <Option<i64>>::sse_encode(self.max_depth, serializer);
         <Vec<String>>::sse_encode(self.exclude_selectors, serializer);
         <crate::TierStrategy>::sse_encode(self.tier_strategy, serializer);
+        <Option<String>>::sse_encode(self.base_url, serializer);
     }
 }
 
@@ -35247,12 +35449,19 @@ impl SseEncode for crate::CrawlConfig {
         <bool>::sse_encode(self.allow_subdomains, serializer);
         <Vec<String>>::sse_encode(self.include_paths, serializer);
         <Vec<String>>::sse_encode(self.exclude_paths, serializer);
+        <bool>::sse_encode(self.path_patterns_match_query, serializer);
+        <bool>::sse_encode(self.dedup_include_query, serializer);
+        <bool>::sse_encode(self.strip_tracking_params, serializer);
+        <Vec<String>>::sse_encode(self.tracking_params, serializer);
         <std::collections::HashMap<String, String>>::sse_encode(self.custom_headers, serializer);
         <i64>::sse_encode(self.request_timeout, serializer);
         <Option<i64>>::sse_encode(self.rate_limit_ms, serializer);
         <i64>::sse_encode(self.max_redirects, serializer);
         <i64>::sse_encode(self.retry_count, serializer);
         <Vec<i64>>::sse_encode(self.retry_codes, serializer);
+        <i64>::sse_encode(self.retry_initial_delay_ms, serializer);
+        <i64>::sse_encode(self.retry_max_delay_ms, serializer);
+        <f64>::sse_encode(self.rate_limit_jitter_ratio, serializer);
         <bool>::sse_encode(self.cookies_enabled, serializer);
         <Option<crate::AuthConfig>>::sse_encode(self.auth, serializer);
         <Option<i64>>::sse_encode(self.max_body_size, serializer);

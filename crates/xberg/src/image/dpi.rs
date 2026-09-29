@@ -1,6 +1,15 @@
 /// PDF points per inch constant
 const PDF_POINTS_PER_INCH: f64 = 72.0;
 
+#[cfg(feature = "pdf")]
+pub(crate) const OCR_PNG_ENCODE_BYTES_PER_PIXEL: u64 = 4;
+#[cfg(feature = "pdf")]
+pub(crate) const OCR_PNG_ENCODE_FIXED_BYTES: u64 = 256 * 1024;
+#[cfg(feature = "pdf")]
+const OCR_RENDER_SOURCE_BYTES_PER_PIXEL: u64 = 4;
+#[cfg(feature = "pdf")]
+const OCR_RGB_CONVERSION_BYTES_PER_PIXEL: u64 = 3;
+
 /// Calculate smart DPI based on page dimensions, memory constraints, and target DPI
 // The only non-test caller is `image::preprocessing`, which is `ocr-pipeline`-gated.
 // `layout-detection` pulls this module in for `effective_pdf_render_dpi` alone (#1577), so
@@ -163,14 +172,66 @@ pub(crate) fn pdf_ocr_render_dpi(
     doc: &xberg_native_pdf::PdfDocument,
     page_idx: usize,
     images_config: Option<&crate::core::config::ImageExtractionConfig>,
+    security_limits: &crate::extractors::security::SecurityLimits,
 ) -> i32 {
-    if images_config.is_none()
+    let requested_dpi = if images_config.is_none()
         && let Some(density) = crate::pdf::scan_detect::full_page_raster_density(doc, page_idx)
     {
-        return scan_page_render_dpi(density);
-    }
+        scan_page_render_dpi(density)
+    } else {
+        let (page_width_pt, page_height_pt) = crate::pdf::render::get_page_dimensions_pt(doc, page_idx);
+        effective_pdf_render_dpi(images_config, f64::from(page_width_pt), f64::from(page_height_pt))
+    };
     let (page_width_pt, page_height_pt) = crate::pdf::render::get_page_dimensions_pt(doc, page_idx);
-    effective_pdf_render_dpi(images_config, f64::from(page_width_pt), f64::from(page_height_pt))
+    let capped_dpi = cap_pdf_ocr_render_dpi(
+        requested_dpi,
+        f64::from(page_width_pt),
+        f64::from(page_height_pt),
+        security_limits.max_content_size,
+    );
+    if capped_dpi < requested_dpi {
+        crate::pdf::render::record_render_warning(crate::types::ProcessingWarning {
+            source: std::borrow::Cow::Borrowed("pdf-render"),
+            message: std::borrow::Cow::Owned(format!(
+                "Page {} OCR render DPI was reduced from {requested_dpi} to {capped_dpi} to fit security_limits.max_content_size",
+                page_idx + 1
+            )),
+        });
+    }
+    capped_dpi
+}
+
+#[cfg(feature = "pdf")]
+fn cap_pdf_ocr_render_dpi(requested_dpi: i32, page_width_pt: f64, page_height_pt: f64, max_content_size: usize) -> i32 {
+    let fits = |dpi: i32| {
+        let width = ((page_width_pt / PDF_POINTS_PER_INCH) * f64::from(dpi)).ceil().max(1.0) as u128;
+        let height = ((page_height_pt / PDF_POINTS_PER_INCH) * f64::from(dpi))
+            .ceil()
+            .max(1.0) as u128;
+        let bytes_per_pixel = u128::from(
+            OCR_RENDER_SOURCE_BYTES_PER_PIXEL + OCR_RGB_CONVERSION_BYTES_PER_PIXEL + OCR_PNG_ENCODE_BYTES_PER_PIXEL,
+        );
+        width
+            .checked_mul(height)
+            .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
+            .and_then(|bytes| bytes.checked_add(u128::from(OCR_PNG_ENCODE_FIXED_BYTES)))
+            .is_some_and(|bytes| bytes <= max_content_size as u128)
+    };
+    if fits(requested_dpi) {
+        return requested_dpi;
+    }
+
+    let mut low = 1;
+    let mut high = requested_dpi.max(1);
+    while low < high {
+        let middle = low + (high - low + 1) / 2;
+        if fits(middle) {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    low
 }
 
 /// Calculate optimal DPI with min/max constraints

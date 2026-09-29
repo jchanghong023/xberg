@@ -475,9 +475,8 @@ pub(crate) fn extract_all_from_native_document(
     } else {
         config
     };
-    let page_structure_was_implicitly_tracked = force_annotation_page_tracking
-        && config.ocr.is_none()
-        && config.force_ocr_pages.as_ref().is_none_or(Vec::is_empty);
+    let page_structure_was_implicitly_tracked =
+        force_annotation_page_tracking && !crate::pdf::native::text::page_boundaries_required(config);
 
     #[cfg_attr(not(feature = "layout-detection"), allow(unused_mut))]
     let (mut native_text, mut boundaries, mut page_contents, mut pdf_metadata) =

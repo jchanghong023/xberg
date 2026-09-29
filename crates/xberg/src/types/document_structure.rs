@@ -267,6 +267,7 @@ pub struct DocumentNode {
 
     /// Parent node index (`None` = root-level node).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub parent: Option<NodeIndex>,
 
     /// Child node indices in reading order.
@@ -292,6 +293,7 @@ pub struct DocumentNode {
 
     /// Bounding box in document coordinates.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub bbox: Option<BoundingBox>,
 
     /// Inline annotations (formatting, links) on this node's text content.
@@ -562,6 +564,7 @@ pub struct GridCell {
     pub is_header: bool,
     /// Bounding box for this cell (if available).
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub bbox: Option<BoundingBox>,
     /// Outline level (1-6) of the heading style this cell's text carries, when it has one.
     ///

@@ -164,6 +164,32 @@ fn get_or_init_engine(
 /// neither `model_path` nor a custom `model_id`.
 const DEFAULT_MODEL_ID: &str = "deepseek-ai/DeepSeek-OCR";
 
+/// DeepSeek-OCR model generation used when `backend_options.version` is absent.
+const DEFAULT_VERSION: u32 = 2;
+
+/// Parse and check the DeepSeek-OCR `backend_options`.
+///
+/// Configuration validation and every page both call this, so an invalid option
+/// fails before any page runs. ~keep
+pub(crate) fn check_backend_options(value: Option<&serde_json::Value>) -> Result<DeepseekOcrBackendOptions> {
+    let options: DeepseekOcrBackendOptions = parse_backend_options(value, "candle-deepseek-ocr")?;
+    for (field, value) in [
+        ("model_path", options.model_path.as_deref()),
+        ("model_id", options.model_id.as_deref()),
+        ("hf_revision", options.hf_revision.as_deref()),
+        ("cache_dir", options.cache_dir.as_deref()),
+    ] {
+        validate_optional_non_empty(value, "candle-deepseek-ocr", field)?;
+    }
+    let version = options.version.unwrap_or(DEFAULT_VERSION);
+    if !matches!(version, 1 | 2) {
+        return Err(crate::XbergError::validation(format!(
+            "invalid candle-deepseek-ocr backend_options.version: expected 1 or 2, got {version}"
+        )));
+    }
+    Ok(options)
+}
+
 /// DeepSeek-OCR backend using candle transformers.
 ///
 /// A vision-language model combining SAM vision encoder, ViT/Qwen2 vision
@@ -239,22 +265,8 @@ impl DeepseekOcrBackend {
     /// so the central `AccelerationConfig` is honoured. `model_id` defaults to
     /// [`DEFAULT_MODEL_ID`] and is only consulted when `model_path` is absent.
     fn parse_options(&self, config: &OcrConfig) -> Result<DeepseekOcrOptions> {
-        let options: DeepseekOcrBackendOptions =
-            parse_backend_options(config.backend_options.as_ref(), "candle-deepseek-ocr")?;
-        for (field, value) in [
-            ("model_path", options.model_path.as_deref()),
-            ("model_id", options.model_id.as_deref()),
-            ("hf_revision", options.hf_revision.as_deref()),
-            ("cache_dir", options.cache_dir.as_deref()),
-        ] {
-            validate_optional_non_empty(value, "candle-deepseek-ocr", field)?;
-        }
-        let version = options.version.unwrap_or(2);
-        if !matches!(version, 1 | 2) {
-            return Err(crate::XbergError::validation(format!(
-                "invalid candle-deepseek-ocr backend_options.version: expected 1 or 2, got {version}"
-            )));
-        }
+        let options = check_backend_options(config.backend_options.as_ref())?;
+        let version = options.version.unwrap_or(DEFAULT_VERSION);
         Ok(DeepseekOcrOptions {
             model_path: options.model_path,
             model_id: options.model_id.unwrap_or_else(|| DEFAULT_MODEL_ID.to_string()),

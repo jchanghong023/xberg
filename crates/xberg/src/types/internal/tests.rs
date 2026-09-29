@@ -102,6 +102,51 @@ fn list_item_source_label_ignores_an_empty_label() {
     assert_eq!(element.attributes, None);
 }
 
+/// Measured font size round-trips and stays out of `public_attributes()` --
+/// unlike the list-marker attribute, this is internal plumbing, not document
+/// content.
+#[cfg(feature = "pdf")]
+#[test]
+fn measured_font_size_round_trips_and_stays_internal() {
+    let mut element = InternalElement::text(ElementKind::Paragraph, "Body text.", 1);
+    assert_eq!(element.measured_font_size(), None);
+
+    element.set_measured_font_size(11.5);
+
+    assert_eq!(element.measured_font_size(), Some(11.5));
+    // The only attribute set is the measured font size, so it must never reach
+    // the public surface: `public_attributes()` reports `None` rather than
+    // `Some({..})`.
+    assert_eq!(element.public_attributes(), None);
+}
+
+/// A non-finite or non-positive value is never stored in the first place.
+#[cfg(feature = "pdf")]
+#[test]
+fn measured_font_size_ignores_non_finite_or_non_positive_values() {
+    for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -11.5] {
+        let mut element = InternalElement::text(ElementKind::Paragraph, "Body text.", 1);
+        element.set_measured_font_size(invalid);
+        assert_eq!(element.measured_font_size(), None, "{invalid} must not be stored");
+        assert_eq!(element.attributes, None);
+    }
+}
+
+/// The attribute map survives a cache round-trip as plain strings, so an
+/// unparseable or corrupted stored value must be treated as untrusted and
+/// read back as `None`, not propagated or panicked on.
+#[cfg(feature = "pdf")]
+#[test]
+fn measured_font_size_returns_none_for_unparseable_stored_value() {
+    let mut element = InternalElement::text(ElementKind::Paragraph, "Body text.", 1);
+    element
+        .attributes
+        .get_or_insert_with(AHashMap::new)
+        .insert("xberg:internal:font-size-pt".to_string(), "not-a-number".to_string());
+
+    assert_eq!(element.measured_font_size(), None);
+}
+
 #[cfg(any(feature = "ocr", feature = "pdf", paddle_ocr, feature = "xml", feature = "office"))]
 #[test]
 fn test_internal_element_builder_pattern() {

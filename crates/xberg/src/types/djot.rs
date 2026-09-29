@@ -133,6 +133,7 @@ pub struct FormattedBlock {
 
     /// Element attributes (classes, IDs, key-value pairs)
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub attributes: Option<Attributes>,
 
     /// Language identifier for code blocks
@@ -201,6 +202,7 @@ pub struct InlineElement {
 
     /// Element attributes
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub attributes: Option<Attributes>,
 
     /// Additional metadata (e.g., href for links, src/alt for images)
@@ -282,6 +284,7 @@ pub struct DjotImage {
 
     /// Element attributes
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub attributes: Option<Attributes>,
 }
 
@@ -301,6 +304,7 @@ pub struct DjotLink {
 
     /// Element attributes
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub attributes: Option<Attributes>,
 }
 

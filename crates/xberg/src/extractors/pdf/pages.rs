@@ -5,12 +5,24 @@
 use crate::types::internal::{ElementKind, InternalDocument};
 use crate::types::{HierarchicalBlock, PageContent, PageHierarchy};
 
+/// Fallback font size (in points) reported for a hierarchy block when no measured
+/// font size was recorded on the element.
+///
+/// This is the pre-fix hardcoded default that every block used to report
+/// unconditionally; it is kept as a fallback so output stays stable for elements
+/// that predate font-size measurement (e.g. non-PDF extractors) rather than
+/// reporting a nonsensical `0.0`.
+const FALLBACK_HIERARCHY_FONT_SIZE_PT: f32 = 12.0;
+
 /// Extract hierarchy information from an InternalDocument and assign to pages.
 ///
-/// Examines all heading elements in the document, maps them to pages using the
-/// `page` field, and creates PageHierarchy structures for each page.
+/// Examines all heading and paragraph elements in the document, maps them to
+/// pages using the `page` field, and creates PageHierarchy structures for each
+/// page. Each block reports the element's measured dominant font size when one
+/// was recorded, falling back to [`FALLBACK_HIERARCHY_FONT_SIZE_PT`] otherwise.
 ///
-/// Only processes ElementKind::Heading elements and ignores other element types.
+/// Only processes ElementKind::Heading and ElementKind::Paragraph elements and
+/// ignores other element types.
 pub(crate) fn assign_hierarchy_to_pages(pages: &mut [PageContent], doc: &InternalDocument) {
     let mut page_hierarchies: std::collections::HashMap<u32, Vec<HierarchicalBlock>> = std::collections::HashMap::new();
 
@@ -20,31 +32,21 @@ pub(crate) fn assign_hierarchy_to_pages(pages: &mut [PageContent], doc: &Interna
             None => continue,
         };
 
-        match element.kind {
-            ElementKind::Heading { level } => {
-                let block = HierarchicalBlock {
-                    text: element.text.clone(),
-                    font_size: 12.0,
-                    level: format!("h{}", level),
-                    bbox: element
-                        .bbox
-                        .map(|b| (b.x0 as f32, b.y0 as f32, b.x1 as f32, b.y1 as f32).into()),
-                };
-                page_hierarchies.entry(page_num).or_default().push(block);
-            }
-            ElementKind::Paragraph => {
-                let block = HierarchicalBlock {
-                    text: element.text.clone(),
-                    font_size: 12.0,
-                    level: "body".to_string(),
-                    bbox: element
-                        .bbox
-                        .map(|b| (b.x0 as f32, b.y0 as f32, b.x1 as f32, b.y1 as f32).into()),
-                };
-                page_hierarchies.entry(page_num).or_default().push(block);
-            }
-            _ => {}
-        }
+        let level = match element.kind {
+            ElementKind::Heading { level } => format!("h{}", level),
+            ElementKind::Paragraph => "body".to_string(),
+            _ => continue,
+        };
+
+        let block = HierarchicalBlock {
+            text: element.text.clone(),
+            font_size: element.measured_font_size().unwrap_or(FALLBACK_HIERARCHY_FONT_SIZE_PT),
+            level,
+            bbox: element
+                .bbox
+                .map(|b| (b.x0 as f32, b.y0 as f32, b.x1 as f32, b.y1 as f32).into()),
+        };
+        page_hierarchies.entry(page_num).or_default().push(block);
     }
 
     for page in pages.iter_mut() {
@@ -105,4 +107,96 @@ pub(crate) fn assign_tables_and_images_to_pages(
     }
 
     Some(updated_pages)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::internal_builder::InternalDocumentBuilder;
+
+    fn page(page_number: u32) -> PageContent {
+        PageContent {
+            page_number,
+            content: String::new(),
+            tables: Vec::new(),
+            image_indices: Vec::new(),
+            image_preprocessing: None,
+            hierarchy: None,
+            is_blank: None,
+            layout_regions: None,
+            speaker_notes: None,
+            section_name: None,
+            sheet_name: None,
+            ocr_confidence: None,
+        }
+    }
+
+    #[test]
+    fn should_report_each_elements_own_measured_font_size() {
+        let mut builder = InternalDocumentBuilder::new("pdf");
+        let heading_idx = builder.push_heading(1, "Title", Some(1), None);
+        builder.set_measured_font_size(heading_idx, 24.0);
+        let paragraph_idx = builder.push_paragraph("Body text.", vec![], Some(1), None);
+        builder.set_measured_font_size(paragraph_idx, 11.5);
+        let doc = builder.build();
+
+        let mut pages = vec![page(1)];
+        assign_hierarchy_to_pages(&mut pages, &doc);
+
+        let blocks = &pages[0].hierarchy.as_ref().expect("hierarchy present").blocks;
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].font_size, 24.0, "heading should report its own measured size");
+        assert_eq!(
+            blocks[1].font_size, 11.5,
+            "paragraph should report its own measured size, not the heading's"
+        );
+    }
+
+    #[test]
+    fn should_fall_back_to_default_font_size_when_none_was_measured() {
+        let mut builder = InternalDocumentBuilder::new("pdf");
+        builder.push_paragraph("Body text.", vec![], Some(1), None);
+        let doc = builder.build();
+
+        let mut pages = vec![page(1)];
+        assign_hierarchy_to_pages(&mut pages, &doc);
+
+        let blocks = &pages[0].hierarchy.as_ref().expect("hierarchy present").blocks;
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].font_size, FALLBACK_HIERARCHY_FONT_SIZE_PT);
+    }
+
+    #[test]
+    fn should_fall_back_to_default_font_size_for_non_finite_or_non_positive_measurements() {
+        for invalid in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -12.0] {
+            let mut builder = InternalDocumentBuilder::new("pdf");
+            let idx = builder.push_paragraph("Body text.", vec![], Some(1), None);
+            builder.set_measured_font_size(idx, invalid);
+            let doc = builder.build();
+
+            let mut pages = vec![page(1)];
+            assign_hierarchy_to_pages(&mut pages, &doc);
+
+            let blocks = &pages[0].hierarchy.as_ref().expect("hierarchy present").blocks;
+            assert_eq!(
+                blocks[0].font_size, FALLBACK_HIERARCHY_FONT_SIZE_PT,
+                "invalid measurement {invalid} must not propagate"
+            );
+        }
+    }
+
+    #[test]
+    fn should_skip_elements_with_no_page() {
+        let mut builder = InternalDocumentBuilder::new("pdf");
+        builder.push_paragraph("Body text.", vec![], None, None);
+        let doc = builder.build();
+
+        let mut pages = vec![page(1)];
+        assign_hierarchy_to_pages(&mut pages, &doc);
+
+        assert!(
+            pages[0].hierarchy.is_none(),
+            "an element with no page must not be assigned"
+        );
+    }
 }

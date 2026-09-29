@@ -167,6 +167,23 @@ pub struct TesseractConfig {
     #[serde(default)]
     pub source_dpi: Option<f64>,
 
+    /// Whether the caller already knows this image is a whole-page scan, when true.
+    ///
+    /// Like `source_dpi`, this is *not* a user-facing knob and has no counterpart on the public
+    /// [`crate::types::TesseractConfig`]: it is a per-call fact about one image, set by the PDF
+    /// OCR route from
+    /// [`crate::core::config::ocr::KNOWN_FULL_PAGE_SCAN_BACKEND_OPTION`] because that route
+    /// already runs the scan-detection density check to decide the page's default PSM. Every
+    /// other caller leaves it `false`.
+    ///
+    /// `false` means "unknown, judge from the pixels": `prepare_ocr_image` then falls back to
+    /// `should_apply_default_preprocessing`'s brightness heuristic, as it always has. `true`
+    /// skips that heuristic and applies the default preprocessing (resample, binarisation,
+    /// deskew) unconditionally -- a known scan page must not lose it just because shaded table
+    /// rows or a grey background make it read as dark (GH#1894).
+    #[serde(default)]
+    pub known_full_page_scan: bool,
+
     /// The true, 1-indexed page number of the source document that `image_bytes` came
     /// from, when the caller knows it.
     ///
@@ -268,6 +285,7 @@ impl Default for TesseractConfig {
             auto_rotate: false,
             tessdata_path: None,
             source_dpi: None,
+            known_full_page_scan: false,
             page_number: default_page_number(),
             security_limits: None,
         }
@@ -330,6 +348,9 @@ impl From<&crate::types::TesseractConfig> for TesseractConfig {
             // The public config is a user-supplied document-wide setting and cannot know the
             // resolution of any one image; only the per-call `backend_options` hint can.
             source_dpi: None,
+            // Same rationale as `source_dpi`: a document-wide public config cannot know whether
+            // any one image is a whole-page scan; only the per-call `backend_options` hint can.
+            known_full_page_scan: false,
             // Same rationale as `source_dpi`: the public config has no notion of which page
             // of a document this one call is for. Unlike `source_dpi`, no caller currently
             // threads a per-call value in through `backend_options`, so this always resolves

@@ -69,6 +69,7 @@ pub struct PdfFormField {
 
     /// Widget bounding box on its page, if known.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub bbox: Option<BoundingBox>,
 
     /// Maximum input length for text fields, if specified.

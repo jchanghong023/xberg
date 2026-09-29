@@ -197,6 +197,33 @@ pub(crate) fn extract_spans_from_page(
     Ok((spans, reordered_sparse_columns))
 }
 
+/// Whether the text pass must hand out per-page byte offsets, independent of whether the
+/// caller asked to collect `PageContent` itself.
+///
+/// Some OCR routes replace only *some* pages rather than the whole document, and those routes
+/// need the boundaries this predicate gates:
+///
+/// - `force_ocr_pages` non-empty and an `ocr` block both already required boundaries before
+///   GH#1752.
+/// - `ocr_near_empty_fallback == Some(true)` and `ocr_scanned_page_quality_gate == Some(true)`
+///   now also require them, even without an `ocr` block. Before this widening, a caller who set
+///   either flag alone got no boundaries at all: `extractors/pdf/mod.rs` skips
+///   `extract_mixed_ocr_native` entirely without them, the per-page text-quality gate collapses
+///   to one document-wide verdict, and a single flagged page escalates to whole-document OCR --
+///   the cost inversion GH#1752 exists to fix.
+///
+/// Deliberately does *not* check `ocr_embedded_images` (irrelevant to page boundaries -- it
+/// gates whether embedded image bytes are read, not page-text offsets) or whether an automatic
+/// OCR backend is registered: being wrong in the "too eager" direction here just tracks
+/// boundaries nobody ends up using, which is silent-safe, while being wrong "too narrow" is the
+/// bug this function fixes. ~keep
+pub(crate) fn page_boundaries_required(config: &ExtractionConfig) -> bool {
+    config.force_ocr_pages.as_ref().is_some_and(|pages| !pages.is_empty())
+        || config.ocr.is_some()
+        || config.ocr_near_empty_fallback == Some(true)
+        || config.ocr_scanned_page_quality_gate == Some(true)
+}
+
 /// Extract text from a xberg_native_pdf document with optional page boundary tracking.
 ///
 /// Mirrors the signature and behaviour of `extract_text_from_pdf_document`.
@@ -204,10 +231,10 @@ pub(crate) fn extract_spans_from_page(
 /// When `page_config` is `Some`, tracks byte offsets and optionally collects
 /// per-page `PageContent` entries.
 ///
-/// When `page_config` is `None` but `extraction_config` requires per-page boundaries
-/// (i.e. `force_ocr_pages` is set or an `ocr` config is present for quality evaluation),
-/// boundary tracking is enabled automatically with a default `PageConfig` so that the
-/// mixed-OCR and quality-threshold codepaths receive the offsets they need.
+/// When `page_config` is `None` but `extraction_config` requires per-page boundaries, per
+/// [`page_boundaries_required`], boundary tracking is enabled automatically with a default
+/// `PageConfig` so that the mixed-OCR and quality-threshold codepaths receive the offsets they
+/// need.
 ///
 /// Otherwise the fast path is used (no per-page tracking).
 pub(crate) fn extract_text_from_native_document(
@@ -216,8 +243,7 @@ pub(crate) fn extract_text_from_native_document(
     extraction_config: Option<&ExtractionConfig>,
     margins: PageMarginFractions,
 ) -> Result<PdfTextExtractionResult> {
-    let needs_boundaries =
-        extraction_config.is_some_and(|c| c.force_ocr_pages.as_ref().is_some_and(|p| !p.is_empty()) || c.ocr.is_some());
+    let needs_boundaries = extraction_config.is_some_and(page_boundaries_required);
     let furniture_permissions = FurniturePermissions::from_extraction_config(extraction_config);
 
     if let Some(config) = page_config {
@@ -1897,6 +1923,19 @@ fn redirect_split_out_of_content(
     }
     let search_lines: &[SpanLine] = band.as_deref().unwrap_or(lines);
     let max_redirect_distance = page_width * MAX_REDIRECT_DISTANCE_FRACTION;
+    let max_label_width = page_width * MAX_DENSE_COLUMN_SPLIT_SNAP_SPAN_FRACTION;
+    // GH#1800: the same two qualifications PATH 2 (below) already applies to a corridor a
+    // split is inside a column, applied here too. Before this fix PATH 1 took the WIDEST
+    // whitespace corridor with no qualification at all, and a sparse table's own cell gap
+    // is routinely wider than the page's real gutter (53 vs 21pt, 37 vs 24, 24 vs 15 on the
+    // reporter's pages) -- so a table beside prose always won the "widest" comparison before
+    // either gate had a chance to run. Excluding a hanging-label indent and requiring both
+    // flanks to read as columns are exactly the tests that already keep PATH 2 from doing
+    // the same thing; the asymmetry, not a missing third gate, was the defect. ~keep
+    let qualifies = |&corridor: &(f32, f32)| {
+        !corridor_is_hanging_label_indent(spans, search_lines, max_label_width, corridor)
+            && both_sides_are_columns(spans, search_lines, furniture_width, (corridor.0 + corridor.1) / 2.0)
+    };
     let widest_within_reach = |corridors: Vec<(f32, f32)>| {
         corridors
             .into_iter()
@@ -1904,12 +1943,12 @@ fn redirect_split_out_of_content(
             .map(|(left, right)| (left + right) / 2.0)
             .filter(|candidate| (candidate - split_x).abs() <= max_redirect_distance)
     };
-    if let Some(candidate) = widest_within_reach(page_whitespace_corridors(
-        spans,
-        search_lines,
-        furniture_width,
-        min_gutter,
-    )) {
+    let whitespace_corridors: Vec<(f32, f32)> =
+        page_whitespace_corridors(spans, search_lines, furniture_width, min_gutter)
+            .into_iter()
+            .filter(qualifies)
+            .collect();
+    if let Some(candidate) = widest_within_reach(whitespace_corridors) {
         return candidate;
     }
 
@@ -1933,7 +1972,6 @@ fn redirect_split_out_of_content(
     {
         return split_x;
     }
-    let max_label_width = page_width * MAX_DENSE_COLUMN_SPLIT_SNAP_SPAN_FRACTION;
     let corridors = page_low_occupancy_corridors(
         spans,
         search_lines,
@@ -1942,8 +1980,7 @@ fn redirect_split_out_of_content(
         MAX_GUTTER_CROSSING_LINES,
     )
     .into_iter()
-    .filter(|&corridor| !corridor_is_hanging_label_indent(spans, search_lines, max_label_width, corridor))
-    .filter(|&(left, right)| both_sides_are_columns(spans, search_lines, furniture_width, (left + right) / 2.0))
+    .filter(qualifies)
     .collect();
     widest_within_reach(corridors).unwrap_or(split_x)
 }
@@ -7354,6 +7391,159 @@ mod tests {
         assert!(
             outside < MIN_DENSE_COLUMN_SPLIT_LINES,
             "the population floor must reject a vacuous agreement"
+        );
+    }
+
+    /// GH#1752: `page_boundaries_required` must widen boundary tracking to the two per-page OCR
+    /// settings without changing behaviour for any caller that leaves them unset. This is the
+    /// load-bearing assertion for that: with both settings at their default `None`, boundary
+    /// tracking must stay off, because `None == Some(true)` is always false and the widened
+    /// predicate must reduce byte-for-byte to the pre-GH#1752 predicate (`force_ocr_pages`
+    /// non-empty or `ocr.is_some()`).
+    #[test]
+    fn page_boundaries_required_default_config_stays_on_the_fast_path() {
+        let pdf = build_paged_text_pdf(2, 3);
+        let mut doc = NativeDocument::open_bytes(&pdf).expect("fixture must open");
+        let margins = PageMarginFractions::default();
+        let config = ExtractionConfig::default();
+
+        let (_, boundaries, _, _) =
+            extract_text_from_native_document(&mut doc, None, Some(&config), margins).expect("extraction must succeed");
+
+        assert!(
+            boundaries.is_none(),
+            "a default config must stay on the fast path with no boundaries -- this is what \
+             proves the widening is byte-identical to the pre-GH#1752 predicate at defaults"
+        );
+    }
+
+    #[test]
+    fn page_boundaries_required_ocr_block_alone_enables_boundaries() {
+        let pdf = build_paged_text_pdf(2, 3);
+        let mut doc = NativeDocument::open_bytes(&pdf).expect("fixture must open");
+        let margins = PageMarginFractions::default();
+        let config = ExtractionConfig {
+            ocr: Some(crate::core::config::OcrConfig::default()),
+            ..ExtractionConfig::default()
+        };
+
+        let (_, boundaries, _, _) =
+            extract_text_from_native_document(&mut doc, None, Some(&config), margins).expect("extraction must succeed");
+
+        assert!(
+            boundaries.is_some(),
+            "an `ocr` block alone must enable boundary tracking"
+        );
+    }
+
+    /// GH#1752: the actual regression this ticket fixes -- before the widening, this configuration
+    /// left `needs_boundaries` `false` because the old predicate only checked `config.ocr.is_some()`.
+    #[test]
+    fn page_boundaries_required_near_empty_fallback_alone_enables_boundaries() {
+        let pdf = build_paged_text_pdf(2, 3);
+        let mut doc = NativeDocument::open_bytes(&pdf).expect("fixture must open");
+        let margins = PageMarginFractions::default();
+        let config = ExtractionConfig {
+            ocr_near_empty_fallback: Some(true),
+            ..ExtractionConfig::default()
+        };
+
+        let (_, boundaries, _, _) =
+            extract_text_from_native_document(&mut doc, None, Some(&config), margins).expect("extraction must succeed");
+
+        assert!(
+            boundaries.is_some(),
+            "ocr_near_empty_fallback = Some(true) without an `ocr` block must still enable \
+             boundary tracking (GH#1752)"
+        );
+    }
+
+    /// GH#1752: same regression as above, for the sibling setting.
+    #[test]
+    fn page_boundaries_required_scanned_page_quality_gate_alone_enables_boundaries() {
+        let pdf = build_paged_text_pdf(2, 3);
+        let mut doc = NativeDocument::open_bytes(&pdf).expect("fixture must open");
+        let margins = PageMarginFractions::default();
+        let config = ExtractionConfig {
+            ocr_scanned_page_quality_gate: Some(true),
+            ..ExtractionConfig::default()
+        };
+
+        let (_, boundaries, _, _) =
+            extract_text_from_native_document(&mut doc, None, Some(&config), margins).expect("extraction must succeed");
+
+        assert!(
+            boundaries.is_some(),
+            "ocr_scanned_page_quality_gate = Some(true) without an `ocr` block must still \
+             enable boundary tracking (GH#1752)"
+        );
+    }
+
+    #[test]
+    fn page_boundaries_required_ocr_block_wins_even_with_settings_explicitly_off() {
+        let pdf = build_paged_text_pdf(2, 3);
+        let mut doc = NativeDocument::open_bytes(&pdf).expect("fixture must open");
+        let margins = PageMarginFractions::default();
+        let config = ExtractionConfig {
+            ocr: Some(crate::core::config::OcrConfig::default()),
+            ocr_near_empty_fallback: Some(false),
+            ocr_scanned_page_quality_gate: Some(false),
+            ..ExtractionConfig::default()
+        };
+
+        let (_, boundaries, _, _) =
+            extract_text_from_native_document(&mut doc, None, Some(&config), margins).expect("extraction must succeed");
+
+        assert!(
+            boundaries.is_some(),
+            "an `ocr` block alone is still sufficient; Some(false) on the sibling settings \
+             does not take anything away"
+        );
+    }
+
+    /// GH#1800: a two-cell-per-row sparse table sits in the left column (cell 0 at x
+    /// 40..65, cell 1 at x 105..130 -- columns 2-4 of the reporter's 5-column table are
+    /// never filled in this reproducer, which is what "sparse" means here), beside an
+    /// ordinary prose column starting at x 148. The table's own cell gap (65..105, 40pt)
+    /// is wider than the true column gutter (130..148, 18pt) -- 2.2x, the same order as
+    /// the reporter's measured 53-vs-21 and 37-vs-24 pages. `detect_split_x` is presumed
+    /// to have landed inside the table's second cell (a bimodal median artifact); PATH 1
+    /// must not redirect it to the table's own cell gap just because that gap is wider. ~keep
+    #[test]
+    fn redirect_prefers_the_true_gutter_over_a_wider_sparse_table_cell_gap_gh1800() {
+        let mut spans = Vec::new();
+        for row in 0..8 {
+            let y = 500.0 - row as f32 * 8.0;
+            spans.push(span_with_width(&format!("{row}"), 40.0, y, 25.0, 8.0, 8.0));
+            spans.push(span_with_width(&format!("{row}00"), 105.0, y, 25.0, 8.0, 8.0));
+        }
+        for row in 0..8 {
+            let y = 650.0 - row as f32 * 12.0;
+            spans.push(span_with_width(
+                "some prose text filling out this line of the right column",
+                148.0,
+                y,
+                250.0,
+                12.0,
+                12.0,
+            ));
+        }
+        let lines = corridor_fixture_lines(&spans);
+        let furniture_width = CORRIDOR_PAGE_WIDTH * FULL_WIDTH_FURNITURE_FRACTION;
+        let min_gutter = (CORRIDOR_PAGE_WIDTH * MIN_DENSE_COLUMN_GUTTER_FRACTION).max(MIN_DENSE_COLUMN_GUTTER_PTS);
+        let corridors = page_whitespace_corridors(&spans, &lines, furniture_width, min_gutter);
+        assert_eq!(
+            corridors,
+            vec![(65.0, 105.0), (130.0, 148.0)],
+            "both the false table gap and the true gutter must be present as raw candidates"
+        );
+
+        let split_x = 115.0; // inside the table's second cell, as a bimodal median would land
+        let redirected = redirect_split_out_of_content(&spans, &lines, CORRIDOR_PAGE_WIDTH, split_x);
+        assert!(
+            (redirected - 139.0).abs() < 1.0,
+            "expected the 18pt true gutter (mid 139), got {redirected} -- \
+             the 40pt table cell gap (mid 85) must not win merely for being wider"
         );
     }
 }

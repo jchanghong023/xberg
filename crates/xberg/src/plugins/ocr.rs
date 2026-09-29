@@ -391,6 +391,18 @@ pub trait OcrBackend: Plugin {
         vec![]
     }
 
+    /// Optional: languages usable under `config`, defaulting to ignoring it. GH#1857. ~keep
+    fn supported_languages_for(&self, config: &OcrConfig) -> Vec<String> {
+        let _ = config;
+        self.supported_languages()
+    }
+
+    /// Optional: whether `language` is supported under `config`. GH#1857.
+    fn supports_language_for(&self, config: &OcrConfig, language: &str) -> bool {
+        let _ = config;
+        self.supports_language(language)
+    }
+
     /// Optional: Check if the backend supports table detection.
     ///
     /// Defaults to `false`. Override if your backend can detect and extract tables.
@@ -628,6 +640,12 @@ pub struct OcrBackendCapabilities {
     /// re-sorted. Tesseract's order comes from enumerating installed tessdata files; PaddleOCR's
     /// comes from its own `SUPPORTED_LANGUAGES` constant. Re-sorting would disagree with the
     /// precedence each backend's own `supports_language` implementation uses internally.
+    ///
+    /// This is the no-override answer ([`list_ocr_backend_capabilities`]). Use
+    /// [`list_ocr_backend_capabilities_for`] when the caller sets `OcrConfig.tessdata_path`: for
+    /// Tesseract the language list is a property of the resolved tessdata directory, and the
+    /// no-override chain can name a different directory than the one a job using that config
+    /// will load from. See GH#1857.
     pub supported_languages: Vec<String>,
 }
 
@@ -669,12 +687,22 @@ pub struct OcrBackendCapabilities {
 /// # });
 /// ```
 pub fn list_ocr_backend_capabilities() -> crate::Result<Vec<OcrBackendCapabilities>> {
+    list_ocr_backend_capabilities_for(&OcrConfig::default())
+}
+
+/// [`list_ocr_backend_capabilities`], reporting each backend's languages under `config`.
+///
+/// Tesseract's language list is a property of the tessdata directory it resolves, and
+/// `config.tessdata_path` is the first entry of that search chain. The config-less form always
+/// answers for the no-override chain, which can be a different directory than the one a job using
+/// `config` will load from. Use this form when `config.tessdata_path` is set. See GH#1857.
+pub fn list_ocr_backend_capabilities_for(config: &OcrConfig) -> crate::Result<Vec<OcrBackendCapabilities>> {
     use crate::plugins::registry::get_ocr_backend_registry;
 
     let registry = get_ocr_backend_registry();
     let registry = registry.read();
 
-    Ok(capabilities_from_snapshot(registry.registered_snapshot()))
+    Ok(capabilities_from_snapshot(registry.registered_snapshot(), config))
 }
 
 /// Pure mapping from a registry snapshot to sorted capability records.
@@ -682,12 +710,15 @@ pub fn list_ocr_backend_capabilities() -> crate::Result<Vec<OcrBackendCapabiliti
 /// Split out from [`list_ocr_backend_capabilities`] so tests can exercise the mapping and the
 /// sort-by-name contract with local mock backends, without mutating the process-global OCR
 /// registry (which other test modules also read and write concurrently).
-fn capabilities_from_snapshot(registered: Vec<(String, Arc<dyn OcrBackend>)>) -> Vec<OcrBackendCapabilities> {
+fn capabilities_from_snapshot(
+    registered: Vec<(String, Arc<dyn OcrBackend>)>,
+    config: &OcrConfig,
+) -> Vec<OcrBackendCapabilities> {
     let mut capabilities: Vec<OcrBackendCapabilities> = registered
         .into_iter()
         .map(|(name, backend)| OcrBackendCapabilities {
             name,
-            supported_languages: backend.supported_languages(),
+            supported_languages: backend.supported_languages_for(config),
         })
         .collect();
     capabilities.sort_unstable_by(|left, right| left.name.cmp(&right.name));
@@ -723,6 +754,15 @@ fn capabilities_from_snapshot(registered: Vec<(String, Arc<dyn OcrBackend>)>) ->
 /// # });
 /// ```
 pub fn ocr_backend_supports_language(backend: &str, language: &str) -> crate::Result<bool> {
+    ocr_backend_supports_language_for(backend, language, &OcrConfig::default())
+}
+
+/// [`ocr_backend_supports_language`], answering under `config`.
+///
+/// Use this, not the config-less form, when the caller sets `OcrConfig.tessdata_path`: the
+/// config-less form checks the no-override search chain and can deny a language the job would
+/// load without trouble. See GH#1857.
+pub fn ocr_backend_supports_language_for(backend: &str, language: &str, config: &OcrConfig) -> crate::Result<bool> {
     use crate::plugins::registry::get_ocr_backend_registry;
 
     let registry = get_ocr_backend_registry();
@@ -735,7 +775,7 @@ pub fn ocr_backend_supports_language(backend: &str, language: &str) -> crate::Re
         .iter()
         .find(|(name, _)| name.as_str() == backend)
         .or_else(|| registered.iter().find(|(name, _)| name.as_str() == canonical.as_str()))
-        .map(|(_, instance)| instance.supports_language(language))
+        .map(|(_, instance)| instance.supports_language_for(config, language))
         .ok_or_else(|| crate::XbergError::Plugin {
             message: format!(
                 "OCR backend '{backend}' not registered. Available backends: {:?}",

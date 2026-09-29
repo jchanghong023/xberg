@@ -70,6 +70,7 @@ pub struct PdfAnnotation {
     pub page_number: u32,
     /// Bounding box of the annotation on the page.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub bounding_box: Option<BoundingBox>,
     /// Author/creator of the annotation (PDF `/T` entry).
     #[serde(default, skip_serializing_if = "Option::is_none")]

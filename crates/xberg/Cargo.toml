@@ -1268,7 +1268,7 @@ biblatex = { version = "0.12", optional = true }
 # 0.8 moved regex matching to an unconditional `regex-lite`, so the old `regex`
 # feature is gone; it also carries quick-xml ^0.41, which unifies with the rest
 # of the graph and clears RUSTSEC-2026-0194/0195.
-biblib = { version = "0.8", default-features = false, features = ["ris", "pubmed", "xml"], optional = true }
+biblib = { version = "0.9", default-features = false, features = ["ris", "pubmed", "xml"], optional = true }
 bitvec = "1.1"
 blake3 = { workspace = true }
 bytes = { workspace = true }
@@ -1313,7 +1313,7 @@ indexmap = "2.14.2"
 infer = "0.22.0"
 itertools = { workspace = true, optional = true }
 jotdown = "0.10"
-jsonschema = { version = "0.57", optional = true, default-features = false }
+jsonschema = { version = "0.58", optional = true, default-features = false }
 libc = { workspace = true }
 # liter-llm is declared per-target in the platform-conditional dependencies blocks below (it
 # pulls reqwest/rustls → aws-lc-rs → aws-lc-sys; the MSVC build is handled by the fix shipped in
@@ -1374,7 +1374,7 @@ rake = { version = "0.3.6", optional = true }
 rayon = { workspace = true }
 regex = "1.13.1"
 resvg = { workspace = true, optional = true }
-rmcp = { version = "3.4.1", features = [
+rmcp = { version = "3.5.0", features = [
     "server",
     "macros",
     "base64",
@@ -1440,7 +1440,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["s
 tract-onnx = { workspace = true, optional = true }
 # Typst's own parser, used to convert Typst math to LaTeX.
 typst-syntax = { version = "0.15.1", optional = true }
-unhwp = { version = "0.12.0", default-features = false, features = ["hwpx"], optional = true }
+unhwp = { version = "0.13.0", default-features = false, features = ["hwpx"], optional = true }
 unicode-normalization = { version = "0.1.25", optional = true }
 url = { workspace = true }
 urlencoding = "2"
@@ -1696,7 +1696,7 @@ dotenvy = "0.15"
 filetime = "0.2"
 image = { workspace = true, default-features = false, features = ["png"] }
 # Test retrieval features prove runtime compilation stays offline under Cargo feature unification. ~keep
-jsonschema = { version = "0.57", default-features = false, features = ["resolve-file", "resolve-http", "tls-ring"] }
+jsonschema = { version = "0.58", default-features = false, features = ["resolve-file", "resolve-http", "tls-ring"] }
 qrcode = { version = "0.14", default-features = false, features = ["image"] }
 # Test-only: builds an in-memory model2vec fixture (safetensors bytes) for the
 # static_engine unit tests, without a network fetch.

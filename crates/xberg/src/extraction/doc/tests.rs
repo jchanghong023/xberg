@@ -193,7 +193,7 @@ fn test_fc_clx_offset() -> usize {
 fn build_fib(len: usize, ccp_text: u32, ccp_ftn: u32, ccp_atn: u32, ccp_txbx: u32) -> Vec<u8> {
     let mut buf = vec![0u8; len];
     write_u16(&mut buf, 0, 0xA5EC); // wIdent
-    write_u16(&mut buf, 2, 101); // nFib >= 101 selects the Word97+ path ~keep
+    write_u16(&mut buf, 2, 0x00C1); // Word 97 nFib ~keep
     write_u16(&mut buf, 0x0A, 0x0200); // fWhichTblStm: use 1Table
     write_u16(&mut buf, TEST_FIB_BASE, TEST_CSW as u16);
     let cslw_offset = TEST_FIB_BASE + 2 + TEST_CSW * 2;
@@ -263,6 +263,64 @@ fn build_doc_ole(word_doc: &[u8], table_stream: &[u8]) -> Vec<u8> {
         std::io::Write::write_all(&mut stream, table_stream).expect("write 1Table stream");
     }
     comp.into_inner().into_inner()
+}
+
+fn build_legacy_doc_ole(w_ident: u16, n_fib: u16, flags: u16, text: &str) -> Vec<u8> {
+    const TEXT_OFFSET: usize = 0x80;
+
+    let mut word_doc = vec![0u8; TEXT_OFFSET + text.len()];
+    write_u16(&mut word_doc, 0, w_ident);
+    write_u16(&mut word_doc, 2, n_fib);
+    write_u16(&mut word_doc, 0x0A, flags);
+    write_u32(&mut word_doc, 0x18, TEXT_OFFSET as u32);
+    write_u32(&mut word_doc, 0x34, text.len() as u32);
+    write_u32(&mut word_doc, 0x4C, 0xFFFF_FFFF);
+    word_doc[TEXT_OFFSET..].copy_from_slice(text.as_bytes());
+
+    let cursor = Cursor::new(Vec::new());
+    let mut compound = cfb::CompoundFile::create(cursor).expect("create Word 6 CFB container");
+    let mut stream = compound
+        .create_stream("/WordDocument")
+        .expect("create WordDocument stream");
+    std::io::Write::write_all(&mut stream, &word_doc).expect("write WordDocument stream");
+    drop(stream);
+    compound.into_inner().into_inner()
+}
+
+#[test]
+fn should_extract_word_6_document_without_a_table_stream() {
+    const TEXT: &str = "Legacy Word six document";
+    let bytes = build_legacy_doc_ole(0xA5DC, 0x0065, 0, TEXT);
+
+    let result = extract_doc_text(&bytes).expect("Word 6 extraction should succeed");
+
+    assert_eq!(result.content, TEXT);
+    assert!(result.paragraphs.is_empty());
+}
+
+#[test]
+fn should_route_a5ec_word_7_header_to_legacy_extraction() {
+    const TEXT: &str = "Legacy Word seven document";
+    let bytes = build_legacy_doc_ole(0xA5EC, 0x0068, 0, TEXT);
+
+    let result = extract_doc_text(&bytes).expect("Word 7 extraction should succeed");
+
+    assert_eq!(result.content, TEXT);
+    assert!(result.paragraphs.is_empty());
+}
+
+#[test]
+fn should_report_fast_saved_legacy_doc_as_unsupported() {
+    let bytes = build_legacy_doc_ole(0xA5DC, 0x0065, 0x0004, "Fast-saved legacy document");
+
+    let error = extract_doc_text(&bytes).expect_err("fast-saved legacy DOC is not implemented");
+
+    assert!(
+        error
+            .to_string()
+            .contains("Fast-saved Word 6/95 documents are not supported"),
+        "error should identify the unsupported legacy variant: {error}"
+    );
 }
 
 /// #77: footnotes, headers, comments and text boxes live in subdocument

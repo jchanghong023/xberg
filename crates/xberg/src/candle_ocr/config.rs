@@ -222,11 +222,12 @@ where
             "invalid {backend_name} backend_options: expected a JSON object"
         )));
     }
-    // The PDF OCR route stamps `source_dpi` and `page_rotation_degrees` into every backend's
-    // shared `backend_options` object regardless of which backend will read it (xberg#1672,
+    // The PDF OCR route stamps `source_dpi`, `page_rotation_degrees`, and (GH#1894)
+    // `known_full_page_scan` into every backend's shared `backend_options` object regardless of
+    // which backend will read it (xberg#1672,
     // `extractors::pdf::ocr::pipeline::ocr_config_with_page_rotation_hint`), and
     // `OcrConfig::backend_options`'s own contract says unknown keys are silently ignored. No
-    // candle backend option struct declares either field, so strip exactly those two known
+    // candle backend option struct declares any of these fields, so strip exactly those known
     // pipeline hint keys before the `deny_unknown_fields` deserialize below -- which keeps
     // reporting a real typo in a candle-specific option (any other unknown key) as the
     // validation error it is.
@@ -234,6 +235,7 @@ where
     if let Some(obj) = value.as_object_mut() {
         obj.remove(crate::core::config::ocr::SOURCE_DPI_BACKEND_OPTION);
         obj.remove(crate::core::config::ocr::PAGE_ROTATION_DEGREES_BACKEND_OPTION);
+        obj.remove(crate::core::config::ocr::KNOWN_FULL_PAGE_SCAN_BACKEND_OPTION);
     }
     serde_json::from_value(value)
         .map_err(|error| XbergError::validation(format!("invalid {backend_name} backend_options: {error}")))

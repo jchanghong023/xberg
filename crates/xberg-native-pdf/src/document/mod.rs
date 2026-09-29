@@ -1002,7 +1002,8 @@ fn contains_objstm_marker(window: &[u8]) -> bool {
 }
 
 /// Append ink names declared by `Separation` and `DeviceN` colour spaces
-/// in `cs_dict` to `out`. Reserved colorants `/All` and `/None` (§8.6.6.4)
+/// in `cs_dict` to `out`, including one that is the base of an `Indexed`
+/// space or the underlying space of a `Pattern`. Reserved colorants `/All` and `/None` (§8.6.6.4)
 /// are skipped. Caller is responsible for deduping across multiple calls.
 ///
 /// When `doc` is `Some`, indirect references inside each colour-space array
@@ -1026,11 +1027,11 @@ fn extract_inks_from_color_space_dict(
 
 /// Inner walker — surfaces inks from a single colour-space definition.
 /// Factored out of [`extract_inks_from_color_space_dict`] so the
-/// Pattern arm can recurse into its underlying colour space without
-/// requiring a synthetic single-entry dict.
+/// Pattern and Indexed arm can recurse into its underlying colour space
+/// without requiring a synthetic single-entry dict.
 ///
-/// **Cycle handling:** the Pattern arm recurses into the underlying
-/// colour space (§8.7.3.1). A self-referential array such as
+/// **Cycle handling:** the Pattern and Indexed arm recurses into the
+/// underlying colour space (§8.7.3.1, §8.6.6.3). A self-referential array such as
 /// `5 0 obj [/Pattern 5 0 R]` would otherwise blow the stack, so
 /// indirect references are de-duplicated via `visited` (keyed on
 /// `ObjectRef`) and total depth is capped at `MAX_RECURSION_DEPTH`
@@ -1064,13 +1065,15 @@ fn collect_inks_from_color_space(
         None => return,
     };
     match cs_type {
-        "Pattern" => {
+        "Pattern" | "Indexed" => {
             // ISO 32000-1 §8.7.3.1: a Pattern colour space's
             // optional second array element is the underlying
             // colour space (uncoloured Tiling carries the
-            // underlying space's tints). Recurse so a Pattern
-            // with /Separation or /DeviceN underlying surfaces
-            // the spot colorants for plate allocation.
+            // underlying space's tints). §8.6.6.3: an Indexed
+            // space's second element is its base, and every
+            // palette entry paints in that base. Recurse so a
+            // /Separation or /DeviceN underneath either one
+            // surfaces its spot colorants for plate allocation.
             //
             // Guard against self-referential cycles (e.g.
             // `5 0 obj [/Pattern 5 0 R]`): an indirect underlying

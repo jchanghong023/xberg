@@ -10,7 +10,7 @@ part 'lib.freezed.dart';
 
 // These functions are ignored because they are not marked as `pub`: `try_convert_annotation_kind_from_core`, `try_convert_asset_category_from_core`, `try_convert_auth_config_from_core`, `try_convert_block_type_from_core`, `try_convert_boundary_reason_from_core`, `try_convert_browser_backend_from_core`, `try_convert_browser_mode_from_core`, `try_convert_browser_wait_from_core`, `try_convert_call_mode_from_core`, `try_convert_candle_deepseek_ocr_dtype_from_core`, `try_convert_candle_device_preference_from_core`, `try_convert_candle_trocr_variant_from_core`, `try_convert_chunk_sizing_from_core`, `try_convert_chunk_type_from_core`, `try_convert_chunker_type_from_core`, `try_convert_chunking_reason_from_core`, `try_convert_code_content_mode_from_core`, `try_convert_code_data_node_kind_from_core`, `try_convert_confidence_semantics_from_core`, `try_convert_content_filter_kind_from_core`, `try_convert_content_layer_from_core`, `try_convert_crawl_strategy_kind_from_core`, `try_convert_credential_provider_config_from_core`, `try_convert_diff_line_from_core`, `try_convert_document_content_encoding_from_core`, `try_convert_element_type_from_core`, `try_convert_embedding_model_type_from_core`, `try_convert_embeddings_embedding_backend_from_core`, `try_convert_entity_category_from_core`, `try_convert_execution_provider_type_from_core`, `try_convert_extract_input_kind_from_core`, `try_convert_extraction_method_from_core`, `try_convert_form_field_type_from_core`, `try_convert_format_metadata_from_core`, `try_convert_formula_model_from_core`, `try_convert_glm_ocr_layout_mode_from_core`, `try_convert_glm_ocr_task_kind_from_core`, `try_convert_host_matcher_from_core`, `try_convert_html_theme_from_core`, `try_convert_image_kind_from_core`, `try_convert_image_output_format_from_core`, `try_convert_image_type_from_core`, `try_convert_inline_type_from_core`, `try_convert_jupyter_cell_rendering_from_core`, `try_convert_keyword_algorithm_from_core`, `try_convert_late_interaction_model_type_from_core`, `try_convert_layout_class_from_core`, `try_convert_layout_strategy_from_core`, `try_convert_link_type_from_core`, `try_convert_merge_mode_from_core`, `try_convert_mime_detection_policy_from_core`, `try_convert_ner_backend_kind_from_core`, `try_convert_no_chunking_reason_from_core`, `try_convert_node_content_from_core`, `try_convert_ocr_backend_type_from_core`, `try_convert_ocr_bounding_geometry_from_core`, `try_convert_ocr_element_level_from_core`, `try_convert_ocr_strategy_from_core`, `try_convert_output_format_from_core`, `try_convert_paddle_inference_backend_from_core`, `try_convert_paddle_language_from_core`, `try_convert_paddle_ocr_vl_task_kind_from_core`, `try_convert_page_orientation_handling_from_core`, `try_convert_page_unit_type_from_core`, `try_convert_pdf_annotation_type_from_core`, `try_convert_pdf_backend_from_core`, `try_convert_pii_category_from_core`, `try_convert_preset_category_from_core`, `try_convert_probe_status_from_core`, `try_convert_processing_stage_from_core`, `try_convert_psm_mode_from_core`, `try_convert_redaction_strategy_from_core`, `try_convert_reduction_level_from_core`, `try_convert_region_kind_from_core`, `try_convert_relationship_kind_from_core`, `try_convert_reranker_head_from_core`, `try_convert_reranker_model_type_from_core`, `try_convert_result_format_from_core`, `try_convert_revision_anchor_from_core`, `try_convert_revision_kind_from_core`, `try_convert_schema_compliance_from_core`, `try_convert_sparse_embedding_model_type_from_core`, `try_convert_structured_data_type_from_core`, `try_convert_summary_strategy_from_core`, `try_convert_table_chunking_mode_from_core`, `try_convert_table_model_from_core`, `try_convert_table_overlap_preference_from_core`, `try_convert_text_direction_from_core`, `try_convert_tier_strategy_from_core`, `try_convert_uri_kind_from_core`, `try_convert_url_extraction_mode_from_core`, `try_convert_vlm_fallback_policy_from_core`, `try_convert_whisper_model_from_core`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ChunkClassificationEnrichmentConfig`, `DocumentExtractorDartCallbacks`, `EmbeddingBackendDartCallbacks`, `OcrBackendDartCallbacks`, `PostProcessorDartCallbacks`, `RendererDartCallbacks`, `RerankerBackendDartCallbacks`, `TokenizerBackendDartCallbacks`, `ValidatorDartCallbacks`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `backend_type`, `can_handle`, `confidence_semantics`, `count_tokens`, `dimensions`, `embed`, `emits_structured_markdown`, `estimated_duration_ms`, `extract`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `page_orientation_handling`, `priority`, `priority`, `priority`, `process_document`, `process_image_file`, `process_image`, `process`, `processing_stage`, `render_result`, `rerank`, `should_process`, `should_validate`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `supported_languages`, `supported_mime_types`, `supports_document_processing`, `supports_language`, `supports_table_detection`, `validate`, `version`, `version`, `version`, `version`, `version`, `version`, `version`, `version`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `backend_type`, `can_handle`, `confidence_semantics`, `count_tokens`, `dimensions`, `embed`, `emits_structured_markdown`, `estimated_duration_ms`, `extract`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `page_orientation_handling`, `priority`, `priority`, `priority`, `process_document`, `process_image_file`, `process_image`, `process`, `processing_stage`, `render_result`, `rerank`, `should_process`, `should_validate`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `supported_languages_for`, `supported_languages`, `supported_mime_types`, `supports_document_processing`, `supports_language_for`, `supports_language`, `supports_table_detection`, `validate`, `version`, `version`, `version`, `version`, `version`, `version`, `version`, `version`
 
 /// Extract content from a single bytes or URI input.
 Future<ExtractionResult> extract({
@@ -115,6 +115,16 @@ Future<List<String>> listOcrBackends() =>
 Future<List<OcrBackendCapabilities>> listOcrBackendCapabilities() =>
     RustLib.instance.api.crateListOcrBackendCapabilities();
 
+/// `list_ocr_backend_capabilities`, reporting each backend's languages under `config`.
+///
+/// Tesseract's language list is a property of the tessdata directory it resolves, and
+/// `config.tessdata_path` is the first entry of that search chain. The config-less form always
+/// answers for the no-override chain, which can be a different directory than the one a job using
+/// `config` will load from. Use this form when `config.tessdata_path` is set. See GH#1857.
+Future<List<OcrBackendCapabilities>> listOcrBackendCapabilitiesFor({
+  required OcrConfig config,
+}) => RustLib.instance.api.crateListOcrBackendCapabilitiesFor(config: config);
+
 /// Check whether a specific registered OCR backend supports a language.
 ///
 /// Delegates to the named backend's own `OcrBackend.supports_language`, which is the correct
@@ -132,6 +142,21 @@ Future<bool> ocrBackendSupportsLanguage({
 }) => RustLib.instance.api.crateOcrBackendSupportsLanguage(
   backend: backend,
   language: language,
+);
+
+/// `ocr_backend_supports_language`, answering under `config`.
+///
+/// Use this, not the config-less form, when the caller sets `OcrConfig.tessdata_path`: the
+/// config-less form checks the no-override search chain and can deny a language the job would
+/// load without trouble. See GH#1857.
+Future<bool> ocrBackendSupportsLanguageFor({
+  required String backend,
+  required String language,
+  required OcrConfig config,
+}) => RustLib.instance.api.crateOcrBackendSupportsLanguageFor(
+  backend: backend,
+  language: language,
+  config: config,
 );
 
 /// List all registered post-processor names.
@@ -253,6 +278,24 @@ Future<List<LateInteractionMatch>> maxSimRank({
 /// in or whose models are not cached report `Skip` rather than failing.
 Future<DoctorReport> doctor({required ExtractionConfig config}) =>
     RustLib.instance.api.crateDoctor(config: config);
+
+/// Count the pages in a PDF without rendering any of them.
+///
+/// Opens the document and returns its page count from the PDF structure. No page
+/// is rasterized, so this is cheap relative to `render_pdf_page_to_png` — use it
+/// when you only need the count (e.g. to drive a render loop over the pages).
+///
+/// **Errors:**
+///
+/// Returns `XbergError.Parsing` if the PDF cannot be opened, authenticated,
+/// or its page count read.
+Future<PlatformInt64> pdfPageCount({
+  required List<int> pdfBytes,
+  String? password,
+}) => RustLib.instance.api.cratePdfPageCount(
+  pdfBytes: pdfBytes,
+  password: password,
+);
 
 Future<CacheStats> createCacheStatsFromJson({required String json}) =>
     RustLib.instance.api.crateCreateCacheStatsFromJson(json: json);
@@ -1377,6 +1420,9 @@ Future<CandleDeepseekOcrDtype> createCandleDeepseekOcrDtypeFromJson({
 Future<LayoutClass> createLayoutClassFromJson({required String json}) =>
     RustLib.instance.api.crateCreateLayoutClassFromJson(json: json);
 
+Future<AuthConfig> createAuthConfigFromJson({required String json}) =>
+    RustLib.instance.api.crateCreateAuthConfigFromJson(json: json);
+
 Future<BrowserMode> createBrowserModeFromJson({required String json}) =>
     RustLib.instance.api.crateCreateBrowserModeFromJson(json: json);
 
@@ -1398,9 +1444,6 @@ Future<CrawlStrategyKind> createCrawlStrategyKindFromJson({
 Future<ContentFilterKind> createContentFilterKindFromJson({
   required String json,
 }) => RustLib.instance.api.crateCreateContentFilterKindFromJson(json: json);
-
-Future<AuthConfig> createAuthConfigFromJson({required String json}) =>
-    RustLib.instance.api.crateCreateAuthConfigFromJson(json: json);
 
 Future<AssetCategory> createAssetCategoryFromJson({required String json}) =>
     RustLib.instance.api.crateCreateAssetCategoryFromJson(json: json);
@@ -1429,6 +1472,8 @@ Future<OcrBackendDartImpl> createOcrBackendDartImpl({
   required FutureOr<bool> Function(String) supportsLanguage,
   required FutureOr<OcrBackendType> Function() backendType,
   required FutureOr<List<String>> Function() supportedLanguages,
+  required FutureOr<List<String>> Function(OcrConfig) supportedLanguagesFor,
+  required FutureOr<bool> Function(OcrConfig, String) supportsLanguageFor,
   required FutureOr<bool> Function() supportsTableDetection,
   required FutureOr<bool> Function() supportsDocumentProcessing,
   required FutureOr<bool> Function() emitsStructuredMarkdown,
@@ -1444,6 +1489,8 @@ Future<OcrBackendDartImpl> createOcrBackendDartImpl({
   supportsLanguage: supportsLanguage,
   backendType: backendType,
   supportedLanguages: supportedLanguages,
+  supportedLanguagesFor: supportedLanguagesFor,
+  supportsLanguageFor: supportsLanguageFor,
   supportsTableDetection: supportsTableDetection,
   supportsDocumentProcessing: supportsDocumentProcessing,
   emitsStructuredMarkdown: emitsStructuredMarkdown,
@@ -2463,6 +2510,23 @@ class BrowserConfig {
   /// Timeout for browser page load and rendering (in milliseconds when serialized).
   final PlatformInt64 timeout;
 
+  /// Overall deadline for a single browser fetch, covering browser launch (or
+  /// page acquisition from a shared pool), page setup, navigation, rendering,
+  /// and screenshot capture. Must exceed `timeout` to leave room for launch
+  /// and setup overhead; a fetch that has not returned within this deadline
+  /// fails with a timeout error (in milliseconds when serialized).
+  ///
+  /// Shutdown/teardown is governed separately by `shutdown_timeout` and is
+  /// not counted against this deadline: an already-computed result is
+  /// delivered to the caller without waiting for the browser process to
+  /// exit.
+  final PlatformInt64 overallTimeout;
+
+  /// How long to wait for the browser process to close and exit cleanly
+  /// during teardown before the process is forcibly killed (in milliseconds
+  /// when serialized).
+  final PlatformInt64 shutdownTimeout;
+
   /// Wait strategy after browser navigation.
   final BrowserWait wait;
 
@@ -2506,6 +2570,8 @@ class BrowserConfig {
     required this.backend,
     this.endpoint,
     required this.timeout,
+    required this.overallTimeout,
+    required this.shutdownTimeout,
     required this.wait,
     this.waitSelector,
     this.extraWait,
@@ -2523,6 +2589,8 @@ class BrowserConfig {
       backend.hashCode ^
       endpoint.hashCode ^
       timeout.hashCode ^
+      overallTimeout.hashCode ^
+      shutdownTimeout.hashCode ^
       wait.hashCode ^
       waitSelector.hashCode ^
       extraWait.hashCode ^
@@ -2542,6 +2610,8 @@ class BrowserConfig {
           backend == other.backend &&
           endpoint == other.endpoint &&
           timeout == other.timeout &&
+          overallTimeout == other.overallTimeout &&
+          shutdownTimeout == other.shutdownTimeout &&
           wait == other.wait &&
           waitSelector == other.waitSelector &&
           extraWait == other.extraWait &&
@@ -3866,6 +3936,15 @@ class ContentConfig {
   /// Include document structure tree in output. Default: `true`.
   final bool includeDocumentStructure;
 
+  /// Prepend a YAML frontmatter block (`title`, `description`, etc., extracted from
+  /// `<head>`) to the markdown output. Default: `true`.
+  ///
+  /// This only controls the frontmatter text inside `markdown.content`. Crawlberg
+  /// never reads `<head>` metadata back out of the converter's result -- `PageMetadata`
+  /// is populated independently by `crate::html::metadata::extract_metadata` from the
+  /// parsed DOM, so turning this off does not lose any metadata field.
+  final bool extractMetadata;
+
   const ContentConfig({
     required this.outputFormat,
     required this.preprocessingPreset,
@@ -3879,6 +3958,7 @@ class ContentConfig {
     required this.wrap,
     required this.wrapWidth,
     required this.includeDocumentStructure,
+    required this.extractMetadata,
   });
 
   @override
@@ -3894,7 +3974,8 @@ class ContentConfig {
       maxDepth.hashCode ^
       wrap.hashCode ^
       wrapWidth.hashCode ^
-      includeDocumentStructure.hashCode;
+      includeDocumentStructure.hashCode ^
+      extractMetadata.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -3912,7 +3993,8 @@ class ContentConfig {
           maxDepth == other.maxDepth &&
           wrap == other.wrap &&
           wrapWidth == other.wrapWidth &&
-          includeDocumentStructure == other.includeDocumentStructure;
+          includeDocumentStructure == other.includeDocumentStructure &&
+          extractMetadata == other.extractMetadata;
 }
 
 /// Cross-extractor content filtering configuration.
@@ -4261,6 +4343,28 @@ class ConversionOptions {
   /// - [`TierStrategy::Tier2`] — always use the Tier-2 DOM-walk path.
   final TierStrategy tierStrategy;
 
+  /// Base URL to resolve relative `href`/`src` destinations against.
+  ///
+  /// When set, every relative link and image/media destination (`a href`, `img src`
+  /// and its lazy-load fallbacks, `srcset`, `graphic` `url`/`href`/`xlink:href`/`src`,
+  /// `iframe`/`audio`/`video`/`source` `src`) is resolved to an absolute URL before
+  /// being written to the Markdown output, so the result is followable without the
+  /// reader knowing where the source HTML came from.
+  ///
+  /// A `<base href>` in the document, if present, is honored the way a browser
+  /// honors it: it is itself resolved against `base_url`, and that combined result
+  /// becomes the effective base every other relative reference resolves against.
+  ///
+  /// Non-hierarchical schemes (`mailto:`, `tel:`, `javascript:`, `data:`) and
+  /// already-absolute URLs are left unchanged. An unset (default) or unparseable
+  /// `base_url`, and a relative reference that fails to resolve, leave the original
+  /// attribute text unchanged -- this option never panics and never corrupts a
+  /// destination it cannot confidently resolve.
+  ///
+  /// Default `None` — no resolution, output byte-identical to versions before this
+  /// option existed.
+  final String? baseUrl;
+
   const ConversionOptions({
     required this.headingStyle,
     required this.listIndentType,
@@ -4305,6 +4409,7 @@ class ConversionOptions {
     this.maxDepth,
     required this.excludeSelectors,
     required this.tierStrategy,
+    this.baseUrl,
   });
 
   @override
@@ -4351,7 +4456,8 @@ class ConversionOptions {
       inferDimensions.hashCode ^
       maxDepth.hashCode ^
       excludeSelectors.hashCode ^
-      tierStrategy.hashCode;
+      tierStrategy.hashCode ^
+      baseUrl.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -4400,7 +4506,8 @@ class ConversionOptions {
           inferDimensions == other.inferDimensions &&
           maxDepth == other.maxDepth &&
           excludeSelectors == other.excludeSelectors &&
-          tierStrategy == other.tierStrategy;
+          tierStrategy == other.tierStrategy &&
+          baseUrl == other.baseUrl;
 }
 
 /// Dublin Core metadata from docProps/core.xml
@@ -4545,7 +4652,12 @@ class CrawlConfig {
   /// Minimum BM25 score a page must reach to be kept. Defaults to `0.0`.
   final double? bm25Threshold;
 
-  /// Whether to respect robots.txt directives.
+  /// Whether to respect robots.txt directives. A crawl that respects them also honours
+  /// the page's own robots instructions: it does not follow the links of a page marked
+  /// `nofollow` by its robots meta tag or an `X-Robots-Tag` header. A link marked
+  /// `rel="nofollow"` is a hint, not a robots directive, and is still followed. A `noindex`
+  /// page is still crawled and its links followed; the page result marks it with
+  /// `noindex_detected`.
   final bool respectRobotsTxt;
 
   /// When true, HTTP-level error responses (404 NotFound, 403 Forbidden, WAF blocks)
@@ -4560,10 +4672,19 @@ class CrawlConfig {
   /// Custom user-agent string.
   final String? userAgent;
 
-  /// Whether to restrict crawling to the same domain.
+  /// Whether to confine *document* links (`.pdf`, `.docx`, `.zip`, ...) to the seed domain.
+  ///
+  /// Page links are always confined to the seed host, widened to its subdomains by
+  /// [`Self::allow_subdomains`]; this flag does not loosen that. It applies only to document
+  /// links, which are classified by file extension before their host is considered and so
+  /// are followed cross-host by default -- the usual case being documents served from a CDN
+  /// or object store. Set this to `true` to require documents to live on the seed domain too.
   final bool stayOnDomain;
 
-  /// Whether to allow subdomains when `stay_on_domain` is true.
+  /// Whether subdomains of the seed host are in scope.
+  ///
+  /// Applies to page links unconditionally, and to document links when
+  /// [`Self::stay_on_domain`] is set.
   final bool allowSubdomains;
 
   /// Regex patterns for paths to include during crawling.
@@ -4571,6 +4692,30 @@ class CrawlConfig {
 
   /// Regex patterns for paths to exclude during crawling.
   final List<String> excludePaths;
+
+  /// Whether `include_paths`/`exclude_paths` match against `path?query` instead of just
+  /// `path`. Defaults to `false`, matching path only: a pattern anchored with `$` (e.g.
+  /// `/feed/?$`) changes meaning once the query joins the matched text, so this must stay
+  /// opt-in rather than silently changing what an existing config matches.
+  final bool pathPatternsMatchQuery;
+
+  /// Whether the crawl-dedup key includes the (sorted) query string. Defaults to `false`,
+  /// matching historical behavior: `/item?id=1` and `/item?id=2` are treated as one page and
+  /// only the first is fetched. `true` keeps the query, sorted, in the key, so each distinct
+  /// query is fetched once.
+  final bool dedupIncludeQuery;
+
+  /// Whether to strip `tracking_params` from a discovered URL before it is deduplicated,
+  /// fetched, and reported. Defaults to `false`, so no tracking parameters are stripped
+  /// unless explicitly enabled.
+  final bool stripTrackingParams;
+
+  /// Query parameter name patterns to strip when `strip_tracking_params` is `true`. A
+  /// pattern ending in `*` matches by prefix (`utm_*` matches `utm_source`, `utm_campaign`,
+  /// ...); any other pattern matches the parameter name exactly. Defaults to
+  /// `["utm_*", "fbclid", "gclid", "ref"]`, applied only once `strip_tracking_params` is
+  /// enabled.
+  final List<String> trackingParams;
 
   /// Custom HTTP headers to send with each request.
   final Map<String, String> customHeaders;
@@ -4585,11 +4730,25 @@ class CrawlConfig {
   /// Maximum number of redirects to follow.
   final PlatformInt64 maxRedirects;
 
-  /// Number of retry attempts for failed requests.
+  /// Number of retry attempts for failed requests. Bounded by [`MAX_RETRY_COUNT`].
   final PlatformInt64 retryCount;
 
-  /// HTTP status codes that should trigger a retry.
+  /// HTTP status codes that should trigger a retry. When empty, every rate limit, server
+  /// error, bad gateway and timeout is retried. When set, only a failure whose status is
+  /// listed is retried, so a timeout without a response is not.
   final Int64List retryCodes;
+
+  /// Initial delay, in milliseconds, before the first retry. Doubled on each
+  /// subsequent attempt (capped at `retry_max_delay_ms`). Defaults to 100ms.
+  final PlatformInt64 retryInitialDelayMs;
+
+  /// Upper bound, in milliseconds, on the exponential retry backoff. Defaults to 60s.
+  final PlatformInt64 retryMaxDelayMs;
+
+  /// Fraction of the per-domain rate-limit delay to randomly jitter by, in `[0.0, 1.0]`.
+  /// `0.0` (the default) applies no jitter and preserves the previous fixed-interval
+  /// behaviour; `0.1` jitters the delay by up to ±10%.
+  final double rateLimitJitterRatio;
 
   /// Whether to enable cookie handling.
   final bool cookiesEnabled;
@@ -4745,12 +4904,19 @@ class CrawlConfig {
     required this.allowSubdomains,
     required this.includePaths,
     required this.excludePaths,
+    required this.pathPatternsMatchQuery,
+    required this.dedupIncludeQuery,
+    required this.stripTrackingParams,
+    required this.trackingParams,
     required this.customHeaders,
     required this.requestTimeout,
     this.rateLimitMs,
     required this.maxRedirects,
     required this.retryCount,
     required this.retryCodes,
+    required this.retryInitialDelayMs,
+    required this.retryMaxDelayMs,
+    required this.rateLimitJitterRatio,
     required this.cookiesEnabled,
     this.auth,
     this.maxBodySize,
@@ -4796,12 +4962,19 @@ class CrawlConfig {
       allowSubdomains.hashCode ^
       includePaths.hashCode ^
       excludePaths.hashCode ^
+      pathPatternsMatchQuery.hashCode ^
+      dedupIncludeQuery.hashCode ^
+      stripTrackingParams.hashCode ^
+      trackingParams.hashCode ^
       customHeaders.hashCode ^
       requestTimeout.hashCode ^
       rateLimitMs.hashCode ^
       maxRedirects.hashCode ^
       retryCount.hashCode ^
       retryCodes.hashCode ^
+      retryInitialDelayMs.hashCode ^
+      retryMaxDelayMs.hashCode ^
+      rateLimitJitterRatio.hashCode ^
       cookiesEnabled.hashCode ^
       auth.hashCode ^
       maxBodySize.hashCode ^
@@ -4849,12 +5022,19 @@ class CrawlConfig {
           allowSubdomains == other.allowSubdomains &&
           includePaths == other.includePaths &&
           excludePaths == other.excludePaths &&
+          pathPatternsMatchQuery == other.pathPatternsMatchQuery &&
+          dedupIncludeQuery == other.dedupIncludeQuery &&
+          stripTrackingParams == other.stripTrackingParams &&
+          trackingParams == other.trackingParams &&
           customHeaders == other.customHeaders &&
           requestTimeout == other.requestTimeout &&
           rateLimitMs == other.rateLimitMs &&
           maxRedirects == other.maxRedirects &&
           retryCount == other.retryCount &&
           retryCodes == other.retryCodes &&
+          retryInitialDelayMs == other.retryInitialDelayMs &&
+          retryMaxDelayMs == other.retryMaxDelayMs &&
+          rateLimitJitterRatio == other.rateLimitJitterRatio &&
           cookiesEnabled == other.cookiesEnabled &&
           auth == other.auth &&
           maxBodySize == other.maxBodySize &&
@@ -10353,6 +10533,11 @@ class ImagePreprocessingConfig {
   /// whole-page method recovers every fill color, and the per-band step itself can
   /// regress a row style it does not fully model (e.g. a mid-grey fill with white
   /// text), so it defaults to `false` rather than being enabled unconditionally.
+  ///
+  /// Has no effect when `binarization_method` is `"none"` or `"off"` **and** `contrast_enhance`
+  /// is `true`: that path re-reads the original image to apply background normalization and
+  /// sharpening, discarding the per-band result. A `WARN` is emitted when the option is
+  /// requested in that combination (GH#1837).
   final bool normalizeShadedRows;
 
   const ImagePreprocessingConfig({
@@ -12747,6 +12932,12 @@ class OcrBackendCapabilities {
   /// re-sorted. Tesseract's order comes from enumerating installed tessdata files; PaddleOCR's
   /// comes from its own `SUPPORTED_LANGUAGES` constant. Re-sorting would disagree with the
   /// precedence each backend's own `supports_language` implementation uses internally.
+  ///
+  /// This is the no-override answer ([`list_ocr_backend_capabilities`]). Use
+  /// [`list_ocr_backend_capabilities_for`] when the caller sets `OcrConfig.tessdata_path`: for
+  /// Tesseract the language list is a property of the resolved tessdata directory, and the
+  /// no-override chain can name a different directory than the one a job using that config
+  /// will load from. See GH#1857.
   final List<String> supportedLanguages;
 
   const OcrBackendCapabilities({
@@ -13015,8 +13206,23 @@ class OcrConfig {
   /// (`crate::extractors::pdf::ocr::scoring::repair_ocr_list_markers`), this repair has no
   /// table-column context available at the point OCR text comes back as a flat string, so it
   /// cannot tell `"1.234,56"` (European) from `"1,234.56"` (US) apart on its own -- it always
-  /// assumes the US/UK convention (comma groups, period decimals). Enable it only for
-  /// documents known to use that convention.
+  /// assumes the US/UK convention (comma groups, period decimals).
+  ///
+  /// The rules read only the punctuation and digit counts, never whether a token is an amount,
+  /// so each of these is rewritten too (GH#1836). Enable it only for documents whose numbers are
+  /// amounts, and which use that convention:
+  ///
+  /// - A bare 4-9 digit integer becomes grouped, whatever it denotes: `"Year 2019"` ->
+  ///   `"Year 2,019"`, and likewise a ZIP code, a page number or a part number. Only a literal
+  ///   `"FY "` prefix is exempt.
+  /// - A US-convention decimal with exactly three fraction digits and at most three integer
+  ///   digits becomes an amount: `"0.125"` -> `"0,125"`. Four fraction digits (`"0.7906"`) or a
+  ///   trailing `%` are left alone.
+  /// - A lone digit followed by a single space and an already-grouped number is joined, which is
+  ///   indistinguishable from two adjacent table cells: `"5 12,000"` -> `"512,000"`.
+  ///
+  /// The repair is skipped entirely when `tesseract_config.output_format` is `"hocr"` or
+  /// `"tsv"`, because it would re-punctuate the bare coordinate integers in that markup.
   final bool numericRepair;
 
   const OcrConfig({
@@ -18154,12 +18360,11 @@ class TesseractConfig {
   /// it would with no `TesseractConfig` at all — see issue #1573. Setting any other
   /// field on this struct no longer changes that behaviour.
   ///
-  /// A rendered PDF page (`force_ocr` / `force_ocr_pages` / scanned-page OCR) does **not**
-  /// currently get a context-appropriate default here: it falls through to the engine's
-  /// generic automatic-layout PSM (3) even though standalone image OCR of the same raster
-  /// would use PSM 11 (GH#1786). Measurements on this repository's own synthetic table
-  /// fixtures gave contradictory results across font/tessdata combinations (see GH#1786's
-  /// resolution notes) — table-heavy pages may benefit from setting `psm: 11` explicitly.
+  /// A rendered PDF page (`force_ocr` / `force_ocr_pages` / scanned-page OCR) that is one
+  /// full-page scan gets the same whole-image PSM as standalone image OCR of that raster
+  /// (11, or 5 for a vertical language), so the scan needs no explicit `psm` (GH#1786). A
+  /// page that is not a scan, such as forced OCR of a vector page, keeps the engine's
+  /// automatic-layout PSM (3).
   ///
   /// Common explicit values:
   /// - 3: Fully automatic page segmentation (native engine default)

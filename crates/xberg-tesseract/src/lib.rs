@@ -180,7 +180,7 @@ mod wasm_compat {
 mod page_iterator;
 pub use page_iterator::{BlockInfo, PageIterator, ParaInfo, ParagraphExtractionOutcome};
 mod result_iterator;
-pub use result_iterator::{FontAttributes, ResultIterator, WordData};
+pub use result_iterator::{FontAttributes, ResultIterator, SymbolBox, WordData, WordSymbols};
 mod choice_iterator;
 pub use choice_iterator::ChoiceIterator;
 mod monitor;

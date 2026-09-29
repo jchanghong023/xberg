@@ -20,6 +20,18 @@ use std::time::Instant;
 #[cfg(all(feature = "tokio-runtime", not(target_arch = "wasm32")))]
 type PendingBatchItem = (usize, ExtractInput, String);
 
+#[cfg(all(feature = "tokio-runtime", not(target_arch = "wasm32")))]
+async fn scope_batch_input_progress<F, T>(
+    progress: Arc<dyn crate::engine::seams::ProgressSink>,
+    index: usize,
+    future: F,
+) -> T
+where
+    F: Future<Output = T>,
+{
+    crate::engine::seams::scope_progress(progress, Some(index), future).await
+}
+
 #[cfg(feature = "url-ingestion")]
 use crawlberg::{CrawlConfig, CrawlEngine, CrawlPageResult, DownloadedDocument, ScrapeResult};
 
@@ -448,8 +460,10 @@ async fn extract_batch_concurrent(
         pending
     };
     let task_config = resolve_batch_base_config(&base_config, execution_plan.thread_budget);
+    let progress = Arc::clone(&inner.progress);
     let completed = run_bounded_batch_tasks(pending, execution_plan.workers, move |(index, input, source)| {
         let base_config = Arc::clone(&task_config);
+        let progress = Arc::clone(&progress);
         async move {
             let resolved_config = resolve_batch_input_config(&input, &base_config, execution_plan.thread_budget);
             let timeout_secs = resolved_config.extraction_timeout_secs;
@@ -465,7 +479,7 @@ async fn extract_batch_concurrent(
                 // the chain here. ~keep
                 let extraction: std::pin::Pin<Box<dyn Future<Output = Result<ExtractionResult>> + Send + '_>> =
                     Box::pin(extract_one_resolved(input, &resolved_config, index));
-                extraction.await
+                scope_batch_input_progress(progress, index, extraction).await
             });
 
             #[cfg(feature = "otel")]
@@ -884,7 +898,14 @@ async fn run_shared_url_group(
                         Err(error) => Err(map_crawl_error(error)),
                     }
                 };
-                items[shared.index] = Some(finalize_shared_item(shared, batch_started, conversion).await);
+                items[shared.index] = Some(
+                    scope_batch_input_progress(
+                        Arc::clone(&inner.progress),
+                        shared.index,
+                        finalize_shared_item(shared, batch_started, conversion),
+                    )
+                    .await,
+                );
             }
         }
         UrlExtractionMode::Crawl => {
@@ -902,7 +923,14 @@ async fn run_shared_url_group(
                         Err(error) => Err(map_crawl_error(error)),
                     }
                 };
-                items[shared.index] = Some(finalize_shared_item(shared, batch_started, conversion).await);
+                items[shared.index] = Some(
+                    scope_batch_input_progress(
+                        Arc::clone(&inner.progress),
+                        shared.index,
+                        finalize_shared_item(shared, batch_started, conversion),
+                    )
+                    .await,
+                );
             }
         }
     }

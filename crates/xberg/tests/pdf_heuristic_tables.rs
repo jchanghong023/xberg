@@ -285,3 +285,77 @@ fn test_stroke_width_vertical_rules_table_detected_via_pipeline() {
         table.cells
     );
 }
+
+#[test]
+fn test_borderless_table_beside_prose_uses_the_page_corridor_gh1769() {
+    let mut content = String::new();
+    let columns = [45.0_f32, 100.0, 145.0, 190.0, 235.0, 280.0];
+    for (column, header) in ["Measure", "Group A", "Group B", "Group C", "P A/B", "P A/C"]
+        .iter()
+        .enumerate()
+    {
+        content.push_str(&text_op(header, columns[column], 730.0));
+    }
+    for row in 0..10 {
+        let y = 716.0 - row as f32 * 12.0;
+        let cells = [
+            format!("metric{row}"),
+            format!("{}", 100 + row),
+            format!("{}", 200 + row),
+            format!("{}", 300 + row),
+            format!("0.0{row}"),
+            format!("0.1{row}"),
+        ];
+        for (column, cell) in cells.iter().enumerate() {
+            content.push_str(&text_op(cell, columns[column], y));
+        }
+        content.push_str(&text_op(
+            if row == 0 {
+                "3.4. Adjacent prose heading"
+            } else {
+                "neighbouring prose remains outside the table"
+            },
+            350.0,
+            y,
+        ));
+    }
+    content.push_str(&text_op(
+        "Fig. 3. Full width legend begins and remains continuous across the page",
+        45.0,
+        540.0,
+    ));
+
+    let result = extract_bytes_document_blocking(
+        &build_pdf_with_content(&content),
+        PDF_MIME,
+        &ExtractionConfig::default(),
+    )
+    .expect("extraction must succeed");
+
+    let table = result
+        .tables
+        .iter()
+        .find(|table| table.cells.iter().flatten().any(|cell| cell == "metric0"))
+        .expect("the left-side borderless table must be recovered");
+    assert!(
+        table.cells.iter().any(|row| {
+            row.iter().any(|cell| cell == "metric0")
+                && row.iter().any(|cell| cell == "100")
+                && row.iter().any(|cell| cell == "200")
+                && row.iter().any(|cell| cell == "300")
+        }),
+        "the table must preserve the synthetic row association: {:?}",
+        table.cells
+    );
+    assert!(result.content.contains("3.4. Adjacent prose heading"));
+    assert!(
+        result
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains("Fig. 3. Full width legend begins and remains continuous across the page"),
+        "full-width legend was split: {}",
+        result.content
+    );
+}

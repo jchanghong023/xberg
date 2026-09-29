@@ -196,11 +196,12 @@ const OCR_SCAN_MAX_GLYPHS: usize = 400;
 /// A page whose rasters cover at least [`IMAGE_COVERAGE_FULL`] of it is a scan whatever its
 /// text layer. A scanned sheet is often painted inset, with margins around it, so a page whose
 /// raster covers at least [`OCR_SCAN_COVERAGE_MIN`] is a scan too when its text layer has no
-/// more than [`OCR_SCAN_MAX_GLYPHS`] glyphs. `None` otherwise, and for a page with no image.
+/// more than [`OCR_SCAN_MAX_GLYPHS`] readable glyphs. Glyphs whose mapping provenance is
+/// [`MappingProvenance::Fallback`] do not count as readable because they may be a broken OCR
+/// sidecar rather than real native text. `None` otherwise, and for a page with no image.
 /// The density is that of the largest image on the page, its pixel count over the area it is
 /// painted into, so a 1650 x 2160 px image painted over a Letter page reports about 196 dpi
-/// whatever the page's render resolution is (#1786). The glyph count comes from the same
-/// content-stream classification scan detection uses; no pixel data is decoded.
+/// whatever the page's render resolution is (#1786). No pixel data is decoded.
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline", feature = "layout-detection"))]
 pub(crate) fn full_page_raster_density(doc: &PdfDocument, page_index: usize) -> Option<f64> {
     let (coverage, density) = page_raster_geometry(doc, page_index)?;
@@ -216,14 +217,26 @@ pub(crate) fn full_page_raster_density(doc: &PdfDocument, page_index: usize) -> 
         return None;
     }
     // Detection is advisory: a page that panics must not abort the extraction. ~keep
-    let classified = super::native::guard_native_panic(
-        || doc.classify_page(page_index).map_err(|error| error.to_string()),
+    let page_text = super::native::guard_native_panic(
+        || {
+            doc.extract_page_text_with_options(page_index, ReadingOrder::ColumnAware)
+                .map_err(|error| error.to_string())
+        },
         |message| message,
     )
     .ok()?;
-    (classified.signals.text_glyph_count <= OCR_SCAN_MAX_GLYPHS)
+    (readable_glyph_count(&page_text.spans) <= OCR_SCAN_MAX_GLYPHS)
         .then_some(density)
         .flatten()
+}
+
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline", feature = "layout-detection"))]
+fn readable_glyph_count(spans: &[TextSpan]) -> usize {
+    spans
+        .iter()
+        .filter(|span| span.provenance != Some(MappingProvenance::Fallback))
+        .map(|span| span.text.chars().count())
+        .sum()
 }
 
 /// Raster coverage of the page and the density of its largest image, from one pass over

@@ -524,7 +524,11 @@ fn cached_processor_stages(cache: &ProcessorCache) -> ProcessorStages {
 }
 
 /// Get processors from the cache, organized by stage.
+// ~keep Liveness is configuration-dependent: the only consumers are compiled out on
+// narrow feature legs, so `-D dead-code` fires there and nowhere else. A hand-kept
+// union-of-consumers `cfg` is what drifted here and failed the 1.3.0 publish (GH#1951).
 #[cfg(test)]
+#[allow(dead_code)]
 pub(super) fn get_processors_from_cache() -> Result<ProcessorStages> {
     let cache_lock = PROCESSOR_CACHE.read();
     let cache = cache_lock
@@ -786,25 +790,6 @@ mod tests {
         *slot = None;
     }
 
-    /// Retry a post-processor lifecycle mutation while a concurrent, non-`#[serial]` test in
-    /// this binary holds a processor-snapshot lease. `with_registration_update` refuses such
-    /// mutations with an error whose contract says to retry after the extraction completes, and
-    /// `#[serial]` cannot order against the non-serial tests running real extractions -- so
-    /// honour the contract instead of `.unwrap()`ing an exclusivity this binary never had.
-    /// Same 250 x 20 ms budget the registry guards use, which whole-suite load has shown to be
-    /// necessary.
-    fn retry_post_processor_lifecycle_mutation<T>(mut mutation: impl FnMut() -> Result<T>) -> Result<T> {
-        for _ in 0..250 {
-            match mutation() {
-                Err(crate::XbergError::Other(message)) if message.contains("retry the lifecycle mutation") => {
-                    std::thread::sleep(std::time::Duration::from_millis(20));
-                }
-                outcome => return outcome,
-            }
-        }
-        mutation()
-    }
-
     /// #215: a post-processor registered after the cache was already populated
     /// must become visible on the *next* extraction, not stay invisible until
     /// something remembers to call `clear_processor_cache()`.
@@ -827,16 +812,18 @@ mod tests {
     /// — a property of the test harness, not of the code under test. Emptiness was
     /// only ever scaffolding; the #215 invariant is that a *late* registration becomes
     /// visible, which containment states exactly and races nothing.
+    // ~keep `ProcessorRegistryState` is imported only under `all(test, feature = "tokio-runtime")`;
+    // without the matching gate this test failed to resolve it on every non-tokio leg (GH#1951).
+    #[cfg(feature = "tokio-runtime")]
     #[serial_test::serial]
     #[test]
     fn processor_cache_rebuilds_when_registry_changes_after_first_use() {
-        use crate::plugins::registry::test_support::PostProcessorRegistryGuard;
         use crate::plugins::{Plugin, PostProcessor, ProcessingStage};
         use crate::types::ExtractedDocument;
         use async_trait::async_trait;
         use std::sync::Arc;
 
-        let _guard = PostProcessorRegistryGuard::acquire();
+        let state = ProcessorRegistryState::new_isolated();
 
         #[derive(Debug)]
         struct LateAddedProcessor;
@@ -870,37 +857,27 @@ mod tests {
             }
         }
 
-        *PROCESSOR_CACHE.write() = None;
-
         let has_late_added =
             |processors: &[std::sync::Arc<dyn PostProcessor>]| processors.iter().any(|p| p.name() == "late-added-215");
 
         // Populate the cache, exactly as the first pipeline run of a process would.
-        initialize_processor_cache().unwrap();
-        let (_, middle, _) = get_processors_from_cache().unwrap();
+        state.ensure_cache_current().unwrap();
+        let middle = state.try_get_snapshot().unwrap().middle;
         assert!(
             !has_late_added(&middle),
             "the processor under test must not be in the cache before it is registered"
         );
 
-        // Register a processor *after* the cache already holds a snapshot. The registration is
-        // itself a lifecycle mutation that any concurrent non-serial extraction can transiently
-        // refuse, so it retries on that refusal exactly like the guard's own setup clear above.
-        let late_added: Arc<dyn PostProcessor> = Arc::new(LateAddedProcessor);
-        retry_post_processor_lifecycle_mutation(|| {
-            crate::plugins::register_post_processor(std::sync::Arc::clone(&late_added))
-        })
-        .unwrap();
+        // Register a processor *after* the cache already holds a snapshot.
+        state.register(Arc::new(LateAddedProcessor)).unwrap();
 
         // Without the #215 fix, `initialize_processor_cache` is a no-op once the
         // cache is `Some(_)`, so the newly registered processor would never appear.
-        initialize_processor_cache().unwrap();
-        let (_, middle, _) = get_processors_from_cache().unwrap();
+        state.ensure_cache_current().unwrap();
+        let middle = state.try_get_snapshot().unwrap().middle;
         assert!(
             has_late_added(&middle),
             "the cache must pick up the post-registration processor"
         );
-
-        *PROCESSOR_CACHE.write() = None;
     }
 }

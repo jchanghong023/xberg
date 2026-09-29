@@ -84,6 +84,15 @@ impl Engine {
     /// ([`NoopCache`], [`NoopProgressSink`]), so callers who inject nothing see
     /// byte-identical behavior to before this wiring existed.
     pub async fn extract(&self, input: ExtractInput, config: &ExtractionConfig) -> Result<ExtractionResult> {
+        #[cfg(feature = "tokio-runtime")]
+        return seams::scope_progress(
+            Arc::clone(&self.inner.progress),
+            None,
+            extract_impl::extract(&self.inner, input, config),
+        )
+        .await;
+
+        #[cfg(not(feature = "tokio-runtime"))]
         extract_impl::extract(&self.inner, input, config).await
     }
 
@@ -97,6 +106,15 @@ impl Engine {
         inputs: Vec<ExtractInput>,
         config: &ExtractionConfig,
     ) -> Result<ExtractionResult> {
+        #[cfg(feature = "tokio-runtime")]
+        return seams::scope_progress(
+            Arc::clone(&self.inner.progress),
+            None,
+            extract_impl::extract_batch(&self.inner, inputs, config),
+        )
+        .await;
+
+        #[cfg(not(feature = "tokio-runtime"))]
         extract_impl::extract_batch(&self.inner, inputs, config).await
     }
 

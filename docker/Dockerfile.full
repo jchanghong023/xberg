@@ -34,7 +34,12 @@ RUN cd /tmp && \
     ldconfig && \
     cd / && rm -rf /tmp/libheif*
 
-ARG PDFIUM_VERSION=7881
+# Must equal the binding set compiled into xberg-pdfium-render
+# (`src/lib.rs` includes `bindgen/pdfium_7678.rs`, the only one in the tree). The engine
+# dlopen()s this library at run time, so a mismatch is not a build error: a missing symbol
+# surfaces as MissingDependency via the 446-symbol probe, but a symbol whose signature or
+# struct layout changed is undetected (build.rs sets layout_tests(false)). ~keep
+ARG PDFIUM_VERSION=7678
 ARG ONNXRUNTIME_VERSION=1.24.2
 ARG TARGETARCH
 ENV PDFIUM_VERSION=${PDFIUM_VERSION}
@@ -87,9 +92,18 @@ COPY crates/xberg-windows-metafile/ crates/xberg-windows-metafile/
 
 RUN sed -i '/xberg-py/d; /xberg_rb/d; /xberg-node/d; /xberg-ffi/d; /xberg-jni/d; /xberg-php/d; /xberg-rag/d; /xberg_rustler/d; /xberg_nif/d; /packages\/dart\/rust/d; /packages\/swift\/rust/d; /"crates\/xberg-wasm"/d; /^\[profile\.release\.package\.xberg-wasm\]$/,$d; /benchmark-harness/d; /e2e-generator/d; /e2e\/rust/d' Cargo.toml
 
+# `.dockerignore` excludes `**/.git/`, so build.rs cannot derive XBERG_BUILD_ID from git here and
+# falls back to `""` -- which makes every image at the same crate version share one cache key
+# space (#1845). Declared here rather than at the top of the stage because a changed ARG
+# invalidates every layer below it, and the layers above are apt + a from-source libheif + the
+# pdfium/ORT downloads. Unset is a hard failure: an empty value falls straight back through
+# build.rs's `!id.is_empty()` check and silently restores the collision. ~keep
+ARG XBERG_BUILD_ID
+
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
+    : "${XBERG_BUILD_ID:?must be passed: --build-arg XBERG_BUILD_ID=<commit sha>; see crates/xberg/build.rs}" && \
     cargo build --release --package xberg-cli --features all && \
     cp target/release/xberg /build/xberg && \
     strip /build/xberg
@@ -170,12 +184,19 @@ RUN set -eux; \
     done; \
     echo "✓ Tessdata permissions configured"
 
+# Inspection only -- `docker inspect` on a shipped image shows which build id went into it. It has
+# no runtime effect: `cache_version_tag` reads the value through `env!`, i.e. baked in at
+# compile time, so setting this on a running container changes nothing. Mirrors the ARG/ENV
+# pattern already used for PDFIUM_VERSION above. ~keep
+ARG XBERG_BUILD_ID
+
 # xberg-cli subscriber defaults in logging.rs, so they won't emit DEBUG
 ENV XBERG_CACHE_DIR=/app/.xberg \
     HF_HOME=/app/.xberg/huggingface \
     RUST_LOG=info \
     LD_LIBRARY_PATH=/usr/local/lib:/usr/lib:/lib \
-    PDFIUM_DYNAMIC_LIB_PATH=/usr/local/lib
+    PDFIUM_DYNAMIC_LIB_PATH=/usr/local/lib \
+    XBERG_BUILD_ID=${XBERG_BUILD_ID}
 
 USER xberg
 

@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
-#   ./scripts/install-system-pdfium-macos.sh                    # uses defaults: version=7881, prefix=/usr/local
+#   ./scripts/install-system-pdfium-macos.sh                    # uses defaults: version=7678, prefix=/usr/local
 #   PDFIUM_VERSION=7763 ./scripts/install-system-pdfium-macos.sh
 
 set -euo pipefail
 
-readonly PDFIUM_VERSION="${PDFIUM_VERSION:-7881}"
+# The version must equal the binding set compiled into xberg-pdfium-render
+# (`crates/xberg-pdfium-render/src/lib.rs` includes `bindgen/pdfium_7678.rs`, the only one in
+# the tree). Bump it only together with a regenerated binding set at the same version, and
+# verify by loading the library and resolving symbols -- never by the download alone, which
+# succeeds regardless. ~keep
+readonly PDFIUM_VERSION="${PDFIUM_VERSION:-7678}"
 readonly PREFIX="${PREFIX:-/usr/local}"
 
 readonly RED='\033[0;31m'

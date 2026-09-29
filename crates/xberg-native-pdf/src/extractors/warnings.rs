@@ -60,6 +60,9 @@ pub enum WarningCategory {
     /// A glyph produced no rendered output while the cursor still advanced,
     /// so the page renders with an invisible gap.
     GlyphDropped,
+    /// A `/JPXDecode` image dictionary's `/Width` or `/Height` disagreed with its codestream's
+    /// `SIZ` marker segment; the codestream's size was used (GH#1900).
+    JpxSizeMismatch,
 }
 
 impl WarningCategory {
@@ -76,6 +79,7 @@ impl WarningCategory {
             Self::Font => "font",
             Self::Layout => "layout",
             Self::GlyphDropped => "glyph_dropped",
+            Self::JpxSizeMismatch => "jpx_size_mismatch",
         }
     }
 }

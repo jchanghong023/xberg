@@ -145,6 +145,9 @@ public func listEmbeddingBackends() throws -> RustVec<RustString> {
 public func listOcrBackendCapabilities() throws -> RustVec<OcrBackendCapabilities> {
     try { let val = __swift_bridge__$list_ocr_backend_capabilities(); if val.is_ok { return RustVec(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
 }
+public func listOcrBackendCapabilitiesFor(_ config: OcrConfig) throws -> RustVec<OcrBackendCapabilities> {
+    try { let val = __swift_bridge__$list_ocr_backend_capabilities_for({config.isOwned = false; return config.ptr;}()); if val.is_ok { return RustVec(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
+}
 public func listOcrBackends() throws -> RustVec<RustString> {
     try { let val = __swift_bridge__$list_ocr_backends(); if val.is_ok { return RustVec(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
 }
@@ -169,6 +172,9 @@ public func listValidators() throws -> RustVec<RustString> {
 public func ocrBackendSupportsLanguage<GenericIntoRustString: IntoRustString>(_ backend: GenericIntoRustString, _ language: GenericIntoRustString) throws -> Bool {
     try { let val = __swift_bridge__$ocr_backend_supports_language({ let rustString = backend.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), { let rustString = language.intoRustString(); rustString.isOwned = false; return rustString.ptr }()); switch val.tag { case __swift_bridge__$ResultBoolAndString$ResultOk: return val.payload.ok case __swift_bridge__$ResultBoolAndString$ResultErr: throw RustString(ptr: val.payload.err) default: fatalError() } }()
 }
+public func ocrBackendSupportsLanguageFor<GenericIntoRustString: IntoRustString>(_ backend: GenericIntoRustString, _ language: GenericIntoRustString, _ config: OcrConfig) throws -> Bool {
+    try { let val = __swift_bridge__$ocr_backend_supports_language_for({ let rustString = backend.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), { let rustString = language.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), {config.isOwned = false; return config.ptr;}()); switch val.tag { case __swift_bridge__$ResultBoolAndString$ResultOk: return val.payload.ok case __swift_bridge__$ResultBoolAndString$ResultErr: throw RustString(ptr: val.payload.err) default: fatalError() } }()
+}
 public func maxSimRank(_ query: MultiVectorEmbedding, _ docs: RustVec<MultiVectorEmbedding>) -> RustVec<LateInteractionMatch> {
     RustVec(ptr: __swift_bridge__$max_sim_rank({query.isOwned = false; return query.ptr;}(), { let val = docs; val.isOwned = false; return val.ptr }()))
 }
@@ -180,6 +186,9 @@ public func findUnmarkedClaims<GenericIntoRustString: IntoRustString>(_ markdown
 }
 public func verifyExcerpt<GenericIntoRustString: IntoRustString>(_ excerpt: GenericIntoRustString, _ source_text: GenericIntoRustString) -> Bool {
     __swift_bridge__$verify_excerpt({ let rustString = excerpt.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), { let rustString = source_text.intoRustString(); rustString.isOwned = false; return rustString.ptr }())
+}
+public func pdfPageCount<GenericIntoRustString: IntoRustString>(_ pdf_bytes: RustVec<UInt8>, _ password: Optional<GenericIntoRustString>) throws -> UInt {
+    try { let val = __swift_bridge__$pdf_page_count({ let val = pdf_bytes; val.isOwned = false; return val.ptr }(), { if let rustString = optionalStringIntoRustString(password) { rustString.isOwned = false; return rustString.ptr } else { return nil } }()); switch val.tag { case __swift_bridge__$ResultUIntAndString$ResultOk: return val.payload.ok case __swift_bridge__$ResultUIntAndString$ResultErr: throw RustString(ptr: val.payload.err) default: fatalError() } }()
 }
 public func mapUrl<GenericIntoRustString: IntoRustString>(_ uri: GenericIntoRustString, _ config: UrlExtractionConfig) throws -> MapResult {
     try { let val = __swift_bridge__$map_url({ let rustString = uri.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), {config.isOwned = false; return config.ptr;}()); if val.is_ok { return MapResult(ptr: val.ok_or_err!) } else { throw RustString(ptr: val.ok_or_err!) } }()
@@ -359,6 +368,16 @@ func __swift_bridge__SwiftOcrBackendBox_alef_backend_type (_ this: UnsafeMutable
 @_cdecl("__swift_bridge__$SwiftOcrBackendBox$alef_supported_languages")
 func __swift_bridge__SwiftOcrBackendBox_alef_supported_languages (_ this: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer {
     { let val = Unmanaged<SwiftOcrBackendBox>.fromOpaque(this).takeUnretainedValue().alef_supported_languages(); val.isOwned = false; return val.ptr }()
+}
+
+@_cdecl("__swift_bridge__$SwiftOcrBackendBox$alef_supported_languages_for")
+func __swift_bridge__SwiftOcrBackendBox_alef_supported_languages_for (_ this: UnsafeMutableRawPointer, _ config: UnsafeMutableRawPointer) -> UnsafeMutableRawPointer {
+    { let val = Unmanaged<SwiftOcrBackendBox>.fromOpaque(this).takeUnretainedValue().alef_supported_languages_for(config: RustString(ptr: config)); val.isOwned = false; return val.ptr }()
+}
+
+@_cdecl("__swift_bridge__$SwiftOcrBackendBox$alef_supports_language_for")
+func __swift_bridge__SwiftOcrBackendBox_alef_supports_language_for (_ this: UnsafeMutableRawPointer, _ config: UnsafeMutableRawPointer, _ language: UnsafeMutableRawPointer) -> Bool {
+    Unmanaged<SwiftOcrBackendBox>.fromOpaque(this).takeUnretainedValue().alef_supports_language_for(config: RustString(ptr: config), language: RustString(ptr: language))
 }
 
 @_cdecl("__swift_bridge__$SwiftOcrBackendBox$alef_supports_table_detection")
@@ -3541,8 +3560,8 @@ public class BrowserConfig: BrowserConfigRefMut {
     }
 }
 extension BrowserConfig {
-    public convenience init<GenericIntoRustString: IntoRustString>(_ mode: BrowserMode, _ backend: BrowserBackend, _ endpoint: Optional<GenericIntoRustString>, _ timeout: UInt64, _ wait: BrowserWait, _ wait_selector: Optional<GenericIntoRustString>, _ extra_wait: Optional<UInt64>, _ proxy: Optional<ProxyConfig>, _ block_url_patterns: RustVec<GenericIntoRustString>, _ eval_script: Optional<GenericIntoRustString>, _ robots_user_agent: Optional<GenericIntoRustString>, _ capture_network_events: Bool, _ session_affinity: Bool) {
-        self.init(ptr: __swift_bridge__$BrowserConfig$new({mode.isOwned = false; return mode.ptr;}(), {backend.isOwned = false; return backend.ptr;}(), { if let rustString = optionalStringIntoRustString(endpoint) { rustString.isOwned = false; return rustString.ptr } else { return nil } }(), timeout, {wait.isOwned = false; return wait.ptr;}(), { if let rustString = optionalStringIntoRustString(wait_selector) { rustString.isOwned = false; return rustString.ptr } else { return nil } }(), extra_wait.intoFfiRepr(), { if let val = proxy { val.isOwned = false; return val.ptr } else { return nil } }(), { let val = block_url_patterns; val.isOwned = false; return val.ptr }(), { if let rustString = optionalStringIntoRustString(eval_script) { rustString.isOwned = false; return rustString.ptr } else { return nil } }(), { if let rustString = optionalStringIntoRustString(robots_user_agent) { rustString.isOwned = false; return rustString.ptr } else { return nil } }(), capture_network_events, session_affinity))
+    public convenience init<GenericIntoRustString: IntoRustString>(_ mode: BrowserMode, _ backend: BrowserBackend, _ endpoint: Optional<GenericIntoRustString>, _ timeout: UInt64, _ overall_timeout: UInt64, _ shutdown_timeout: UInt64, _ wait: BrowserWait, _ wait_selector: Optional<GenericIntoRustString>, _ extra_wait: Optional<UInt64>, _ proxy: Optional<ProxyConfig>, _ block_url_patterns: RustVec<GenericIntoRustString>, _ eval_script: Optional<GenericIntoRustString>, _ robots_user_agent: Optional<GenericIntoRustString>, _ capture_network_events: Bool, _ session_affinity: Bool) {
+        self.init(ptr: __swift_bridge__$BrowserConfig$new({mode.isOwned = false; return mode.ptr;}(), {backend.isOwned = false; return backend.ptr;}(), { if let rustString = optionalStringIntoRustString(endpoint) { rustString.isOwned = false; return rustString.ptr } else { return nil } }(), timeout, overall_timeout, shutdown_timeout, {wait.isOwned = false; return wait.ptr;}(), { if let rustString = optionalStringIntoRustString(wait_selector) { rustString.isOwned = false; return rustString.ptr } else { return nil } }(), extra_wait.intoFfiRepr(), { if let val = proxy { val.isOwned = false; return val.ptr } else { return nil } }(), { let val = block_url_patterns; val.isOwned = false; return val.ptr }(), { if let rustString = optionalStringIntoRustString(eval_script) { rustString.isOwned = false; return rustString.ptr } else { return nil } }(), { if let rustString = optionalStringIntoRustString(robots_user_agent) { rustString.isOwned = false; return rustString.ptr } else { return nil } }(), capture_network_events, session_affinity))
     }
 }
 public class BrowserConfigRefMut: BrowserConfigRef {
@@ -3572,6 +3591,14 @@ extension BrowserConfigRef {
 
     public func timeout() -> UInt64 {
         __swift_bridge__$BrowserConfig$timeout(ptr)
+    }
+
+    public func overallTimeout() -> UInt64 {
+        __swift_bridge__$BrowserConfig$overall_timeout(ptr)
+    }
+
+    public func shutdownTimeout() -> UInt64 {
+        __swift_bridge__$BrowserConfig$shutdown_timeout(ptr)
     }
 
     public func wait() -> RustString {
@@ -5407,8 +5434,8 @@ public class ContentConfig: ContentConfigRefMut {
     }
 }
 extension ContentConfig {
-    public convenience init<GenericIntoRustString: IntoRustString>(_ output_format: GenericIntoRustString, _ preprocessing_preset: GenericIntoRustString, _ remove_navigation: Bool, _ remove_forms: Bool, _ strip_tags: RustVec<GenericIntoRustString>, _ preserve_tags: RustVec<GenericIntoRustString>, _ exclude_selectors: RustVec<GenericIntoRustString>, _ skip_images: Bool, _ max_depth: Optional<UInt>, _ wrap: Bool, _ wrap_width: UInt, _ include_document_structure: Bool) {
-        self.init(ptr: __swift_bridge__$ContentConfig$new({ let rustString = output_format.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), { let rustString = preprocessing_preset.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), remove_navigation, remove_forms, { let val = strip_tags; val.isOwned = false; return val.ptr }(), { let val = preserve_tags; val.isOwned = false; return val.ptr }(), { let val = exclude_selectors; val.isOwned = false; return val.ptr }(), skip_images, max_depth.intoFfiRepr(), wrap, wrap_width, include_document_structure))
+    public convenience init<GenericIntoRustString: IntoRustString>(_ output_format: GenericIntoRustString, _ preprocessing_preset: GenericIntoRustString, _ remove_navigation: Bool, _ remove_forms: Bool, _ strip_tags: RustVec<GenericIntoRustString>, _ preserve_tags: RustVec<GenericIntoRustString>, _ exclude_selectors: RustVec<GenericIntoRustString>, _ skip_images: Bool, _ max_depth: Optional<UInt>, _ wrap: Bool, _ wrap_width: UInt, _ include_document_structure: Bool, _ extract_metadata: Bool) {
+        self.init(ptr: __swift_bridge__$ContentConfig$new({ let rustString = output_format.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), { let rustString = preprocessing_preset.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), remove_navigation, remove_forms, { let val = strip_tags; val.isOwned = false; return val.ptr }(), { let val = preserve_tags; val.isOwned = false; return val.ptr }(), { let val = exclude_selectors; val.isOwned = false; return val.ptr }(), skip_images, max_depth.intoFfiRepr(), wrap, wrap_width, include_document_structure, extract_metadata))
     }
 }
 public class ContentConfigRefMut: ContentConfigRef {
@@ -5470,6 +5497,10 @@ extension ContentConfigRef {
 
     public func includeDocumentStructure() -> Bool {
         __swift_bridge__$ContentConfig$include_document_structure(ptr)
+    }
+
+    public func extractMetadata() -> Bool {
+        __swift_bridge__$ContentConfig$extract_metadata(ptr)
     }
 }
 extension ContentConfig: Vectorizable {
@@ -5721,8 +5752,8 @@ public class ConversionOptions: ConversionOptionsRefMut {
     }
 }
 extension ConversionOptions {
-    public convenience init<GenericIntoRustString: IntoRustString>(_ heading_style: HeadingStyle, _ list_indent_type: ListIndentType, _ list_indent_width: UInt, _ bullets: GenericIntoRustString, _ strong_em_symbol: GenericIntoRustString, _ escape_asterisks: Bool, _ escape_underscores: Bool, _ escape_misc: Bool, _ escape_ascii: Bool, _ code_language: GenericIntoRustString, _ autolinks: Bool, _ default_title: Bool, _ br_in_tables: Bool, _ compact_tables: Bool, _ highlight_style: HighlightStyle, _ extract_metadata: Bool, _ whitespace_mode: WhitespaceMode, _ strip_newlines: Bool, _ wrap: Bool, _ wrap_width: UInt, _ convert_as_inline: Bool, _ sub_symbol: GenericIntoRustString, _ sup_symbol: GenericIntoRustString, _ newline_style: NewlineStyle, _ code_block_style: CodeBlockStyle, _ keep_inline_images_in: RustVec<GenericIntoRustString>, _ preprocessing: PreprocessingOptions, _ encoding: GenericIntoRustString, _ debug: Bool, _ strip_tags: RustVec<GenericIntoRustString>, _ preserve_tags: RustVec<GenericIntoRustString>, _ skip_images: Bool, _ url_escape_style: UrlEscapeStyle, _ link_style: LinkStyle, _ output_format: HtmlToMarkdownRsOutputFormat, _ include_document_structure: Bool, _ extract_images: Bool, _ max_image_size: UInt64, _ capture_svg: Bool, _ infer_dimensions: Bool, _ max_depth: Optional<UInt>, _ exclude_selectors: RustVec<GenericIntoRustString>, _ tier_strategy: TierStrategy) {
-        self.init(ptr: __swift_bridge__$ConversionOptions$new({heading_style.isOwned = false; return heading_style.ptr;}(), {list_indent_type.isOwned = false; return list_indent_type.ptr;}(), list_indent_width, { let rustString = bullets.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), { let rustString = strong_em_symbol.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), escape_asterisks, escape_underscores, escape_misc, escape_ascii, { let rustString = code_language.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), autolinks, default_title, br_in_tables, compact_tables, {highlight_style.isOwned = false; return highlight_style.ptr;}(), extract_metadata, {whitespace_mode.isOwned = false; return whitespace_mode.ptr;}(), strip_newlines, wrap, wrap_width, convert_as_inline, { let rustString = sub_symbol.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), { let rustString = sup_symbol.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), {newline_style.isOwned = false; return newline_style.ptr;}(), {code_block_style.isOwned = false; return code_block_style.ptr;}(), { let val = keep_inline_images_in; val.isOwned = false; return val.ptr }(), {preprocessing.isOwned = false; return preprocessing.ptr;}(), { let rustString = encoding.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), debug, { let val = strip_tags; val.isOwned = false; return val.ptr }(), { let val = preserve_tags; val.isOwned = false; return val.ptr }(), skip_images, {url_escape_style.isOwned = false; return url_escape_style.ptr;}(), {link_style.isOwned = false; return link_style.ptr;}(), {output_format.isOwned = false; return output_format.ptr;}(), include_document_structure, extract_images, max_image_size, capture_svg, infer_dimensions, max_depth.intoFfiRepr(), { let val = exclude_selectors; val.isOwned = false; return val.ptr }(), {tier_strategy.isOwned = false; return tier_strategy.ptr;}()))
+    public convenience init<GenericIntoRustString: IntoRustString>(_ heading_style: HeadingStyle, _ list_indent_type: ListIndentType, _ list_indent_width: UInt, _ bullets: GenericIntoRustString, _ strong_em_symbol: GenericIntoRustString, _ escape_asterisks: Bool, _ escape_underscores: Bool, _ escape_misc: Bool, _ escape_ascii: Bool, _ code_language: GenericIntoRustString, _ autolinks: Bool, _ default_title: Bool, _ br_in_tables: Bool, _ compact_tables: Bool, _ highlight_style: HighlightStyle, _ extract_metadata: Bool, _ whitespace_mode: WhitespaceMode, _ strip_newlines: Bool, _ wrap: Bool, _ wrap_width: UInt, _ convert_as_inline: Bool, _ sub_symbol: GenericIntoRustString, _ sup_symbol: GenericIntoRustString, _ newline_style: NewlineStyle, _ code_block_style: CodeBlockStyle, _ keep_inline_images_in: RustVec<GenericIntoRustString>, _ preprocessing: PreprocessingOptions, _ encoding: GenericIntoRustString, _ debug: Bool, _ strip_tags: RustVec<GenericIntoRustString>, _ preserve_tags: RustVec<GenericIntoRustString>, _ skip_images: Bool, _ url_escape_style: UrlEscapeStyle, _ link_style: LinkStyle, _ output_format: HtmlToMarkdownRsOutputFormat, _ include_document_structure: Bool, _ extract_images: Bool, _ max_image_size: UInt64, _ capture_svg: Bool, _ infer_dimensions: Bool, _ max_depth: Optional<UInt>, _ exclude_selectors: RustVec<GenericIntoRustString>, _ tier_strategy: TierStrategy, _ base_url: Optional<GenericIntoRustString>) {
+        self.init(ptr: __swift_bridge__$ConversionOptions$new({heading_style.isOwned = false; return heading_style.ptr;}(), {list_indent_type.isOwned = false; return list_indent_type.ptr;}(), list_indent_width, { let rustString = bullets.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), { let rustString = strong_em_symbol.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), escape_asterisks, escape_underscores, escape_misc, escape_ascii, { let rustString = code_language.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), autolinks, default_title, br_in_tables, compact_tables, {highlight_style.isOwned = false; return highlight_style.ptr;}(), extract_metadata, {whitespace_mode.isOwned = false; return whitespace_mode.ptr;}(), strip_newlines, wrap, wrap_width, convert_as_inline, { let rustString = sub_symbol.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), { let rustString = sup_symbol.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), {newline_style.isOwned = false; return newline_style.ptr;}(), {code_block_style.isOwned = false; return code_block_style.ptr;}(), { let val = keep_inline_images_in; val.isOwned = false; return val.ptr }(), {preprocessing.isOwned = false; return preprocessing.ptr;}(), { let rustString = encoding.intoRustString(); rustString.isOwned = false; return rustString.ptr }(), debug, { let val = strip_tags; val.isOwned = false; return val.ptr }(), { let val = preserve_tags; val.isOwned = false; return val.ptr }(), skip_images, {url_escape_style.isOwned = false; return url_escape_style.ptr;}(), {link_style.isOwned = false; return link_style.ptr;}(), {output_format.isOwned = false; return output_format.ptr;}(), include_document_structure, extract_images, max_image_size, capture_svg, infer_dimensions, max_depth.intoFfiRepr(), { let val = exclude_selectors; val.isOwned = false; return val.ptr }(), {tier_strategy.isOwned = false; return tier_strategy.ptr;}(), { if let rustString = optionalStringIntoRustString(base_url) { rustString.isOwned = false; return rustString.ptr } else { return nil } }()))
     }
 }
 public class ConversionOptionsRefMut: ConversionOptionsRef {
@@ -5908,6 +5939,10 @@ extension ConversionOptionsRef {
 
     public func tierStrategy() -> RustString {
         RustString(ptr: __swift_bridge__$ConversionOptions$tier_strategy(ptr))
+    }
+
+    public func baseUrl() -> Optional<RustString> {
+        { let val = __swift_bridge__$ConversionOptions$base_url(ptr); if val != nil { return RustString(ptr: val!) } else { return nil } }()
     }
 }
 extension ConversionOptions: Vectorizable {
@@ -6187,6 +6222,22 @@ extension CrawlConfigRef {
         RustVec(ptr: __swift_bridge__$CrawlConfig$exclude_paths(ptr))
     }
 
+    public func pathPatternsMatchQuery() -> Bool {
+        __swift_bridge__$CrawlConfig$path_patterns_match_query(ptr)
+    }
+
+    public func dedupIncludeQuery() -> Bool {
+        __swift_bridge__$CrawlConfig$dedup_include_query(ptr)
+    }
+
+    public func stripTrackingParams() -> Bool {
+        __swift_bridge__$CrawlConfig$strip_tracking_params(ptr)
+    }
+
+    public func trackingParams() -> RustVec<RustString> {
+        RustVec(ptr: __swift_bridge__$CrawlConfig$tracking_params(ptr))
+    }
+
     public func customHeaders() -> RustString {
         RustString(ptr: __swift_bridge__$CrawlConfig$custom_headers(ptr))
     }
@@ -6209,6 +6260,18 @@ extension CrawlConfigRef {
 
     public func retryCodes() -> RustVec<UInt16> {
         RustVec(ptr: __swift_bridge__$CrawlConfig$retry_codes(ptr))
+    }
+
+    public func retryInitialDelayMs() -> UInt64 {
+        __swift_bridge__$CrawlConfig$retry_initial_delay_ms(ptr)
+    }
+
+    public func retryMaxDelayMs() -> UInt64 {
+        __swift_bridge__$CrawlConfig$retry_max_delay_ms(ptr)
+    }
+
+    public func rateLimitJitterRatio() -> Double {
+        __swift_bridge__$CrawlConfig$rate_limit_jitter_ratio(ptr)
     }
 
     public func cookiesEnabled() -> Bool {

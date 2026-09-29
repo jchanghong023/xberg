@@ -400,6 +400,42 @@ async fn bounded_batch_scheduler_caps_in_flight_tasks() {
 }
 
 #[tokio::test]
+async fn batch_input_progress_scope_reports_zero_based_item_indices() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Default)]
+    struct IndexSink(Mutex<Vec<usize>>);
+
+    impl crate::engine::seams::ProgressSink for IndexSink {
+        fn emit(&self, _event: crate::engine::seams::ProgressEvent) {}
+
+        fn emit_ocr_page(
+            &self,
+            _page: usize,
+            _total: usize,
+            _completed: usize,
+            _backend: &str,
+            input_index: Option<usize>,
+        ) {
+            self.0
+                .lock()
+                .expect("progress index mutex poisoned")
+                .push(input_index.expect("batch item should carry its index"));
+        }
+    }
+
+    let sink = Arc::new(IndexSink::default());
+    for index in 0..2 {
+        scope_batch_input_progress(sink.clone(), index, async {
+            crate::engine::seams::emit_ocr_page(1, 1, "tesseract");
+        })
+        .await;
+    }
+
+    assert_eq!(*sink.0.lock().expect("progress index mutex poisoned"), vec![0, 1]);
+}
+
+#[tokio::test]
 async fn bounded_batch_scheduler_preserves_completion_and_error_indices() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

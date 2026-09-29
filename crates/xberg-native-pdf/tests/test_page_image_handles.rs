@@ -171,6 +171,26 @@ fn page_image_handles_includes_referenced_mask() {
     assert_eq!((handles[1].width, handles[1].height), (1, 1));
 }
 
+/// GH#1825: an `/ImageMask` legitimately omits `/ColorSpace` (ISO 32000-1 §8.9.6.2 forbids
+/// it), and `resolve_image_xobject_metadata` defaults such an image to `/DeviceGray` before
+/// decoding. The handle builder must report the same placeholder rather than the plain
+/// missing-`/ColorSpace` default of `/DeviceRGB`, or a handle and the image it later decodes
+/// disagree about colour space for every mask in the wild.
+#[test]
+fn page_image_handles_mask_with_no_colorspace_reports_device_gray() {
+    use xberg_native_pdf::extractors::ColorSpace;
+
+    let doc = PdfDocument::from_bytes(build_pdf_with_referenced_mask()).expect("open PDF");
+    let handles = doc.page_image_handles(0).expect("enumerate page image handles");
+
+    assert_eq!(
+        handles[1].color_space,
+        ColorSpace::DeviceGray,
+        "an /ImageMask with no /ColorSpace must report DeviceGray, matching extraction's own \
+         default_mask_color_space placeholder, not the plain DeviceRGB default"
+    );
+}
+
 #[test]
 fn referenced_image_mask_defaults_missing_bits_per_component_to_one() {
     let doc = PdfDocument::from_bytes(build_pdf_with_referenced_mask_options(false, false)).expect("open PDF");

@@ -1,6 +1,8 @@
 /// TSV (tab-separated value) output parser for Tesseract word-level bounding boxes.
 pub mod tsv_parser;
 
+mod shading_marks;
+
 #[cfg(paddle_ocr)]
 pub(crate) use crate::table_core::HocrWord;
 pub(crate) use crate::table_core::{reconstruct_table_with_columns, table_to_markdown};
@@ -8,4 +10,5 @@ pub(crate) use crate::table_core::{reconstruct_table_with_columns, table_to_mark
 #[cfg(feature = "pdf")]
 pub(crate) use crate::pdf::table_reconstruct::post_process_table;
 
-pub(crate) use tsv_parser::extract_words_from_tsv;
+pub(crate) use shading_marks::shading_mark_keep_mask;
+pub(crate) use tsv_parser::{TableWords, extract_table_words_from_tsv, extract_words_from_tsv};

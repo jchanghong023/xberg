@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 7881, not the newest upstream build (bblanchon publishes 8009 as of 2026-08-21). The
-# constraint is the BINDINGS, not the binary: a binary whose exported symbols do not match the
-# bindings it is loaded against fails at runtime with DlSym errors, which is exactly how the
-# vendored fork rotted (symbols were being hand-added and hand-removed to chase drift).
-# 7881 is the highest version with a known-good binding set today. Bump it only together with
-# a regenerated binding set at the same version, and verify by loading the library and
-# resolving symbols -- never by the download alone, which succeeds regardless. ~keep
-version="${PDFIUM_VERSION:-${1:-7881}}"
+# 7678, because that is the binding set compiled into the crate, not because it is newest
+# (bblanchon publishes far higher). The constraint is the BINDINGS, not the binary:
+# `crates/xberg-pdfium-render/src/lib.rs` hardcodes `include!("bindgen/pdfium_7678.rs")` and
+# `src/bindgen/` holds exactly that one file, so 7678 IS the compiled ABI contract. A binary whose
+# exported symbols do not match it fails at run time, which is exactly how the vendored fork rotted
+# (symbols were hand-added and hand-removed to chase drift).
+#
+# This default read 7881 from 2026-08-21 until GH#1882. Nothing in the tree ever had 7881 bindings,
+# so every published image and released musl CLI staged a runtime one release ahead of the bindings
+# it was loaded against. It survived because "verified" meant the download succeeded -- the exact
+# thing the next sentence forbids.
+#
+# Bump it only together with a regenerated binding set at the same version, and verify by loading
+# the library and resolving symbols -- never by the download alone, which succeeds regardless.
+# `DynamicPdfiumBindings::new` probes all 446 required symbols, so a missing one fails cleanly; a
+# symbol that is still present but whose signature or struct layout changed is NOT detected
+# (`build.rs` sets `layout_tests(false)`), and that is the case worth fearing. ~keep
+version="${PDFIUM_VERSION:-${1:-7678}}"
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dest_release="$root_dir/target/release"
 dest_debug="$root_dir/target/debug"

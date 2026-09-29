@@ -635,9 +635,22 @@ jobs:
           fetch-depth: 0
           submodules: false
 
+      # `.dockerignore` excludes `**/.git/`, so build.rs cannot derive XBERG_BUILD_ID inside the
+      # container and falls back to `""`, collapsing every artifact built at one crate version into
+      # a single OCR cache key space (#1845). Asserted non-empty here because an empty
+      # `--build-arg` is indistinguishable from the bug it fixes.
+      - name: Resolve build id
+        id: build_id
+        run: |
+          set -euo pipefail
+          id=$(git rev-parse HEAD)
+          [ -n "$id" ] || { echo "::error::git rev-parse HEAD produced an empty build id"; exit 1; }
+          echo "value=$id" >> "$GITHUB_OUTPUT"
+
       - name: Build Python wheel via Alpine Docker
         run: |
           docker build -f docker/Dockerfile.musl-python \
+            --build-arg XBERG_BUILD_ID=${{ steps.build_id.outputs.value }} \
             --build-arg TARGET=${{ matrix.target }} \
             --output type=local,dest=./build-output .
 
@@ -833,9 +846,22 @@ jobs:
           ref: ${{ needs.prepare.outputs.checkout_ref }}
           fetch-depth: 0
           submodules: false
+      # `.dockerignore` excludes `**/.git/`, so build.rs cannot derive XBERG_BUILD_ID inside the
+      # container and falls back to `""`, collapsing every artifact built at one crate version into
+      # a single OCR cache key space (#1845). Asserted non-empty here because an empty
+      # `--build-arg` is indistinguishable from the bug it fixes.
+      - name: Resolve build id
+        id: build_id
+        run: |
+          set -euo pipefail
+          id=$(git rev-parse HEAD)
+          [ -n "$id" ] || { echo "::error::git rev-parse HEAD produced an empty build id"; exit 1; }
+          echo "value=$id" >> "$GITHUB_OUTPUT"
+
       - name: Build Node NAPI binding via Alpine Docker
         run: |
           docker build -f docker/Dockerfile.musl-node \
+            --build-arg XBERG_BUILD_ID=${{ steps.build_id.outputs.value }} \
             --build-arg TARGET=${{ matrix.target }} \
             --output type=local,dest=./build-output .
       - name: Stage .node into napi platform dir for npm
@@ -921,9 +947,22 @@ jobs:
           ref: ${{ needs.prepare.outputs.checkout_ref }}
           fetch-depth: 0
           submodules: false
+      # `.dockerignore` excludes `**/.git/`, so build.rs cannot derive XBERG_BUILD_ID inside the
+      # container and falls back to `""`, collapsing every artifact built at one crate version into
+      # a single OCR cache key space (#1845). Asserted non-empty here because an empty
+      # `--build-arg` is indistinguishable from the bug it fixes.
+      - name: Resolve build id
+        id: build_id
+        run: |
+          set -euo pipefail
+          id=$(git rev-parse HEAD)
+          [ -n "$id" ] || { echo "::error::git rev-parse HEAD produced an empty build id"; exit 1; }
+          echo "value=$id" >> "$GITHUB_OUTPUT"
+
       - name: Build Node NAPI binding via manylinux Docker
         run: |
           docker build -f docker/Dockerfile.manylinux-node \
+            --build-arg XBERG_BUILD_ID=${{ steps.build_id.outputs.value }} \
             --build-arg MANYLINUX_IMAGE=${{ matrix.image }} \
             --build-arg TARGET=${{ matrix.target }} \
             --output type=local,dest=./build-output .
@@ -1558,9 +1597,22 @@ jobs:
           fetch-depth: 0
 
           submodules: false
+      # `.dockerignore` excludes `**/.git/`, so build.rs cannot derive XBERG_BUILD_ID inside the
+      # container and falls back to `""`, collapsing every artifact built at one crate version into
+      # a single OCR cache key space (#1845). Asserted non-empty here because an empty
+      # `--build-arg` is indistinguishable from the bug it fixes.
+      - name: Resolve build id
+        id: build_id
+        run: |
+          set -euo pipefail
+          id=$(git rev-parse HEAD)
+          [ -n "$id" ] || { echo "::error::git rev-parse HEAD produced an empty build id"; exit 1; }
+          echo "value=$id" >> "$GITHUB_OUTPUT"
+
       - name: Build CLI via Alpine Docker
         run: |
           docker build -f docker/Dockerfile.musl-build \
+            --build-arg XBERG_BUILD_ID=${{ steps.build_id.outputs.value }} \
             --output type=local,dest=./build-output .
 
       - name: Package CLI artifact (with bundled lib/)
@@ -1609,9 +1661,22 @@ jobs:
           fetch-depth: 0
 
           submodules: false
+      # `.dockerignore` excludes `**/.git/`, so build.rs cannot derive XBERG_BUILD_ID inside the
+      # container and falls back to `""`, collapsing every artifact built at one crate version into
+      # a single OCR cache key space (#1845). Asserted non-empty here because an empty
+      # `--build-arg` is indistinguishable from the bug it fixes.
+      - name: Resolve build id
+        id: build_id
+        run: |
+          set -euo pipefail
+          id=$(git rev-parse HEAD)
+          [ -n "$id" ] || { echo "::error::git rev-parse HEAD produced an empty build id"; exit 1; }
+          echo "value=$id" >> "$GITHUB_OUTPUT"
+
       - name: Build static CLI via Alpine Docker
         run: |
           docker build -f docker/Dockerfile.binstall-musl \
+            --build-arg XBERG_BUILD_ID=${{ steps.build_id.outputs.value }} \
             --build-arg FEATURES=${{ matrix.features }} \
             --build-arg TARGET=${{ matrix.target }} \
             --output type=local,dest=./build-output .
@@ -1919,9 +1984,22 @@ jobs:
           fetch-depth: 0
 
           submodules: false
+      # `.dockerignore` excludes `**/.git/`, so build.rs cannot derive XBERG_BUILD_ID inside the
+      # container and falls back to `""`, collapsing every artifact built at one crate version into
+      # a single OCR cache key space (#1845). Asserted non-empty here because an empty
+      # `--build-arg` is indistinguishable from the bug it fixes.
+      - name: Resolve build id
+        id: build_id
+        run: |
+          set -euo pipefail
+          id=$(git rev-parse HEAD)
+          [ -n "$id" ] || { echo "::error::git rev-parse HEAD produced an empty build id"; exit 1; }
+          echo "value=$id" >> "$GITHUB_OUTPUT"
+
       - name: Build xberg-ffi via Alpine Docker
         run: |
           docker build -f docker/Dockerfile.musl-ffi \
+            --build-arg XBERG_BUILD_ID=${{ steps.build_id.outputs.value }} \
             --output type=local,dest=./build-output .
 
       - name: Stage native lib for Java classifier layout
@@ -2089,9 +2167,22 @@ jobs:
           fetch-depth: 0
 
           submodules: false
+      # `.dockerignore` excludes `**/.git/`, so build.rs cannot derive XBERG_BUILD_ID inside the
+      # container and falls back to `""`, collapsing every artifact built at one crate version into
+      # a single OCR cache key space (#1845). Asserted non-empty here because an empty
+      # `--build-arg` is indistinguishable from the bug it fixes.
+      - name: Resolve build id
+        id: build_id
+        run: |
+          set -euo pipefail
+          id=$(git rev-parse HEAD)
+          [ -n "$id" ] || { echo "::error::git rev-parse HEAD produced an empty build id"; exit 1; }
+          echo "value=$id" >> "$GITHUB_OUTPUT"
+
       - name: Build xberg-ffi via Alpine Docker
         run: |
           docker build -f docker/Dockerfile.musl-ffi \
+            --build-arg XBERG_BUILD_ID=${{ steps.build_id.outputs.value }} \
             --output type=local,dest=./build-output .
 
       - name: Stage native lib for NuGet RID layout
@@ -2253,9 +2344,22 @@ jobs:
           fetch-depth: 0
 
           submodules: false
+      # `.dockerignore` excludes `**/.git/`, so build.rs cannot derive XBERG_BUILD_ID inside the
+      # container and falls back to `""`, collapsing every artifact built at one crate version into
+      # a single OCR cache key space (#1845). Asserted non-empty here because an empty
+      # `--build-arg` is indistinguishable from the bug it fixes.
+      - name: Resolve build id
+        id: build_id
+        run: |
+          set -euo pipefail
+          id=$(git rev-parse HEAD)
+          [ -n "$id" ] || { echo "::error::git rev-parse HEAD produced an empty build id"; exit 1; }
+          echo "value=$id" >> "$GITHUB_OUTPUT"
+
       - name: Build xberg_nif via Alpine Docker
         run: |
           docker build -f docker/Dockerfile.musl-rustler \
+            --build-arg XBERG_BUILD_ID=${{ steps.build_id.outputs.value }} \
             --output type=local,dest=./build-output .
 
       # Nothing before this point has ever loaded libxberg_nif.so into a BEAM
@@ -2322,6 +2426,18 @@ jobs:
           fetch-depth: 0
           submodules: false
 
+      # `.dockerignore` excludes `**/.git/`, so build.rs cannot derive XBERG_BUILD_ID inside the
+      # container and falls back to `""`, collapsing every artifact built at one crate version into
+      # a single OCR cache key space (#1845). Asserted non-empty here because an empty
+      # `--build-arg` is indistinguishable from the bug it fixes.
+      - name: Resolve build id
+        id: build_id
+        run: |
+          set -euo pipefail
+          id=$(git rev-parse HEAD)
+          [ -n "$id" ] || { echo "::error::git rev-parse HEAD produced an empty build id"; exit 1; }
+          echo "value=$id" >> "$GITHUB_OUTPUT"
+
       # cargo-zigbuild (the linux-gnu approach used by build-elixir-natives@v1
       # for every other NIF platform) only lowers the glibc floor of
       # Rust-compiled objects. The `full` feature set pulls in libheif ->
@@ -2336,6 +2452,7 @@ jobs:
         if: ${{ needs.prepare.outputs.dry_run != 'true' }}
         run: |
           docker build -f docker/Dockerfile.manylinux-rustler \
+            --build-arg XBERG_BUILD_ID=${{ steps.build_id.outputs.value }} \
             --build-arg MANYLINUX_IMAGE=${{ matrix.image }} \
             --build-arg TARGET=${{ matrix.target }} \
             --output type=local,dest=./build-output .

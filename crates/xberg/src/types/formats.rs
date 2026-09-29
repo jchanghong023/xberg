@@ -500,12 +500,11 @@ pub struct TesseractConfig {
     /// it would with no `TesseractConfig` at all — see issue #1573. Setting any other
     /// field on this struct no longer changes that behaviour.
     ///
-    /// A rendered PDF page (`force_ocr` / `force_ocr_pages` / scanned-page OCR) does **not**
-    /// currently get a context-appropriate default here: it falls through to the engine's
-    /// generic automatic-layout PSM (3) even though standalone image OCR of the same raster
-    /// would use PSM 11 (GH#1786). Measurements on this repository's own synthetic table
-    /// fixtures gave contradictory results across font/tessdata combinations (see GH#1786's
-    /// resolution notes) — table-heavy pages may benefit from setting `psm: 11` explicitly.
+    /// A rendered PDF page (`force_ocr` / `force_ocr_pages` / scanned-page OCR) that is one
+    /// full-page scan gets the same whole-image PSM as standalone image OCR of that raster
+    /// (11, or 5 for a vertical language), so the scan needs no explicit `psm` (GH#1786). A
+    /// page that is not a scan, such as forced OCR of a vector page, keeps the engine's
+    /// automatic-layout PSM (3).
     ///
     /// Common explicit values:
     /// - 3: Fully automatic page segmentation (native engine default)

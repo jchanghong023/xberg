@@ -62,6 +62,19 @@ public class CloudOcrExample implements IOcrBackend {
         return List.of("en");
     }
 
+    // The cloud service offers the same languages whatever the extraction config asks for, so
+    // both config-aware methods delegate to the config-independent ones above. A backend whose
+    // language support depends on the config would read it here instead.
+    @Override
+    public List<String> supported_languages_for(OcrConfig config) throws Exception {
+        return supported_languages();
+    }
+
+    @Override
+    public boolean supports_language_for(OcrConfig config, String language) throws Exception {
+        return supports_language(language);
+    }
+
     @Override
     public boolean supports_table_detection() throws Exception {
         return false;

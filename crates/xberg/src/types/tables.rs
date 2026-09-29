@@ -38,6 +38,7 @@ pub struct Table {
     ///   passed through unchanged.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub bounding_box: Option<BoundingBox>,
 
     /// Stable identifier shared by every `tables[]` entry that represents a

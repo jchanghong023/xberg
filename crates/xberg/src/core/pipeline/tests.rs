@@ -2219,6 +2219,32 @@ mod full_page_image_ocr_tests {
     }
 
     #[test]
+    fn should_return_no_ocr_work_for_page_rasters_without_bounding_boxes() {
+        let mut document = pdf_document();
+        document.push_element(
+            InternalElement::text(
+                ElementKind::OcrText {
+                    level: OcrElementLevel::Block,
+                },
+                "page-level OCR text",
+                0,
+            )
+            .with_page(1),
+        );
+        document.images = vec![ExtractedImage {
+            data: Bytes::from_static(b"page raster"),
+            image_index: 0,
+            page_number: Some(1),
+            bounding_box: None,
+            image_kind: Some(crate::types::ImageKind::PageRaster),
+            ..Default::default()
+        }];
+
+        assert_eq!(image_ocr_positions(&document), Vec::<usize>::new());
+        assert!(document.images[0].ocr_result.is_none());
+    }
+
+    #[test]
     fn should_not_apply_pdf_deduplication_to_other_formats() {
         let mut document = pdf_document();
         document.source_format = "pptx".to_string();
@@ -2872,6 +2898,57 @@ mod document_counts {
             tree_result.internal_document.is_some(),
             "an extension-only change is not divergence; the element tree must survive"
         );
+    }
+
+    /// GH#1888: a scanned PDF extracted with OCR disabled and no `PageConfig` builds
+    /// neither `metadata.pages` (no page boundaries were tracked) nor `pages` (no
+    /// per-page content was collected), so both of the fallbacks above fall through --
+    /// yet `metadata.format`'s PDF page count was already read from the page tree
+    /// during metadata extraction, independent of page tracking. `populate_document_counts`
+    /// must fall back to it instead of reporting `0` for a document that plainly has pages.
+    #[test]
+    #[cfg(feature = "pdf")]
+    fn pages_fall_back_to_pdf_format_metadata_page_count() {
+        use crate::pdf::metadata::PdfMetadata;
+        use crate::types::FormatMetadata;
+
+        let mut result = ExtractedDocument {
+            metadata: Metadata {
+                pages: None,
+                format: Some(FormatMetadata::Pdf(PdfMetadata {
+                    page_count: Some(3),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            },
+            pages: None,
+            ..Default::default()
+        };
+        populate_document_counts(&mut result, 0);
+        assert_eq!(
+            result.counts.pages, 3,
+            "counts.pages must fall back to metadata.format's PDF page_count (GH#1888)"
+        );
+    }
+
+    /// Non-PDF format metadata carries no page count of its own, so the fallback must not
+    /// invent one -- the final `unwrap_or(0)` tier still applies.
+    #[test]
+    #[cfg(feature = "pdf")]
+    fn non_pdf_format_metadata_does_not_supply_a_fallback_page_count() {
+        use crate::types::{ExcelMetadata, FormatMetadata};
+
+        let mut result = ExtractedDocument {
+            metadata: Metadata {
+                pages: None,
+                format: Some(FormatMetadata::Excel(ExcelMetadata::default())),
+                ..Default::default()
+            },
+            pages: None,
+            ..Default::default()
+        };
+        populate_document_counts(&mut result, 0);
+        assert_eq!(result.counts.pages, 0);
     }
 }
 

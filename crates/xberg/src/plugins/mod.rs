@@ -187,8 +187,8 @@ pub use extractor::{
 };
 pub use ocr::{
     ConfidenceSemantics, OcrBackend, OcrBackendCapabilities, OcrBackendType, PageOrientationHandling,
-    clear_ocr_backends, list_ocr_backend_capabilities, list_ocr_backends, ocr_backend_supports_language,
-    register_ocr_backend, unregister_ocr_backend,
+    clear_ocr_backends, list_ocr_backend_capabilities, list_ocr_backend_capabilities_for, list_ocr_backends,
+    ocr_backend_supports_language, ocr_backend_supports_language_for, register_ocr_backend, unregister_ocr_backend,
 };
 pub use processor::{
     PostProcessor, ProcessingStage, clear_post_processors, list_post_processors, register_post_processor,
@@ -211,8 +211,9 @@ pub use validator::{Validator, clear_validators, list_validators, register_valid
 /// Re-exports for the OCR backend plugin type, used by alef-generated bindings.
 pub mod ocr_backend {
     pub use super::{
-        OcrBackend, OcrBackendCapabilities, clear_ocr_backends, list_ocr_backend_capabilities, list_ocr_backends,
-        ocr_backend_supports_language, register_ocr_backend, unregister_ocr_backend,
+        OcrBackend, OcrBackendCapabilities, clear_ocr_backends, list_ocr_backend_capabilities,
+        list_ocr_backend_capabilities_for, list_ocr_backends, ocr_backend_supports_language,
+        ocr_backend_supports_language_for, register_ocr_backend, unregister_ocr_backend,
     };
 }
 /// Re-exports for the post-processor plugin type, used by alef-generated bindings.

@@ -48,7 +48,16 @@ COPY packages/elixir/native/xberg_nif/ packages/elixir/native/xberg_nif/
 
 RUN sed -i '/xberg-py/d; /xberg_rb/d; /xberg-node/d; /xberg-cli/d; /xberg-ffi/d; /xberg-jni/d; /xberg-php/d; /xberg-rag/d; /packages\/dart\/rust/d; /packages\/swift\/rust/d; /"crates\/xberg-wasm"/d; /^\[profile\.release\.package\.xberg-wasm\]$/,$d; /benchmark-harness/d; /e2e-generator/d; /e2e\/rust/d' Cargo.toml
 
-RUN cd packages/elixir/native/xberg_nif && \
+# `.dockerignore` excludes `**/.git/`, so build.rs cannot derive XBERG_BUILD_ID from git here and
+# falls back to `""` -- which makes every Elixir NIF built at the same crate version share one OCR
+# cache key space (#1845). Declared immediately above the build step so a changed value does not
+# invalidate the toolchain/dependency layers above. Unset is a hard failure and so is empty:
+# build.rs honours the override only when it is non-empty, so an empty value falls straight back
+# through its `!id.is_empty()` check and silently restores the collision. ~keep
+ARG XBERG_BUILD_ID
+
+RUN : "${XBERG_BUILD_ID:?must be passed: --build-arg XBERG_BUILD_ID=<commit sha>; see crates/xberg/build.rs}" && \
+    cd packages/elixir/native/xberg_nif && \
     cargo build --release && \
     cp target/release/libxberg_nif.so /build/libxberg_nif.so && \
     strip /build/libxberg_nif.so

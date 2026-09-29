@@ -111,9 +111,12 @@ use utoipa::OpenApi;
             crate::types::summary::DocumentSummary,
             crate::types::translation::Translation,
             crate::types::uri::ExtractedUri,
-            // Transitive closure of the above. `NodeIndex` is deliberately absent:
-            // it carries `schema(value_type = u32)`, so utoipa inlines it as a
-            // primitive rather than emitting a `$ref`. ~keep
+            // Transitive closure of the above. `NodeIndex` is deliberately absent: utoipa
+            // registers it anyway through `<NodeIndex as ToSchema>::schemas(..)` when it
+            // walks `DocumentNode`, so listing it here would be redundant. It is NOT
+            // inlined — a container-level `schema(value_type = u32)` changes `NodeIndex`'s
+            // own schema body, not how a referring field is typed, so `DocumentNode::parent`
+            // is still emitted as a `$ref`. ~keep
             crate::types::djot::BlockType,
             crate::types::djot::InlineElement,
             crate::types::djot::InlineType,

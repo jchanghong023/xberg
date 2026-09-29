@@ -143,6 +143,7 @@ pub struct HealthResponse {
     pub version: String,
     /// Plugin status (optional)
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub plugins: Option<PluginStatus>,
 }
 

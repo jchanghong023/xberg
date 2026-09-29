@@ -70,6 +70,10 @@ pub mod string_pool;
 /// XML helper utilities for tag-name extraction and attribute traversal.
 pub mod xml_utils;
 
+/// Helpers for a test that runs one ignored test in a child process with its own environment.
+#[cfg(test)]
+pub(crate) mod test_support;
+
 #[cfg(feature = "quality")]
 pub(crate) use string_utils::safe_decode;
 #[cfg(any(feature = "xml", feature = "office"))]

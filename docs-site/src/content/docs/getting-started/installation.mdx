@@ -337,7 +337,9 @@ Only relevant if building from source or enabling OCR:
 | Tesseract OCR             | Optional — `brew install tesseract` / `apt install tesseract-ocr`                      |
 | libheif (HEIC / HEIF / AVIF) | Optional — `brew install libheif` / `apt install libheif-dev` / `dnf install libheif-devel` |
 
-PDF extraction uses xberg-native-pdf and has no external PDF runtime dependency.
+PDF extraction uses xberg-native-pdf and has no external PDF runtime dependency. The
+optional `pdfium` backend is the one exception — see [Pdfium PDF
+backend](#pdfium-pdf-backend).
 
 The Wasm package (`@xberg-io/xberg-wasm`) has **zero** system dependencies.
 
@@ -364,6 +366,46 @@ xberg = { version = "1", features = ["heic", "ocr"] }
 with no working WASM/Android build story). EXIF metadata extraction from HEIC
 / HEIF / AVIF works on **every** target via the pure-Rust `nom-exif`
 integration.
+
+### Pdfium PDF backend
+
+The default PDF engine is `native` — pure Rust, no system library. Xberg can also
+extract with Google's PDFium. The Python, Node, PHP, Ruby and Elixir packages for
+**Linux (x86_64, aarch64) and macOS (Apple Silicon)** ship the engine compiled in,
+but they do **not** bundle `libpdfium` — you supply it.
+
+1. Download the library for your platform from
+   [`bblanchon/pdfium-binaries`](https://github.com/bblanchon/pdfium-binaries/releases).
+   Prefer release **7678**: that is the release Xberg's checked-in bindings were
+   generated against. `FPDF_*` symbols are resolved by `dlopen` at run time rather
+   than at link time, so a library whose exported symbols disagree with the bindings
+   can abort the process instead of returning a clean error.
+2. Point `PDFIUM_DYNAMIC_LIB_PATH` at the **directory** holding
+   `libpdfium.so` / `libpdfium.dylib` / `pdfium.dll`:
+
+   ```sh
+   export PDFIUM_DYNAMIC_LIB_PATH=/usr/local/lib
+   ```
+
+   Without it, Xberg falls back to the system library search path.
+3. Select the backend per request:
+
+   ```python
+   from xberg.options import ExtractionConfig, PdfConfig, PdfBackend
+
+   config = ExtractionConfig(pdf_options=PdfConfig(backend=PdfBackend.PDFIUM))
+   ```
+
+The pdfium engine is deliberately narrower in scope than `native`: page count,
+per-page text and Info-dictionary metadata. Use it as a retry path for PDFs the
+native engine reads poorly, not as a default.
+
+**Not available on:** Windows and Intel macOS packages (they build from a reduced
+feature set), WebAssembly (no shared-library loading), Android and iOS. Selecting
+`pdfium` there returns a validation error naming the missing `pdf-pdfium` feature.
+
+The Docker images (`cli`, `core`, `full`) stage a libpdfium and set
+`PDFIUM_DYNAMIC_LIB_PATH` already, so they need no setup.
 
 ### GPU Acceleration
 

@@ -258,6 +258,70 @@ pub struct XYCutStrategy {
 /// high enough that no real document reaches it.
 const MAX_PARTITION_DEPTH: u32 = 64;
 
+// GH#1808: visual-line y-tolerance for the full-width-line peel and the whole-line
+// partition assignment. Matches `find_heading_runs`'s own `same_line` tolerance rather than
+// introducing a second answer to "are these two spans on the same line".
+const XYCUT_LINE_Y_TOLERANCE_PTS: f32 = 1.0;
+// A line whose inked extent reaches this fraction of the region's own width is full-width
+// furniture (a legend, a running header, a caption) rather than column content -- no real
+// two-column body line's own width can reach here, since a column is bounded by the page
+// margin AND the gutter (never much past ~48% of the region on a normal two-column split).
+const FULL_WIDTH_LINE_FRACTION: f32 = 0.90;
+// A single full-width line is an ordinary title or footer -- already handled by
+// `is_single_column_region`'s bridge exclusion elsewhere -- and peeling it alone would cost
+// a recursive call for no benefit. The population this fix targets starts at multi-line
+// legends and table notes (GH#1808's own reproducer is 8 lines).
+const MIN_PEELED_FULL_WIDTH_LINES: usize = 2;
+// The gap, in ems of the line's own max font size, at which a line stops being "continuous"
+// across a column cut. A row's two cells are separated by the gutter (several ems); a
+// legend's own font runs abut at normal word/kern spacing.
+const MAX_INTRA_LINE_GAP_EM: f32 = 1.0;
+
+/// Group `indices` into visual lines: anchored (not chained) on `y`, top to bottom, and
+/// further split on `x` wherever consecutive items are more than `MAX_INTRA_LINE_GAP_EM`
+/// ems apart -- so two unrelated fragments that merely share a baseline (a header printed
+/// once per column, at the same `y` but 50pt apart) are never treated as one line. A line
+/// returned by this function is therefore a genuinely CONTINUOUS run of ink, which is what
+/// both `peel_full_width_line_bands` and `partition_lines_at` need "line" to mean. ~keep
+fn group_indices_into_lines(all_spans: &[TextSpan], indices: &[usize]) -> Vec<Vec<usize>> {
+    let mut order: Vec<usize> = indices.to_vec();
+    order.sort_by(|&a, &b| {
+        all_spans[b]
+            .bbox
+            .y
+            .total_cmp(&all_spans[a].bbox.y)
+            .then_with(|| all_spans[a].bbox.left().total_cmp(&all_spans[b].bbox.left()))
+    });
+    let mut y_buckets: Vec<Vec<usize>> = Vec::new();
+    let mut anchor_y = f32::NAN;
+    for index in order {
+        let y = all_spans[index].bbox.y;
+        if y_buckets.is_empty() || (anchor_y - y).abs() > XYCUT_LINE_Y_TOLERANCE_PTS {
+            anchor_y = y;
+            y_buckets.push(Vec::new());
+        }
+        y_buckets.last_mut().expect("just pushed above").push(index);
+    }
+    let mut lines: Vec<Vec<usize>> = Vec::new();
+    for bucket in y_buckets {
+        let mut run: Vec<usize> = Vec::new();
+        for index in bucket {
+            if let Some(&last) = run.last() {
+                let gap = all_spans[index].bbox.left() - all_spans[last].bbox.right();
+                let max_font = all_spans[last].font_size.max(all_spans[index].font_size);
+                if gap > max_font * MAX_INTRA_LINE_GAP_EM {
+                    lines.push(std::mem::take(&mut run));
+                }
+            }
+            run.push(index);
+        }
+        if !run.is_empty() {
+            lines.push(run);
+        }
+    }
+    lines
+}
+
 impl Default for XYCutStrategy {
     fn default() -> Self {
         Self {
@@ -816,6 +880,26 @@ impl XYCutStrategy {
         // handles row order within a column. ~keep
         if self.is_single_column_region(all_spans, indices) {
             return vec![self.sort_indices(all_spans, indices)];
+        }
+
+        // GH#1808: a figure legend, a running header, or a table's own caption runs the
+        // FULL width of the region. `find_horizontal_split_indexed` below assigns content
+        // by inked width majority per LINE (GH#1808 fix), which already keeps a torn line
+        // whole, but a full-width line still ends up entirely on one side of a column cut
+        // that should not have run through it at all -- reading the legend as a body line
+        // of whichever column it landed on, instead of as its own band before or after
+        // both columns. Peeling such a run off as its own band first, rather than refusing
+        // the column cut outright, is what keeps ordinary two-column prose (a full-width
+        // title, an abstract header, a running header, a footer) from losing its column
+        // split entirely: `partition_region` already does the same for Y-bands via
+        // `find_vertical_split_indexed` peeling ahead of `detect_two_column_prose`, for the
+        // same reason. ~keep
+        if let Some(bands) = self.peel_full_width_line_bands(all_spans, indices) {
+            let mut result = Vec::new();
+            for band in bands {
+                result.extend(self.partition_indexed_depth(all_spans, &band, depth + 1));
+            }
+            return result;
         }
 
         let split_h = |s: &Self, sp: &[TextSpan], idx: &[usize]| s.find_horizontal_split_indexed(sp, idx);
@@ -1469,6 +1553,105 @@ impl XYCutStrategy {
     /// **dense** (covered ratio ≥ 80%). Body-text lines satisfy both.
     /// Aligned multi-column rows look "wide" because their extent spans
     /// the gutter, but fail the density check because the gutter is empty.
+    /// Split `indices` into y-ordered bands at the boundaries of every contiguous run of
+    /// FULL-WIDTH lines, or `None` when there is no such run (the overwhelmingly common
+    /// case -- the hot path pays one line grouping).
+    ///
+    /// A line (already a continuous run of ink -- see `group_indices_into_lines`) is
+    /// full-width when its inked extent reaches `FULL_WIDTH_LINE_FRACTION` of the region's
+    /// own width. GH#1808. ~keep
+    fn peel_full_width_line_bands(&self, all_spans: &[TextSpan], indices: &[usize]) -> Option<Vec<Vec<usize>>> {
+        let lines = group_indices_into_lines(all_spans, indices);
+        if lines.len() < MIN_PEELED_FULL_WIDTH_LINES {
+            return None;
+        }
+        let region_left = indices
+            .iter()
+            .map(|&i| all_spans[i].bbox.left())
+            .fold(f32::MAX, f32::min);
+        let region_right = indices
+            .iter()
+            .map(|&i| all_spans[i].bbox.right())
+            .fold(f32::MIN, f32::max);
+        let region_width = region_right - region_left;
+        if !(region_width.is_finite() && region_width > 0.0) {
+            return None;
+        }
+
+        let is_full_width = |line: &[usize]| -> bool {
+            let line_left = line.iter().map(|&i| all_spans[i].bbox.left()).fold(f32::MAX, f32::min);
+            let line_right = line.iter().map(|&i| all_spans[i].bbox.right()).fold(f32::MIN, f32::max);
+            (line_right - line_left) / region_width >= FULL_WIDTH_LINE_FRACTION
+        };
+        let flags: Vec<bool> = lines.iter().map(|line| is_full_width(line)).collect();
+        if !flags.contains(&true) {
+            return None;
+        }
+
+        let mut bands: Vec<Vec<usize>> = Vec::new();
+        let mut normal: Vec<usize> = Vec::new();
+        let mut peeled_any = false;
+        let mut index = 0usize;
+        while index < lines.len() {
+            if !flags[index] {
+                normal.extend(&lines[index]);
+                index += 1;
+                continue;
+            }
+            let run_start = index;
+            while index < lines.len() && flags[index] {
+                index += 1;
+            }
+            let run = &lines[run_start..index];
+            if run.len() >= MIN_PEELED_FULL_WIDTH_LINES {
+                if !normal.is_empty() {
+                    bands.push(std::mem::take(&mut normal));
+                }
+                bands.push(run.iter().flatten().copied().collect());
+                peeled_any = true;
+            } else {
+                for line in run {
+                    normal.extend(line);
+                }
+            }
+        }
+        if !normal.is_empty() {
+            bands.push(normal);
+        }
+        (peeled_any && bands.len() >= 2).then_some(bands)
+    }
+
+    /// Assign each of `indices`' visual lines, whole, to the side holding the majority of
+    /// its inked width -- never split a single line's spans across `split_x`. A line
+    /// entirely on one side is unaffected: its majority side is trivially its only side, so
+    /// this partitions identically to a per-span `left edge < split_x` test there. Ties (a
+    /// line whose inked width splits exactly evenly) go left, matching the pre-existing
+    /// left-edge bias. GH#1808. ~keep
+    fn partition_lines_at(&self, all_spans: &[TextSpan], indices: &[usize], split_x: f32) -> (Vec<usize>, Vec<usize>) {
+        let lines = group_indices_into_lines(all_spans, indices);
+        let mut goes_right: std::collections::HashMap<usize, bool> = std::collections::HashMap::new();
+        for line in &lines {
+            let mut left_width = 0.0f32;
+            let mut right_width = 0.0f32;
+            for &i in line {
+                let bbox = &all_spans[i].bbox;
+                left_width += (bbox.right().min(split_x) - bbox.left()).max(0.0);
+                right_width += (bbox.right() - bbox.left().max(split_x)).max(0.0);
+            }
+            let line_goes_right = right_width > left_width;
+            for &i in line {
+                goes_right.insert(i, line_goes_right);
+            }
+        }
+        // `Iterator::partition` sends predicate-true items into its FIRST returned vec, so
+        // the predicate must test "belongs on the left" to produce `(left, right)` in that
+        // order -- inverted, this silently swaps every region's two sides. ~keep
+        indices
+            .iter()
+            .copied()
+            .partition(|i| !goes_right.get(i).copied().unwrap_or(false))
+    }
+
     fn is_single_column_region(&self, all_spans: &[TextSpan], indices: &[usize]) -> bool {
         if indices.len() < 3 {
             return false;
@@ -1724,14 +1907,16 @@ impl XYCutStrategy {
             return None;
         }
 
-        // Partition by span LEFT EDGE (where the glyphs actually start),
-        // not bbox.right() and not center. Extractor bboxes overreach to
-        // the right (trailing whitespace / stretched advance widths), and
-        // for wide single-column body spans the center can also drift
-        // past the split. Left edge is anchored to the true glyph start
-        // and reliably places each span into its actual column. ~keep
-        let (left, right): (Vec<usize>, Vec<usize>) =
-            indices.iter().partition(|&&i| all_spans[i].bbox.left() < split_x);
+        // GH#1808: assign whole LINES, not individual spans. A line whose inked spans
+        // straddle `split_x` -- a figure legend or a table note broken across the gutter
+        // at its own font-run boundaries -- is not column content, and partitioning it
+        // span-by-span tears it in two: its own comment used to claim "the column split
+        // boundary will still assign them correctly by left edge", which only holds while
+        // a full-width LINE is exactly one span. `partition_lines_at` sends the whole line
+        // to the side holding the majority of its inked width, so a line entirely on one
+        // side partitions exactly as `left edge < split_x` already did (unaffected), and
+        // only a straddling line's assignment changes. ~keep
+        let (left, right) = self.partition_lines_at(all_spans, indices, split_x);
 
         if left.is_empty() || right.is_empty() {
             return None;
@@ -4224,6 +4409,144 @@ mod tests {
         assert_eq!(
             cap5_group, caption_groups[2],
             "CAP5 must group with FIG.3.A, not drift to the body column: {groups:?}"
+        );
+    }
+
+    /// GH#1808 reproducer: a two-column region (left/right lines at y=300/285/270) sits
+    /// above an 8-line figure legend that runs the full region width (x 40..300). Each
+    /// legend line is written as 3 font-run fragments with small (5pt) inter-run gaps --
+    /// the shape a `Tm`+`TJ`-per-run producer emits for a caption. Region width is 260pt
+    /// (40..300), so a legend line's own 260pt extent is exactly full width.
+    fn gh1808_two_columns_over_torn_legend_spans() -> Vec<TextSpan> {
+        let mut spans = Vec::new();
+        for &y in &[300.0, 285.0, 270.0] {
+            spans.push(make_span_text(40.0, y, 100.0, 10.0, "left column line", 10.0));
+            spans.push(make_span_text(200.0, y, 100.0, 10.0, "right column line", 10.0));
+        }
+        for row in 0..8 {
+            let y = 150.0 - row as f32 * 12.0;
+            spans.push(make_span_text(40.0, y, 60.0, 7.17, "LEG-A", 7.17)); // 40..100
+            spans.push(make_span_text(105.0, y, 95.0, 7.17, "LEG-B", 7.17)); // 105..200, gap 5
+            spans.push(make_span_text(205.0, y, 95.0, 7.17, "LEG-C", 7.17)); // 205..300, gap 5
+        }
+        spans
+    }
+
+    /// RED-then-GREEN unit test for GH#1808's peel (`peel_full_width_line_bands`). Before
+    /// the fix (no peeling at all) this method did not exist and every legend fragment
+    /// reached `find_horizontal_split_indexed` ungrouped, where a column cut near x=150-190
+    /// would tear each legend line at its own font-run boundary. Neutering the fix (see the
+    /// commit message for the verbatim pre-fix failure) makes this method return `None`;
+    /// with the fix, the legend is peeled into its own band, entirely separate from the two
+    /// column lines, and every legend line's 3 fragments stay together in that one band. ~keep
+    #[test]
+    fn peel_full_width_line_bands_keeps_a_torn_legend_whole_gh1808() {
+        let strategy = XYCutStrategy::new();
+        let spans = gh1808_two_columns_over_torn_legend_spans();
+        let indices: Vec<usize> = (0..spans.len()).collect();
+
+        let bands = strategy
+            .peel_full_width_line_bands(&spans, &indices)
+            .expect("an 8-line full-width legend must be peeled off as its own band(s)");
+
+        assert_eq!(bands.len(), 2, "expected exactly [column band, legend band]: {bands:?}");
+        let column_band = &bands[0];
+        let legend_band = &bands[1];
+        assert_eq!(
+            column_band.len(),
+            6,
+            "the two columns' 6 lines must form the first band"
+        );
+        assert_eq!(
+            legend_band.len(),
+            24,
+            "all 8 legend lines' 24 fragments must form the second band"
+        );
+
+        // No legend line's 3 fragments may be split across bands: each of LEG-A/B/C's 8
+        // occurrences must appear only in `legend_band`, never in `column_band`.
+        for &index in legend_band {
+            assert!(
+                spans[index].text.starts_with("LEG-"),
+                "a legend fragment landed outside the legend band: {}",
+                spans[index].text
+            );
+        }
+        for &index in column_band {
+            assert!(
+                !spans[index].text.starts_with("LEG-"),
+                "a column line leaked into the legend band: {}",
+                spans[index].text
+            );
+        }
+    }
+
+    /// Control for the peel: when each legend line is already ONE span (the reporter's own
+    /// p2, which passed before the fix), the peel still fires identically -- the fix must
+    /// not change behavior for input that was never torn in the first place. ~keep
+    #[test]
+    fn peel_full_width_line_bands_control_single_span_legend_gh1808() {
+        let strategy = XYCutStrategy::new();
+        let mut spans = Vec::new();
+        for &y in &[300.0, 285.0, 270.0] {
+            spans.push(make_span_text(40.0, y, 100.0, 10.0, "left column line", 10.0));
+            spans.push(make_span_text(200.0, y, 100.0, 10.0, "right column line", 10.0));
+        }
+        for row in 0..8 {
+            let y = 150.0 - row as f32 * 12.0;
+            spans.push(make_span_text(40.0, y, 260.0, 7.17, "LEGEND", 7.17));
+        }
+        let indices: Vec<usize> = (0..spans.len()).collect();
+
+        let bands = strategy
+            .peel_full_width_line_bands(&spans, &indices)
+            .expect("the single-span legend must still be peeled off");
+        assert_eq!(bands.len(), 2);
+        assert_eq!(
+            bands[1].len(),
+            8,
+            "8 single-span legend lines must form the legend band"
+        );
+    }
+
+    /// RED-then-GREEN unit test for GH#1808's assignment fix (`partition_lines_at`), in
+    /// isolation from the peel. A continuous 5-fragment line (font-run gaps of 4pt at
+    /// 20pt font, well under `MAX_INTRA_LINE_GAP_EM`) runs from x=40 to x=420, straddling
+    /// `split_x = 200.0` with the majority of its inked width (212 of 394pt) on the right.
+    /// Before the fix (a per-span `left edge < split_x` test) this line tore: its first two
+    /// fragments (left edge < 200) landed in `left`, the remaining three in `right`. ~keep
+    #[test]
+    fn partition_lines_at_keeps_a_straddling_line_whole_gh1808() {
+        let strategy = XYCutStrategy::new();
+        let mut spans = vec![
+            make_span_text(40.0, 300.0, 50.0, 10.0, "clear-left-1", 10.0),
+            make_span_text(40.0, 285.0, 50.0, 10.0, "clear-left-2", 10.0),
+            make_span_text(300.0, 300.0, 50.0, 10.0, "clear-right-1", 10.0),
+            make_span_text(300.0, 285.0, 50.0, 10.0, "clear-right-2", 10.0),
+        ];
+        let straddling_start = spans.len();
+        for (left, right) in [
+            (40.0, 116.0),
+            (120.0, 196.0),
+            (200.0, 276.0),
+            (280.0, 356.0),
+            (360.0, 420.0),
+        ] {
+            spans.push(make_span_text(left, 200.0, right - left, 20.0, "STRADDLE", 20.0));
+        }
+        let indices: Vec<usize> = (0..spans.len()).collect();
+
+        let (left, right) = strategy.partition_lines_at(&spans, &indices, 200.0);
+
+        assert_eq!(left, vec![0, 1], "only the two clear-left lines belong on the left");
+        let mut expected_right: Vec<usize> = vec![2, 3];
+        expected_right.extend(straddling_start..straddling_start + 5);
+        expected_right.sort_unstable();
+        let mut actual_right = right;
+        actual_right.sort_unstable();
+        assert_eq!(
+            actual_right, expected_right,
+            "the straddling line's 5 fragments must all move to its majority side (right), none left behind"
         );
     }
 }

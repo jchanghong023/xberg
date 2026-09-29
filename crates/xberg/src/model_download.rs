@@ -1879,22 +1879,18 @@ mod hf_cache_tests {
         hex::encode(Sha256::digest(payload))
     }
 
+    const CACHE_ROOT: &str = "XBERG_HF_CACHE_TEST_ROOT";
+
     fn run_env_child(test_name: &str, cache: &Path, offline_variable: Option<&str>) {
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command
-            .arg("--exact")
-            .arg(test_name)
-            .arg("--ignored")
-            .arg("--nocapture")
-            .env("XBERG_HF_CACHE_TEST_ROOT", cache)
-            .env("HF_HUB_CACHE", cache)
-            .env_remove("HF_HUB_OFFLINE")
-            .env_remove("HUGGINGFACE_HUB_OFFLINE");
-        if let Some(variable) = offline_variable {
-            command.env(variable, "1");
-        }
-        let status = command.status().expect("launch isolated Hugging Face environment test");
-        assert!(status.success(), "isolated test {test_name} failed with {status}");
+        crate::utils::test_support::run_child_test(test_name, CACHE_ROOT, cache, |command| {
+            command
+                .env("HF_HUB_CACHE", cache)
+                .env_remove("HF_HUB_OFFLINE")
+                .env_remove("HUGGINGFACE_HUB_OFFLINE");
+            if let Some(variable) = offline_variable {
+                command.env(variable, "1");
+            }
+        });
     }
 
     #[test]
@@ -1972,7 +1968,9 @@ mod hf_cache_tests {
     #[test]
     #[ignore = "run in an isolated subprocess by shared_resolver_uses_standard_hf_hub_cache_environment"]
     fn standard_hf_hub_cache_environment_child() {
-        let cache = PathBuf::from(std::env::var_os("XBERG_HF_CACHE_TEST_ROOT").expect("test cache root"));
+        let Some(cache) = crate::utils::test_support::child_test_root(CACHE_ROOT) else {
+            return;
+        };
         let revision = "0123456789abcdef0123456789abcdef01234567";
         let payload = b"standard environment cache";
         let cached_file = cache
@@ -2017,7 +2015,9 @@ mod hf_cache_tests {
     #[test]
     #[ignore = "run in isolated subprocesses by offline_cache_miss_and_corruption_never_refresh_from_network"]
     fn offline_cache_miss_and_corruption_child() {
-        let cache = PathBuf::from(std::env::var_os("XBERG_HF_CACHE_TEST_ROOT").expect("test cache root"));
+        let Some(cache) = crate::utils::test_support::child_test_root(CACHE_ROOT) else {
+            return;
+        };
         let revision = "0123456789abcdef0123456789abcdef01234567";
         let cached_file = cache
             .join("models--owner--repo")

@@ -646,9 +646,10 @@ fn cached_managed_client(config: &LlmConfig) -> crate::Result<Arc<ManagedClient>
 ///
 /// For a `bedrock/`-prefixed model, liter-llm's own provider validation runs
 /// here and rejects the request up front — with a message naming the required
-/// AWS credentials and how to supply them — when neither explicit
-/// [`BedrockConfig`](crate::core::config::BedrockConfig) credentials nor
-/// `AWS_ACCESS_KEY_ID` in the environment are available. That upstream message
+/// AWS credentials and how to supply them — when none of an explicit
+/// [`BedrockConfig`](crate::core::config::BedrockConfig) credential pair, an
+/// `AWS_BEARER_TOKEN_BEDROCK` API key, or an `AWS_ACCESS_KEY_ID` /
+/// `AWS_SECRET_ACCESS_KEY` pair in the environment is available. That upstream message
 /// is wrapped with the model that failed to build, so the resulting error names
 /// the operation (building the LLM client), the input (the model string), and
 /// (via the wrapped source) a concrete suggestion.
@@ -968,11 +969,11 @@ mod tests {
     /// Regression test for https://github.com/xberg-io/xberg/issues/1381
     ///
     /// A `bedrock/`-prefixed model with no explicit `BedrockConfig` credentials
-    /// and no `AWS_ACCESS_KEY_ID` in the environment must fail fast at
+    /// and no AWS credentials in the environment must fail fast at
     /// `create_client` time with a clear, actionable error instead of a bare
     /// "failed to build client" message or a confusing runtime request failure.
-    /// `#[serial]` because the test mutates the process-wide `AWS_ACCESS_KEY_ID`
-    /// environment variable, matching the save/restore convention used by the
+    /// `#[serial]` because the test mutates process-wide AWS environment
+    /// variables, matching the save/restore convention used by the
     /// other env-mutating tests in this crate (see
     /// `core::server_config::tests::env_tests`).
     ///
@@ -986,11 +987,21 @@ mod tests {
     #[serial_test::serial]
     #[test]
     fn test_create_client_reports_clear_error_for_unconfigured_bedrock() {
-        let original = std::env::var("AWS_ACCESS_KEY_ID").ok();
+        // ~keep `AWS_BEARER_TOKEN_BEDROCK` has to be cleared as well, not just the access key:
+        // liter-llm's `BedrockProvider::bearer_token` reads it straight from the environment and
+        // `validate` returns `Ok(())` the moment it is set (bedrock.rs:381), so on a machine that
+        // exports one this test would see a successful `create_client` and fail for a reason
+        // unrelated to what it pins.
+        let restore: Vec<(&str, Option<String>)> = ["AWS_ACCESS_KEY_ID", "AWS_BEARER_TOKEN_BEDROCK"]
+            .into_iter()
+            .map(|key| (key, std::env::var(key).ok()))
+            .collect();
         // SAFETY: guarded by #[serial_test::serial] — no other test in this
-        // process observes AWS_ACCESS_KEY_ID concurrently while this one runs.
+        // process observes these variables concurrently while this one runs.
         unsafe {
-            std::env::remove_var("AWS_ACCESS_KEY_ID");
+            for (key, _) in &restore {
+                std::env::remove_var(key);
+            }
         }
 
         let config = bedrock_model_config(BedrockConfig::default());
@@ -998,9 +1009,11 @@ mod tests {
 
         // SAFETY: see above.
         unsafe {
-            match &original {
-                Some(val) => std::env::set_var("AWS_ACCESS_KEY_ID", val),
-                None => std::env::remove_var("AWS_ACCESS_KEY_ID"),
+            for (key, original) in &restore {
+                match original {
+                    Some(val) => std::env::set_var(key, val),
+                    None => std::env::remove_var(key),
+                }
             }
         }
 
@@ -1010,8 +1023,11 @@ mod tests {
                     message.contains("bedrock/anthropic.claude-3-sonnet-20240229-v1:0"),
                     "error should name the model (the input) that failed to build: {message}"
                 );
+                // ~keep Matches liter-llm 2.1.1's wording ("AWS Bedrock requires credentials.").
+                // The literal "AWS credentials" this used to look for is from an older release and
+                // stopped appearing when the dependency moved, which is GH#1910.
                 assert!(
-                    message.contains("AWS credentials"),
+                    message.contains("requires credentials"),
                     "error should name the root cause (missing AWS credentials): {message}"
                 );
                 assert!(

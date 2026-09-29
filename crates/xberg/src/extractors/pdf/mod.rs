@@ -30,9 +30,6 @@ use std::path::Path;
 
 use extraction::extract_all_from_native_document;
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
-use ocr::extract_with_ocr;
-
-#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 fn extraction_method_after_mixed_ocr(replacements: &ahash::AHashMap<u32, String>) -> ExtractionMethod {
     if replacements.is_empty() {
         ExtractionMethod::Native
@@ -909,13 +906,12 @@ fn inject_unrepresented_form_field_elements(doc: &mut InternalDocument, form_fie
 ///
 /// Runs unconditionally (using the default `OcrQualityThresholds` when `config.ocr` is `None`)
 /// so `ScannedPages` and the metadata field both see the signal regardless of whether the
-/// caller configured OCR explicitly. When no explicit `ocr` config is present, `Auto` itself
-/// will not act on the signal (`apply_flagged_pages` still requires it below, per #1338's
-/// "explicit OCR config" rule) so a deduped warning is pushed instead, keeping the defect
-/// visible rather than silently discarded. `ocr_near_empty_fallback: Some(true)` opts back
-/// into that branch without an `ocr` block (GH#1752), so the warning is suppressed there --
-/// it would otherwise tell the caller the pages were dropped on the floor while `Auto` was
-/// in fact about to route them. ~keep
+/// caller configured OCR explicitly. Whenever `Auto` will not act on the signal, a deduped
+/// warning is pushed instead, keeping the defect visible rather than silently discarded; when
+/// it will, the warning is suppressed, since it would otherwise tell the caller the pages were
+/// dropped on the floor while `Auto` was in fact about to route them. That "will it run"
+/// question is answered by `near_empty_ocr_fallback_applies` and nothing else -- see the
+/// comment on the warning below for why a second derivation of it is not acceptable. ~keep
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 fn record_implausible_text_pages(
     config: &ExtractionConfig,
@@ -971,16 +967,24 @@ fn record_implausible_text_pages(
     merged.dedup();
     pdf_metadata.pdf_specific.scanned_pages = Some(merged);
 
-    if config.ocr.is_none() && config.ocr_near_empty_fallback != Some(true) {
+    // GH#1890: this must call the routing predicate, never re-derive it. The earlier
+    // `config.ocr.is_none() && ocr_near_empty_fallback != Some(true)` agreed with
+    // `near_empty_ocr_fallback_applies` only until GH#1752 added `Some(false)`: with an `ocr`
+    // block and the fallback switched off, the `else if` in `extract_core_native` that gates the
+    // routing does not run AND that condition suppressed this warning, so the caller got garbage
+    // text with no diagnostic at all. `Some(true)` with no `ocr` block and no registered automatic
+    // backend diverged the same way. ~keep
+    if !near_empty_ocr_fallback_applies(config, native_text) {
         crate::core::diagnostics::push_warning_deduped(
             warnings,
             crate::types::ProcessingWarning {
                 source: std::borrow::Cow::Borrowed("ocr"),
                 message: std::borrow::Cow::Owned(format!(
                     "Page(s) {implausible_pages:?} do not read as any real detectable language, \
-                     suggesting a wrong glyph-to-Unicode mapping (issue #1696); no explicit `ocr` \
-                     config was provided, so they were not automatically routed to OCR. Set `ocr` \
-                     to route these pages to OCR."
+                     suggesting a wrong glyph-to-Unicode mapping (issue #1696), but the automatic \
+                     OCR fallback does not run for this extraction, so they were not routed to \
+                     OCR. Set `ocr`, and leave `ocr_near_empty_fallback` unset or set it to \
+                     `true`, to route these pages to OCR."
                 )),
             },
         );
@@ -1239,6 +1243,7 @@ async fn run_ocr_with_layout(
     content: &[u8],
     config: &ExtractionConfig,
     path: Option<&std::path::Path>,
+    page_ocr_hints: Option<ocr::PageOcrHints>,
     #[cfg(feature = "layout-detection")] precomputed_layout_images: Option<Vec<image::RgbImage>>,
     #[cfg(feature = "layout-detection")] precomputed_layout_detections: Option<Vec<crate::layout::DetectionResult>>,
     #[cfg(feature = "layout-detection")] precomputed_layout_acceleration_override: Option<
@@ -1374,11 +1379,47 @@ async fn run_ocr_with_layout(
     let ocr_config = config.ocr.as_ref().unwrap_or(&default_ocr_config);
 
     if let Some(pipeline) = ocr_config.effective_pipeline() {
+        #[cfg(paddle_ocr)]
+        // The synthesized classical pipeline is an automatic page-quality fallback. Running
+        // it here as one document lets a good page's score hide a bad page, so use the same
+        // page-local runner as selected-page OCR. Explicit pipelines retain their configured
+        // document scope because their stages may intentionally process the document. ~keep
+        if ocr_config.pipeline.is_none()
+            && ocr_config.vlm_fallback == crate::core::config::VlmFallbackPolicy::Disabled
+            && ocr_config.backend == "tesseract"
+        {
+            let (text, tables, elements, document, usage, page_texts, rasters, formulas, preprocessing, confidence) =
+                Box::pin(ocr::extract_full_document_ocr_pipeline_per_page(
+                    content,
+                    config,
+                    path,
+                    page_ocr_hints,
+                    #[cfg(feature = "layout-detection")]
+                    prepared_layout_inputs,
+                ))
+                .await?;
+            return Ok((
+                text,
+                tables,
+                elements,
+                document,
+                usage,
+                page_texts,
+                rasters,
+                formulas,
+                preprocessing,
+                confidence,
+                ocr_layout_gate_decisions,
+                layout_warning,
+                layout_glyph_drop_warnings,
+            ));
+        }
+
         let (
-            text,
-            ocr_tables,
+            mut text,
+            mut ocr_tables,
             ocr_elements,
-            pipeline_doc,
+            mut pipeline_doc,
             llm_usage,
             ocr_pts,
             pipeline_rasters,
@@ -1396,8 +1437,15 @@ async fn run_ocr_with_layout(
             config,
             &pipeline,
             path,
+            page_ocr_hints,
         ))
         .await?;
+        // GH#1892: the whole-document route repaired nothing, so `numeric_repair` was honoured for
+        // `force_ocr_pages` and silently ignored for `force_ocr` under one identical flag. Placed
+        // ahead of formula recognition on purpose -- see the function's own doc comment. ~keep
+        if ocr::numeric_repair_enabled(config) {
+            ocr::apply_numeric_repair_to_whole_document_ocr(&mut text, pipeline_doc.as_mut(), &mut ocr_tables);
+        }
         #[cfg(feature = "formula-recognition")]
         let (mut pipeline_doc, mut pipeline_formulas) = (pipeline_doc, pipeline_formulas);
         #[cfg(feature = "formula-recognition")]
@@ -1430,18 +1478,18 @@ async fn run_ocr_with_layout(
     }
 
     let (
-        text,
+        mut text,
         _mean_conf,
-        ocr_tables,
+        mut ocr_tables,
         ocr_elements,
-        ocr_doc,
+        mut ocr_doc,
         llm_usage,
         ocr_pts,
         ocr_rasters,
         formulas,
         preprocessing,
         ocr_confidence,
-    ) = Box::pin(extract_with_ocr(
+    ) = Box::pin(ocr::extract_with_ocr_with_page_hints(
         Some(content),
         #[cfg(feature = "layout-detection")]
         ocr_images,
@@ -1451,8 +1499,14 @@ async fn run_ocr_with_layout(
         layout_detections,
         config,
         path,
+        page_ocr_hints,
     ))
     .await?;
+    // GH#1892: same repair as the pipeline branch above -- this is the other half of the
+    // whole-document route, the one `force_ocr` and the near-empty `Auto` fallback reach. ~keep
+    if ocr::numeric_repair_enabled(config) {
+        ocr::apply_numeric_repair_to_whole_document_ocr(&mut text, ocr_doc.as_mut(), &mut ocr_tables);
+    }
     #[cfg(feature = "formula-recognition")]
     let (mut ocr_doc, mut formulas) = (ocr_doc, formulas);
     #[cfg(feature = "formula-recognition")]
@@ -1927,6 +1981,16 @@ fn attach_pdf_ocr_confidence(
     }
 }
 
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+fn automatic_unmapped_text_hints(metadata: &crate::pdf::metadata::PdfExtractionMetadata) -> Option<ocr::PageOcrHints> {
+    let pages = metadata.pdf_specific.fabricated_text_pages.as_ref()?;
+    (!pages.is_empty()).then(|| ocr::PageOcrHints {
+        source_dpi: None,
+        known_full_page_scan: false,
+        single_block_pages: Some(std::sync::Arc::new(pages.iter().copied().collect())),
+    })
+}
+
 /// PDF document extractor using xberg_native_pdf.
 #[cfg_attr(alef, alef(skip))]
 pub struct PdfExtractor;
@@ -2336,6 +2400,7 @@ impl PdfExtractor {
                 content,
                 config,
                 path,
+                None,
                 #[cfg(feature = "layout-detection")]
                 markdown_layout_images.take(),
                 #[cfg(feature = "layout-detection")]
@@ -2375,8 +2440,16 @@ impl PdfExtractor {
                             mixed_preprocessing,
                             mixed_ocr_confidence,
                             mixed_warnings,
-                        ) = ocr::extract_mixed_ocr_native(&native_text, bounds, ocr_pages, content, config, path)
-                            .await?;
+                        ) = ocr::extract_mixed_ocr_native_with_single_block_pages(
+                            &native_text,
+                            bounds,
+                            ocr_pages,
+                            &[],
+                            content,
+                            config,
+                            path,
+                        )
+                        .await?;
                         let extraction_method = extraction_method_after_mixed_ocr(&results_map);
                         ocr_llm_usage = mixed_llm_usage;
                         ocr_results_map = Some(results_map);
@@ -2418,7 +2491,21 @@ impl PdfExtractor {
                 // EXPLICIT sites (`force_ocr_pages` above, `ocr_inline_images`) keep their
                 // hard error, because there the caller asked for something the build cannot
                 // do. See GH#1610. ~keep
-                match ocr::extract_mixed_ocr_native(&native_text, bounds, &scanned_pages, content, config, path).await {
+                match ocr::extract_mixed_ocr_native_with_single_block_pages(
+                    &native_text,
+                    bounds,
+                    &scanned_pages,
+                    pdf_metadata
+                        .pdf_specific
+                        .fabricated_text_pages
+                        .as_deref()
+                        .unwrap_or(&[]),
+                    content,
+                    config,
+                    path,
+                )
+                .await
+                {
                     Ok((
                         mixed,
                         results_map,
@@ -2603,6 +2690,7 @@ impl PdfExtractor {
                         content,
                         config,
                         path,
+                        automatic_unmapped_text_hints(&pdf_metadata),
                         #[cfg(feature = "layout-detection")]
                         markdown_layout_images.take(),
                         #[cfg(feature = "layout-detection")]
@@ -2698,7 +2786,21 @@ impl PdfExtractor {
                 }
                 ocr::OcrGateOutcome::RunFallbackOnPages(pages) => match boundaries.as_deref() {
                     Some(bounds) if !bounds.is_empty() => {
-                        match ocr::extract_mixed_ocr_native(&native_text, bounds, &pages, content, config, path).await {
+                        match ocr::extract_mixed_ocr_native_with_single_block_pages(
+                            &native_text,
+                            bounds,
+                            &pages,
+                            pdf_metadata
+                                .pdf_specific
+                                .fabricated_text_pages
+                                .as_deref()
+                                .unwrap_or(&[]),
+                            content,
+                            config,
+                            path,
+                        )
+                        .await
+                        {
                             Ok((
                                 mixed,
                                 results_map,
@@ -5940,6 +6042,67 @@ mod tests {
         );
     }
 
+    /// GH#1892: `numeric_repair` on the whole-document route (`force_ocr` -> `run_ocr_with_layout`
+    /// -> `extract_with_ocr`), which had no repair call at all while the `force_ocr_pages` route
+    /// repaired from the same flag.
+    ///
+    /// ~keep This asserts the *wiring*, which the unit tests on
+    /// `apply_numeric_repair_to_whole_document_ocr` cannot: those call the helper directly and pass
+    /// identically with both call sites deleted. The `numeric_repair: false` control is what makes
+    /// the positive assertion mean something -- without it, a fixture whose number the repair never
+    /// touched would read the same as a working repair.
+    #[cfg(all(feature = "pdf", feature = "ocr"))]
+    #[tokio::test]
+    #[serial]
+    async fn force_ocr_route_applies_numeric_repair() {
+        use crate::core::config::OcrConfig;
+
+        const BACKEND_NAME: &str = "pdf-1892-force-ocr-numeric-repair";
+        const OCR_TEXT: &str = "Total operating revenue 1172 dollars";
+        let _backend = register_mock_ocr_backend(BACKEND_NAME, OCR_TEXT);
+
+        let config_for = |numeric_repair: bool| ExtractionConfig {
+            use_cache: false,
+            force_ocr: true,
+            ocr: Some(OcrConfig {
+                backend: BACKEND_NAME.to_string(),
+                numeric_repair,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let plain_content = |config: ExtractionConfig| async move {
+            let internal = PdfExtractor::new()
+                .extract_content(SCANNED_HELLO_PDF, "application/pdf", &config)
+                .await
+                .expect("force-OCR extraction of the scanned fixture must succeed");
+            crate::extraction::derive::derive_extraction_result(
+                internal,
+                false,
+                crate::core::config::OutputFormat::Plain,
+            )
+            .content
+        };
+
+        let unrepaired = plain_content(config_for(false)).await;
+        let repaired = plain_content(config_for(true)).await;
+
+        assert!(
+            unrepaired.contains("1172"),
+            "control: with the flag off the mock's bare number must survive, or this test measures \
+             nothing: {unrepaired:?}"
+        );
+        assert!(
+            repaired.contains("1,172"),
+            "force_ocr takes the whole-document route, so `numeric_repair` must reach it: {repaired:?}"
+        );
+        assert!(
+            !repaired.contains("1172"),
+            "and the bare form must be replaced, not merely accompanied: {repaired:?}"
+        );
+    }
+
     /// xberg#1665: the render batch peak scales with the configured thread budget alone, with
     /// no notion of `security_limits.max_content_size`. A 4-page batch of Letter (612x792pt)
     /// pages at the default 150 dpi estimates to about 4 x 20.3MB = 81MB; with
@@ -6173,11 +6336,11 @@ mod tests {
             .iter()
             .filter(|warning| warning.source == "ocr")
             .collect::<Vec<_>>();
-        // Two distinct OCR-source warnings belong here, not a duplicate: one reports that
-        // targeted OCR itself failed for page 2, the other that the language-plausibility
-        // check (issue #1709) could not judge that page's retained native text at all. Assert
-        // on each warning's content rather than a bare count, so a real regression in either
-        // one fails loudly instead of the count silently drifting to match.
+        // Three distinct OCR-source warnings belong here, not duplicates: one reports that
+        // targeted OCR itself failed for page 2, one records the XObject retry that preceded
+        // that failure, and the last says the language-plausibility check (issue #1709) could
+        // not judge that page's retained native text at all. Assert on each warning's content
+        // rather than a bare count, so a real regression in any one fails loudly. ~keep
         let fallback_failure_warnings = warnings
             .iter()
             .filter(|warning| warning.message.contains(FAILURE))
@@ -6198,9 +6361,22 @@ mod tests {
             "expected exactly one plausibility-check abstention warning: {warnings:?}"
         );
 
+        let xobject_retry_warnings = warnings
+            .iter()
+            .filter(|warning| {
+                warning.message.contains("Page 2 contains 1 image XObject(s)")
+                    && warning.message.contains("retried on the embedded image bytes")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            xobject_retry_warnings.len(),
+            1,
+            "expected exactly one page-2 XObject retry warning: {warnings:?}"
+        );
+
         assert_eq!(
             warnings.len(),
-            fallback_failure_warnings.len() + plausibility_abstention_warnings.len(),
+            fallback_failure_warnings.len() + plausibility_abstention_warnings.len() + xobject_retry_warnings.len(),
             "unexpected extra OCR-source warning(s): {warnings:?}"
         );
 
@@ -6721,6 +6897,69 @@ mod tests {
         assert!(!near_empty_ocr_fallback_applies(&config, "real native text"));
     }
 
+    /// GH#1890. `record_implausible_text_pages` warns that implausible pages were not routed to
+    /// OCR; the `else if` in `extract_core_native` decides whether they actually are. Those
+    /// are one fact, and the warning used to re-derive it, which made them disagree for two
+    /// configurations. This is an oracle test, not a table of expectations: it compares the
+    /// observable warning against `near_empty_ocr_fallback_applies` itself, so any future
+    /// divergence fails here regardless of which side moved. `#[serial]` because the predicate's
+    /// `Some(true)`-without-a-block arm consults the process-global OCR backend registry that the
+    /// mock-backend tests in this module mutate. ~keep
+    #[cfg(all(feature = "pdf", feature = "ocr"))]
+    #[test]
+    #[serial]
+    fn the_unrouted_implausible_page_warning_tracks_the_routing_predicate() {
+        use crate::core::config::OcrConfig;
+
+        let implausible = rot_ascii_letters(WRONG_MAPPING_PROSE, 3);
+        let boundaries = vec![crate::types::PageBoundary {
+            page_number: 1,
+            byte_start: 0,
+            byte_end: implausible.len(),
+        }];
+
+        for ocr_block in [None, Some(OcrConfig::default())] {
+            for near_empty_fallback in [None, Some(true), Some(false)] {
+                let config = ExtractionConfig {
+                    ocr: ocr_block.clone(),
+                    ocr_near_empty_fallback: near_empty_fallback,
+                    ..Default::default()
+                };
+                let mut pdf_metadata = scanned_pages_metadata(Some(1), Vec::new());
+                let mut warnings = Vec::new();
+
+                let branch_runs = near_empty_ocr_fallback_applies(&config, &implausible);
+                record_implausible_text_pages(
+                    &config,
+                    &mut pdf_metadata,
+                    &implausible,
+                    Some(&boundaries),
+                    &mut warnings,
+                );
+
+                assert_eq!(
+                    pdf_metadata.pdf_specific.implausible_text_pages,
+                    Some(vec![1]),
+                    "the ROT-3 page must be flagged as implausible, or this case asserts nothing \
+                     (ocr_block: {}, ocr_near_empty_fallback: {near_empty_fallback:?})",
+                    ocr_block.is_some()
+                );
+
+                let warned = warnings
+                    .iter()
+                    .any(|warning| warning.message.contains("do not read as any real detectable language"));
+                assert_eq!(
+                    warned,
+                    !branch_runs,
+                    "the not-routed-to-OCR warning must be emitted exactly when the automatic OCR \
+                     branch will not run, and suppressed exactly when it will (ocr_block: {}, \
+                     ocr_near_empty_fallback: {near_empty_fallback:?}, branch_runs: {branch_runs})",
+                    ocr_block.is_some()
+                );
+            }
+        }
+    }
+
     #[tokio::test]
     #[cfg(feature = "pdf")]
     async fn test_pdf_batch_mode_validates_page_config_enabled() {
@@ -6962,6 +7201,71 @@ mod tests {
 
     #[cfg(feature = "pdf")]
     const ENCRYPTED_THREE_PAGE_PDF_PASSWORD: &str = "xberg-test-fake-password-1451";
+
+    /// An obviously-fake literal that is not this fixture's password, and is not empty.
+    #[cfg(feature = "pdf")]
+    const WRONG_PDF_PASSWORD: &str = "xberg-test-fake-wrong-password-1879";
+
+    /// `PdfDocument::authenticate` reports a rejected password as `Ok(false)`, not as an `Err`,
+    /// so `open_pdf_document` -- which mapped the error and dropped the bool -- accepted every
+    /// wrong password. That is why no `pdf_page_count` fixture could prove a binding forwards
+    /// its password argument: the page tree reads unauthenticated, and authentication itself
+    /// never failed either. The extraction path (`open_bytes_with_passwords`) always read the
+    /// bool and is unaffected. GH#1879.
+    #[test]
+    #[cfg(feature = "pdf")]
+    fn should_reject_a_wrong_pdf_password_rather_than_ignore_it() {
+        use base64::Engine as _;
+
+        let content = base64::engine::general_purpose::STANDARD
+            .decode(ENCRYPTED_THREE_PAGE_PDF_BASE64)
+            .expect("fixture must be valid base64");
+
+        let error = crate::pdf_page_count(&content, Some(WRONG_PDF_PASSWORD))
+            .expect_err("a wrong non-empty user password must not authenticate");
+        assert!(
+            error.to_string().contains("authenticate"),
+            "the error must name authentication as the cause: {error}"
+        );
+
+        assert_eq!(
+            crate::pdf_page_count(&content, Some(ENCRYPTED_THREE_PAGE_PDF_PASSWORD))
+                .expect("the correct user password must authenticate"),
+            3,
+            "the correct password must still open the document"
+        );
+        assert_eq!(
+            crate::pdf_page_count(&content, None).expect("an unauthenticated page-tree read must still succeed"),
+            3,
+            "the page tree is structure, not encrypted data, so omitting the password is not an error"
+        );
+    }
+
+    /// The corpus fixture whose user password is empty is still the right document for a
+    /// binding-level wrong-password test: the empty password authenticates, and any non-empty
+    /// password is rejected. So the e2e fixture needs no new corpus object. GH#1879.
+    #[test]
+    #[cfg(feature = "pdf")]
+    fn should_reject_a_non_empty_password_on_a_pdf_whose_user_password_is_empty() {
+        let Some(content) = crate::utils::read_test_fixture("pdf/password_protected.pdf") else {
+            return;
+        };
+
+        assert_eq!(
+            crate::pdf_page_count(&content, None).expect("an encrypted page tree reads without a password"),
+            2
+        );
+        assert_eq!(
+            crate::pdf_page_count(&content, Some("")).expect("the empty user password authenticates"),
+            2
+        );
+        let error = crate::pdf_page_count(&content, Some(WRONG_PDF_PASSWORD))
+            .expect_err("a non-empty password is neither the user nor the owner password");
+        assert!(
+            error.to_string().contains("authenticate"),
+            "the error must name authentication as the cause: {error}"
+        );
+    }
 
     /// An encrypted document is subject to `max_pages` like any other. This is a
     /// characterization test, NOT a regression test — it passes against the pre-fix code
@@ -7822,6 +8126,110 @@ mod tests {
             Some(ExtractionMethod::Ocr),
             "Auto strategy must record extraction_method: ocr for a fabricated-provenance page"
         );
+    }
+
+    #[tokio::test]
+    #[cfg(all(feature = "pdf", feature = "ocr"))]
+    #[serial]
+    async fn fabricated_mapping_page_records_effective_block_psm_in_page_metadata() {
+        use crate::core::config::{OcrConfig, PageConfig};
+
+        const FABRICATED_NATIVE_TEXT: &str = "synthetic fabricated text used to verify the per page segmentation mode recorded after automatic ocr routing";
+        let config = ExtractionConfig {
+            ocr: Some(OcrConfig::default()),
+            pages: Some(PageConfig {
+                extract_pages: true,
+                ..Default::default()
+            }),
+            use_cache: false,
+            ..Default::default()
+        };
+
+        let internal = PdfExtractor::new()
+            .extract_content(
+                &identity_h_mapping_pdf(FABRICATED_NATIVE_TEXT, false),
+                "application/pdf",
+                &config,
+            )
+            .await
+            .expect("fabricated-provenance PDF extraction should succeed");
+        assert_eq!(
+            internal
+                .metadata
+                .additional
+                .get(crate::ocr_metadata_keys::OCR_PAGE_SEGMENTATION_MODES_METADATA_KEY),
+            Some(&serde_json::json!([{ "page_number": 1, "psm": 6 }]))
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(all(feature = "pdf", feature = "ocr"))]
+    #[serial]
+    async fn explicit_force_ocr_does_not_apply_the_automatic_block_mode() {
+        use crate::core::config::{OcrConfig, PageConfig};
+
+        const FABRICATED_NATIVE_TEXT: &str = "synthetic fabricated text used to verify explicit whole document ocr retains the caller controlled segmentation mode";
+        let config = ExtractionConfig {
+            force_ocr: true,
+            ocr: Some(OcrConfig::default()),
+            pages: Some(PageConfig {
+                extract_pages: true,
+                ..Default::default()
+            }),
+            use_cache: false,
+            ..Default::default()
+        };
+
+        let internal = PdfExtractor::new()
+            .extract_content(
+                &identity_h_mapping_pdf(FABRICATED_NATIVE_TEXT, false),
+                "application/pdf",
+                &config,
+            )
+            .await
+            .expect("explicit whole-document OCR should succeed");
+        let entries = internal
+            .metadata
+            .additional
+            .get(crate::ocr_metadata_keys::OCR_PAGE_SEGMENTATION_MODES_METADATA_KEY)
+            .and_then(serde_json::Value::as_array);
+
+        assert!(entries.is_none_or(|entries| entries.iter().all(|entry| entry["psm"] != serde_json::json!(6))));
+    }
+
+    #[tokio::test]
+    #[cfg(all(feature = "pdf", feature = "ocr"))]
+    #[serial]
+    async fn explicit_force_ocr_pages_does_not_apply_the_automatic_block_mode() {
+        use crate::core::config::{OcrConfig, PageConfig};
+
+        const FABRICATED_NATIVE_TEXT: &str = "synthetic fabricated text used to verify explicit selected page ocr retains the caller controlled segmentation mode";
+        let config = ExtractionConfig {
+            force_ocr_pages: Some(vec![1]),
+            ocr: Some(OcrConfig::default()),
+            pages: Some(PageConfig {
+                extract_pages: true,
+                ..Default::default()
+            }),
+            use_cache: false,
+            ..Default::default()
+        };
+
+        let internal = PdfExtractor::new()
+            .extract_content(
+                &identity_h_mapping_pdf(FABRICATED_NATIVE_TEXT, false),
+                "application/pdf",
+                &config,
+            )
+            .await
+            .expect("explicit selected-page OCR should succeed");
+        let entries = internal
+            .metadata
+            .additional
+            .get(crate::ocr_metadata_keys::OCR_PAGE_SEGMENTATION_MODES_METADATA_KEY)
+            .and_then(serde_json::Value::as_array);
+
+        assert!(entries.is_none_or(|entries| entries.iter().all(|entry| entry["psm"] != serde_json::json!(6))));
     }
 
     /// xberg#1696's false-positive control: a Type0/Identity-H font that DOES carry a
@@ -8942,6 +9350,33 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn test_per_page_ocr_keeps_good_page_when_document_average_fails() {
+        use crate::types::PageBoundary;
+
+        let good = "Native words remain searchable with the page table.";
+        let mut boundaries = vec![PageBoundary {
+            byte_start: 0,
+            byte_end: good.len(),
+            page_number: 1,
+        }];
+        boundaries.extend((2..=10).map(|page_number| PageBoundary {
+            byte_start: good.len(),
+            byte_end: good.len(),
+            page_number,
+        }));
+
+        let decision = ocr::evaluate_per_page_ocr(good, Some(&boundaries), Some(10), &OcrQualityThresholds::default());
+
+        assert_eq!(decision.failing_pages, (2..=10).collect::<Vec<_>>());
+        assert!(!decision.whole_doc_failure);
+        assert_eq!(
+            ocr::evaluate_ocr_skip_gate(false, good.len(), 0.1, &decision, &OcrQualityThresholds::default()),
+            ocr::OcrGateOutcome::RunFallbackOnPages((2..=10).collect())
+        );
+    }
+
     /// When every page fails the per-page quality check, the gate must route to
     /// RunFallback (ExtractionMethod::Ocr), not RunFallbackOnPages (ExtractionMethod::Mixed).
     /// A document where every page needs OCR is not a mixed document.
@@ -8967,10 +9402,7 @@ mod tests {
 
         let decision = ocr::evaluate_per_page_ocr(&text, Some(&boundaries), Some(2), &OcrQualityThresholds::default());
         assert!(decision.fallback);
-        assert!(
-            decision.failing_pages.is_empty(),
-            "doc-level failure fires before per-page scan when all pages fail"
-        );
+        assert_eq!(decision.failing_pages, vec![1, 2]);
         assert!(
             decision.whole_doc_failure,
             "all pages failing must set whole_doc_failure so gate routes to RunFallback"
@@ -9497,6 +9929,143 @@ BT /F1 12 Tf 30 30 Td (Beta) Tj ET
             root_metadata.as_ref().map(|metadata| metadata.target_dpi),
             Some(150),
             "the singular compatibility field must deterministically report the first preprocessed page"
+        );
+    }
+
+    /// A minimal 2-page PDF carrying real text content, for tests that only need page
+    /// structure and must not depend on the `test_documents/` corpus (see `read_test_fixture`).
+    #[cfg(feature = "pdf")]
+    fn build_two_page_text_pdf() -> Vec<u8> {
+        let mut pdf = b"%PDF-1.4\n".to_vec();
+        let mut offsets: Vec<usize> = Vec::new();
+
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(b"1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(b"2 0 obj\n<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>\nendobj\n");
+
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            b"3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+              /Contents 5 0 R /Resources << /Font << /F1 7 0 R >> >> >>\nendobj\n",
+        );
+
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            b"4 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] \
+              /Contents 6 0 R /Resources << /Font << /F1 7 0 R >> >> >>\nendobj\n",
+        );
+
+        let stream1 = "BT /F1 12 Tf 72 700 Td (Page one has real text content here.) Tj ET\n";
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            format!(
+                "5 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+                stream1.len(),
+                stream1
+            )
+            .as_bytes(),
+        );
+
+        let stream2 = "BT /F1 12 Tf 72 700 Td (Page two has different text content here.) Tj ET\n";
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            format!(
+                "6 0 obj\n<< /Length {} >>\nstream\n{}\nendstream\nendobj\n",
+                stream2.len(),
+                stream2
+            )
+            .as_bytes(),
+        );
+
+        offsets.push(pdf.len());
+        pdf.extend_from_slice(
+            b"7 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica \
+              /Encoding /WinAnsiEncoding >>\nendobj\n",
+        );
+
+        let xref_pos = pdf.len();
+        let total_objs = offsets.len() + 1;
+        pdf.extend_from_slice(format!("xref\n0 {}\n", total_objs).as_bytes());
+        pdf.extend_from_slice(b"0000000000 65535 f\r\n");
+        for &off in &offsets {
+            pdf.extend_from_slice(format!("{off:010} 00000 n\r\n").as_bytes());
+        }
+        pdf.extend_from_slice(
+            format!(
+                "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n",
+                total_objs, xref_pos
+            )
+            .as_bytes(),
+        );
+        pdf
+    }
+
+    /// GH#1752: `metadata.pages` must be populated when `ocr_near_empty_fallback = Some(true)`
+    /// is set with no `ocr` block, at parity with what an `ocr` block alone already produced.
+    ///
+    /// Before the fix, `page_structure_was_implicitly_tracked` in `extraction.rs` discarded the
+    /// page structure whenever `config.ocr` was `None`, regardless of the two settings GH#1752
+    /// gave the near-empty-fallback and scanned-page-quality-gate behaviours. Both configs here
+    /// set `pdf_options: None` and `pages: None` so `force_annotation_page_tracking` is `true`,
+    /// the only condition under which this site is reachable. Config X (an `ocr` block) is
+    /// checked first as a control -- asserting it is `Some` before checking config Y rules out a
+    /// fixture that simply never produces page structure at all, which would make the Y
+    /// assertion pass vacuously.
+    #[cfg(feature = "pdf")]
+    #[tokio::test]
+    async fn metadata_pages_populated_for_near_empty_fallback_without_ocr_block() {
+        use crate::core::config::OcrConfig;
+
+        let pdf = build_two_page_text_pdf();
+        let extractor = PdfExtractor::new();
+
+        let config_x = ExtractionConfig {
+            ocr: Some(OcrConfig::default()),
+            pdf_options: None,
+            pages: None,
+            ..ExtractionConfig::default()
+        };
+        let result_x = extractor
+            .extract_content(&pdf, "application/pdf", &config_x)
+            .await
+            .expect("extraction with an `ocr` block must succeed");
+        let result_x = crate::extraction::derive::derive_extraction_result(
+            result_x,
+            false,
+            crate::core::config::OutputFormat::Plain,
+        );
+        let pages_x = result_x
+            .metadata
+            .pages
+            .as_ref()
+            .expect("control: an `ocr` block alone must populate metadata.pages");
+
+        let config_y = ExtractionConfig {
+            ocr: None,
+            ocr_near_empty_fallback: Some(true),
+            pdf_options: None,
+            pages: None,
+            ..ExtractionConfig::default()
+        };
+        let result_y = extractor
+            .extract_content(&pdf, "application/pdf", &config_y)
+            .await
+            .expect("extraction with ocr_near_empty_fallback must succeed");
+        let result_y = crate::extraction::derive::derive_extraction_result(
+            result_y,
+            false,
+            crate::core::config::OutputFormat::Plain,
+        );
+        let pages_y = result_y.metadata.pages.as_ref().expect(
+            "ocr_near_empty_fallback = Some(true) without an `ocr` block must also populate \
+             metadata.pages (GH#1752)",
+        );
+
+        assert_eq!(
+            pages_y.total_count, pages_x.total_count,
+            "page counts must match between the two configurations"
         );
     }
 }

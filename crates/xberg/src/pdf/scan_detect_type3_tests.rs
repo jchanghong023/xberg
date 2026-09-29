@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline", feature = "layout-detection"))]
+use lopdf::dictionary;
 
 // GH#1782: unmapped Type 3 procedure codes are not Unicode. Extraction
 // retains one '?' per code so the fabricated gate sees painted glyphs
@@ -9,6 +11,91 @@ fn type3_fixture(name: &str) -> PdfDocument {
         .join("tests/fixtures/pdf/regressions/type3")
         .join(name);
     PdfDocument::open(&path).unwrap_or_else(|e| panic!("open fixture {name}: {e}"))
+}
+
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline", feature = "layout-detection"))]
+fn inset_raster_type3_fixture() -> PdfDocument {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/pdf/regressions/type3/gh1782-2-readable-lines.pdf");
+    let mut source = lopdf::Document::load(path).expect("load synthetic Type 3 fixture");
+    let page_id = *source.get_pages().get(&1).expect("fixture has one page");
+    let original_bytes = source.get_page_content(page_id);
+    let operations = lopdf::content::Content::decode(&original_bytes)
+        .expect("decode Type 3 fixture operators")
+        .operations;
+    let type3_strings = operations
+        .iter()
+        .filter(|operation| operation.operator == "Tj")
+        .skip(2)
+        .filter_map(|operation| match operation.operands.first() {
+            Some(lopdf::Object::String(bytes, _)) => Some(hex::encode(bytes)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(type3_strings.len(), 4, "fixture has four Type 3 text-show strings");
+    let original_content = String::from_utf8(original_bytes).expect("fixture content is ASCII");
+    let body_start = original_content.find("BT\n/T3_0").expect("fixture has Type 3 body");
+    let mut expanded_body = String::from("BT\n/T3_0 16 Tf\n");
+    for (line, text) in type3_strings.iter().cycle().take(16).enumerate() {
+        let baseline = 700 - line * 35;
+        expanded_body.push_str(&format!("1 0 0 1 60 {baseline} Tm <{text}> Tj\n"));
+    }
+    expanded_body.push_str("ET\n");
+    let image_content = "q 489.6 0 0 633.6 61.2 79.2 cm /ImScan Do Q\n";
+    let repeated_content = format!("{image_content}{}{expanded_body}", &original_content[..body_start]);
+    source
+        .change_page_content(page_id, repeated_content.into_bytes())
+        .expect("replace page content");
+
+    let pixels = vec![0x40u8; 400 * 400];
+    let image_id = source.add_object(lopdf::Stream::new(
+        dictionary! {
+            "Type" => "XObject",
+            "Subtype" => "Image",
+            "Width" => 400,
+            "Height" => 400,
+            "ColorSpace" => "DeviceGray",
+            "BitsPerComponent" => 8,
+        },
+        pixels,
+    ));
+    let page = source
+        .get_object_mut(page_id)
+        .and_then(lopdf::Object::as_dict_mut)
+        .expect("page dictionary");
+    let resources = page
+        .get_mut(b"Resources")
+        .and_then(lopdf::Object::as_dict_mut)
+        .expect("page resources");
+    resources.set("XObject", dictionary! { "ImScan" => image_id });
+
+    let mut bytes = Vec::new();
+    source.save_to(&mut bytes).expect("serialize synthetic fixture");
+    PdfDocument::from_bytes(bytes).expect("open inset-raster Type 3 fixture")
+}
+
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline", feature = "layout-detection"))]
+#[test]
+fn inset_scan_ignores_more_than_four_hundred_fallback_type3_glyphs() {
+    let doc = inset_raster_type3_fixture();
+    let page = doc
+        .extract_page_text_with_options(0, ReadingOrder::ColumnAware)
+        .expect("extract synthetic Type 3 page");
+    let fallback_glyphs = page
+        .spans
+        .iter()
+        .filter(|span| span.provenance == Some(MappingProvenance::Fallback))
+        .map(|span| span.text.chars().count())
+        .sum::<usize>();
+    assert!(
+        fallback_glyphs > OCR_SCAN_MAX_GLYPHS,
+        "fixture must exceed the old raw-glyph cutoff; got {fallback_glyphs}"
+    );
+
+    assert!(
+        full_page_raster_density(&doc, 0).is_some(),
+        "fallback Type 3 glyphs do not prove that an inset raster is a figure"
+    );
 }
 
 /// The achieved half of the fix: every span the Type 3 font paints is

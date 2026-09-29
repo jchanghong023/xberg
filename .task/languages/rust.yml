@@ -9,7 +9,6 @@ vars:
   BUILD_PROFILE: '{{.BUILD_PROFILE | default "release"}}'
   RUST_BACKTRACE: '{{.RUST_BACKTRACE | default "1"}}'
   CARGO_TERM_COLOR: "always"
-  PDFIUM_VERSION: "7881"
 
 tasks:
   install:

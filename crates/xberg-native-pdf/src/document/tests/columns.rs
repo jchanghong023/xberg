@@ -812,3 +812,93 @@ fn lift_marginalia_column_skips_single_page_number() {
     spans.push(corridor_span("7", 50.0, 500.0, 12.0));
     assert!(PdfDocument::lift_marginalia_column(&spans).is_none());
 }
+
+/// GH#1809: `line_corridor_gutter` asks only whether an x-interval is empty of ink with a
+/// real population on each flank -- not how much of the page each side fills, which is
+/// what `prose_two_column_gutter`, `density_central_gutter` and `classifier_column_gutter`
+/// all measure in one form or another. The reporter's page is this shape: a left column
+/// running the full height, a right column filling only its top third, and an empty
+/// corridor between them from the top of the page to the bottom. ~keep
+#[test]
+fn line_corridor_gutter_finds_a_short_second_column() {
+    const LEFT_LINES: usize = 35;
+    const RIGHT_LINES: usize = 10;
+
+    let mut spans = Vec::new();
+    for index in 0..LEFT_LINES {
+        let y = 750.0 - index as f32 * 10.0;
+        spans.push(corridor_span(
+            "Left column runs the full length of the page here",
+            35.0,
+            y,
+            245.0,
+        ));
+        if index < RIGHT_LINES {
+            spans.push(corridor_span("Short right column stops early", 321.0, y, 235.0));
+        }
+    }
+
+    let gutter = PdfDocument::line_corridor_gutter(&spans).expect("the empty corridor must be found");
+    assert_eq!(gutter, 300.5, "the midpoint of the empty 280..321 corridor");
+    let combined = PdfDocument::detect_column_gutter(&spans).expect("the combined entry point must find it too");
+    assert!(
+        combined > 280.0 && combined < 321.0,
+        "detect_column_gutter must land inside the empty corridor, got {combined}"
+    );
+}
+
+/// GH#1809's guard against the failure mode #1769 shipped and had to be reverted: a
+/// table's own recurring cell gaps are x-intervals no row's ink crosses, exactly like a
+/// column corridor. The geometry here is GH#1756's -- its journal table's five-column
+/// grid (x 312.6..556.7) beside the same page's prose, corridor 291.0..306.6 -- and the
+/// two halves bracket the census threshold exactly, at two grid rows and at one. The
+/// census is the ONLY thing that declines on the two-row half: raise it out of reach and
+/// that page yields exactly one qualifying corridor and the detector answers
+/// `Some(298.8)` -- measured -- where
+/// `detect_column_gutter_also_declines_on_the_sparse_table_rows_pages_gh1756` requires
+/// `None`. ~keep
+#[test]
+fn line_corridor_gutter_declines_on_a_grid_table() {
+    /// The #1756 journal table's own column grid, as `(left, width)`. Consecutive cells
+    /// leave gaps of 54.6, 23.8, 27.4 and 25.2pt, so a full row opens four. ~keep
+    const GRID_ROW: [(f32, f32); 5] = [
+        (312.6, 30.0),
+        (397.2, 20.0),
+        (441.0, 20.0),
+        (488.4, 21.1),
+        (534.7, 22.0),
+    ];
+    const PROSE_LINES: usize = 5;
+    const GRID_ROWS: usize = 2;
+
+    let prose = || {
+        (0..PROSE_LINES).map(|index| {
+            let y = 760.0 - index as f32 * 14.0;
+            [
+                corridor_span("left column prose beside the table", 37.6, y, 253.4),
+                corridor_span("right column prose beside the table", 306.6, y, 235.0),
+            ]
+        })
+    };
+    let grid_row = |row: usize| {
+        let y = 690.0 - row as f32 * 14.0;
+        GRID_ROW.map(|(x, width)| corridor_span("cell", x, y, width))
+    };
+
+    let mut table_page: Vec<_> = (0..GRID_ROWS).flat_map(grid_row).collect();
+    table_page.extend(prose().flatten());
+    assert_eq!(PdfDocument::line_corridor_gutter(&table_page), None);
+
+    // One row is a kerning accident, not a grid, and must not cost the page its gutter:
+    // the same geometry with a single grid row still reports the corridor's midpoint. ~keep
+    let mut one_row_page: Vec<_> = grid_row(0).into_iter().collect();
+    one_row_page.extend(prose().flatten());
+    let gutter =
+        PdfDocument::line_corridor_gutter(&one_row_page).expect("one grid row must not cost the page its gutter");
+    // Compared with a tolerance, not for equality: the corridor's left edge is
+    // 37.6 + 253.4 in f32, which does not land on 291.0 exactly. ~keep
+    assert!(
+        (gutter - 298.8).abs() < 0.01,
+        "expected the 291.0..306.6 midpoint, got {gutter}"
+    );
+}

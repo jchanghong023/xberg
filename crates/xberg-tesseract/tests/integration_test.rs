@@ -127,6 +127,68 @@ fn test_ocr_on_table_image() {
 }
 
 #[test]
+fn test_word_symbols_spell_each_accepted_word_inside_its_box() {
+    let tessdata_dir = get_tessdata_dir();
+    ensure_eng_traineddata_exists(&tessdata_dir);
+
+    let api = TesseractAPI::new().expect("Failed to create TesseractAPI");
+    api.init(tessdata_dir.to_str().unwrap(), "eng")
+        .expect("Failed to initialize Tesseract");
+    let (image_data, width, height) = load_test_image("images/simple_table.png").expect("Failed to load test image");
+    api.set_image(&image_data, width as i32, height as i32, 3, 3 * width as i32)
+        .expect("Failed to set image");
+    api.recognize().expect("Failed to recognize");
+
+    let iterator = api.get_iterator().expect("Failed to get result iterator");
+    let all_words = iterator.extract_all_words().expect("Failed to read words").words;
+    let words = iterator
+        .extract_word_symbols(|_| true)
+        .expect("Failed to read word symbols");
+    assert!(
+        words.len() >= 2,
+        "the table image must give several words, got {}",
+        words.len()
+    );
+    assert_eq!(
+        words.len(),
+        all_words.len(),
+        "every word must come back with its symbols"
+    );
+    for word in &words {
+        let spelled: String = word.symbols.iter().map(|symbol| symbol.text.as_str()).collect();
+        assert_eq!(spelled, word.text, "the symbols must spell their own word");
+        for symbol in &word.symbols {
+            assert!(
+                symbol.left >= word.left && symbol.right <= word.right,
+                "symbol {:?} must lie inside word {:?} ({}..{})",
+                symbol.text,
+                word.text,
+                word.left,
+                word.right
+            );
+        }
+    }
+    let wanted = words[0].text.clone();
+    let expected = words.iter().filter(|word| word.text == wanted).count();
+    let filtered = iterator
+        .extract_word_symbols(|text| text == wanted)
+        .expect("Failed to read filtered word symbols");
+    assert!(
+        expected < words.len(),
+        "the image must give more than one distinct word"
+    );
+    assert_eq!(
+        filtered.len(),
+        expected,
+        "the filter must keep every word it accepts and no other"
+    );
+    assert!(
+        filtered.iter().all(|word| word.text == wanted),
+        "the filter must keep only the words it accepts"
+    );
+}
+
+#[test]
 fn test_invalid_language_code() {
     let tessdata_dir = get_tessdata_dir();
     ensure_eng_traineddata_exists(&tessdata_dir);

@@ -169,6 +169,19 @@ fn table_region_outcome(
     offset_y: f32,
     structure: &tatr::TableStructure,
 ) -> TableRegionOutcome {
+    // A geometrically valid grid says nothing about whether any OCR text reached it. When
+    // `select_table_elements` discarded every element -- its `MIN_CELL_ELEMENT_IOW` test is against
+    // the whole table bbox, so a region whose word boxes and TATR crop disagree about coordinates
+    // loses all of them -- `build_markdown_table` still returns a fully shaped grid of empty
+    // strings whose markdown is non-empty (the header separator alone). The caller then publishes a
+    // table holding none of the page's values, and because the outcome is `Recognized` the GH#1622
+    // text fallback never runs, so the words are absent from both outputs. Decide on the elements,
+    // not on the geometry alone (xberg-io/xberg#1813). ~keep
+    if table_elements.is_empty() {
+        tracing::warn!("TATR table region has no OCR elements after the cell-overlap filter; skipping the table");
+        return fallback_table_outcome(table_elements);
+    }
+
     if !is_cell_grid_valid(cell_grid) {
         tracing::debug!("TATR cell grid is invalid (too many empty cells or malformed); skipping table");
         return fallback_table_outcome(table_elements);
@@ -785,6 +798,31 @@ mod tests {
             outcome,
             TableRegionOutcome::Empty,
             "a region with no OCR text has nothing to fall back to"
+        );
+    }
+
+    /// A valid grid whose elements were all discarded by the overlap filter must not be published
+    /// as a table of empty cells. Before this guard the outcome was `Recognized` with a non-empty
+    /// markdown header separator, so the caller emitted a table holding none of the page's values
+    /// and the GH#1622 text fallback never ran (xberg-io/xberg#1813).
+    #[test]
+    fn should_not_recognize_a_valid_grid_whose_elements_were_all_filtered_out() {
+        let grid = vec![
+            vec![cell(0.0, 0.0, 50.0, 50.0), cell(50.0, 0.0, 100.0, 50.0)],
+            vec![cell(0.0, 50.0, 50.0, 100.0), cell(50.0, 50.0, 100.0, 100.0)],
+        ];
+        assert!(
+            is_cell_grid_valid(&grid),
+            "the grid must be geometrically valid, or this test would pass via the invalid-grid arm"
+        );
+        let element_refs: Vec<&OcrElement> = Vec::new();
+
+        let outcome = table_region_outcome(&grid, &element_refs, 0.0, 0.0, &no_structure());
+
+        assert_eq!(
+            outcome,
+            TableRegionOutcome::Empty,
+            "a table region with no surviving OCR elements must publish no table"
         );
     }
 

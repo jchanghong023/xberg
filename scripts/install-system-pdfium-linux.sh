@@ -5,7 +5,12 @@
 set -euo pipefail
 
 PREFIX="${1:-${PREFIX:-/usr/local}}"
-PDFIUM_VERSION="${2:-${PDFIUM_VERSION:-7881}}"
+# The version must equal the binding set compiled into xberg-pdfium-render
+# (`crates/xberg-pdfium-render/src/lib.rs` includes `bindgen/pdfium_7678.rs`, the only one in
+# the tree). Bump it only together with a regenerated binding set at the same version, and
+# verify by loading the library and resolving symbols -- never by the download alone, which
+# succeeds regardless. ~keep
+PDFIUM_VERSION="${2:-${PDFIUM_VERSION:-7678}}"
 PDFIUM_PLATFORM="linux-x64"
 DOWNLOAD_URL="https://github.com/bblanchon/pdfium-binaries/releases/download/chromium/${PDFIUM_VERSION}/pdfium-${PDFIUM_PLATFORM}.tgz"
 

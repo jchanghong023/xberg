@@ -21,11 +21,11 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use xberg::Result;
-use xberg::core::config::{ExtractionConfig, PostProcessorConfig};
+use xberg::core::config::{ExtractInput, ExtractionConfig, PostProcessorConfig};
 use xberg::core::pipeline::run_pipeline;
 use xberg::internal::{ElementKind, InternalDocument, InternalElement};
 use xberg::plugins::registry::{get_document_extractor_registry, get_post_processor_registry};
-use xberg::plugins::{Plugin, PostProcessor, ProcessingStage};
+use xberg::plugins::{DocumentExtractor, Plugin, PostProcessor, ProcessingStage};
 use xberg::types::ExtractedDocument;
 
 #[cfg(feature = "ocr")]
@@ -419,36 +419,99 @@ async fn test_concurrent_pipeline_processing() {
 ///
 /// Validates that:
 /// - Multiple readers can access registry simultaneously
-/// - Registry lookups are fast under concurrent load
+/// - Every reader resolves the same extractor the uncontended lookup does
 #[tokio::test]
 async fn test_concurrent_registry_reads() {
-    let registry = get_document_extractor_registry();
+    const READERS: usize = 200;
+    // A MIME type owned by this test alone. The global registry is process-wide and
+    // keyed by MIME type, so a private key cannot change what any sibling test's
+    // lookup returns. It has to be registered here because the global document
+    // extractor registry holds no `text/plain` entry in this binary -- the earlier
+    // version of this test looked one up and discarded the `Err`, so it asserted
+    // nothing about the registry's contents. ~keep
+    const MIME: &str = "application/x-xberg-gh1923";
 
-    let mut handles = vec![];
-    for _ in 0..200 {
-        let registry_clone = Arc::clone(&registry);
-        handles.push(tokio::spawn(async move {
-            let start = std::time::Instant::now();
+    struct ConcurrentReadExtractor;
 
-            let reg = registry_clone.read();
-            let _extractor = reg.get("text/plain");
-
-            start.elapsed()
-        }));
-    }
-
-    let mut max_duration = Duration::from_secs(0);
-    for handle in handles {
-        let duration = handle.await.expect("Task should not panic");
-        if duration > max_duration {
-            max_duration = duration;
+    impl Plugin for ConcurrentReadExtractor {
+        fn name(&self) -> &str {
+            "gh1923-concurrent-read"
+        }
+        fn version(&self) -> String {
+            "1.0.0".to_string()
+        }
+        fn initialize(&self) -> Result<()> {
+            Ok(())
+        }
+        fn shutdown(&self) -> Result<()> {
+            Ok(())
         }
     }
 
-    assert!(
-        max_duration < Duration::from_millis(10),
-        "Registry reads should be fast, max duration: {:?}",
-        max_duration
+    #[async_trait]
+    impl DocumentExtractor for ConcurrentReadExtractor {
+        async fn extract(&self, _input: ExtractInput, _config: &ExtractionConfig) -> Result<ExtractedDocument> {
+            Ok(ExtractedDocument::default())
+        }
+
+        fn supported_mime_types(&self) -> &[&str] {
+            &[MIME]
+        }
+    }
+
+    let registry = get_document_extractor_registry();
+    {
+        let mut reg = registry.write();
+        reg.register(Arc::new(ConcurrentReadExtractor))
+            .expect("Registration should succeed");
+    }
+
+    // The uncontended answer, taken before any reader is spawned, is the oracle the
+    // concurrent reads are compared against.
+    //
+    // This replaced a `max_duration < 10ms` wall-clock bound, which measured the tokio
+    // scheduler's queueing delay rather than the lock and failed on any loaded host
+    // (GH#1923: `max duration: 17.042897ms` on a CI runner that never touched the
+    // registry). A timing bound cannot distinguish a slow lock from a busy machine;
+    // agreement across readers can, and is what a reader-writer lock actually promises. ~keep
+    let oracle = {
+        let reg = registry.read();
+        reg.get(MIME).ok().map(|extractor| extractor.name().to_string())
+    };
+    assert_eq!(
+        oracle.as_deref(),
+        Some("gh1923-concurrent-read"),
+        "the uncontended lookup must resolve, or the agreement assertion below compares None against None"
+    );
+
+    let mut handles = vec![];
+    for _ in 0..READERS {
+        let registry_clone = Arc::clone(&registry);
+        handles.push(tokio::spawn(async move {
+            let reg = registry_clone.read();
+            reg.get(MIME).ok().map(|extractor| extractor.name().to_string())
+        }));
+    }
+
+    let mut observed = Vec::with_capacity(READERS);
+    for handle in handles {
+        observed.push(handle.await.expect("Task should not panic"));
+    }
+
+    {
+        let mut reg = registry.write();
+        let _ = reg.remove("gh1923-concurrent-read");
+    }
+
+    assert_eq!(
+        observed.len(),
+        READERS,
+        "every spawned reader must report; a short count means the comparison below examined less than it claims"
+    );
+    let disagreeing = observed.iter().filter(|name| **name != oracle).count();
+    assert_eq!(
+        disagreeing, 0,
+        "{disagreeing} of {READERS} concurrent readers disagreed with the uncontended lookup {oracle:?}"
     );
 }
 

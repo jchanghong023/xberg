@@ -45,11 +45,20 @@
 //!   RGB/Gray have no declared ink-coverage intent in the subtractive
 //!   output model, so they neither paint nor knock out plates. Matches
 //!   `tint_for_ink`'s vector handling.
-//! - **JPX (JPEG 2000) image XObjects**: logged and skipped. No pure-
-//!   Rust JP2 decoder is bundled.
-//! - **Indexed images** (`[/Indexed …]`): expanded to RGB upstream and
-//!   therefore skipped by separation routing for now. Indexed CMYK
-//!   palettes would need a separate `expand_indexed_to_cmyk` path.
+//! - **JPX (JPEG 2000) image XObjects**: decoded like any other image and
+//!   routed by the colour space that comes out of them. `hayro-jpeg2000`
+//!   is a non-optional dependency, so the filter itself never decides
+//!   anything here; a four-component JPX on a `/DeviceCMYK` image paints
+//!   the process plates, and a three-component one is skipped for the same
+//!   no-ink-intent reason any RGB image is.
+//! - **Indexed images** (`[/Indexed base …]`): classified by `base`, which is
+//!   where an Indexed image's ink intent actually lives (ISO 32000-1
+//!   §7.4.5). When `base` carries ink intent (CMYK, Separation, DeviceN),
+//!   the palette lookup's own base-space bytes route to the plates directly
+//!   -- not the RGB `extract_image_from_xobject` produces for on-screen
+//!   display, which would misattribute every palette entry's ink. A
+//!   JPX-coded Indexed image's index plane is looked up the same way
+//!   (GH#1916).
 //!
 //! ICC profiles (per-image and document `/OutputIntents`) and TRC /
 //! BG / UCR functions are **not** consulted when routing image samples
@@ -622,7 +631,15 @@ fn scan_do_operator_for_inks(
         // operator in the content stream. Surface those inks so the
         // per-plate short-circuit doesn't drop the image's plates as
         // empty. ~keep
-        scan_image_xobject_for_inks(dict, color_spaces, resources, doc, referenced);
+        scan_image_xobject_for_inks(
+            &xobj,
+            xobj_ref_obj.as_reference(),
+            dict,
+            color_spaces,
+            resources,
+            doc,
+            referenced,
+        );
     }
     Ok(())
 }
@@ -666,13 +683,26 @@ fn scan_form_xobject_for_inks(
 /// (the `/Subtype /Image` branch) — pure code motion, same colour-space
 /// resolution and `/All`/`/None` handling, no logic changed.
 fn scan_image_xobject_for_inks(
+    xobject: &Object,
+    obj_ref: Option<crate::object::ObjectRef>,
     dict: &HashMap<String, Object>,
     color_spaces: &HashMap<String, Object>,
     resources: &Object,
     doc: &PdfDocument,
     referenced: &mut Vec<String>,
 ) {
-    let resolved = resolve_image_color_space(dict, color_spaces, resources, doc);
+    let resolved =
+        match resolve_image_color_space_with_decoded_fallback(xobject, obj_ref, dict, color_spaces, resources, doc) {
+            Ok((resolved, _)) => resolved,
+            Err(error) => {
+                tracing::warn!(
+                    error_code = error.telemetry_code(),
+                    error_offset = ?error.telemetry_offset(),
+                    "skipping image XObject while collecting separation inks"
+                );
+                return;
+            }
+        };
     match resolved {
         ResolvedSpace::Cmyk | ResolvedSpace::IccCmyk => push_process_inks(referenced),
         ResolvedSpace::Separation(ink) => push_separation_ink(referenced, &ink),
@@ -905,6 +935,19 @@ fn classify_resolved(
             }
         }
         "ICCBased" => classify_iccbased_by_component_count(arr, doc),
+        "Indexed" => {
+            // `[/Indexed base hival lookup]`: an Indexed space carries no ink
+            // intent of its own -- it inherits its base's (ISO 32000-1
+            // §7.4.5), so classify by `base` exactly as the Pattern arm
+            // above recurses into its underlying space. (GH#1898) ~keep
+            match arr.get(1) {
+                Some(base) => {
+                    let resolved = doc.resolve_object(base).unwrap_or_else(|_| base.clone());
+                    classify_resolved(&resolved, color_spaces, resources, doc)
+                }
+                None => ResolvedSpace::Unknown,
+            }
+        }
         _ => ResolvedSpace::Unknown,
     }
 }
@@ -2575,6 +2618,49 @@ fn resolve_image_color_space(
     classify_resolved(&resolved_obj, color_spaces, resources, doc)
 }
 
+/// Resolve the dictionary colour space, decoding the image only for the JPEG 2000 case where
+/// ISO 32000-1 permits `/ColorSpace` to be absent. The decoded image is returned so the paint
+/// pass can reuse it instead of decoding the same stream again. ~keep
+fn resolve_image_color_space_with_decoded_fallback(
+    xobject: &Object,
+    obj_ref: Option<crate::object::ObjectRef>,
+    image_dict: &HashMap<String, Object>,
+    color_spaces: &HashMap<String, Object>,
+    resources: &Object,
+    doc: &PdfDocument,
+) -> Result<(ResolvedSpace, Option<crate::extractors::images::PdfImage>)> {
+    let declared = resolve_image_color_space(image_dict, color_spaces, resources, doc);
+    if image_dict.contains_key("ColorSpace")
+        || !matches!(declared, ResolvedSpace::Unknown)
+        || !image_uses_jpx_decode(image_dict)
+    {
+        return Ok((declared, None));
+    }
+
+    let image = crate::extractors::images::extract_image_from_xobject(Some(doc), xobject, obj_ref, Some(color_spaces))?;
+    let resolved = match image.color_space() {
+        crate::extractors::images::ColorSpace::DeviceCMYK => ResolvedSpace::Cmyk,
+        crate::extractors::images::ColorSpace::ICCBased(4) => ResolvedSpace::IccCmyk,
+        crate::extractors::images::ColorSpace::DeviceRGB
+        | crate::extractors::images::ColorSpace::CalRGB
+        | crate::extractors::images::ColorSpace::Lab
+        | crate::extractors::images::ColorSpace::ICCBased(3) => ResolvedSpace::Rgb,
+        crate::extractors::images::ColorSpace::DeviceGray
+        | crate::extractors::images::ColorSpace::CalGray
+        | crate::extractors::images::ColorSpace::ICCBased(1) => ResolvedSpace::Separation("Black".to_string()),
+        _ => ResolvedSpace::Unknown,
+    };
+    Ok((resolved, Some(image)))
+}
+
+fn image_uses_jpx_decode(image_dict: &HashMap<String, Object>) -> bool {
+    match image_dict.get("Filter") {
+        Some(Object::Name(name)) => name == "JPXDecode",
+        Some(Object::Array(filters)) => filters.iter().any(|filter| filter.as_name() == Some("JPXDecode")),
+        _ => false,
+    }
+}
+
 /// For a given source colour space and target ink, return the index of the
 /// channel that contributes to that ink, or `None` when the ink is outside
 /// the source's colorant set.
@@ -2666,13 +2752,6 @@ fn blit_image_plane_to_plate(
     dst.draw_pixmap(0, 0, src.as_ref(), &paint, image_transform, clip);
 }
 
-/// Returns true if the image XObject's `/Filter` chain contains a filter we
-/// can't decode. `/JPXDecode` (JPEG 2000) is always decodable, so there is
-/// currently no filter this rejects.
-fn image_has_unsupported_filter(_image_dict: &HashMap<String, Object>) -> bool {
-    false
-}
-
 /// Paint an image XObject into the separation plates.
 ///
 /// Per ISO 32000-1 §11.7.4 image samples are routed channel-by-channel to
@@ -2683,12 +2762,12 @@ fn image_has_unsupported_filter(_image_dict: &HashMap<String, Object>) -> bool {
 /// - DeviceCMYK / ICCBased(N=4) images → C/M/Y/K plates
 /// - Separation images → the named spot plate
 /// - DeviceN images → per-channel routing by colorant name
+/// - Indexed images whose base carries ink intent → the base's own plates,
+///   via the base-space palette lookup (GH#1898), JPX-coded included (GH#1916)
 /// - Image masks (`/ImageMask true`) → paint the current fill colour through
 ///   the 1-bit stencil (delegates to `tint_for_ink` for spot/process logic)
-/// - JPX-filtered images logged and skipped (no decoder bundled)
 ///
-/// Out of scope, dropped silently for now: RGB/Gray images, indexed images,
-/// inline images. See module-level Limitations.
+/// Out of scope, dropped silently for now: RGB/Gray images, inline images. See module-level Limitations.
 #[allow(clippy::too_many_arguments)]
 fn paint_image_to_plates(
     pixmaps: &mut [Pixmap],
@@ -2735,18 +2814,21 @@ fn paint_image_to_plates(
         );
     }
 
-    // §D3: JPX images get a debug log and are dropped — no pure-Rust JP2
-    // decoder is bundled. ~keep
-    if image_has_unsupported_filter(dict) {
-        tracing::warn!(
-            "Skipping image XObject '{name}' on separation plates: \
-             unsupported filter (JPXDecode — JPEG 2000 decoder not bundled)"
-        );
-        return Ok(());
-    }
-
-    // Resolve the image's declared colour space, honouring DefaultCMYK etc. ~keep
-    let resolved_space = resolve_image_color_space(dict, color_spaces, resources, ctx.doc);
+    // Resolve the image's declared colour space, honouring DefaultCMYK etc. A JPEG 2000 image may
+    // omit it and take the colour space from its decoded codestream (GH#1922). ~keep
+    let (resolved_space, decoded_image) =
+        match resolve_image_color_space_with_decoded_fallback(xobject, obj_ref, dict, color_spaces, resources, ctx.doc)
+        {
+            Ok(resolved) => resolved,
+            Err(error) => {
+                tracing::warn!(
+                    error_code = error.telemetry_code(),
+                    error_offset = ?error.telemetry_offset(),
+                    "skipping image XObject"
+                );
+                return Ok(());
+            }
+        };
 
     // For RGB / Gray / Unknown the image carries no ink-coverage intent.
     // Skip entirely; underlying plates are left untouched. xberg-native-pdf does
@@ -2763,15 +2845,68 @@ fn paint_image_to_plates(
         return Ok(());
     }
 
-    let pdf_image = match extract_image_from_xobject(Some(ctx.doc), xobject, obj_ref, Some(color_spaces)) {
-        Ok(img) => img,
+    // An `/Indexed` image's ink intent lives in its BASE colour space (ISO
+    // 32000-1 §7.4.5) -- `resolved_space` above already reflects that base.
+    // Route the palette lookup's own base-space bytes straight to the
+    // plates, bypassing `extract_image_from_xobject`'s RGB expansion below
+    // entirely: that expansion is for on-screen display, and handing its RGB
+    // to plate routing would misattribute every palette entry's ink.
+    // (GH#1898) ~keep
+    match crate::extractors::images::decode_indexed_image_in_base_space(
+        Some(ctx.doc),
+        xobject,
+        obj_ref,
+        Some(color_spaces),
+    ) {
+        Ok(Some(indexed)) => {
+            if indexed.width == 0 || indexed.height == 0 {
+                return Ok(());
+            }
+            route_image_samples_to_plates(
+                pixmaps,
+                dict,
+                &indexed.samples,
+                indexed.components,
+                indexed.width as usize,
+                indexed.height as usize,
+                // An Indexed image's own /Decode remaps its INDEX values
+                // (§8.9.5.2), not the base-space channels this buffer now
+                // holds, so it does not apply here -- treat it as already
+                // folded in to skip the base-channel /Decode read below. ~keep
+                true,
+                false,
+                &resolved_space,
+                gs_stack,
+                base_transform,
+                clip,
+                target_inks,
+            );
+            return Ok(());
+        }
+        Ok(None) => {}
         Err(error) => {
             tracing::warn!(
                 error_code = error.telemetry_code(),
                 error_offset = ?error.telemetry_offset(),
-                "skipping image XObject"
+                "skipping Indexed image XObject on separation plates"
             );
             return Ok(());
+        }
+    }
+
+    let pdf_image = if let Some(image) = decoded_image {
+        image
+    } else {
+        match extract_image_from_xobject(Some(ctx.doc), xobject, obj_ref, Some(color_spaces)) {
+            Ok(image) => image,
+            Err(error) => {
+                tracing::warn!(
+                    error_code = error.telemetry_code(),
+                    error_offset = ?error.telemetry_offset(),
+                    "skipping image XObject"
+                );
+                return Ok(());
+            }
         }
     };
     let w = pdf_image.width() as usize;
@@ -2784,8 +2919,7 @@ fn paint_image_to_plates(
     // §8.9.5: BitsPerComponent ∈ {1, 2, 4, 8, 16}. Channel extraction below
     // assumes 8 bits per sample (one byte per channel per pixel) and would
     // mis-read packed sub-byte or 16-bit streams. Until the routing path
-    // supports full BPC expansion, skip with a log entry — matching the
-    // JPX carve-out. ~keep
+    // supports full BPC expansion, skip with a log entry. ~keep
     let bpc = pdf_image.bits_per_component();
     if bpc != 8 {
         tracing::warn!(
@@ -2813,7 +2947,7 @@ fn paint_image_to_plates(
     // samples rescaled at all" fact, true for every sub-byte and 16-bit
     // image, and reading it here drops the /Decode those images are owed. ~keep
     let extractor_decode_applied = pdf_image.decode_folded_in();
-    let (samples, stride, decode_pre_applied) = match (resolved_space.clone(), extractor_cs, pdf_image.data()) {
+    let decoded_route = match (resolved_space.clone(), extractor_cs, pdf_image.data()) {
         // Raw CMYK pixel buffer (Flate / CCITT / etc. on a DeviceCMYK image). ~keep
         (
             ResolvedSpace::Cmyk | ResolvedSpace::IccCmyk,
@@ -2822,7 +2956,7 @@ fn paint_image_to_plates(
                 pixels,
                 format: PixelFormat::CMYK,
             },
-        ) => (pixels.clone(), 4usize, extractor_decode_applied),
+        ) => (pixels.clone(), 4usize, extractor_decode_applied, false),
         // JPEG-encoded DeviceCMYK image — decode to raw CMYK preserving APP14 inversion.
         // ~keep
         (
@@ -2833,12 +2967,21 @@ fn paint_image_to_plates(
             crate::extractors::images::decode_cmyk_jpeg_to_raw_cmyk(bytes)?,
             4,
             false,
+            false,
         ),
         (ResolvedSpace::Separation(_), PdfCs::Separation, ImageData::Raw { pixels, .. }) => {
-            (pixels.clone(), 1, extractor_decode_applied)
+            (pixels.clone(), 1, extractor_decode_applied, false)
         }
+        (
+            ResolvedSpace::Separation(ref ink),
+            PdfCs::DeviceGray | PdfCs::CalGray | PdfCs::ICCBased(1),
+            ImageData::Raw {
+                pixels,
+                format: PixelFormat::Grayscale,
+            },
+        ) if ink == "Black" && !dict.contains_key("ColorSpace") => (pixels.clone(), 1, extractor_decode_applied, true),
         (ResolvedSpace::DeviceN(ref names), PdfCs::DeviceN, ImageData::Raw { pixels, .. }) => {
-            (pixels.clone(), names.len().max(1), extractor_decode_applied)
+            (pixels.clone(), names.len().max(1), extractor_decode_applied, false)
         }
         // Shape mismatch (e.g. extractor reports a different colour space than
         // the dict declared after our resolver ran). Drop silently — the
@@ -2855,13 +2998,58 @@ fn paint_image_to_plates(
             return Ok(());
         }
     };
+    let (samples, stride, decode_pre_applied, invert_gray_to_ink) = decoded_route;
     let _ = color_state;
+
+    route_image_samples_to_plates(
+        pixmaps,
+        dict,
+        &samples,
+        stride,
+        w,
+        h,
+        decode_pre_applied,
+        invert_gray_to_ink,
+        &resolved_space,
+        gs_stack,
+        base_transform,
+        clip,
+        target_inks,
+    );
+    Ok(())
+}
+
+/// Apply `/Decode` (unless the caller says it is already folded into
+/// `samples`) and blit each requested ink's channel from an image's
+/// interleaved raw samples onto its plate.
+///
+/// Shared by [`paint_image_to_plates`]'s direct-extraction path and its
+/// `/Indexed` base-space path (GH#1898), so both apply `/Decode` and blit
+/// identically once their samples are in the resolved colour space's own
+/// component order.
+#[allow(clippy::too_many_arguments)]
+fn route_image_samples_to_plates(
+    pixmaps: &mut [Pixmap],
+    dict: &HashMap<String, Object>,
+    samples: &[u8],
+    stride: usize,
+    w: usize,
+    h: usize,
+    decode_pre_applied: bool,
+    invert_gray_to_ink: bool,
+    resolved_space: &ResolvedSpace,
+    gs_stack: &GraphicsStateStack,
+    base_transform: Transform,
+    clip: Option<&Mask>,
+    target_inks: &[&str],
+) {
+    let pixel_count = w * h;
 
     // §8.9.5.2: /Decode maps raw sample values into the colour space's range.
     // For per-plate routing the colour space is treated as identity, so the
     // only effect that matters is inversion (`/Decode [1 0]` on a Separation
     // image, etc.). Default identity is `[0 1]` per channel. Only consulted
-    // for sample sources the extractor has not already mapped. ~keep
+    // for sample sources the caller has not already mapped. ~keep
     let decode = if decode_pre_applied {
         None
     } else {
@@ -2872,21 +3060,25 @@ fn paint_image_to_plates(
     let transform = combine_transforms(base_transform, &gs.ctm);
 
     for (i, &ink) in target_inks.iter().enumerate() {
-        let Some(channel_idx) = image_channel_for_ink(&resolved_space, ink) else {
+        let Some(channel_idx) = image_channel_for_ink(resolved_space, ink) else {
             continue;
         };
         if channel_idx >= stride {
             continue;
         }
-        let mut plane = extract_image_channel(&samples, pixel_count, stride, channel_idx);
+        let mut plane = extract_image_channel(samples, pixel_count, stride, channel_idx);
         if let Some(decode_pairs) = decode.as_ref()
             && let Some(&(dmin, dmax)) = decode_pairs.get(channel_idx)
         {
             apply_decode_to_plane(&mut plane, dmin, dmax);
         }
+        if invert_gray_to_ink {
+            for sample in &mut plane {
+                *sample = 255 - *sample;
+            }
+        }
         blit_image_plane_to_plate(&mut pixmaps[i], &plane, w as u32, h as u32, transform, clip);
     }
-    Ok(())
 }
 
 /// Expand a 1-bpc packed bitmap into one byte per pixel (0 or 255).
@@ -3066,13 +3258,17 @@ fn paint_image_mask_to_plates(
         };
         let gray = (tint.clamp(0.0, 1.0) * 255.0).round() as u8;
 
-        // Build an RGBA buffer where R=G=B=gray and A=stencil_byte. SourceOver
-        // composites this against the destination so opaque-stencil pixels
-        // replace the plate value with `gray`; transparent-stencil pixels
-        // leave the plate untouched. ~keep
+        // Build a premultiplied RGBA buffer, grey `gray` at opacity `stencil_byte`, which is
+        // the form a tiny_skia pixmap holds. SourceOver composites this against the
+        // destination so opaque-stencil pixels replace the plate value with `gray`;
+        // transparent-stencil pixels leave the plate untouched. Unpremultiplied, a
+        // transparent pixel would add `gray` to the plate under it. ~keep
         let mut rgba = Vec::with_capacity(pixel_count * 4);
         for &alpha in &stencil[..pixel_count] {
-            rgba.extend_from_slice(&[gray, gray, gray, alpha]);
+            let v = tiny_skia::ColorU8::from_rgba(gray, gray, gray, alpha)
+                .premultiply()
+                .red();
+            rgba.extend_from_slice(&[v, v, v, alpha]);
         }
         let Some(size) = tiny_skia::IntSize::from_wh(w as u32, h as u32) else {
             continue;

@@ -459,7 +459,7 @@ fn render_layout_page(
     // `effective_pdf_render_dpi` stays in place for the markdown-structure render, which is
     // never OCR input and must not change. ~keep
     let render_dpi = if normalize_for_ocr {
-        crate::image::dpi::pdf_ocr_render_dpi(doc, page_index, budget.images_config)
+        crate::image::dpi::pdf_ocr_render_dpi(doc, page_index, budget.images_config, budget.security_limits)
     } else {
         crate::image::dpi::effective_pdf_render_dpi(
             budget.images_config,
@@ -924,6 +924,23 @@ pub(super) async fn maybe_run_layout_for_markdown(
     }
 }
 
+#[cfg(all(test, paddle_ocr))]
+static OCR_LAYOUT_RUN_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(all(test, paddle_ocr))]
+static WATCHED_OCR_LAYOUT_CONTENT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(all(test, paddle_ocr))]
+pub(super) fn watch_ocr_layout_runs_for(content: &[u8]) {
+    OCR_LAYOUT_RUN_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    WATCHED_OCR_LAYOUT_CONTENT.store(content.as_ptr() as usize, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(all(test, paddle_ocr))]
+pub(super) fn ocr_layout_run_count() -> usize {
+    WATCHED_OCR_LAYOUT_CONTENT.store(0, std::sync::atomic::Ordering::SeqCst);
+    OCR_LAYOUT_RUN_COUNT.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Run the layout pass used by OCR without blocking a Tokio worker thread.
 ///
 /// `result` holds `data: None` when the `Auto` gate skipped every page: the caller
@@ -945,6 +962,10 @@ pub(super) async fn run_layout_for_ocr(
     security_limits: &crate::extractors::security::SecurityLimits,
     images_config: Option<&crate::core::config::ImageExtractionConfig>,
 ) -> Result<(LayoutAttempt<LayoutRunOutput>, Vec<crate::types::ProcessingWarning>)> {
+    #[cfg(all(test, paddle_ocr))]
+    if WATCHED_OCR_LAYOUT_CONTENT.load(std::sync::atomic::Ordering::SeqCst) == content.as_ptr() as usize {
+        OCR_LAYOUT_RUN_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
     // OCR consumes the layout pass's rasters as its input images, so gated
     // pages still render; only model inference is skipped for them.
     run_layout_for_pdf_pages_async(

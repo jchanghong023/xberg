@@ -17,7 +17,10 @@ keywords = ["pdf", "text-extraction", "pdf-parser", "pdf-rendering", "document-p
 categories = ["parsing", "text-processing"]
 # `include` is load-bearing, not tidiness. tests/ is ~10 MB dominated by PDFs and TTFs that
 # compress poorly; shipping it would push the .crate past crates.io's 10 MiB ceiling. Only the
-# six fixtures the doctests and packaged unit tests actually read are listed. ~keep
+# fixtures the doctests and packaged unit tests actually read are listed -- every fixture any
+# `src/` file `include_bytes!`s MUST appear here or `cargo test` on the packaged crate fails to
+# compile, which `cargo package --verify` does NOT catch because it runs `cargo build`, not
+# `--tests` (GH#1850 added three and missed them). ~keep
 include = [
   "/src/**/*",
   "/Cargo.toml",
@@ -26,6 +29,15 @@ include = [
   "/ATTRIBUTIONS.md",
   "/CHANGELOG.md",
   "/tests/fixtures/jpx/sample_gray.jp2",
+  "/tests/fixtures/jpx/gh1850_rgba.jp2",
+  "/tests/fixtures/jpx/gh1850_rgba.j2k",
+  "/tests/fixtures/jpx/gh1850_grey_alpha.jp2",
+  "/tests/fixtures/jpx/gh1855_cmyk_quadrants.j2k",
+  "/tests/fixtures/jpx/gh1885_palette_cmyk.jp2",
+  "/tests/fixtures/jpx/gh1885_indices_grey.jp2",
+  "/tests/fixtures/jpx/gh1885_palette_alpha.jp2",
+  "/tests/fixtures/jpx/gh1885_hival15_lossy.jp2",
+  "/tests/fixtures/jpx/gh1885_indices_16bit.jp2",
   "/tests/fixtures/encrypted_needs_password.pdf",
   "/tests/fixtures/encrypted_cid_truetype.pdf",
   "/tests/fixtures/encrypted_objstm.pdf",
@@ -88,7 +100,7 @@ regex = "1.13"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.11"
-skrifa = "0.46"                                                                             # capped by harfrust: skrifa 0.47 requires read-fonts ^0.44 while harfrust 0.13.3 still requires ^0.43.3, and text_rasterizer hands a harfrust FontRef to skrifa's OutlineFace, so the two must share one read-fonts. `cargo upgrade --incompatible` raises this and leaves the comment behind; re-pin it. Re-verified 2026-09-25 against the crates.io requirements of harfrust 0.13.3 (latest) and skrifa 0.47.0: still incompatible, 0.47 fails to compile (E0308) ~keep
+skrifa = "0.46"                                                                             # capped by harfrust, which is the binding constraint and not a preference: skrifa 0.47.0 requires read-fonts ^0.44.0 while harfrust 0.13.3 -- the LATEST harfrust -- requires ^0.43.3, and for a 0.x crate those carets cannot resolve to one version. text_rasterizer hands a harfrust `FontRef` to skrifa's `OutlineFace`, so the two must share a single read-fonts or the call is a type error (E0308 + E0599). `cargo upgrade --incompatible` raises this every time and leaves this comment behind; re-pin it. Re-verified 2026-09-27 against the crates.io index: harfrust has no release above 0.13.3, and every skrifa <= 0.46.2 asks for read-fonts ^0.43.x. Unblocks when harfrust ships a read-fonts 0.44 build. ~keep
 smallvec = "1.16"
 stringprep = "0.1"
 subsetter = { version = "0.2", default-features = false }                                  # drops the duplicate skrifa 0.42/read-fonts 0.39 stack ~keep

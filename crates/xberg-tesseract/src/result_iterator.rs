@@ -34,6 +34,29 @@ pub struct WordData {
     pub language: Option<String>,
 }
 
+/// A recognised word with the text and box of each of its symbols, from
+/// [`ResultIterator::extract_word_symbols`].
+#[derive(Debug, Clone)]
+pub struct WordSymbols {
+    pub text: String,
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+    /// The word's symbols in reading order.
+    pub symbols: Vec<SymbolBox>,
+}
+
+/// One symbol of a word: its text and its box.
+#[derive(Debug, Clone)]
+pub struct SymbolBox {
+    pub text: String,
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
 /// Outcome of a full-page word extraction pass over the `ResultIterator`.
 ///
 /// `skipped` distinguishes "the page has no words" from "words exist but
@@ -370,6 +393,33 @@ impl ResultIterator {
         let handle = self.handle.lock().map_err(|_| TesseractError::MutexLockError)?;
         extract_word_data_unlocked(*handle)
     }
+
+    /// Reads the text and box of each symbol in every word that `wanted` accepts, in a single
+    /// mutex lock. The iterator is reset to the beginning first. A word whose text, box or
+    /// symbols cannot be read is left out, so an absent word means "unknown", not "no symbols". ~keep
+    pub fn extract_word_symbols(&self, wanted: impl Fn(&str) -> bool) -> Result<Vec<WordSymbols>> {
+        let handle = self.handle.lock().map_err(|_| TesseractError::MutexLockError)?;
+        let raw = *handle;
+        let mut words = Vec::new();
+
+        unsafe { TessPageIteratorBegin(raw) };
+
+        loop {
+            if let Ok(text) = iterator_text_unlocked(raw, TessPageIteratorLevel::RIL_WORD)
+                && wanted(&text)
+                && let Ok(word) = word_symbols_unlocked(raw, text)
+            {
+                words.push(word);
+            }
+
+            let has_next = unsafe { TessResultIteratorNext(raw, TessPageIteratorLevel::RIL_WORD as c_int) != 0 };
+            if !has_next {
+                break;
+            }
+        }
+
+        Ok(words)
+    }
 }
 
 /// Classifies a single per-word extraction attempt and folds it into the running
@@ -403,35 +453,8 @@ fn record_word_extraction_result(
 /// before calling this function. Passing a handle that is not mutex-guarded, or calling
 /// this function concurrently on the same handle, is undefined behaviour.
 fn extract_word_data_unlocked(raw: *mut c_void) -> Result<WordData> {
-    let text_ptr = unsafe { TessResultIteratorGetUTF8Text(raw, TessPageIteratorLevel::RIL_WORD as c_int) };
-    if text_ptr.is_null() {
-        return Err(TesseractError::NullPointerError);
-    }
-    // SAFETY: Tesseract returned this NUL-terminated allocation and requires TessDeleteText. ~keep
-    let text = unsafe {
-        copy_and_delete_tess_text(text_ptr, |pointer| {
-            // SAFETY: the guard calls this exactly once with the pointer returned by Tesseract. ~keep
-            TessDeleteText(pointer);
-        })
-    }?;
-
-    let mut left = 0;
-    let mut top = 0;
-    let mut right = 0;
-    let mut bottom = 0;
-    let bbox_result = unsafe {
-        TessPageIteratorBoundingBox(
-            raw,
-            TessPageIteratorLevel::RIL_WORD as c_int,
-            &mut left,
-            &mut top,
-            &mut right,
-            &mut bottom,
-        )
-    };
-    if bbox_result == 0 {
-        return Err(TesseractError::InvalidParameterError);
-    }
+    let text = iterator_text_unlocked(raw, TessPageIteratorLevel::RIL_WORD)?;
+    let (left, top, right, bottom) = bounding_box_unlocked(raw, TessPageIteratorLevel::RIL_WORD)?;
 
     let confidence = unsafe { TessResultIteratorConfidence(raw, TessPageIteratorLevel::RIL_WORD as c_int) };
     let font_attrs = extract_word_font_attributes(raw);
@@ -446,6 +469,66 @@ fn extract_word_data_unlocked(raw: *mut c_void) -> Result<WordData> {
         confidence,
         font_attrs,
         language,
+    })
+}
+
+/// The text of the current element at `level`. The caller MUST hold the iterator's mutex. ~keep
+fn iterator_text_unlocked(raw: *mut c_void, level: TessPageIteratorLevel) -> Result<String> {
+    let text_ptr = unsafe { TessResultIteratorGetUTF8Text(raw, level as c_int) };
+    if text_ptr.is_null() {
+        return Err(TesseractError::NullPointerError);
+    }
+    // SAFETY: Tesseract returned this NUL-terminated allocation and requires TessDeleteText. ~keep
+    unsafe {
+        copy_and_delete_tess_text(text_ptr, |pointer| {
+            // SAFETY: the guard calls this exactly once with the pointer returned by Tesseract. ~keep
+            TessDeleteText(pointer);
+        })
+    }
+}
+
+/// The box `(left, top, right, bottom)` of the current element at `level`. The caller MUST hold
+/// the iterator's mutex. ~keep
+fn bounding_box_unlocked(raw: *mut c_void, level: TessPageIteratorLevel) -> Result<(i32, i32, i32, i32)> {
+    let (mut left, mut top, mut right, mut bottom) = (0, 0, 0, 0);
+    let found =
+        unsafe { TessPageIteratorBoundingBox(raw, level as c_int, &mut left, &mut top, &mut right, &mut bottom) };
+    if found == 0 {
+        return Err(TesseractError::InvalidParameterError);
+    }
+    Ok((left, top, right, bottom))
+}
+
+/// The current word with the text and box of each of its symbols. The walk leaves the iterator
+/// inside the word, so the caller moves on with a word-level step. The caller MUST hold the
+/// iterator's mutex. ~keep
+fn word_symbols_unlocked(raw: *mut c_void, text: String) -> Result<WordSymbols> {
+    let (left, top, right, bottom) = bounding_box_unlocked(raw, TessPageIteratorLevel::RIL_WORD)?;
+    let word_level = TessPageIteratorLevel::RIL_WORD as c_int;
+    let symbol_level = TessPageIteratorLevel::RIL_SYMBOL as c_int;
+    let mut symbols = Vec::new();
+    loop {
+        let symbol_text = iterator_text_unlocked(raw, TessPageIteratorLevel::RIL_SYMBOL)?;
+        let (left, top, right, bottom) = bounding_box_unlocked(raw, TessPageIteratorLevel::RIL_SYMBOL)?;
+        symbols.push(SymbolBox {
+            text: symbol_text,
+            left,
+            top,
+            right,
+            bottom,
+        });
+        let at_last_symbol = unsafe { TessPageIteratorIsAtFinalElement(raw, word_level, symbol_level) != 0 };
+        if at_last_symbol || unsafe { TessResultIteratorNext(raw, symbol_level) } == 0 {
+            break;
+        }
+    }
+    Ok(WordSymbols {
+        text,
+        left,
+        top,
+        right,
+        bottom,
+        symbols,
     })
 }
 
@@ -540,6 +623,7 @@ ffi_extern! {
     pub fn TessResultIteratorSymbolIsSubscript(handle: *mut c_void) -> c_int;
     pub fn TessResultIteratorSymbolIsDropcap(handle: *mut c_void) -> c_int;
     pub fn TessResultIteratorNext(handle: *mut c_void, level: c_int) -> c_int;
+    pub fn TessPageIteratorIsAtFinalElement(handle: *mut c_void, level: c_int, element: c_int) -> c_int;
     pub fn TessPageIteratorBoundingBox(
         handle: *mut c_void,
         level: c_int,

@@ -151,6 +151,14 @@ jobs:
         run: cargo clippy --locked -p xberg --no-default-features --features "formula-recognition,pdf" --all-targets -- -D warnings
         shell: bash
 
+      # `candle-glm-ocr` is the only OCR backend that turns on `layout-detection`, so this
+      # cell compiles layout + OCR without `pdf`. It catches a helper gated wider than its
+      # pdf-only callers. Skipped on Linux aarch64 for the same candle reason as below. ~keep
+      - name: Clippy GLM-OCR single backend
+        if: matrix.os != 'ubuntu-24.04-arm'
+        run: cargo clippy --locked -p xberg --no-default-features --features "tokio-runtime,ocr,candle-glm-ocr" --all-targets -- -D warnings
+        shell: bash
+
       # `cargo clippy --workspace` above lints xberg-candle-ocr too, but only at its
       # default (empty) feature set -- every per-model module (trocr, paddleocr-vl,
       # glm-ocr, deepseek-ocr) is feature-gated and so invisible to that step. This
@@ -714,15 +722,20 @@ jobs:
   # provisions a real pdfium runtime via the existing `download-pdfium` composite action
   # (rather than a third bespoke download script), then runs only that one test.
   #
-  # Version pin: the checked-in bindings under
-  # crates/xberg-pdfium-render/include/pdfium_7678/ were generated against pdfium release
-  # 7678, while scripts/download_pdfium_runtime.sh's own default (used by
-  # `task pdfium:download`) pins 7881 for unrelated reasons (see commit f88391c26c). A
-  # binary/bindings version mismatch resolves every `FPDF_*` symbol via `dlopen` at runtime,
-  # not at compile time, so a mismatched download would not fail cleanly -- it can crash the
-  # test process instead of raising `XbergError::MissingDependency`. Pin this job's download
-  # to 7678 (the bindings' actual version), not the script's default, to keep binary and
-  # bindings in lockstep.
+  # Version pin: 7678, the release the checked-in bindings were generated against
+  # (crates/xberg-pdfium-render/src/lib.rs includes bindgen/pdfium_7678.rs, the only binding set
+  # in the tree). Every other pdfium version pin in the repo now agrees -- the three install
+  # scripts and the four Dockerfiles -- so this job no longer diverges from the script default
+  # (GH#1882; it read 7881 until then, against 7678 bindings).
+  #
+  # Every `FPDF_*` symbol resolves via `dlopen` at run time, not at compile time, so a mismatch
+  # is never a build error. `DynamicPdfiumBindings::new` probes all 446 required symbols before
+  # constructing anything, so a MISSING symbol does fail cleanly as
+  # `XbergError::MissingDependency` -- an earlier version of this comment claimed such a mismatch
+  # "can crash the test process", which the probe disproves. The case that genuinely goes
+  # undetected is a symbol that is still exported but whose signature or struct layout changed:
+  # nothing validates arity or layout (build.rs sets layout_tests(false)), so that is silent UB.
+  # Keeping binary and bindings on one version is what avoids it.
   #
   # `stage-pdfium-runtime` (the second existing composite action) copies the runtime library
   # into a binding crate/package directory for build-time linking or co-located dlopen (e.g.

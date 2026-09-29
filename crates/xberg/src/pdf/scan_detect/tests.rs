@@ -778,6 +778,19 @@ fn full_page_raster_density_reads_the_scan_density_and_ignores_figures() {
         20,
     ))
     .unwrap();
+    let figure_text = figure
+        .extract_page_text_with_options(0, ReadingOrder::ColumnAware)
+        .expect("extract mapped figure text");
+    let mapped_glyphs = figure_text
+        .spans
+        .iter()
+        .filter(|span| span.provenance != Some(MappingProvenance::Fallback))
+        .map(|span| span.text.chars().count())
+        .sum::<usize>();
+    assert!(
+        mapped_glyphs > OCR_SCAN_MAX_GLYPHS,
+        "negative control must exceed the readable-glyph cutoff; got {mapped_glyphs}"
+    );
     assert_eq!(
         full_page_raster_density(&figure, 0),
         None,
@@ -802,5 +815,48 @@ fn full_page_raster_density_reads_the_scan_density_and_ignores_figures() {
         full_page_raster_density(&blank, 0),
         None,
         "a page without images has no raster density"
+    );
+}
+
+#[cfg(any(feature = "ocr", feature = "ocr-pipeline", feature = "layout-detection"))]
+#[test]
+fn inset_raster_with_more_than_four_hundred_mapped_artifact_glyphs_is_a_figure() {
+    let mut source = lopdf::Document::load_mem(&crate::pdf::render::build_full_page_raster_pdf(
+        (100.0, 100.0),
+        (400, 400),
+        0.64,
+        20,
+    ))
+    .expect("load mapped-text figure fixture");
+    let page_id = *source.get_pages().get(&1).expect("fixture has one page");
+    let content = String::from_utf8(source.get_page_content(page_id)).expect("fixture content is ASCII");
+    let artifact_content = content
+        .replace("BT /F1", "/Artifact << /Type /Layout >> BDC BT /F1")
+        .replace(" Tj ET\n", " Tj ET EMC\n");
+    source
+        .change_page_content(page_id, artifact_content.into_bytes())
+        .expect("replace page content");
+    let mut bytes = Vec::new();
+    source.save_to(&mut bytes).expect("serialize artifact fixture");
+    let doc = PdfDocument::from_bytes(bytes).expect("open artifact fixture");
+
+    let page = doc
+        .extract_page_text_with_options(0, ReadingOrder::ColumnAware)
+        .expect("extract mapped artifact text");
+    let mapped_artifact_glyphs = page
+        .spans
+        .iter()
+        .filter(|span| span.artifact_type.is_some())
+        .filter(|span| span.provenance != Some(MappingProvenance::Fallback))
+        .map(|span| span.text.chars().count())
+        .sum::<usize>();
+    assert!(
+        mapped_artifact_glyphs > OCR_SCAN_MAX_GLYPHS,
+        "negative control must exceed the readable-glyph cutoff; got {mapped_artifact_glyphs}"
+    );
+    assert_eq!(
+        full_page_raster_density(&doc, 0),
+        None,
+        "visible mapped artifact text still makes an inset raster a figure"
     );
 }

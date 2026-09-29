@@ -229,6 +229,16 @@ fn ensure_layout_model_path() -> crate::Result<Arc<PathBuf>> {
     })
 }
 
+/// Parse and check the GLM-OCR `backend_options`.
+///
+/// Configuration validation and every page both call this, so an invalid option
+/// fails before any page runs. ~keep
+pub(crate) fn check_backend_options(value: Option<&serde_json::Value>) -> Result<GlmOcrBackendOptions> {
+    let options: GlmOcrBackendOptions = parse_backend_options(value, "candle-glm-ocr")?;
+    validate_optional_non_empty(options.cache_dir.as_deref(), "candle-glm-ocr", "cache_dir")?;
+    Ok(options)
+}
+
 /// Options parsed from backend-specific configuration.
 ///
 /// Extracted from [`OcrConfig.backend_options`] to make GLM-OCR configuration
@@ -421,8 +431,7 @@ impl GlmOcrBackend {
     /// fail `GlmOcrEngine::new_with_hf`'s revision check, and the pin itself is already the
     /// default. See the engine-level pinning check for the (retained) defensive guard.
     fn parse_options(&self, config: &OcrConfig) -> Result<GlmOcrOptions> {
-        let options: GlmOcrBackendOptions = parse_backend_options(config.backend_options.as_ref(), "candle-glm-ocr")?;
-        validate_optional_non_empty(options.cache_dir.as_deref(), "candle-glm-ocr", "cache_dir")?;
+        let options = check_backend_options(config.backend_options.as_ref())?;
         let task = match options.task {
             None => self.default_task,
             Some(GlmOcrTaskKind::Ocr) => GlmOcrTask::Ocr,

@@ -129,6 +129,7 @@ pub struct ExtractedDocument {
     /// OCR-only extraction, or mixed native/OCR output.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub extraction_method: Option<ExtractionMethod>,
     /// Tables extracted from the document, each with structured cell data.
     pub tables: Vec<Table>,
@@ -200,6 +201,12 @@ pub struct ExtractedDocument {
     /// Always `None` for non-Djot documents.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    // utoipa types every `Option<T>` as `oneOf[$ref, null]`, which is wrong for a field that
+    // `skip_serializing_if` omits rather than nulls, and buries the description on a union
+    // branch. `nullable = false` is the documented opt-out and does not add the field to
+    // `required`. Every omission-only optional reference in this crate carries it (GH#1841);
+    // the four that genuinely serialise `null` deliberately do not. ~keep
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub djot_content: Option<DjotContent>,
 
     /// OCR elements with full spatial and confidence metadata.
@@ -232,6 +239,7 @@ pub struct ExtractedDocument {
     /// Independent of `result_format` — can be combined with Unified or ElementBased.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub document: Option<DocumentStructure>,
 
     /// Extracted keywords when keyword extraction is enabled.
@@ -359,6 +367,7 @@ pub struct ExtractedDocument {
     /// liter-llm-driven abstractive backend.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub summary: Option<super::summary::DocumentSummary>,
 
     /// Confidence score computed by the heuristics pipeline.
@@ -372,6 +381,7 @@ pub struct ExtractedDocument {
     #[cfg(feature = "heuristics")]
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub extraction_confidence: Option<crate::heuristics::confidence::ExtractionConfidence>,
 
     /// Translation of `content` produced by the translation post-processor.
@@ -379,6 +389,7 @@ pub struct ExtractedDocument {
     /// `None` when translation is not configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub translation: Option<super::translation::Translation>,
 
     /// Per-page classifications produced by the page-classification post-processor.
@@ -396,6 +407,7 @@ pub struct ExtractedDocument {
     /// was replaced. `None` when redaction is not configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub redaction_report: Option<super::redaction::RedactionReport>,
 
     /// Mathematical formulas recognized in the document.
@@ -613,6 +625,7 @@ pub struct Chunk {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     #[cfg_attr(feature = "alef-meta", alef(since = "1.1.0"))]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub sparse_embedding: Option<crate::SparseEmbedding>,
 
     /// Optional ColBERT-style multi-vector (late-interaction) embedding for this chunk.
@@ -626,6 +639,7 @@ pub struct Chunk {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
     #[cfg_attr(feature = "alef-meta", alef(since = "1.1.0"))]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub late_interaction: Option<crate::MultiVectorEmbedding>,
 
     /// Metadata about this chunk's position and properties.
@@ -693,6 +707,7 @@ pub struct ChunkMetadata {
     /// Only populated when `ChunkerType::Markdown` is used.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub heading_context: Option<HeadingContext>,
 
     /// Flattened heading trail from document root to this chunk's section.
@@ -756,6 +771,7 @@ pub struct PageSpan {
 
     /// Bounding box on this page, if known.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub bbox: Option<BoundingBox>,
 }
 
@@ -844,13 +860,14 @@ pub struct ExtractedImage {
     /// When OCR is performed on this image, the result is embedded here
     /// rather than in a separate collection, making the relationship explicit.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[cfg_attr(feature = "api", schema(value_type = Option<ExtractedDocument>))]
+    #[cfg_attr(feature = "api", schema(value_type = Option<ExtractedDocument>, nullable = false))]
     pub ocr_result: Option<Box<ExtractedDocument>>,
 
     /// Bounding box of the image on the page (PDF coordinates: x0=left, y0=bottom, x1=right, y1=top).
     /// Only populated for PDF-extracted images when position data is available from the PDF extractor.
     #[serde(skip_serializing_if = "Option::is_none")]
     #[serde(default)]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub bounding_box: Option<BoundingBox>,
 
     /// Original source path of the image within the document archive (e.g., "media/image1.png" in DOCX).
@@ -862,6 +879,7 @@ pub struct ExtractedImage {
     /// Heuristic classification of what this image likely depicts.
     /// `None` if classification was disabled or inconclusive.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "api", schema(nullable = false))]
     pub image_kind: Option<ImageKind>,
 
     /// Confidence score for `image_kind`, in the range 0.0 to 1.0.
