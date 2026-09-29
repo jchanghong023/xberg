@@ -1855,6 +1855,65 @@ mod tests {
         doc
     }
 
+    #[test]
+    fn image_ocr_grid_preserves_visual_rows_through_markdown_rendering() {
+        use crate::types::internal::InternalElement;
+        use crate::types::{BoundingBox, OcrElementLevel};
+
+        for with_host_text in [false, true] {
+            let mut doc = doc_with_ocr_image(Some("差距\n口径\nPaddleOCR\nTesseract"));
+            let mut ocr = InternalDocument::new("image/png");
+            for (text, x, y) in [
+                ("差距", 600.0, 1.0),
+                ("口径", 0.0, 2.0),
+                ("PaddleOCR", 400.0, 0.0),
+                ("Tesseract", 200.0, 1.0),
+            ] {
+                let mut element = InternalElement::text(
+                    ElementKind::OcrText {
+                        level: OcrElementLevel::Line,
+                    },
+                    text,
+                    0,
+                );
+                element.bbox = Some(BoundingBox {
+                    x0: x,
+                    y0: y,
+                    x1: x + 100.0,
+                    y1: y + 20.0,
+                });
+                ocr.push_element(element);
+            }
+            doc.images[0].ocr_result.as_mut().unwrap().ocr_internal_document = Some(ocr);
+            if with_host_text {
+                doc.push_element(InternalElement::text(ElementKind::Paragraph, "HOST_END", 0));
+            }
+            let markdown = crate::rendering::markdown::render_markdown(&doc);
+            assert!(
+                markdown.contains("![](image_0.png)\n\n```text\n"),
+                "marker must precede its fence: {markdown:?}"
+            );
+            let body = markdown
+                .split("```text\n")
+                .nth(1)
+                .unwrap()
+                .split("\n```")
+                .next()
+                .unwrap();
+            assert_eq!(
+                body.lines().count(),
+                1,
+                "rendering must not split measured rows: {markdown:?}"
+            );
+            assert_eq!(
+                body.split_whitespace().collect::<Vec<_>>(),
+                ["口径", "Tesseract", "PaddleOCR", "差距"]
+            );
+            assert_eq!(markdown.contains("HOST_END"), with_host_text);
+            assert!(!body.contains("HOST_END"));
+        }
+    }
+
     /// The block is the only place a markdown reader finds the image file and what it
     /// contained, so it carries both halves whatever `images.ocr_text_only` and
     /// `images.append_ocr_text` say. Those flags used to strip it — both set against the block

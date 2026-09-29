@@ -1494,6 +1494,16 @@ impl Plugin for PaddleOcrBackend {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl OcrBackend for PaddleOcrBackend {
+    fn model_state(&self) -> serde_json::Value {
+        let pool = self.engine_pool.lock().unwrap_or_else(|e| e.into_inner());
+        let mut resident: Vec<_> = pool
+            .iter()
+            .filter(|(_, cell)| cell.get().is_some())
+            .map(|(key, _)| key.clone())
+            .collect();
+        resident.sort();
+        serde_json::json!({"resident_sessions": resident, "initialized": !resident.is_empty()})
+    }
     async fn process_image(&self, image_bytes: &[u8], config: &OcrConfig) -> Result<ExtractedDocument> {
         if image_bytes.is_empty() {
             return Err(crate::XbergError::Validation {
@@ -1944,6 +1954,21 @@ mod tests {
             return;
         }
         assert_eq!(paddle_engine_layout(0), (1, 1));
+    }
+
+    /// (fork) `model_state` is the non-loading half of the worker's `model_state`
+    /// query (WORKER.md): it must answer from the engine pool without resolving or
+    /// initializing any model. A freshly constructed backend owns no engines —
+    /// construction only resolves the cache directory — so the pool reports empty and
+    /// `initialized: false`; per-key population is exercised by the real-model
+    /// integration tests.
+    #[test]
+    fn model_state_reports_an_empty_pool_before_any_engine_loads() {
+        let backend = PaddleOcrBackend::new().expect("construction resolves no models");
+        assert_eq!(
+            backend.model_state(),
+            serde_json::json!({"resident_sessions": [], "initialized": false})
+        );
     }
 
     const CONCURRENT_INITIALIZER_COUNT: usize = 8;

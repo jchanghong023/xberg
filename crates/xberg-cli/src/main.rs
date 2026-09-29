@@ -274,14 +274,17 @@ enum Commands {
         file_configs: Option<PathBuf>,
     },
 
-    /// Run a batch-local stdio worker process
+    /// Run a resident stdio worker for concurrent documents and screenshots
     ///
-    /// Serves one batch for an embedding caller (JchTools): reads one JSON request per
+    /// Serves an embedding caller (JchTools): reads one JSON request per
     /// line from stdin (`{"id":..,"command":"extract","path":"..","mode":"normal"}`) and
     /// writes exactly one JSON response line per request to stdout, echoing `id`. The
-    /// extraction configuration is fixed at startup and the process (plus its loaded
-    /// models) is reused for the whole batch; stdin EOF ends the batch and the process
-    /// exits after the in-flight request. stdout carries protocol messages only —
+    /// document and screenshot configurations are independent and fixed at startup.
+    /// Both model sets remain in this process across batches. Responses may arrive
+    /// out of order. Supports per-request cancel/timeout, extract mode=fast and
+    /// formats/capabilities/model_state queries without starting another process.
+    /// Associate responses by id. stdin EOF drains documents and cancels
+    /// screenshots before exit. stdout carries protocol messages only —
     /// diagnostics go to stderr. Full contract: docs/requirements/WORKER.md
     Worker {
         /// Path to config file (TOML, YAML, or JSON). If not specified, searches for xberg.toml/yaml/json in current and parent directories.
@@ -292,7 +295,7 @@ enum Commands {
         #[arg(long, conflicts_with = "config")]
         no_config_discovery: bool,
 
-        /// Inline JSON configuration. Applied after config file; the worker serves the whole batch with this fixed config.
+        /// Inline JSON configuration. Applied after config file and fixed for the worker's lifetime.
         ///
         /// Example: --config-json '{"ocr":{"backend":"tesseract"},"chunking":{"max_chars":1000}}'
         #[arg(long)]
@@ -1338,8 +1341,8 @@ mod feature_profile_tests {
         assert!(command_arg_ids("extract").iter().any(|id| id == "url"));
     }
 
-    /// `worker` is registered unconditionally: it is the batch-local stdio process the
-    /// JchTools integration holds for a whole batch (docs/requirements/WORKER.md), so it
+    /// `worker` is registered unconditionally: it is the resident stdio process the
+    /// JchTools integration shares across documents and screenshots (docs/requirements/WORKER.md), so it
     /// must exist in every feature profile, not only when api/mcp servers are compiled in.
     #[test]
     fn worker_command_is_always_exposed() {

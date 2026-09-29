@@ -41,7 +41,7 @@
 - **test_documents 语料二进制不进 git**：`test_documents` 子模块只含源码与 `corpus.lock.json`（693 个对象的 sha256/大小清单），.pdf/.docx/.pst 等二进制须先从公开 bucket 拉取到工作树（约 618 MB，一次性）：`cd test_documents && python scripts/fetch_corpus.py`（已正确文件只做哈希校验；语料路径被子模块 .gitignore 忽略，不会弄脏父仓）。缺语料时 cargo test 会出现大量 "fixture not found" 失败；testgate fulltest 门的 `test-documents-corpus` 阶段会先做存在性预检并给出该修复命令。
 - **现状与缺口（如实记录）**：本 fork 没有自动跑 Rust 测试的 CI（上游 `ci-rust.yaml` 等编译 / 测试 workflow 被仓库守卫 skip，无守卫的 `ci-lint` 只跑治理 / 文档 / 脚本类检查，不编译 Rust、不跑 Rust 测试）；fork 新增模块多数自带 UT（`extraction/visio.rs`、`rendering/ocr_layout.rs`、`extraction/markdown_utils.rs`、`extraction/excel/images.rs`、`transcription/sensevoice/`、`crates/xberg-windows-metafile`；Whisper 链路移除后 `transcription/wmf.rs` 无 UT 的旧记录已退役），未覆盖处以需求目录各文档的缺口记录为准；上游 `e2e/` + `fixtures/` 的语言绑定 e2e 在本 fork 不运行、不作为验收依据。
 - 复用已有有效测试，不为每处修改机械新增用例；纯文档等非功能变更按实际影响验证，不运行无关完整测试。
-- 当前转换脚本只覆盖真实 CLI 抽取，不能据此声称 HTTP 服务、性能日志或每条解码回退路径完成 E2E；覆盖盲区及未满足需求见 [DELIVERY.md](docs/requirements/DELIVERY.md) 和对应需求文档。修改相关能力时补齐必要验证，未经授权不执行费时测试。
+- 当前转换脚本只覆盖真实 CLI 抽取，不能据此声称 HTTP 服务、worker 协议、截图 OCR、性能日志或每条解码回退路径完成 E2E；覆盖盲区及未满足需求见 [DELIVERY.md](docs/requirements/DELIVERY.md) 和对应需求文档。修改相关能力时补齐必要验证，未经授权不执行费时测试。
 - fork 行为改变上游测试前提时，依据需求调整前提/断言并保留有效覆盖，不删除测试来掩盖失败；与 fork 差异无关的上游测试语义保留。
 
 ## 三级测试门操作
@@ -54,6 +54,8 @@
 | `python testgate.py fulltest` | 每次须用户明确授权。三 crate fmt → fork feature 集 build-cli → `fulltest.py --keep-going` → 语料存在性 → 三 crate test → 三 crate clippy `-D warnings`。阶段依赖与独立结果以 `FULLTEST_STAGES` 为准；任一失败即门失败。 |
 | `python testgate.py slowtest` | 每次须用户明确授权。先完整 fulltest 门；本地失败则后续跳过，成功再运行 slowtest.py。远程阶段默认未授权，仅能报告本地部分。 |
 
+- 截图 OCR 的独立 UT 入口为 `cargo test -p xberg-snapshot-ocr`（同样须用户点名）。`tests/snapshot_models_gated.rs` 的真实模型用例需 `XBERG_SNAPSHOT_TEST_MODELS` 指向固定字节模型目录，可选 `XBERG_SNAPSHOT_TINY_DICT` 指向错配字典；动态 ORT 构建还需 `ORT_DYLIB_PATH`。缺资产时用例提前返回，须报告未验证。当前三 crate 门不包含该 crate 自身的 fmt / UT / clippy；新增命令说明不扩大自主运行权限。
+- 文档 OCR 同行对齐的真实 CLI 用例为 `commands_test::document_ocr_corpus_keeps_table_cells_on_one_line`（默认 ignore）。用户点名运行时，设置 `XBERG_OCR_ALIGNMENT_IMAGE` 指向标准语料 `测试识别.png`，准备 PaddleOCR 模型，然后用标准 fork feature 集执行 `cargo test -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api --test commands_test document_ocr_corpus_keeps_table_cells_on_one_line -- --ignored`。用例强制离线、不下载，缺图/模型即失败；未显式运行不能计作同行对齐已验收。
 - xberg 的 test/clippy 用 `FEATURES_LIB = formats-no-heic,analysis,ocr,paddle-ocr,transcription,layout-detection,api`，保留上游 layout 专属测试与配置校验；CLI 用标准 fork 集且 `--no-default-features`。测试 feature 集不等于出厂能力。test 阶段 `CARGO_BUILD_JOBS=8`，防止 Windows 页面文件耗尽（os error 1455），不缩减覆盖。
 - 远程发布有真实公开副作用：只有用户明确授权发布目标并显式加 `--with-release-ci` 才能触发；要求工作区干净、HEAD 已推到 origin。workflow 为 `.github/workflows/build-windows-cli.yml`，需轮询最终结果。不得将未授权跳过的远程阶段描述为通过，不执行 WSL/跨平台验证。
 - 消歧：点名 `fulltest.py` / `slowtest.py`＝仅脚本；点名“fulltest / slowtest 门”“完整本地验证”“testgate xxx”＝对应门；口语“跑 fulltest”默认指 fulltest.py。
@@ -88,7 +90,8 @@
 | crate | 角色 |
 |---|---|
 | `crates/xberg` | 核心库：配置、抽取、OCR、渲染、转写、HTTP API 都在这里面 |
-| `crates/xberg-cli` | 二进制 `xberg`：clap 定义在 `src/main.rs`，子命令在 `src/commands/`（extract / batch / worker / cache / config / doctor / server 等；worker 是 JchTools 批次用的 stdio 工作进程，需求见 [WORKER.md](docs/requirements/WORKER.md)） |
+| `crates/xberg-cli` | 二进制 `xberg`：clap 定义在 `src/main.rs`，子命令在 `src/commands/`（extract / batch / worker / cache / config / doctor / server 等；worker 是文档转换与截图 OCR 共用的本地 stdio 工作进程，需求见 [WORKER.md](docs/requirements/WORKER.md)） |
+| `crates/xberg-snapshot-ocr` | **fork 新增**：独立截图 OCR 引擎，含瓦片、合并、识别与布局；CLI 接线在 `commands/snapshot_ocr.rs`，需求见 [OCR-SNAPSHOT.md](docs/requirements/OCR-SNAPSHOT.md) |
 | `crates/xberg-windows-metafile` | **fork 新增**：纯 GDI 把 EMF/WMF 栅格化成 PNG |
 | `xberg-paddle-ocr` / `xberg-tesseract` / `xberg-candle-ocr` | OCR 后端 crate（本 fork 只用前两个，candle 不编） |
 | `xberg-native-pdf` / `xberg-libheif` / `xberg-gliner` | PDF 原生解析 / heic（fork 不编）/ NER gliner（fork 不编） |
@@ -113,6 +116,8 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 - `docs-site/`（Astro + Starlight 文档）、`e2e/` + `fixtures/`、`.ai-rulez/`（ai-rulez 管理的 AI 规则/技能，改规则后需用固定版本的 ai-rulez 重新生成 bundle）。**`e2e/` 与 `fixtures/` 是上游的语言绑定 e2e 资产**（csharp/dart/go/...），本 fork 的验收不走它们（走 fulltest.py），日常不要为它们做适配；merge 上游带进来的改动原样保留即可。
 - `packages/` / `integrations/` / `plugin/` / `charts/` / `templates/`——上游生态资产（语言包、第三方集成、Claude 插件、Helm chart、README 生成模板），fork 不主动维护，merge 时原样保留（引擎新增格式时的计数同步除外，见本文件「仓库性质与上游同步」）。
 - CLI 运行入口：`target\debug\xberg.exe extract <输入>`、`batch`；HTTP 入口 `target\debug\xberg.exe serve`，路由在 `crates/xberg/src/api/router.rs`（如 `/extract`、`/health`）。调用参数先按源码/对应二进制帮助核对，运行服务或转换仍应属于用户任务范围。
+- 截图入口：`target\debug\xberg.exe snapshot-ocr --image <PNG路径> --models <模型目录> --json`；模型目录按 `--models` → `snapshot_ocr.models_dir` → `XBERG_SNAPSHOT_MODEL_DIR` → exe 旁 `models/snapshot-ocr` 解析。目录内为 `det.onnx`、`rec.onnx`、`dict/dict.txt`；标准 CLI 动态 ORT 运行前需配置 `ORT_DYLIB_PATH`。`worker` 的四命令在 `commands/worker.rs`；同进程常驻与双场景并发要求以 WORKER.md 为准，调度入口为 `commands/worker/scheduler.rs`，文档与截图分别使用进程内常驻线程，单出口按 id 回包。真实子进程验证不由 fulltest.py 覆盖，协议和未满足项见 [WORKER.md](docs/requirements/WORKER.md)。
+- worker 并发 E2E 入口为 `python scripts/tests/worker_concurrency.py --cli <已编译xberg.exe> --config <JSON配置> --document <耗时足够的真实OCR文档> --snapshot <PNG> --document-text <文档OCR必含文本> --snapshot-text <截图必含文本> --media <真实语音文件> --media-text <转录必含文本>`，**仅在用户明确要求测试时运行**。配置须显式包含独立的 `snapshot_ocr` 块，文档通道使用 PaddleOCR；准备对应模型与 ORT DLL（可用 `ORT_DYLIB_PATH`），脚本不编译、不下载，关闭结果缓存但保留模型缓存。默认报告 `.tmp/worker-concurrency/report.json`；实测两通道同 PID 重叠、跨批次模型/VAD 复用、错误隔离、逐请求取消/超时后复用、fast/normal 切换、进程内查询及 EOF，未观察到重叠即失败；报告包含二进制与语料 SHA-256。调度 UT 在 `worker/scheduler.rs`，普通 CLI crate 测试入口会包含它们。该 E2E 不在现有 fulltest/slowtest 门内，不能据门通过推断它已运行。
 - OOXML 内嵌对象入口目前为 `extraction/ooxml_embedded/mod.rs`；测试可能外移到同名目录的 `tests.rs`，查找时同时检查 inline tests 与外置测试模块。
 - workspace member 变化时检查上游 `docker/` 与 `.dockerignore` 的构建上下文，保留 `xberg-windows-metafile` 的对应登记；这属于同步已有资产，不扩展本 fork 的支持平台。
 

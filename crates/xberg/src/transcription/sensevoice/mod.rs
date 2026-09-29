@@ -90,10 +90,9 @@ pub struct SenseVoiceResult {
 /// recognizer session) is a process-level cache keyed by the resolved model /
 /// token / DLL paths and the recognizer thread count — the same lifetime model
 /// as the JchTools media worker — so repeated calls in one process skip the
-/// model load. VAD sessions are per-run state and are created and destroyed
-/// each call; digests are verified before any session is created (cache
-/// misses) and the VAD digest on every call. Output semantics are unchanged
-/// by the cache.
+/// model load. The VAD model also stays resident: its streaming state and queued
+/// segments are reset under the session run lock before and after every input.
+/// Digests for all three assets are verified before creating the cached sessions.
 pub fn transcribe_bytes(
     content: &[u8],
     name: &str,
@@ -101,29 +100,46 @@ pub fn transcribe_bytes(
     model_dir: Option<&Path>,
     max_duration_ms: Option<u64>,
 ) -> Result<SenseVoiceResult, String> {
+    transcribe_bytes_cancellable(
+        content,
+        name,
+        mime_type,
+        model_dir,
+        max_duration_ms,
+        &crate::cancellation::CancellationToken::new(),
+    )
+}
+
+/// Cooperative variant: stops between native decode/inference calls, retaining
+/// the cached recognizer. A terminal return means this pipeline has stopped.
+pub fn transcribe_bytes_cancellable(
+    content: &[u8],
+    name: &str,
+    mime_type: &str,
+    model_dir: Option<&Path>,
+    max_duration_ms: Option<u64>,
+    cancel: &crate::cancellation::CancellationToken,
+) -> Result<SenseVoiceResult, String> {
+    check_cancel(cancel)?;
     let model_root = resolve_model_dir(model_dir)?;
 
     let session = get_or_create_session(&model_root)?;
-    let vad_model_path = sherpa::model_file(&model_root, &VAD_MODEL_RELATIVE);
-    if !vad_model_path.is_file() {
-        return Err(format!("媒体模型缺失: {}", vad_model_path.display()));
-    }
-    // VAD 会话每次运行重建（纯状态），但其资产仍在每次调用前校验摘要。
-    verify_asset(&vad_model_path, VAD_MODEL_SHA256, VAD_MODEL_LEN, "Silero VAD 模型")?;
+    check_cancel(cancel)?;
 
     let ffmpeg_dir = resolve_ffmpeg_dir(&model_root)?;
 
     // 字节先落临时文件（FFmpeg 按路径打开输入），用完即删。
     let staged = stage_input(content, mime_type)?;
 
-    run_pipeline(
-        &session,
-        &vad_model_path,
-        &ffmpeg_dir,
-        &staged.path,
-        name,
-        max_duration_ms,
-    )
+    run_pipeline(&session, &ffmpeg_dir, &staged.path, name, max_duration_ms, cancel)
+}
+
+fn check_cancel(cancel: &crate::cancellation::CancellationToken) -> Result<(), String> {
+    if cancel.is_cancelled() {
+        Err("transcription cancelled".into())
+    } else {
+        Ok(())
+    }
 }
 
 /// Recognizer thread count, fixed exactly as the JchTools media chain
@@ -137,6 +153,7 @@ const RECOGNIZER_THREADS: i32 = 1;
 struct SenseVoiceSession {
     sherpa: sherpa::Sherpa,
     recognizer: *const sherpa::OfflineRecognizer,
+    vad: *const sherpa::Vad,
     /// Serializes decode + VAD + inference runs over this session. The JchTools
     /// reference chain is strictly serial per engine; sharing one recognizer
     /// across concurrent caller threads is therefore funneled through this lock
@@ -166,6 +183,7 @@ impl Drop for SenseVoiceSession {
         // SAFETY: the handle was created by `create_recognizer` with the same
         // `sherpa` symbol table, which outlives the process by design.
         self.sherpa.destroy_recognizer_session(self.recognizer);
+        self.sherpa.destroy_vad_session(self.vad);
     }
 }
 
@@ -173,15 +191,29 @@ impl SenseVoiceSession {
     /// Verify the pinned model/token assets, load the sherpa DLL, and build the
     /// recognizer session. Runs only on cache misses; the `sensevoice_model_load`
     /// perf span lives on [`create_recognizer`], the cold-start bulk.
-    fn load(model_path: &Path, tokens_path: &Path, sherpa_path: &Path, threads: i32) -> Result<Self, String> {
+    fn load(
+        model_path: &Path,
+        tokens_path: &Path,
+        sherpa_path: &Path,
+        vad_path: &Path,
+        threads: i32,
+    ) -> Result<Self, String> {
         // SAFETY：模型与 DLL 路径都来自摘要校验后的固定资产；识别器句柄由
         // 会话持有并在 `Drop` 中销毁。
         unsafe {
             let sherpa = sherpa::Sherpa::load(sherpa_path)?;
             let recognizer = create_recognizer(&sherpa, model_path, tokens_path, threads)?;
+            let vad = match create_vad(&sherpa, vad_path) {
+                Ok(vad) => vad,
+                Err(error) => {
+                    sherpa.destroy_recognizer_session(recognizer);
+                    return Err(error);
+                }
+            };
             Ok(Self {
                 sherpa,
                 recognizer,
+                vad,
                 run_lock: Mutex::new(()),
             })
         }
@@ -193,6 +225,19 @@ impl SenseVoiceSession {
 /// per distinct key and kept until process exit.
 static SESSIONS: LazyLock<Mutex<HashMap<String, Arc<SenseVoiceSession>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Non-blocking model query; loading holds the cache lock, so never wait for it.
+pub fn model_state() -> serde_json::Value {
+    match SESSIONS.try_lock() {
+        Ok(sessions) => {
+            let mut keys: Vec<_> = sessions.keys().cloned().collect();
+            keys.sort();
+            serde_json::json!({"state": if keys.is_empty() { "uninitialized" } else { "ready" }, "resident_sessions": keys})
+        }
+        Err(std::sync::TryLockError::WouldBlock) => serde_json::json!({"state": "loading"}),
+        Err(_) => serde_json::json!({"state": "error", "error": "session cache poisoned"}),
+    }
+}
 
 /// Cache key for one loaded session — stable across calls that resolve to the
 /// same assets and engine configuration.
@@ -211,6 +256,13 @@ fn session_cache_key(model_path: &Path, tokens_path: &Path, sherpa_path: &Path, 
 fn get_or_create_session(model_root: &Path) -> Result<Arc<SenseVoiceSession>, String> {
     let model_path = sherpa::model_file(model_root, &SENSEVOICE_MODEL_RELATIVE);
     let tokens_path = sherpa::model_file(model_root, &TOKENS_RELATIVE);
+    let vad_path = sherpa::model_file(model_root, &VAD_MODEL_RELATIVE);
+    let sherpa_path = resolve_sherpa_dll(model_root)?;
+    let key = session_cache_key(&model_path, &tokens_path, &sherpa_path, RECOGNIZER_THREADS);
+    let mut sessions = SESSIONS.lock().map_err(|e| format!("会话缓存损坏: {e}"))?;
+    if let Some(session) = sessions.get(&key) {
+        return Ok(Arc::clone(session));
+    }
     for path in [&model_path, &tokens_path] {
         if !path.is_file() {
             return Err(format!("媒体模型缺失: {}", path.display()));
@@ -224,25 +276,21 @@ fn get_or_create_session(model_root: &Path) -> Result<Arc<SenseVoiceSession>, St
         "SenseVoice 模型",
     )?;
     verify_asset(&tokens_path, TOKENS_SHA256, TOKENS_LEN, "SenseVoice tokens")?;
-    let sherpa_path = resolve_sherpa_dll(model_root)?;
-
-    let key = session_cache_key(&model_path, &tokens_path, &sherpa_path, RECOGNIZER_THREADS);
-    let mut sessions = SESSIONS.lock().map_err(|e| format!("会话缓存损坏: {e}"))?;
-    if let Some(session) = sessions.get(&key) {
-        return Ok(Arc::clone(session));
-    }
+    verify_asset(&vad_path, VAD_MODEL_SHA256, VAD_MODEL_LEN, "Silero VAD 模型")?;
     let session = Arc::new(SenseVoiceSession::load(
         &model_path,
         &tokens_path,
         &sherpa_path,
+        &vad_path,
         RECOGNIZER_THREADS,
     )?);
     sessions.insert(key, Arc::clone(&session));
+    tracing::info!("SenseVoice and Silero VAD sessions initialized successfully");
     Ok(session)
 }
 
-/// Create the per-run Silero VAD session (fresh state per decode; destroyed
-/// with the pipeline via [`sherpa::RealVad`]'s `Drop`).
+/// Create the resident Silero VAD session; RealVad borrows it under run_lock and
+/// resets streaming state without unloading the model.
 unsafe fn create_vad(sherpa_engine: &sherpa::Sherpa, vad_model_path: &Path) -> Result<*const sherpa::Vad, String> {
     // SAFETY：VAD 模型路径来自摘要校验后的固定资产；指针在本函数栈上
     // 存活到 FFI 调用结束，返回的会话由 RealVad 的 Drop 销毁。
@@ -278,33 +326,34 @@ unsafe fn create_recognizer(
 
 /// Load the FFmpeg shared libraries, decode + segment + transcribe, and
 /// assemble the SV-06 output. The recognizer comes from the process-level
-/// session cache; VAD sessions are created and destroyed per run. Split from
+/// session cache; VAD streaming state is reset per run. Split from
 /// [`transcribe_bytes`] so the perf spans wrap the exact stages named in
 /// PERFORMANCE.md.
 #[allow(clippy::too_many_arguments)]
 fn run_pipeline(
     session: &SenseVoiceSession,
-    vad_model_path: &Path,
     ffmpeg_dir: &Path,
     media_path: &Path,
     name: &str,
     max_duration_ms: Option<u64>,
+    cancel: &crate::cancellation::CancellationToken,
 ) -> Result<SenseVoiceResult, String> {
     // 同一会话上的解码与推理严格串行（JchTools 参考语义）；锁内不涉及其它锁。
     let _run_guard = session.run_lock.lock().map_err(|_| "会话运行锁损坏".to_string())?;
+    check_cancel(cancel)?;
     // SAFETY：模型与 DLL 路径都来自摘要校验后的固定资产；FFI 指针在
     // 本函数栈上存活到全部 FFI 调用结束。
     unsafe {
         let libs = ffmpeg_dll::FfmpegLibs::load(ffmpeg_dir)?;
-        let vad_ptr = create_vad(&session.sherpa, vad_model_path)?;
-
-        let mut real_vad = sherpa::RealVad::new(&session.sherpa, vad_ptr);
+        let mut real_vad = sherpa::RealVad::new(&session.sherpa, session.vad);
         let mut transcriber = sherpa::SenseVoiceTranscriber::new(&session.sherpa, session.recognizer);
-        let mut pipeline = VadPipeline::new(&mut real_vad, &mut transcriber);
+        let mut pipeline = VadPipeline::new(&mut real_vad, &mut transcriber).with_cancel(cancel.clone());
 
         let mut sink = |samples: &[f32]| -> Result<(), String> { vad_push(&mut pipeline, samples) };
-        let outcome = decode_file(&libs, media_path, &mut sink)?;
+        let outcome = decode_file(&libs, media_path, &mut sink, cancel)?;
+        check_cancel(cancel)?;
         vad_finish(&mut pipeline)?;
+        check_cancel(cancel)?;
 
         // 时长以实际喂入 VAD 的样本为准（与片段时间戳同源）。
         let total_samples = pipeline.total_samples();
@@ -346,8 +395,9 @@ fn decode_file(
     libs: &ffmpeg_dll::FfmpegLibs,
     path: &Path,
     sink: &mut dyn FnMut(&[f32]) -> Result<(), String>,
+    cancel: &crate::cancellation::CancellationToken,
 ) -> Result<ffmpeg_dll::DecodeOutcome, String> {
-    ffmpeg_dll::decode_audio(libs, path, |samples| sink(samples))
+    ffmpeg_dll::decode_audio_cancellable(libs, path, |samples| sink(samples), cancel)
 }
 
 // (fork) perf-tracing：VAD 喂入窗口（含出段即转写）。
@@ -678,6 +728,25 @@ mod tests {
     fn resolve_model_dir_explicit_invalid_is_hard_error() {
         let err = resolve_model_dir(Some(Path::new("Z:/definitely/not/a/dir"))).expect_err("显式无效目录必须报错");
         assert!(err.contains("model_dir"), "unexpected: {err}");
+    }
+
+    /// (fork) 协作取消的入口检查点（WORKER.md：排队/运行任务在检查点停止）：
+    /// 已取消的 token 必须在任何资产解析之前返回取消错误——即使模型目录不可用，
+    /// 错误也是「transcription cancelled」而不是缺模型诊断，证明停止不等待模型工作。
+    #[test]
+    fn cancelled_request_stops_before_asset_resolution() {
+        let cancel = crate::cancellation::CancellationToken::new();
+        cancel.cancel();
+        let err = transcribe_bytes_cancellable(
+            b"",
+            "speech.mp4",
+            "video/mp4",
+            Some(Path::new("Z:/definitely/not/a/dir")),
+            None,
+            &cancel,
+        )
+        .expect_err("已取消的请求必须在入口检查点停止");
+        assert_eq!(err, "transcription cancelled");
     }
 
     // 覆盖进程级会话缓存：键对相同输入稳定、对路径与线程配置区分。

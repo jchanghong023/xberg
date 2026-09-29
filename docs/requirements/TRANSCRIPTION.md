@@ -15,7 +15,7 @@
 - 原生库查找顺序：显式配置 → `XBERG_SHERPA_DLL_DIR` / `XBERG_FFMPEG_DLL_DIR` → exe 旁候选目录 → PATH；sherpa DLL 加载前先加载同目录 `onnxruntime.dll`，防 PATH 上旧运行库抢载。外部 ffmpeg 不再是任何路径的运行前提；`XBERG_FFMPEG`、`XBERG_ASF_DECODER` 环境变量退役。
 - WMV/ASF 仍可读（经 FFmpeg DLL 解码，替代原 Media Foundation 路径）。
 - 模型会话在进程内复用（worker 批次、serve），键含模型目录、线程配置与 DLL 路径；摘要校验在会话首次创建时执行。同一识别器上的解码+推理串行，不同模型根互不阻塞。
-- 超时沿用 `transcription.timeout_ms` 墙钟边界，约束包括资产解析在内的整个转写调用；到期丢弃结果（阻塞任务在后台自然结束）。取消仍由调用方按 [WORKER.md](WORKER.md) 边界执行（超时杀进程/关连接）。
+- 普通 extract 的 `transcription.timeout_ms` 仍是其既有墙钟边界。共享 worker 的超时/取消以 [WORKER.md](WORKER.md) 为准：每个请求持有独立 token，FFmpeg 包读取、VAD 窗口及语音段之间停止，当前原生调用先返回；等待真实处理结束才发终态，不能杀共享进程或只丢弃结果。
 
 ## 验收
 
@@ -25,6 +25,8 @@
 - worker `transcribe`（见 [WORKER.md](WORKER.md)）与 `extract` 两条路径的输出语义一致（同一 SV-06 结构）。
 
 ## 验证边界与历史记录
+
+- 2026-09-29 常驻扩展（已实施、未运行发布包验证）：SenseVoice 与 Silero VAD 会话一起缓存，资产只在缓存未命中时校验加载。文件开始/结束（含取消、异常返回）在会话锁内 Reset/Clear VAD 流状态，下一文件不重新加载模型且时间轴从零开始；缓存查询不等待加载锁。FFI 使用固定 [sherpa-onnx v1.13.6 C API](https://github.com/k2-fsa/sherpa-onnx/blob/v1.13.6/sherpa-onnx/c-api/c-api.h) 的 Reset/Clear 接口，真实流隔离与取消后复用由 worker E2E 验证，未执行前不声称通过。
 
 - 多音轨取第一条、长音频（小时级）内存曲线、奇异容器未逐一实测；wmv/asf 的 FFmpeg 解码路径有实现与扩展映射，公开语料（wmv/mp4）经 `--deep` 覆盖。
 - 移除前对照（2026-09-27，同机单次运行，非统计结论；样本为公开合成 SAPI 中文语音 + 正弦/静音/无音轨/截断）：两个实现全部样本可用；whisper 输出为平坦段落（`timestamps=true` 亦无时刻值），SenseVoice 为段级时间戳；72.76 s 中文样本峰值内存 whisper 833.9 MB vs SenseVoice 355.0 MB；英文样本在 whisper 强制 zh 时出现重复引号幻觉、SenseVoice 逐词正确（单样本事实，不外推）；静音/纯音/无音轨/截断行为两实现均可区分。原始数据 `E:\xberg\.tmp\contrast\`（report.md / results.json）。

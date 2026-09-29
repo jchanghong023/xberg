@@ -486,8 +486,8 @@ function Test-ModelFile([string]$Path, [string]$Sha256, [int64]$SizeBytes) {
 function Get-RequiredModelEntries([string]$Exe, [string]$ModelsRoot) {
   # No layout models requested (fork no longer compiles the layout feature).
   # The media capability assets (snapshot OCR / SenseVoice / VAD / sherpa-onnx
-  # / FFmpeg) are staged from $PinnedAssets below and are not listed by the
-  # manifest.
+  # / FFmpeg) are staged from $PinnedAssets below. Snapshot models also appear
+  # in the public manifest; $RequiredModels selects only the document HF models.
   if ($RequiredModels.Count -eq 0) {
     return @()
   }

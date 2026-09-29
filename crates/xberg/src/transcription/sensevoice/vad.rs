@@ -56,6 +56,7 @@ pub(crate) struct VadPipeline<'a> {
     lines: Vec<TranscriptLine>,
     total: u64,
     peak_resident: usize,
+    cancel: crate::cancellation::CancellationToken,
 }
 
 impl<'a> VadPipeline<'a> {
@@ -67,13 +68,20 @@ impl<'a> VadPipeline<'a> {
             lines: Vec::new(),
             total: 0,
             peak_resident: 0,
+            cancel: crate::cancellation::CancellationToken::new(),
         }
+    }
+
+    pub(crate) fn with_cancel(mut self, cancel: crate::cancellation::CancellationToken) -> Self {
+        self.cancel = cancel;
+        self
     }
 
     /// 喂入任意大小的样本块；内部按窗口切分后交给 VAD，出段即转写。
     pub(crate) fn push_samples(&mut self, samples: &[f32]) -> Result<(), String> {
         self.pending.extend_from_slice(samples);
         while self.pending.len() >= VAD_WINDOW {
+            super::check_cancel(&self.cancel)?;
             let window: Vec<f32> = self.pending.drain(..VAD_WINDOW).collect();
             self.vad.accept(&window);
             self.total += window.len() as u64;
@@ -86,6 +94,7 @@ impl<'a> VadPipeline<'a> {
     /// 输入结束：不足一窗口的尾部样本同样喂入，flush 之后必须继续收割，
     /// 否则 flush 定稿的最后一段会静默丢失（尾部样本要求）。
     pub(crate) fn finish(&mut self) -> Result<(), String> {
+        super::check_cancel(&self.cancel)?;
         if !self.pending.is_empty() {
             let tail = std::mem::take(&mut self.pending);
             self.vad.accept(&tail);
@@ -98,8 +107,10 @@ impl<'a> VadPipeline<'a> {
     /// 收割 VAD 已定稿的全部片段：逐段即时转写，PCM 在本函数结束即释放。
     fn drain_ready(&mut self) -> Result<(), String> {
         while let Some(segment) = self.vad.pop_segment() {
+            super::check_cancel(&self.cancel)?;
             self.peak_resident = self.peak_resident.max(segment.samples.len());
             if let Some(line) = self.transcriber.transcribe(&segment)? {
+                super::check_cancel(&self.cancel)?;
                 self.lines.push(line);
             }
         }

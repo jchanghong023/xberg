@@ -12,6 +12,108 @@ fn get_binary_path() -> String {
     env!("CARGO_BIN_EXE_xberg").to_string()
 }
 
+/// The public manifest must describe the pinned screenshot assets even without installed
+/// models or document OCR features. These paths must never alias HF tiny/small exports.
+#[test]
+fn cache_manifest_includes_the_complete_pinned_snapshot_model_set() {
+    let empty = tempdir().expect("empty model directory");
+    let output = Command::new(get_binary_path())
+        .args(["cache", "manifest", "--format", "json", "--no-config-discovery"])
+        .env("XBERG_SNAPSHOT_MODEL_DIR", empty.path().join("missing"))
+        .current_dir(empty.path())
+        .output()
+        .expect("execute cache manifest");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let manifest: serde_json::Value = serde_json::from_slice(&output.stdout).expect("manifest is JSON");
+    let models = manifest["models"].as_array().expect("models array");
+    let snapshots: Vec<_> = models
+        .iter()
+        .filter(|entry| entry["model_set"] == "snapshot-pp-ocrv6-small-textsnap")
+        .collect();
+    assert_eq!(snapshots.len(), 3, "all three pinned members, each exactly once");
+    for (path, size, sha, asset) in [
+        (
+            "snapshot-ocr/det.onnx",
+            9_891_707_u64,
+            "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940",
+            "snap-det.onnx",
+        ),
+        (
+            "snapshot-ocr/rec.onnx",
+            21_148_338,
+            "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed",
+            "snap-rec.onnx",
+        ),
+        (
+            "snapshot-ocr/dict/dict.txt",
+            74_947,
+            "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d",
+            "snap-dict.txt",
+        ),
+    ] {
+        let matches: Vec<_> = models.iter().filter(|entry| entry["relative_path"] == path).collect();
+        assert_eq!(matches.len(), 1, "unique manifest path {path}");
+        let entry = matches[0];
+        assert_eq!(entry["model_set"], "snapshot-pp-ocrv6-small-textsnap");
+        assert_eq!(entry["size_bytes"], size);
+        assert_eq!(entry["sha256"], sha);
+        assert_eq!(
+            entry["source_url"],
+            format!("https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/{asset}")
+        );
+    }
+    assert_eq!(manifest["model_count"], models.len());
+    assert_eq!(
+        manifest["total_size_bytes"],
+        models
+            .iter()
+            .map(|entry| entry["size_bytes"].as_u64().expect("size"))
+            .sum::<u64>()
+    );
+    assert!(
+        !empty.path().join("missing").exists(),
+        "manifest must not load or download models"
+    );
+}
+
+/// Real-model acceptance for the existing 测试识别.png corpus image. Kept opt-in
+/// because it crosses the CLI, real Paddle models and rendering boundaries.
+#[cfg(feature = "paddle-ocr")]
+#[test]
+#[ignore = "requires XBERG_OCR_ALIGNMENT_IMAGE pointing to 测试识别.png and installed PaddleOCR models"]
+fn document_ocr_corpus_keeps_table_cells_on_one_line() {
+    let input = std::env::var_os("XBERG_OCR_ALIGNMENT_IMAGE").expect("set XBERG_OCR_ALIGNMENT_IMAGE to 测试识别.png");
+    assert!(PathBuf::from(&input).is_file(), "real corpus image is required");
+    let work = tempdir().expect("isolated CLI output");
+    let output = Command::new(get_binary_path())
+        .arg("extract")
+        .arg(input)
+        .args(["--format", "json", "--no-config-discovery", "--config-json"])
+        .arg(r#"{"output_format":"markdown","use_cache":false,"ocr":{"backend":"paddle-ocr"}}"#)
+        .env("HF_HUB_OFFLINE", "1")
+        .current_dir(work.path())
+        .output()
+        .expect("real extract command");
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).expect("extract JSON");
+    let markdown = envelope["result"]["content"].as_str().expect("document content");
+    let fence = markdown.split("```text\n").nth(1).expect("image OCR grid fence");
+    let body = fence.split("\n```").next().expect("fence body");
+    for tokens in [
+        vec!["口径", "Tesseract", "差距"],
+        vec!["同一数据集", "0.58", "6.24", "10.8"],
+        vec!["配置", "默认值", "来源"],
+        vec!["ocr.enabled", "true", "OcrConfig::default()"],
+    ] {
+        let row = body
+            .lines()
+            .find(|line| tokens.iter().all(|token| line.contains(token)))
+            .unwrap_or_else(|| panic!("missing same-row cells {tokens:?} in OCR fence: {body}"));
+        let positions: Vec<_> = tokens.iter().map(|token| row.find(token).unwrap()).collect();
+        assert!(positions.windows(2).all(|p| p[0] < p[1]), "cell order: {row}");
+    }
+}
+
 /// Get the test_documents directory path.
 fn get_test_documents_dir() -> PathBuf {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));

@@ -276,6 +276,7 @@ type VadFront = unsafe extern "C" fn(*const Vad) -> *const SpeechSegment;
 type VadDestroySegment = unsafe extern "C" fn(*const SpeechSegment);
 type VadPop = unsafe extern "C" fn(*const Vad);
 type VadFlush = unsafe extern "C" fn(*const Vad);
+type VadReset = unsafe extern "C" fn(*const Vad);
 
 pub(crate) struct Sherpa {
     create_recognizer: DynamicSymbol<CreateRecognizer>,
@@ -294,6 +295,8 @@ pub(crate) struct Sherpa {
     vad_destroy_segment: DynamicSymbol<VadDestroySegment>,
     vad_pop: DynamicSymbol<VadPop>,
     vad_flush: DynamicSymbol<VadFlush>,
+    vad_reset: DynamicSymbol<VadReset>,
+    vad_clear: DynamicSymbol<VadReset>,
 }
 
 #[cfg(windows)]
@@ -361,6 +364,8 @@ impl Sherpa {
                 vad_destroy_segment: sym!(b"SherpaOnnxDestroySpeechSegment\0", VadDestroySegment),
                 vad_pop: sym!(b"SherpaOnnxVoiceActivityDetectorPop\0", VadPop),
                 vad_flush: sym!(b"SherpaOnnxVoiceActivityDetectorFlush\0", VadFlush),
+                vad_reset: sym!(b"SherpaOnnxVoiceActivityDetectorReset\0", VadReset),
+                vad_clear: sym!(b"SherpaOnnxVoiceActivityDetectorClear\0", VadReset),
             })
         }
     }
@@ -407,6 +412,13 @@ impl Sherpa {
         // SAFETY：句柄来自同一符号表的 create_recognizer；调用方保证不再使用。
         unsafe {
             (self.destroy_recognizer)(recognizer);
+        }
+    }
+
+    /// Called by the owning resident session only after all runs have ended.
+    pub(crate) fn destroy_vad_session(&self, vad: *const Vad) {
+        unsafe {
+            (self.destroy_vad)(vad);
         }
     }
 
@@ -481,6 +493,12 @@ pub(crate) struct RealVad<'a> {
 
 impl<'a> RealVad<'a> {
     pub(crate) unsafe fn new(sherpa: &'a Sherpa, vad: *const Vad) -> Self {
+        // The session owns the detector and its inference model. Reset streaming
+        // state only, under the session's run lock, including after cancellation.
+        unsafe {
+            (sherpa.vad_reset)(vad);
+            (sherpa.vad_clear)(vad);
+        }
         Self { sherpa, vad }
     }
 }
@@ -527,7 +545,8 @@ impl VadEngine for RealVad<'_> {
 impl Drop for RealVad<'_> {
     fn drop(&mut self) {
         unsafe {
-            (self.sherpa.destroy_vad)(self.vad);
+            (self.sherpa.vad_reset)(self.vad);
+            (self.sherpa.vad_clear)(self.vad);
         }
     }
 }

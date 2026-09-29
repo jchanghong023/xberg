@@ -394,11 +394,22 @@ pub(crate) fn library_dir(candidate: &Path) -> Option<PathBuf> {
 /// - 无音轨：返回 `has_audio = false`（「无音频轨道」）。
 /// - 解码失败：返回 Err（解码失败属于失败，不产出半成品）。
 /// - 解码器 flush 与重采样器 flush 的尾部样本都会交给 `sink`。
+#[cfg(test)]
 pub(crate) fn decode_audio(
     libs: &FfmpegLibs,
     input: &Path,
-    mut sink: impl FnMut(&[f32]) -> Result<(), String>,
+    sink: impl FnMut(&[f32]) -> Result<(), String>,
 ) -> Result<DecodeOutcome, String> {
+    decode_audio_cancellable(libs, input, sink, &crate::cancellation::CancellationToken::new())
+}
+
+pub(crate) fn decode_audio_cancellable(
+    libs: &FfmpegLibs,
+    input: &Path,
+    mut sink: impl FnMut(&[f32]) -> Result<(), String>,
+    cancel: &crate::cancellation::CancellationToken,
+) -> Result<DecodeOutcome, String> {
+    super::check_cancel(cancel)?;
     unsafe {
         (libs.log_set_level)(AV_LOG_ERROR);
     }
@@ -520,6 +531,7 @@ pub(crate) fn decode_audio(
         }
 
         loop {
+            super::check_cancel(cancel)?;
             let code = (libs.read_frame)(fmt.ctx, pkt.pkt);
             if code == AVERROR_EOF {
                 break;

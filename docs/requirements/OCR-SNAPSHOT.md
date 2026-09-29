@@ -1,14 +1,14 @@
 # 截图 OCR 通道需求
 
-> **状态：已按用户目标实施，条目级追认保留。** 2026-09-27 起草并实施，服务用户提出的跨仓库重构目标（Xberg 同时提供文档 OCR 与截图 OCR 两套明确区分的能力，供 JchTools 截图服务本地调用）。起草时的封闭选项确认流程因用户未批复而按目标文本与推荐项继续；与 [OCR.md](OCR.md)、[DELIVERY.md](DELIVERY.md) 的交叉修订已就地应用，用户可在复查时否决（否决即回退对应行为）。模型与行为对照证据见文末与提交记录。
+> **状态：模型与识别路径已实施，同进程并发及接口补齐待验收；原有条目级追认保留。** 2026-09-27 起草并实施，服务用户提出的跨仓库重构目标（Xberg 同时提供文档 OCR 与截图 OCR 两套明确区分的能力，供 JchTools 截图服务本地调用）。起草时的封闭选项确认流程因用户未批复而按目标文本与推荐项继续；与 [OCR.md](OCR.md)、[DELIVERY.md](DELIVERY.md) 的交叉修订已就地应用，用户可在复查时否决（否决即回退对应行为）。模型与行为对照证据见文末与提交记录。
 >
 > 模型字节与行为合同的权威来源是 JchTools 仓库 `docs/requirements/SNAP2TEXT.md`（O-07 模型身份、O-23～O-28 推理与布局行为、附录 A/B 确定性定义）。本文把它承接为 Xberg 侧的可验收需求；两文冲突时以用户裁决为准。条目编号 `SNAP-xx` 仅为跨仓库引用方便。
 
 ## 通道定义与隔离
 
-- **SNAP-01（第二套 OCR 能力）** Xberg 提供与文档 OCR 并列的第二套 OCR 能力「截图 OCR」：输入一张图像，输出布局保真纯文本及可选的结构化文字框记录。文档 OCR（`ocr` 配置块、`paddle-ocr` 后端、pp-ocrv6 tiny、文档转换行为）保持现状不变；截图通道不进入 `ocr.backend` 后端选择集，文档通道也不因截图通道的存在改变默认值、模型、性能或输出。
+- **SNAP-01（第二套 OCR 能力）** Xberg 提供与文档 OCR 并列的第二套 OCR 能力「截图 OCR」：输入一张图像，输出布局保真纯文本及可选的结构化文字框记录。文档 OCR（`ocr` 配置块、`paddle-ocr` 后端、pp-ocrv6 tiny、文档转换行为）保持现状不变；截图通道不进入 `ocr.backend` 后端选择集，文档通道也不因截图通道的存在改变默认值、模型、性能或输出。两通道各自使用独立配置与模型会话；隔离不意味着分进程，必须遵守 [WORKER.md](WORKER.md) 的唯一 Xberg 进程及双场景并发要求。
 - **SNAP-02（模型集命名）** 截图模型集显式命名为 `snapshot-pp-ocrv6-small-textsnap`（定名可在确认时调整），由检测、识别、有序字典三个成员成套组成；manifest 条目、磁盘缓存路径、引擎会话键均与文档 tiny / v6 small 互不共享、互不别名。
-- **SNAP-03（字节固定）** 模型字节固定为 TextSnap 转换产物（即 SNAP2TEXT 附录 A）：det `PP-OCRv6_small_det/inference.onnx` 9,891,707 字节 / SHA-256 `3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940`；rec `PP-OCRv6_small_rec/inference.onnx` 21,148,338 字节 / `3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed`；有序字典派生自原 `inference.yml`（`ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1`），18708 字、74,947 字节 / `b5f2bfe2…`（以资产清单锁定全摘要）。不使用 Xberg HF 仓库中的 v6 tiny 或 v6 small 导出产物替代；不重新导出、量化或改权重。
+- **SNAP-03（字节固定）** 模型字节固定为 TextSnap 转换产物（即 SNAP2TEXT 附录 A）：det `PP-OCRv6_small_det/inference.onnx` 9,891,707 字节 / SHA-256 `3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940`；rec `PP-OCRv6_small_rec/inference.onnx` 21,148,338 字节 / `3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed`；有序字典派生自原 `inference.yml`（`ab078671bb49f06228eadccd34f1bb501e157f7a047095ffb943ba81512c77d1`），18708 字、74,947 字节 / `b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d`。不使用 Xberg HF 仓库中的 v6 tiny 或 v6 small 导出产物替代；不重新导出、量化或改权重。
 - **SNAP-04（显式选择，无自动回退）** 截图通道只能经显式配置或专用接口选择；模型缺失、摘要不符、成员错配时明确失败。不存在「同属 PP-OCRv6 就回退/替代」的任何路径；文档通道与截图通道不互相回退、不互相覆盖、不共享实例。
 - **SNAP-05（错配拒绝）** 至少以下情形必须报错且不推理：det/rec 任一文件缺失或 SHA-256 不符；字典与 rec 模型不成套（如 tiny 字典配 small rec、字典换行/编码被改）；把文档 tiny 模型配置为截图模型集或反之；CTC 类数与「blank + 18708 字 + 尾部空格」的 18710 类约定不符。
 - **SNAP-06（CTC 对应固定）** 识别解码的索引映射固定为：索引 0 = CTC blank，索引 1..18708 = 原字典顺序，索引 18709 = 尾部空格；不增删字符、不重排、不去重、不混配字典。
@@ -25,8 +25,9 @@
 
 ## 本地调用接口
 
-- **SNAP-14（worker 协议扩展）** `xberg worker`（见 [WORKER.md](WORKER.md)）新增 `ocr_snapshot` 命令：请求携带图像字节（base64，PNG 或等价无损编码）与选区元数据，不要求也不鼓励调用方落盘——截图内容只驻内存。响应为单行 JSON：成功 `{"id":..,"ok":true,"text":"<布局文本>",...}`；失败 `{"id":..,"ok":false,"error":"<一行原因>","error_kind":"<错误类别>"}`。串行、批内模型会话复用、EOF 退出等既有 worker 语义全部适用。
+- **SNAP-14（worker 协议扩展）** `xberg worker`（见 [WORKER.md](WORKER.md)）新增 `ocr_snapshot` 命令：请求携带图像字节（base64，PNG 或等价无损编码）与选区元数据，不要求也不鼓励调用方落盘——截图内容只驻内存。响应为单行 JSON：成功 `{"id":..,"ok":true,"text":"<布局文本>",...}`；失败 `{"id":..,"ok":false,"error":"<一行原因>","error_kind":"<错误类别>"}`。并发调度、进程内模型常驻、请求关联与退出语义遵循 [WORKER.md](WORKER.md)；文档转换进行中必须能在同一进程执行截图推理。
 - **SNAP-15（错误类别）** 至少区分：`model_not_ready`（未加载/加载中）、`asset_invalid`（缺失或校验失败）、`input_invalid`（图像无法解码）、`no_text`、`cancelled`、`internal`。错误消息不含图像内容。
+  首个有效截图请求保留惰性加载并等待其结果；已有截图请求负责冷启动、模型尚未加载或加载中时，后续截图请求立即返回 `ok:false` + `model_not_ready`，不排入推理队列、不保留图像。调用方通过 `snapshot_state` 观察状态，就绪后重试；加载失败仍由负责加载的请求报告 `asset_invalid`，下一次请求可以重试加载。就绪后的普通推理保持有界排队。
 - **SNAP-16（取消边界）** 客户端在请求处理期间断开 stdin/管道连接时，worker 在瓦片或识别批次检查点终止该请求并回收资源；已断开请求的结果不得再写出，也不得把终止伪造成成功。检查点粒度与 SNAP2TEXT O-19 一致（取消不是错误）。
 - **SNAP-17（状态查询）** worker 协议提供截图通道状态查询（未初始化 / 加载中 / 就绪 / 错误 + 错误摘要），供调用方在模型常驻加载期间提示等待（对应 SNAP2TEXT O-13）。
 - **SNAP-18（CLI 验收入口）** 提供等价 CLI 子命令（如 `xberg snapshot-ocr --image <路径> --json`）用于开发验收与调试；它不是文档通道的后端开关，也不能改写 SNAP-04 的选择语义。
@@ -40,13 +41,15 @@
 
 - 真实模型加载与摘要校验通过；SNAP-05 各错配情形分别得到明确拒绝；断网环境完整截图识别成功。
 - 同图对照：与 JchTools 现有实现（迁移期参考实现）同批公开合成截图逐图比较最终文本的行序、缩进、内部空格、空行与双栏位置；纯逻辑构造用例逐字符一致，真实对照满足 SNAP2TEXT 附录 C 口径；记录加载与识别耗时。
-- 文档通道不回归：现有 `fulltest.py` 语料 OCR 判定与金标准键全部保持；同一包内两套模型可同时使用且互不污染（文档转换与截图识别先后或交替执行）。
-- worker 协议 UT：id 回显、错误类别、坏 JSON 隔离、断连取消检查点、状态查询、模型会话批内复用（第二次请求不再加载模型）。
+- 文档通道不回归：现有 `fulltest.py` 语料 OCR 判定与金标准键全部保持；同一进程内两套模型及配置可同时使用且互不污染；除先后或交替请求外，必须覆盖 [WORKER.md](WORKER.md) 规定的重叠执行。
+- worker 协议 UT：id 回显、错误类别、坏 JSON 隔离、断连取消检查点、状态查询、模型会话进程内复用（第二次请求不再加载模型）。真实 worker 的双场景并发与跨批次常驻按 [WORKER.md](WORKER.md) 验收，协议 UT 不能替代。
 
-## 与既有需求的关系（修订已应用，追认保留）
+## 实现与验证缺口
 
-- [OCR.md](OCR.md)：第 9 行已补充「截图通道是独立能力，不属于 `ocr.backend` 选择集」。
-- [DELIVERY.md](DELIVERY.md)：打包模型清单已追加截图模型集；「不分发 RT-DETR/TATR」不含截图模型集；验收句已扩展为「抽取、文档 OCR、截图 OCR 与媒体转写可用」。
-- [PERFORMANCE.md](PERFORMANCE.md)：已新增阶段名 `snapshot_model_load`、`snapshot_ocr_infer`（阶段名只增不改）。
-- [WORKER.md](WORKER.md)：协议已扩展 `ocr_snapshot`/`snapshot_state`/`transcribe`，向后兼容，既有 `extract` 语义不变。
-- [README.md](README.md)：需求域表已新增本文件。
+- 2026-09-29 已实施同进程独立文档/截图调度、常驻引擎和独立状态记录；具体完成判据及未运行的验证见 [WORKER.md](WORKER.md)。类型检查不等于真实双模型并发验收。
+- SNAP-16：stdin EOF 可在推理期间触发取消，已断开的截图结果不再写出；仅关闭 stdout 而保持 stdin 打开仍须等一次写入检测断连。真实模型检查点与管道关闭的完整联动尚待运行验收。
+- SNAP-15/17：状态查询不再借用推理引擎，可在加载期间返回 loading；加载失败记录 error，成功记录 ready。已补齐冷启动期间后续请求的 `model_not_ready` 响应，新增调度 UT 覆盖未加载/加载中拒绝、id 与无载荷响应、文档与状态查询继续执行、就绪重试及不重复推理。测试使用受控加载桩，真实模型联动仍待验收。
+- SNAP-19：公开 `cache manifest` 已追加三个截图条目，引用加载器的固定大小和 SHA-256；`model_set` 为 `snapshot-pp-ocrv6-small-textsnap`，`relative_path` 为模型根目录下的 `snapshot-ocr/det.onnx`、`snapshot-ocr/rec.onnx`、`snapshot-ocr/dict/dict.txt`，`source_url` 对应已有固定发布资产。截图通道编入所有 CLI profile，因此 manifest 不再以文档 OCR feature 为开放条件，查询不加载/下载模型。新增真实 CLI 协议测试核对三成员、摘要、大小、唯一性及总量，尚待运行；打包仍沿用其独立固定字节清单。
+- 引擎已有纯逻辑 UT 与真实模型测试，但后者在缺少资产环境变量时直接返回并打印跳过原因；测试进程成功不能证明加载、识别或错配路径已经运行。实际入口与所需变量见 [AGENTS.md](../../AGENTS.md)，现有测试门未覆盖该 crate 自身测试，见 [DELIVERY.md](DELIVERY.md)。
+- 既有 2026-09-28 对照记录（`.tmp/snap-bench/`，15 份公开合成样本）：Xberg 与 snap-ocr-core 参考实现 15/15 最终文本逐字符一致。长行截断、双栏列距与缩进行丢字的首轮异常归因于画布溢出、期望列距和无 CJK 字形字体等语料问题；修正语料后长行 CER 0.667%、双栏锚点偏差 ≤1 半角单元、缩进行 CER 0%。该记录仅覆盖这些样本，未调整模型参数或 SNAP-08～SNAP-12 合同（原 B-2 决定），剩余误差不据此扩展为全部真实截图达标。
+- 截图 / SenseVoice 的 worker 批内会话复用历史冒烟与调用方集成边界见 [WORKER.md](WORKER.md)；整包和文档通道回归范围见 [DELIVERY.md](DELIVERY.md)。本次未重跑模型或跨仓库对照，不改变原有条目级追认状态。

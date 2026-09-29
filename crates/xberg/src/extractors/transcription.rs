@@ -107,6 +107,7 @@ async fn run_sensevoice_pipeline(
     content: &[u8],
     mime_type: &str,
     tcfg: &crate::core::config::transcription::TranscriptionConfig,
+    cancel: crate::cancellation::CancellationToken,
 ) -> Result<InternalDocument> {
     let bytes = content.to_vec();
     let mime_owned = mime_type.to_string();
@@ -115,12 +116,13 @@ async fn run_sensevoice_pipeline(
     let name = SENSEVOICE_DOCUMENT_NAME.to_string();
 
     let result = transcribe_holding_permit(TRANSCRIPTION_SEMAPHORE.clone(), move || {
-        crate::transcription::sensevoice::transcribe_bytes(
+        crate::transcription::sensevoice::transcribe_bytes_cancellable(
             &bytes,
             &name,
             &mime_owned,
             model_dir.as_deref(),
             max_duration_ms,
+            &cancel,
         )
     })
     .await?;
@@ -224,7 +226,16 @@ impl InternalDocumentExtractor for TranscriptionExtractor {
             )));
         }
 
-        apply_timeout(tcfg.timeout_ms, run_sensevoice_pipeline(content, mime_type, tcfg)).await
+        apply_timeout(
+            tcfg.timeout_ms,
+            run_sensevoice_pipeline(
+                content,
+                mime_type,
+                tcfg,
+                config.cancel_token.clone().unwrap_or_default(),
+            ),
+        )
+        .await
     }
 
     fn supported_mime_types(&self) -> &[&str] {

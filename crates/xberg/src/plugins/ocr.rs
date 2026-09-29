@@ -185,6 +185,11 @@ pub enum PageOrientationHandling {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 pub trait OcrBackend: Plugin {
+    /// Non-loading snapshot of resident model sessions, for worker introspection.
+    /// Backends without instrumentation report that explicitly.
+    fn model_state(&self) -> serde_json::Value {
+        serde_json::json!({"state": "not_reported"})
+    }
     /// Process an image and extract text via OCR.
     ///
     /// # Arguments

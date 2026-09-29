@@ -18,26 +18,16 @@ use xberg::cache;
 
 use crate::{WireFormat, style};
 
-#[cfg(any(
-    feature = "paddle-ocr",
-    feature = "layout-detection",
-    feature = "ner-onnx",
-    feature = "formula-recognition"
-))]
 #[derive(Debug, Clone, serde::Serialize)]
 struct CacheManifestEntry {
     relative_path: String,
     sha256: String,
     size_bytes: u64,
     source_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_set: Option<&'static str>,
 }
 
-#[cfg(any(
-    feature = "paddle-ocr",
-    feature = "layout-detection",
-    feature = "ner-onnx",
-    feature = "formula-recognition"
-))]
 impl CacheManifestEntry {
     fn new(relative_path: String, sha256: String, size_bytes: u64, source_url: String) -> Self {
         Self {
@@ -45,6 +35,7 @@ impl CacheManifestEntry {
             sha256,
             size_bytes,
             source_url,
+            model_set: None,
         }
     }
 }
@@ -184,41 +175,36 @@ pub fn clear_command(cache_dir: Option<PathBuf>, format: WireFormat) -> Result<(
 
 /// Execute cache manifest command - outputs expected model files with checksums.
 pub fn manifest_command(format: WireFormat) -> Result<()> {
-    // below is `#[cfg]`-stripped and `entries: Vec<_>` has no anchor for
-    #[cfg(not(any(
-        feature = "paddle-ocr",
-        feature = "layout-detection",
-        feature = "ner-onnx",
-        feature = "formula-recognition"
-    )))]
-    {
-        let _ = format;
-        anyhow::bail!(
-            "manifest command unavailable: build xberg-cli with at least one of \
-             --features \"paddle-ocr\", \"layout-detection\", or \"ner-onnx\""
-        );
-    }
-
-    #[cfg(any(
-        feature = "paddle-ocr",
-        feature = "layout-detection",
-        feature = "ner-onnx",
-        feature = "formula-recognition"
-    ))]
-    {
-        manifest_command_inner(format)
-    }
+    // The independent snapshot channel is compiled into every CLI profile.
+    manifest_command_inner(format)
 }
 
 /// Gather the manifest entries for every model source compiled into this binary.
-#[cfg(any(
-    feature = "paddle-ocr",
-    feature = "layout-detection",
-    feature = "ner-onnx",
-    feature = "formula-recognition"
-))]
 fn collect_manifest_entries() -> Vec<CacheManifestEntry> {
-    let mut entries: Vec<CacheManifestEntry> = Vec::new();
+    use xberg_snapshot_ocr::{
+        DET_MODEL_BYTES, DET_MODEL_SHA256, DICT_BYTES, DICT_SHA256, REC_MODEL_BYTES, REC_MODEL_SHA256,
+        SNAPSHOT_MODEL_SET,
+    };
+
+    // Paths are relative to the bundle's models directory, separate from the document
+    // OCR HF cache. Use the same pins as the loader; do not query or load local assets.
+    #[allow(unused_mut, reason = "additional model sources depend on CLI features")]
+    let mut entries: Vec<CacheManifestEntry> = [
+        ("det.onnx", DET_MODEL_SHA256, DET_MODEL_BYTES, "snap-det.onnx"),
+        ("rec.onnx", REC_MODEL_SHA256, REC_MODEL_BYTES, "snap-rec.onnx"),
+        ("dict/dict.txt", DICT_SHA256, DICT_BYTES, "snap-dict.txt"),
+    ]
+    .into_iter()
+    .map(|(path, sha256, size_bytes, asset)| CacheManifestEntry {
+        model_set: Some(SNAPSHOT_MODEL_SET),
+        ..CacheManifestEntry::new(
+            format!("snapshot-ocr/{path}"),
+            sha256.to_string(),
+            size_bytes,
+            format!("https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/{asset}"),
+        )
+    })
+    .collect();
 
     #[cfg(feature = "paddle-ocr")]
     {
@@ -259,12 +245,6 @@ fn collect_manifest_entries() -> Vec<CacheManifestEntry> {
 }
 
 /// Print the model manifest as a human-readable table.
-#[cfg(any(
-    feature = "paddle-ocr",
-    feature = "layout-detection",
-    feature = "ner-onnx",
-    feature = "formula-recognition"
-))]
 #[expect(
     clippy::print_stdout,
     reason = "model manifest is the command's stdout result output"
@@ -312,12 +292,6 @@ fn print_manifest_text(entries: &[CacheManifestEntry], version: &str, total_size
     );
 }
 
-#[cfg(any(
-    feature = "paddle-ocr",
-    feature = "layout-detection",
-    feature = "ner-onnx",
-    feature = "formula-recognition"
-))]
 #[expect(
     clippy::print_stdout,
     reason = "model manifest is the command's stdout result output"

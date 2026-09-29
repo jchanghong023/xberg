@@ -31,3 +31,9 @@
 | XML/OPML | 元素标题以 ` (k: v, …)` 内联 `id`、`type`、`_note` 等属性；过滤 `xmlns*`、空值及 `xberg:` 内部标记。plain 与 Markdown 保持一致，默认配置下相关 OPML note 与 XML 保真断言成立。 |
 
 以上要求用真实转换结果和对应自动化断言验收。既有关键测试包括 `issue_131_opml_note_attribute`、`xml_embedding_quality`；完整质量判据见 [DELIVERY.md](DELIVERY.md)。没有逐项通过的当前报告时，不把代码存在或历史报告写成“已验收”。
+
+## 实现与验证边界
+
+- 既有 2026-09-28 记录：PPTX `p:p` 段落抽取与内嵌 SVG 的 OCR 栅格化已实施，新增 6 个 UT 经红→绿、相关模块 168 个 UT 及 fastcheck 通过。PNM 六种表示的合成边界测试通过；JchTools A17 的 P6 夹具仅含 9/27 字节，属于截断输入，既有优雅失败不作为引擎缺陷。对应 fulltest 的覆盖限制见 [DELIVERY.md](DELIVERY.md)，不能以其问题码未变化代替这些新路径的正向验收。
+- 2026-09-29 源码核对：PDF 数字脚注的公开抽取回归测试 `numeric_footnote_survives_public_extraction` 已在 `7697e63075` 恢复启用，结构化路径接入数字边界保护；旧索引中“仍被 ignore、待调试”的状态已过时。本次未执行该测试，不追加通过声明。
+- 既有同步记录中的 PDF 数字修复已接入图片 OCR 输出，使正文与网格围栏共同使用修复结果；这不消除 [OCR.md](OCR.md) 中仍有效的同行对齐缺口。详细补丁与上游测试前提调整由 Git 历史保存，不作为额外产品要求。

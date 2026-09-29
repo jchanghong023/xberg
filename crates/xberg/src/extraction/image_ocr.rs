@@ -387,6 +387,10 @@ pub(crate) async fn process_images_with_ocr(
     config: &crate::core::config::ExtractionConfig,
     warnings: &mut Vec<crate::types::ProcessingWarning>,
 ) -> crate::Result<Vec<ExtractedImage>> {
+    let cancelled = || config.cancel_token.as_ref().is_some_and(|token| token.is_cancelled());
+    if cancelled() {
+        return Err(crate::XbergError::validation("Extraction cancelled"));
+    }
     // `runs_ocr_on_embedded_images` rather than `config.ocr.is_some()`: this early return
     // was a third separately-written copy of the pipeline's gate, so `ocr_embedded_images:
     // Some(true)` without an `ocr` block would have been accepted by the caller and then
@@ -410,7 +414,7 @@ pub(crate) async fn process_images_with_ocr(
     let mut pending = build_pending_ocr_tasks(&images, ocr_config, config);
 
     let mut join_set: tokio::task::JoinSet<OcrTaskResult> = tokio::task::JoinSet::new();
-    while join_set.len() < max_tasks {
+    while join_set.len() < max_tasks && !cancelled() {
         let Some(task) = pending.pop_front() else {
             break;
         };
@@ -425,11 +429,18 @@ pub(crate) async fn process_images_with_ocr(
 
         apply_ocr_result(&mut images, idx, ocr_result, ocr_config, warnings);
 
-        if let Some(task) = pending.pop_front() {
+        // Do not abort the JoinSet: a backend may have native work on a blocking
+        // thread. Drain started work before returning the cancellation terminal.
+        if !cancelled()
+            && let Some(task) = pending.pop_front()
+        {
             spawn_ocr_task(&mut join_set, task);
         }
     }
 
+    if cancelled() {
+        return Err(crate::XbergError::validation("Extraction cancelled"));
+    }
     Ok(images)
 }
 
@@ -1026,5 +1037,117 @@ mod tests {
             "a caller who disabled OCR must never reach the OCR backend"
         );
         assert!(warnings.is_empty());
+    }
+
+    const CANCELING_BACKEND_NAME: &str = "cancellation-checkpoint-test-backend";
+
+    /// Cancels the extraction's token from inside the first OCR call, then returns
+    /// normally: started work finishes, but the cooperative checkpoints must stop the
+    /// batch from dispatching the queued image and convert the completed drain into
+    /// the cancellation terminal (the worker dispatcher cancels this same token; see
+    /// WORKER.md's cooperative-cancellation semantics).
+    struct CancelingBackend {
+        calls: Arc<AtomicUsize>,
+        cancel: crate::cancellation::CancellationToken,
+    }
+
+    impl Plugin for CancelingBackend {
+        fn name(&self) -> &str {
+            CANCELING_BACKEND_NAME
+        }
+        fn version(&self) -> String {
+            "1.0.0".to_string()
+        }
+        fn initialize(&self) -> crate::Result<()> {
+            Ok(())
+        }
+        fn shutdown(&self) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl OcrBackend for CancelingBackend {
+        async fn process_image(&self, _image_bytes: &[u8], _config: &OcrConfig) -> crate::Result<ExtractedDocument> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.cancel.cancel();
+            Ok(ExtractedDocument::default())
+        }
+
+        fn supports_language(&self, _lang: &str) -> bool {
+            true
+        }
+
+        fn backend_type(&self) -> OcrBackendType {
+            OcrBackendType::Custom
+        }
+    }
+
+    /// (fork) Cancellation is terminal for the image-OCR stage at both checkpoints:
+    /// a token that is already cancelled on entry fails fast even on the empty/no-OCR
+    /// fast path, and a token cancelled while the batch is running stops new dispatch
+    /// (the queued image never reaches the backend) and ends in the cancellation
+    /// error instead of a partial success.
+    #[tokio::test]
+    async fn cancellation_is_terminal_at_entry_and_mid_batch() {
+        let cancelled = crate::cancellation::CancellationToken::new();
+        cancelled.cancel();
+        let entry_config = crate::core::config::ExtractionConfig {
+            cancel_token: Some(cancelled),
+            ..Default::default()
+        };
+        let error = process_images_with_ocr(Vec::new(), &entry_config, &mut Vec::new())
+            .await
+            .expect_err("an already-cancelled extraction must fail before the no-work fast path");
+        assert!(
+            error.to_string().contains("Extraction cancelled"),
+            "unexpected terminal: {error}"
+        );
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let cancel = crate::cancellation::CancellationToken::new();
+        crate::plugins::register_ocr_backend(Arc::new(CancelingBackend {
+            calls: Arc::clone(&calls),
+            cancel: cancel.clone(),
+        }))
+        .expect("register canceling OCR backend");
+        struct Guard;
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = crate::plugins::unregister_ocr_backend(CANCELING_BACKEND_NAME);
+            }
+        }
+        let _guard = Guard;
+
+        let config = crate::core::config::ExtractionConfig {
+            ocr: Some(OcrConfig {
+                backend: CANCELING_BACKEND_NAME.to_string(),
+                ..Default::default()
+            }),
+            concurrency: Some(ConcurrencyConfig {
+                max_threads: Some(1),
+                max_concurrent_ocr: None,
+            }),
+            cancel_token: Some(cancel),
+            ..Default::default()
+        };
+        let images = (0..2)
+            .map(|_| ExtractedImage {
+                data: Bytes::from_static(b"image"),
+                ..Default::default()
+            })
+            .collect();
+        let error = process_images_with_ocr(images, &config, &mut Vec::new())
+            .await
+            .expect_err("a mid-batch cancellation must not report success");
+        assert!(
+            error.to_string().contains("Extraction cancelled"),
+            "unexpected terminal: {error}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the queued image must not dispatch after the token is cancelled"
+        );
     }
 }

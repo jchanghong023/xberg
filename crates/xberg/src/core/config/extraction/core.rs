@@ -1107,6 +1107,28 @@ impl ExtractionConfig {
         self.disable_ocr || self.ocr.as_ref().is_some_and(|o| !o.enabled)
     }
 
+    /// Disable layout inference and image/page OCR for one fast document request.
+    /// Native text, tables, image extraction and snapshot configuration are retained.
+    pub fn disable_expensive_document_processing(&mut self) {
+        self.disable_ocr = true;
+        self.force_ocr = false;
+        self.ocr_embedded_images = Some(false);
+        if let Some(ocr) = &mut self.ocr {
+            ocr.enabled = false;
+        }
+        if let Some(images) = &mut self.images {
+            images.run_ocr_on_images = false;
+        }
+        #[cfg(feature = "layout-types")]
+        {
+            self.layout = None;
+        }
+        #[cfg(feature = "layout-detection")]
+        {
+            self.use_layout_for_markdown = false;
+        }
+    }
+
     /// Check if image processing is needed by examining OCR and image extraction settings.
     ///
     /// Returns `true` if either OCR is enabled or image extraction is configured,

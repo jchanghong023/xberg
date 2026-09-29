@@ -101,6 +101,12 @@ impl CancellationToken {
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::Relaxed)
     }
+
+    /// Borrow the same flag for native inference APIs accepting an atomic flag.
+    /// Adapters must never clear the flag; cancellation remains one-shot.
+    pub fn as_atomic(&self) -> &AtomicBool {
+        &self.cancelled
+    }
 }
 
 impl Serialize for CancellationToken {

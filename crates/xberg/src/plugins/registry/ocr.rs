@@ -355,6 +355,14 @@ impl OcrBackendRegistry {
         names
     }
 
+    /// Inspect resident sessions without initializing inference models.
+    pub fn model_state(&self, name: &str) -> serde_json::Value {
+        self.backends
+            .get(&canonical_ocr_backend_name(name))
+            .map(|backend| backend.model_state())
+            .unwrap_or_else(|| serde_json::json!({"state": "unavailable"}))
+    }
+
     pub(crate) fn registered_snapshot(&self) -> Vec<(String, Arc<dyn OcrBackend>)> {
         let mut backends: Vec<_> = self
             .backends
@@ -554,6 +562,73 @@ mod tests {
     fn test_ocr_backend_registry_new_empty() {
         let registry = OcrBackendRegistry::new_empty();
         assert_eq!(registry.list().len(), 0);
+    }
+
+    /// A backend that reports resident-session state through the `model_state` hook.
+    struct ReportingOcrBackend;
+
+    impl Plugin for ReportingOcrBackend {
+        fn name(&self) -> &str {
+            "reporting-ocr"
+        }
+        fn version(&self) -> String {
+            "1.0.0".to_string()
+        }
+        fn initialize(&self) -> Result<()> {
+            Ok(())
+        }
+        fn shutdown(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl OcrBackend for ReportingOcrBackend {
+        async fn process_image(&self, _: &[u8], _: &OcrConfig) -> Result<ExtractedDocument> {
+            Ok(ExtractedDocument::default())
+        }
+
+        fn supports_language(&self, _: &str) -> bool {
+            true
+        }
+
+        fn backend_type(&self) -> crate::plugins::ocr::OcrBackendType {
+            crate::plugins::ocr::OcrBackendType::Custom
+        }
+
+        fn model_state(&self) -> serde_json::Value {
+            serde_json::json!({"state": "ready", "resident_sessions": ["paddle|tiny"]})
+        }
+    }
+
+    /// (fork) `model_state` is the worker's in-process model query (WORKER.md
+    /// `model_state` command): it delegates to the registered backend without
+    /// initializing anything, answers explicitly for backends without
+    /// instrumentation, and reports unknown names as unavailable rather than failing.
+    #[test]
+    fn model_state_delegates_and_reports_uninstrumented_and_missing_backends() {
+        let mut registry = OcrBackendRegistry::new_empty();
+        registry
+            .register(Arc::new(MockOcrBackend {
+                name: "plain-ocr".to_string(),
+                languages: vec!["eng".to_string()],
+            }))
+            .unwrap();
+        registry.register(Arc::new(ReportingOcrBackend)).unwrap();
+
+        assert_eq!(
+            registry.model_state("reporting-ocr"),
+            serde_json::json!({"state": "ready", "resident_sessions": ["paddle|tiny"]})
+        );
+        assert_eq!(
+            registry.model_state("plain-ocr"),
+            serde_json::json!({"state": "not_reported"}),
+            "backends without the hook must still answer, saying they do not introspect"
+        );
+        assert_eq!(
+            registry.model_state("no-such-backend"),
+            serde_json::json!({"state": "unavailable"})
+        );
     }
 
     #[cfg(feature = "ocr")]

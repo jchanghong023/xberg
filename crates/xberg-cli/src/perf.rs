@@ -61,3 +61,36 @@ where
 
     Some((guard, layer))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// (fork) PERFORMANCE.md 的目录覆盖与失败边界：`XBERG_PERF_LOG_DIR` 指定滚动目录；
+    /// 目录无法创建时返回 `None` 禁用性能日志而不是失败，业务转换照常继续。
+    /// 目录不可用取「已存在的普通文件之下的路径」——`create_dir_all` 对它必然失败。
+    #[expect(unsafe_code, reason = "目录覆盖只能通过进程环境变量观察，测试必须改写进程环境")]
+    #[test]
+    fn init_perf_layer_honors_env_dir_and_disables_on_an_unusable_dir() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let dir = std::env::temp_dir().join(format!("xberg-perf-ut-{}", std::process::id()));
+        unsafe { std::env::set_var(PERF_LOG_DIR_ENV, &dir) };
+        let enabled = init_perf_layer::<tracing_subscriber::Registry>();
+        assert!(enabled.is_some(), "可创建的目录必须启用性能日志");
+        drop(enabled);
+
+        let file = std::env::temp_dir().join(format!("xberg-perf-ut-file-{}", std::process::id()));
+        std::fs::write(&file, b"regular file").expect("临时文件写入");
+        unsafe { std::env::set_var(PERF_LOG_DIR_ENV, file.join("sub")) };
+        assert!(
+            init_perf_layer::<tracing_subscriber::Registry>().is_none(),
+            "不可用目录必须禁用性能日志，而不是失败"
+        );
+
+        unsafe { std::env::remove_var(PERF_LOG_DIR_ENV) };
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

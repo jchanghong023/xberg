@@ -1,17 +1,20 @@
-//! `xberg worker` - batch-local stdio worker process for embedding callers (JchTools).
+//! `xberg worker` - resident stdio worker process for embedding callers (JchTools).
 //!
-//! A worker serves exactly one batch: the caller starts it with a fixed extraction
-//! configuration, sends one JSON request per line on stdin, and reads exactly one JSON
-//! response line per request from stdout. Closing stdin ends the batch; the worker
-//! finishes the in-flight request and exits. The full contract (including who owns
-//! timeouts and restarts) lives in `docs/requirements/WORKER.md`.
+//! One process owns the document runtime and a separate resident screenshot engine.
+//! Document and screenshot requests run concurrently on dedicated threads, while a
+//! single protocol writer emits complete JSON lines correlated by `id`. Configuration
+//! is fixed at startup; keeping stdin open reuses both models across batches.
+//! Closing stdin drains document work and cancels screenshots. See
+//! `docs/requirements/WORKER.md` for lifecycle and cooperative per-request timeouts.
 //!
 //! Supported commands:
-//! - `extract` (`path`, optional `mode`): run the startup config unchanged — the
-//!   original and still primary operation, with an unchanged response shape.
+//! - `extract` (`path`, optional `mode`): normal uses startup settings; fast
+//!   disables document layout and image OCR in a request-local config copy.
+//! - `cancel` (`target_id`), `timeout_ms` on work requests, and in-process
+//!   `formats`, `capabilities`, `model_state` queries keep the same connection.
 //! - `ocr_snapshot` (`image_base64`, SNAP-14): recognize one in-memory screenshot
 //!   through the snapshot OCR channel; engine lazily loaded on the first request and
-//!   reused for the batch. Success is `{"id":..,"ok":true,"text":..,"records":N,
+//!   reused across batches. Success is `{"id":..,"ok":true,"text":..,"records":N,
 //!   "elapsed_ms":M}` (a text-free image is `ok:true` with `text:""` and
 //!   `error_kind:"no_text"` so callers can tell the cases apart); failure carries
 //!   `error_kind` (`model_not_ready|asset_invalid|input_invalid|no_text|cancelled|
@@ -25,7 +28,7 @@
 //! uses (OCR engine pool, Tesseract processor, layout model caches, the SenseVoice
 //! session cache, the snapshot OCR engine above) is a process-level
 //! lazy cache, so simply keeping the process — and one tokio runtime — alive for the
-//! whole batch means the second and later files skip model loading. `xberg serve`
+//! process lifetime means the second and later files skip model loading. `xberg serve`
 //! relies on the same mechanism across HTTP requests.
 //!
 //! Protocol purity: stdout carries protocol messages only. Diagnostics go to stderr
@@ -33,25 +36,27 @@
 //! and the default panic hook also writes to stderr, so even a caught panic cannot
 //! corrupt the stdout stream.
 //!
-//! Disconnect handling (SNAP-16): the serving loop is strictly serial, so a client
-//! disconnect is observed at the first response write. A failed write sets the shared
-//! cancel flag (the snapshot channel honors it at its tile/batch checkpoints) and
-//! aborts the loop with an IO error — the process exits instead of idling; timeouts
-//! and restarts stay the caller's job (WORKER.md semantic 6).
+//! Stdin is read independently of inference so EOF cancels screenshots at their
+//! existing checkpoints. Output failure stops the dispatcher without waiting for
+//! another stdin line. Diagnostics and panic hooks write only to stderr.
+
+mod control;
+mod scheduler;
+use scheduler::run_worker_loop;
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{BufRead, Write};
+
 use std::path::PathBuf;
 use xberg::{ExtractInput, ExtractedDocument, ExtractionConfig, ProcessingWarning};
 
 use super::extract::{build_runtime, single_result_from_output};
 use super::snapshot_ocr::{
-    ErrorKind, KIND_INPUT_INVALID, KIND_NO_TEXT, Recognized, SnapshotOcrEngine, recognize_base64,
+    ErrorKind, KIND_INPUT_INVALID, KIND_NO_TEXT, Recognized, SnapshotOcrEngine, SnapshotState, recognize_base64,
 };
 use super::validate_file_exists;
 
@@ -63,12 +68,17 @@ const COMMAND_OCR_SNAPSHOT: &str = "ocr_snapshot";
 const COMMAND_SNAPSHOT_STATE: &str = "snapshot_state";
 /// Media transcription command (SV-12).
 const COMMAND_TRANSCRIBE: &str = "transcribe";
+const COMMAND_CANCEL: &str = "cancel";
+const COMMAND_FORMATS: &str = "formats";
+const COMMAND_CAPABILITIES: &str = "capabilities";
+const COMMAND_MODEL_STATE: &str = "model_state";
 
-/// The only supported extraction mode today: run the startup config unchanged.
+/// Run the startup document processing settings unchanged.
 const MODE_NORMAL: &str = "normal";
+const MODE_FAST: &str = "fast";
 
 /// One line-JSON request read from stdin.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub(crate) struct WorkerRequest {
     /// Caller-supplied correlation token (any JSON value), echoed verbatim in the response.
     pub(crate) id: Value,
@@ -79,13 +89,25 @@ pub(crate) struct WorkerRequest {
     /// snapshot commands.
     #[serde(default)]
     pub(crate) path: Option<PathBuf>,
-    /// Extraction mode; `None` means [`MODE_NORMAL`]. No other mode exists yet.
+    /// Extraction mode; `None` means [`MODE_NORMAL`]; `fast` is extract-only.
     #[serde(default)]
     pub(crate) mode: Option<String>,
     /// Base64 image bytes (PNG or equivalent lossless encoding) — required by
     /// `ocr_snapshot`; the bytes stay in memory (SNAP-14: no disk staging required).
     #[serde(default)]
     pub(crate) image_base64: Option<String>,
+    #[serde(default)]
+    pub(crate) timeout_ms: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_target_id")]
+    pub(crate) target_id: Option<Value>,
+    #[serde(skip)]
+    pub(crate) control: control::RequestControl,
+}
+
+fn deserialize_target_id<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
 }
 
 /// What the extraction handler did with a request, before protocol wrapping.
@@ -146,6 +168,7 @@ pub(crate) struct TranscribeSuccess {
               byte-compatible; the other arms stay small"
 )]
 pub(crate) enum RequestOutcome {
+    Query(Value),
     Extract(WorkerOutcome),
     Snapshot(std::result::Result<SnapshotSuccess, (String, ErrorKind)>),
     State {
@@ -275,6 +298,11 @@ impl WorkerResponse {
 /// Wrap a handler outcome into the wire response.
 fn render_outcome(id: Value, outcome: RequestOutcome) -> WorkerResponse {
     match outcome {
+        RequestOutcome::Query(value) => {
+            let mut response = WorkerResponse::bare(id, true);
+            response.extra = Some(value);
+            response
+        }
         RequestOutcome::Extract(WorkerOutcome::Success(document)) => WorkerResponse::success(id, document),
         RequestOutcome::Extract(WorkerOutcome::Failure(error)) => WorkerResponse::failure(id, error),
         RequestOutcome::Snapshot(Ok(success)) => {
@@ -316,10 +344,14 @@ fn render_outcome(id: Value, outcome: RequestOutcome) -> WorkerResponse {
 /// (`id`, `command`) and invalid JSON are reported as a plain message suitable for a
 /// failure response with a null id. `extract` additionally requires `path` here,
 /// preserving the original parse-level rejection; the other commands validate their
-/// own fields in [`process_line`] so their responses can still echo the id.
+/// own fields in [`validate_line`] so their responses can still echo the id.
 fn parse_request(line: &str) -> std::result::Result<WorkerRequest, String> {
+    let raw: Value = serde_json::from_str(line).map_err(|error| format!("invalid worker request JSON: {error}"))?;
+    if raw.get("id").is_none() {
+        return Err("invalid worker request JSON: missing field `id`".into());
+    }
     let request: WorkerRequest =
-        serde_json::from_str(line).map_err(|error| format!("invalid worker request JSON: {error}"))?;
+        serde_json::from_value(raw).map_err(|error| format!("invalid worker request JSON: {error}"))?;
     if request.command == COMMAND_EXTRACT && request.path.is_none() {
         return Err("invalid worker request JSON: missing field `path` for command 'extract'".to_string());
     }
@@ -337,98 +369,96 @@ fn render_panic(panic: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-/// Handle one stdin line: parse it, validate the protocol-level fields, and run the
-/// handler under `catch_unwind` so a panicking request becomes a failure response
-/// for this id instead of killing the worker.
-///
-/// `handler` is never called for lines that fail protocol validation (bad JSON,
-/// unsupported command, unsupported mode, missing command-specific fields).
-fn process_line<F>(line: &str, handler: &mut F) -> WorkerResponse
-where
-    F: FnMut(WorkerRequest) -> RequestOutcome,
-{
-    let request = match parse_request(line) {
-        Ok(request) => request,
-        Err(error) => return WorkerResponse::failure(Value::Null, error),
-    };
+/// Reject malformed protocol messages before they enter either work queue.
+fn validate_line(line: &str) -> std::result::Result<WorkerRequest, Box<WorkerResponse>> {
+    let request = parse_request(line).map_err(|error| {
+        let id = serde_json::from_str::<Value>(line)
+            .ok()
+            .and_then(|raw| raw.get("id").cloned())
+            .unwrap_or(Value::Null);
+        Box::new(WorkerResponse::failure(id, error))
+    })?;
     let id = request.id.clone();
     if let Some(mode) = request.mode.as_deref()
         && mode != MODE_NORMAL
+        && !(mode == MODE_FAST && request.command == COMMAND_EXTRACT)
     {
-        return WorkerResponse::failure(
+        return Err(Box::new(WorkerResponse::failure(
             id,
-            format!("unsupported mode '{mode}': only '{MODE_NORMAL}' is supported"),
-        );
+            format!("unsupported mode '{mode}': normal is supported for all tasks; fast only for extract"),
+        )));
+    }
+    if request.timeout_ms == Some(0) {
+        return Err(Box::new(WorkerResponse::failure(
+            id,
+            "timeout_ms must be positive".into(),
+        )));
     }
     match request.command.as_str() {
+        COMMAND_CANCEL => {
+            if request.target_id.is_none() {
+                return Err(Box::new(WorkerResponse::failure(
+                    id,
+                    "cancel requires target_id".into(),
+                )));
+            }
+        }
+        COMMAND_FORMATS | COMMAND_CAPABILITIES | COMMAND_MODEL_STATE => {}
         COMMAND_EXTRACT => {}
         COMMAND_OCR_SNAPSHOT => {
             if request.image_base64.is_none() {
-                return WorkerResponse::failure(
+                return Err(Box::new(WorkerResponse::failure(
                     id,
                     "ocr_snapshot requires image_base64 (base64 PNG or equivalent lossless bytes)".to_string(),
-                );
+                )));
             }
         }
         COMMAND_SNAPSHOT_STATE => {}
         COMMAND_TRANSCRIBE => {
             if request.path.is_none() {
-                return WorkerResponse::failure(id, "transcribe requires path (local media file)".to_string());
+                return Err(Box::new(WorkerResponse::failure(
+                    id,
+                    "transcribe requires path (local media file)".to_string(),
+                )));
             }
         }
         other => {
-            return WorkerResponse::failure(
+            return Err(Box::new(WorkerResponse::failure(
                 id,
-                format!(
-                    "unsupported command '{other}': only '{COMMAND_EXTRACT}', '{COMMAND_OCR_SNAPSHOT}', \
-                     '{COMMAND_SNAPSHOT_STATE}' and '{COMMAND_TRANSCRIBE}' are supported"
-                ),
-            );
+                format!("unsupported command '{other}'; use capabilities to list commands"),
+            )));
         }
     }
+    Ok(request)
+}
+
+fn process_request<F>(request: WorkerRequest, handler: &mut F) -> WorkerResponse
+where
+    F: FnMut(WorkerRequest) -> RequestOutcome,
+{
+    let id = request.id.clone();
+    let screenshot = request.command == COMMAND_OCR_SNAPSHOT;
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(request))) {
         Ok(outcome) => render_outcome(id, outcome),
-        Err(panic) => WorkerResponse::failure(id, render_panic(panic)),
+        Err(panic) => {
+            let mut response = WorkerResponse::failure(id, render_panic(panic));
+            if screenshot {
+                response.error_kind = Some(super::snapshot_ocr::KIND_INTERNAL);
+            }
+            response
+        }
     }
 }
 
-/// The request-serving loop: strictly serial, one response line per request.
-///
-/// Reads a line, answers it completely, and only then reads the next line — the caller
-/// may therefore pipeline writes only up to the response it is waiting for. Whitespace-
-/// only lines are skipped (they carry no id to echo). Returns `Ok(())` on stdin EOF,
-/// which is the normal end-of-batch signal.
-///
-/// Disconnect handling (SNAP-16): a stdout write/flush failure means the caller is
-/// gone. The cancel flag is set — the snapshot channel observes it at its tile/batch
-/// checkpoints — and the loop aborts with an IO error so the process exits instead of
-/// idling; the caller treats the exit like a crash (WORKER.md semantic 6).
-fn run_worker_loop<R, W, F>(reader: R, writer: &mut W, cancel: &AtomicBool, mut handler: F) -> Result<()>
+#[cfg(test)]
+fn process_line<F>(line: &str, handler: &mut F) -> WorkerResponse
 where
-    R: BufRead,
-    W: Write,
     F: FnMut(WorkerRequest) -> RequestOutcome,
 {
-    for line in reader.lines() {
-        let line = line.context("failed to read a worker request line from stdin")?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        if cancel.load(Ordering::Acquire) {
-            anyhow::bail!("client disconnected (cancel flag set); not serving further requests");
-        }
-        let response = process_line(&line, &mut handler);
-        let encoded = serde_json::to_string(&response).context("failed to serialize a worker response")?;
-        if let Err(error) = writeln!(writer, "{encoded}") {
-            cancel.store(true, Ordering::Release);
-            return Err(error).context("failed to write a worker response line to stdout");
-        }
-        if let Err(error) = writer.flush() {
-            cancel.store(true, Ordering::Release);
-            return Err(error).context("failed to flush a worker response line to stdout");
-        }
+    match validate_line(line) {
+        Ok(request) => process_request(request, handler),
+        Err(response) => *response,
     }
-    Ok(())
 }
 
 /// Run one request against the real extraction pipeline on the worker's shared runtime.
@@ -442,8 +472,9 @@ fn extract_request(
     config: &ExtractionConfig,
     request: WorkerRequest,
 ) -> WorkerOutcome {
+    let config = request_config(config, &request);
     let Some(path) = request.path else {
-        // Unreachable through process_line (extract requires a path), kept as a
+        // Unreachable through validate_line (extract requires a path), kept as a
         // defensive non-panicking fallback for direct callers.
         return WorkerOutcome::Failure("extract requires path (local document file)".to_string());
     };
@@ -453,7 +484,7 @@ fn extract_request(
     }
     let started = std::time::Instant::now();
     let input = ExtractInput::from_uri(uri.clone());
-    match runtime.block_on(xberg::extract(input, config)) {
+    match runtime.block_on(xberg::extract(input, &config)) {
         Ok(output) => match single_result_from_output(output) {
             Ok(document) => {
                 tracing::info!(
@@ -469,11 +500,29 @@ fn extract_request(
     }
 }
 
+fn request_config(startup: &ExtractionConfig, request: &WorkerRequest) -> ExtractionConfig {
+    let mut config = startup.clone();
+    config.cancel_token = Some(request.control.token.clone());
+    // The dispatcher owns deadlines. Do not drop an extraction future while its
+    // spawn_blocking parser is still running and report a false terminal result.
+    config.extraction_timeout_secs = None;
+    // The `transcription` config field only exists in transcription-enabled builds
+    // (the `all`-feature leg server_test rebuilds does not carry it).
+    #[cfg(feature = "transcription")]
+    if let Some(transcription) = &mut config.transcription {
+        transcription.timeout_ms = None;
+    }
+    if request.mode.as_deref() == Some(MODE_FAST) {
+        config.disable_expensive_document_processing();
+    }
+    config
+}
+
 /// Handle one `ocr_snapshot` request (SNAP-14): decode the in-memory image and
-/// recognize it through the lazily loaded, batch-reused snapshot engine.
+/// recognize it through the lazily loaded, resident snapshot engine.
 fn ocr_snapshot_request(engine: &mut SnapshotOcrEngine, request: WorkerRequest, cancel: &AtomicBool) -> RequestOutcome {
     let Some(encoded) = request.image_base64 else {
-        // Unreachable through process_line; defensive non-panicking fallback.
+        // Unreachable through validate_line; defensive non-panicking fallback.
         return RequestOutcome::Snapshot(Err((
             "ocr_snapshot requires image_base64 (base64 PNG or equivalent lossless bytes)".to_string(),
             KIND_INPUT_INVALID,
@@ -499,12 +548,9 @@ fn ocr_snapshot_request(engine: &mut SnapshotOcrEngine, request: WorkerRequest, 
 
 /// Handle one `snapshot_state` request (SNAP-17). The query itself always succeeds;
 /// `state` reports the channel and `error` the last load failure (null when none).
-fn snapshot_state_request(engine: &SnapshotOcrEngine) -> RequestOutcome {
-    let (state, error) = engine.state();
-    RequestOutcome::State {
-        state,
-        error: error.map(str::to_string),
-    }
+fn snapshot_state_request(status: &SnapshotState) -> RequestOutcome {
+    let (state, error) = status.get();
+    RequestOutcome::State { state, error }
 }
 
 /// Map a media file extension onto the MIME the sensevoice stager understands
@@ -555,6 +601,15 @@ fn transcribe_media(
     }
     let path = request.path.ok_or("transcribe requires path (local media file)")?;
     validate_file_exists(&path).map_err(|error| format!("{error:#}"))?;
+    if request.control.token.is_cancelled() {
+        return Err("transcription cancelled".into());
+    }
+    if let Some(max_bytes) = tcfg.max_bytes {
+        let size = std::fs::metadata(&path).map_err(|e| e.to_string())?.len();
+        if size > max_bytes {
+            return Err(format!("Input size {size} exceeds transcription.max_bytes {max_bytes}"));
+        }
+    }
     let bytes = std::fs::read(&path).map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
     // SV-06 header name: the input file's complete name including its extension,
     // exactly the JchTools media worker's `markdown()` name source (`file_name()`),
@@ -565,12 +620,13 @@ fn transcribe_media(
         .unwrap_or("media")
         .to_string();
     let mime_type = mime_for_media(&path);
-    let result = xberg::transcription::sensevoice::transcribe_bytes(
+    let result = xberg::transcription::sensevoice::transcribe_bytes_cancellable(
         &bytes,
         &name,
         mime_type,
         tcfg.model_dir.as_deref(),
         tcfg.max_duration_ms,
+        &request.control.token,
     )?;
     Ok(TranscribeSuccess {
         markdown: result.markdown,
@@ -596,7 +652,7 @@ fn transcribe_request(_config: &ExtractionConfig, _request: WorkerRequest) -> Re
 /// Execute the `xberg worker` command.
 ///
 /// Builds the one tokio runtime and resolves the one config this worker will use for
-/// the whole batch, then serves stdin until EOF. The snapshot OCR engine is created
+/// the process lifetime, then serves stdin until EOF. The snapshot OCR engine is created
 /// lazily on the first `ocr_snapshot` request against `config.snapshot_ocr`; every
 /// other backend rides the library's process-level caches. Diagnostics (including
 /// the per-request info log with elapsed time) go to stderr via `tracing`.
@@ -609,28 +665,107 @@ pub fn worker_command(config: ExtractionConfig) -> Result<()> {
     let runtime = build_runtime(&config).context("failed to build the worker's tokio runtime")?;
     let cancel = Arc::new(AtomicBool::new(false));
     let mut snapshot_engine = SnapshotOcrEngine::new(config.snapshot_ocr.clone());
-    let handler = |request: WorkerRequest| -> RequestOutcome {
-        match request.command.as_str() {
-            COMMAND_EXTRACT => RequestOutcome::Extract(extract_request(&runtime, &config, request)),
-            COMMAND_OCR_SNAPSHOT => ocr_snapshot_request(&mut snapshot_engine, request, &cancel),
-            COMMAND_SNAPSHOT_STATE => snapshot_state_request(&snapshot_engine),
-            COMMAND_TRANSCRIBE => transcribe_request(&config, request),
-            // Unreachable: process_line rejects unknown commands before the handler.
-            other => RequestOutcome::Extract(WorkerOutcome::Failure(format!("unsupported command '{other}'"))),
-        }
+    let status = snapshot_engine.state();
+    let default_timeout = config.extraction_timeout_secs.map(std::time::Duration::from_secs);
+    // Initialize registries once, before inference, without loading models.
+    let formats = serde_json::to_value(super::formats::compiled_in_formats()?)?;
+    let document_backend = config
+        .ocr
+        .as_ref()
+        .map(|ocr| ocr.backend.clone())
+        .unwrap_or_else(|| "paddle-ocr".into());
+    let document = move |request: WorkerRequest| match request.command.as_str() {
+        COMMAND_TRANSCRIBE => transcribe_request(&config, request),
+        _ => RequestOutcome::Extract(extract_request(&runtime, &config, request)),
     };
-    let stdin = std::io::stdin().lock();
+    let screenshot = move |request: WorkerRequest| {
+        let control = request.control.clone();
+        ocr_snapshot_request(&mut snapshot_engine, request, control.token.as_atomic())
+    };
+    let query = move |command: &str| match command {
+        COMMAND_FORMATS => RequestOutcome::Query(serde_json::json!({"formats": formats})),
+        COMMAND_CAPABILITIES => RequestOutcome::Query(serde_json::json!({
+            "protocol_version": 2, "version": env!("CARGO_PKG_VERSION"), "pid": std::process::id(),
+            "commands": ["extract", "ocr_snapshot", "transcribe", "snapshot_state", "cancel", "formats", "capabilities", "model_state"],
+            "extract_modes": ["normal", "fast"], "cancellation": "cooperative", "timeout_ms": true,
+            "document_snapshot_concurrent": true, "transcription": cfg!(feature = "transcription"),
+            "layout": cfg!(feature = "layout-detection"), "paddle_ocr": cfg!(feature = "paddle-ocr")
+        })),
+        COMMAND_MODEL_STATE => {
+            let (snapshot, error) = status.get();
+            #[cfg(feature = "ocr")]
+            let document = {
+                let registry = xberg::plugins::registry::get_ocr_backend_registry();
+                let registry = registry.read();
+                registry.model_state(&document_backend)
+            };
+            #[cfg(not(feature = "ocr"))]
+            let document = serde_json::json!({"state": "unavailable"});
+            #[cfg(feature = "transcription")]
+            let media = xberg::transcription::sensevoice::model_state();
+            #[cfg(not(feature = "transcription"))]
+            let media = serde_json::json!({"state": "unavailable"});
+            RequestOutcome::Query(serde_json::json!({"models": {
+                "snapshot": {"state": snapshot, "error": error},
+                "document": {"backend": document_backend, "models": document}, "transcription": media
+            }}))
+        }
+        _ => snapshot_state_request(&status),
+    };
+    // Do not move a StdinLock across threads; the reader thread owns the handle.
+    let stdin = std::io::BufReader::new(std::io::stdin());
     let mut stdout = std::io::stdout().lock();
-    run_worker_loop(stdin, &mut stdout, &cancel, handler)
+    run_worker_loop(stdin, &mut stdout, cancel, default_timeout, document, screenshot, query)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
-    use std::io::Cursor;
     use std::path::Path;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[test]
+    fn fast_mode_changes_only_the_request_config_and_normal_restores_ocr() {
+        let startup = ExtractionConfig {
+            force_ocr: true,
+            ..Default::default()
+        };
+        let before = serde_json::to_value(&startup).expect("config serializes");
+        let mut fast = request(json!(1), "large.pdf");
+        fast.mode = Some(MODE_FAST.into());
+        let effective = request_config(&startup, &fast);
+        assert!(effective.disable_ocr);
+        assert!(!effective.force_ocr);
+        assert!(!effective.runs_ocr_on_embedded_images());
+        assert_eq!(serde_json::to_value(&startup).unwrap(), before);
+        assert_eq!(
+            serde_json::to_value(&effective.snapshot_ocr).unwrap(),
+            before["snapshot_ocr"]
+        );
+        let normal = request_config(&startup, &request(json!(2), "small.pdf"));
+        assert!(!normal.disable_ocr);
+        assert!(normal.force_ocr);
+        #[cfg(feature = "ocr")]
+        assert!(normal.runs_ocr_on_embedded_images());
+    }
+
+    #[test]
+    fn control_protocol_validates_target_timeout_mode_and_preserves_ids() {
+        assert!(validate_line(r#"{"id":1,"command":"cancel","target_id":null}"#).is_ok());
+        assert!(validate_line(r#"{"id":2,"command":"extract","path":"a.pdf","mode":"fast","timeout_ms":1}"#).is_ok());
+        for command in ["formats", "capabilities", "model_state"] {
+            assert!(validate_line(&json!({"id":3,"command":command}).to_string()).is_ok());
+        }
+        for value in [
+            json!({"id":4,"command":"extract"}),
+            json!({"id":4,"command":"cancel"}),
+            json!({"id":4,"command":"ocr_snapshot","image_base64":"x","mode":"fast"}),
+            json!({"id":4,"command":"extract","path":"x","timeout_ms":0}),
+        ] {
+            assert_eq!(validate_line(&value.to_string()).unwrap_err().id, json!(4));
+        }
+    }
 
     fn request(id: Value, path: &str) -> WorkerRequest {
         WorkerRequest {
@@ -639,6 +774,7 @@ mod tests {
             path: Some(PathBuf::from(path)),
             mode: None,
             image_base64: None,
+            ..Default::default()
         }
     }
 
@@ -649,11 +785,8 @@ mod tests {
             path: Some(PathBuf::from(path)),
             mode: None,
             image_base64: None,
+            ..Default::default()
         }
-    }
-
-    fn extract_outcome_ok() -> RequestOutcome {
-        RequestOutcome::Extract(WorkerOutcome::Success(ExtractedDocument::default()))
     }
 
     fn extract_outcome_failure(message: &str) -> RequestOutcome {
@@ -750,7 +883,7 @@ mod tests {
         );
 
         let mode = process_line(
-            r#"{"id":8,"command":"extract","path":"a.pdf","mode":"fast"}"#,
+            r#"{"id":8,"command":"extract","path":"a.pdf","mode":"invalid"}"#,
             &mut handler,
         );
         assert!(!mode.ok);
@@ -759,7 +892,7 @@ mod tests {
             mode.error
                 .as_deref()
                 .unwrap_or_default()
-                .contains("unsupported mode 'fast'")
+                .contains("unsupported mode 'invalid'")
         );
 
         assert_eq!(calls, 0, "protocol rejections must not reach the handler");
@@ -951,149 +1084,6 @@ mod tests {
         let value = serde_json::to_value(render_outcome(json!(9), failure)).expect("serializes");
         assert_eq!(value["ok"], json!(false));
         assert!(value["error"].as_str().unwrap_or_default().contains("媒体模型缺失"));
-    }
-
-    #[test]
-    fn run_worker_loop_answers_every_request_in_order_and_stops_at_eof() {
-        let input = Cursor::new(concat!(
-            "{\"id\":1,\"command\":\"extract\",\"path\":\"a.txt\"}\n",
-            "\n",
-            "{\"id\":\"two\",\"command\":\"extract\",\"path\":\"missing.txt\"}\n",
-        ));
-        let mut output = Vec::new();
-        let cancel = AtomicBool::new(false);
-        let handler = |request: WorkerRequest| {
-            if request.path.as_deref() == Some(Path::new("a.txt")) {
-                extract_outcome_ok()
-            } else {
-                extract_outcome_failure("file not found")
-            }
-        };
-
-        run_worker_loop(input, &mut output, &cancel, handler).expect("EOF is a clean exit");
-
-        let text = String::from_utf8(output).expect("responses are UTF-8");
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 2, "one response per request; blank lines skipped: {text}");
-
-        let first: Value = serde_json::from_str(lines[0]).expect("response is line JSON");
-        assert_eq!(first["id"], json!(1));
-        assert_eq!(first["ok"], json!(true));
-
-        // A failed file does not end the batch: the next request is still answered.
-        let second: Value = serde_json::from_str(lines[1]).expect("response is line JSON");
-        assert_eq!(second["id"], json!("two"));
-        assert_eq!(second["ok"], json!(false));
-        assert_eq!(second["error"], json!("file not found"));
-    }
-
-    /// Mixed-command batch: a failing snapshot request and an unknown command are
-    /// isolated between well-formed responses, and ids echo end to end.
-    #[test]
-    fn run_worker_loop_isolates_failures_across_commands() {
-        use base64::{Engine as _, engine::general_purpose::STANDARD};
-
-        // A valid (blank) PNG so the request reaches model resolution and fails
-        // there — an undecodable image would be `input_invalid` instead.
-        let mut png = Vec::new();
-        image::RgbImage::from_pixel(8, 8, image::Rgb([255, 255, 255]))
-            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
-            .expect("tiny png encodes");
-        let png_b64 = STANDARD.encode(&png);
-
-        let input = Cursor::new(format!(
-            concat!(
-                "{{\"id\":1,\"command\":\"ocr_snapshot\",\"image_base64\":\"{png_b64}\"}}\n",
-                "{{\"id\":2,\"command\":\"snapshot_state\"}}\n",
-                "{{\"id\":3,\"command\":\"transcribe\",\"path\":\"E:/media/speech.mp4\"}}\n",
-                "{{\"id\":4,\"command\":\"time_travel\"}}\n",
-                "{{\"id\":5,\"command\":\"extract\",\"path\":\"a.txt\"}}\n",
-            ),
-            png_b64 = png_b64,
-        ));
-        let mut output = Vec::new();
-        let cancel = AtomicBool::new(false);
-        let mut engine = SnapshotOcrEngine::new(None);
-        // Engine with no resolvable models: ocr_snapshot must fail without
-        // affecting later requests.
-        let handler = |request: WorkerRequest| match request.command.as_str() {
-            COMMAND_OCR_SNAPSHOT => ocr_snapshot_request(&mut engine, request, &cancel),
-            COMMAND_SNAPSHOT_STATE => snapshot_state_request(&engine),
-            COMMAND_TRANSCRIBE => RequestOutcome::Transcribe(Err("no such media".to_string())),
-            COMMAND_EXTRACT => extract_outcome_ok(),
-            other => extract_outcome_failure(&format!("unsupported command '{other}'")),
-        };
-
-        run_worker_loop(input, &mut output, &cancel, handler).expect("EOF is a clean exit");
-
-        let text = String::from_utf8(output).expect("utf-8");
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 5, "one response per request: {lines:?}");
-
-        let ocr: Value = serde_json::from_str(lines[0]).expect("line json");
-        assert_eq!(ocr["id"], json!(1));
-        assert_eq!(ocr["ok"], json!(false));
-        assert_eq!(
-            ocr["error_kind"],
-            json!("asset_invalid"),
-            "unresolvable models are an asset failure"
-        );
-
-        let state: Value = serde_json::from_str(lines[1]).expect("line json");
-        assert_eq!(state["id"], json!(2));
-        assert_eq!(state["ok"], json!(true));
-        assert_eq!(
-            state["state"],
-            json!("error"),
-            "a failed load is reported by the state query"
-        );
-        assert!(state["error"].is_string());
-
-        let transcribe: Value = serde_json::from_str(lines[2]).expect("line json");
-        assert_eq!(transcribe["id"], json!(3));
-        assert_eq!(transcribe["ok"], json!(false));
-        assert_eq!(transcribe["error"], json!("no such media"));
-
-        let unknown: Value = serde_json::from_str(lines[3]).expect("line json");
-        assert_eq!(unknown["id"], json!(4));
-        assert_eq!(unknown["ok"], json!(false));
-        assert!(
-            unknown["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("unsupported command 'time_travel'"),
-            "unexpected: {unknown}"
-        );
-
-        // The failed requests did not end the batch.
-        let extract: Value = serde_json::from_str(lines[4]).expect("line json");
-        assert_eq!(extract["id"], json!(5));
-        assert_eq!(extract["ok"], json!(true));
-    }
-
-    /// Disconnect handling (SNAP-16): a failed response write sets the cancel flag
-    /// and aborts the loop instead of idling.
-    #[test]
-    fn run_worker_loop_sets_the_cancel_flag_when_a_write_fails() {
-        struct BrokenWriter;
-        impl std::io::Write for BrokenWriter {
-            fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
-                Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "client gone"))
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
-        }
-
-        let input = Cursor::new("{\"id\":1,\"command\":\"extract\",\"path\":\"a.txt\"}\n");
-        let cancel = AtomicBool::new(false);
-        let handler = |_request: WorkerRequest| extract_outcome_ok();
-        let result = run_worker_loop(input, &mut BrokenWriter, &cancel, handler);
-        assert!(result.is_err(), "a broken pipe must abort the loop");
-        assert!(
-            cancel.load(Ordering::Acquire),
-            "a failed response write must set the cancel flag"
-        );
     }
 
     fn unique_temp_path(extension: &str) -> PathBuf {
