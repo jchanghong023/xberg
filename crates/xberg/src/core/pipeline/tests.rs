@@ -3034,6 +3034,54 @@ fn opted_out_images_are_dropped_before_derivation() {
     }
 }
 
+/// GH#1703's counts half, end to end through `run_pipeline`: `drop_opted_out_images`
+/// clears `doc.images` BEFORE derivation, so the post-render `drop_ocr_only_images`
+/// can no longer see — let alone count — the entries. The pre-derivation clear must
+/// itself carry the number into `populate_document_counts`, or `DocumentCounts::images`
+/// (documented as always populated, even when the collection is not returned) silently
+/// reports 0 for every opted-out run. `disable_ocr` keeps this test off the OCR backend
+/// entirely and pins that the count must not depend on OCR having been the reason the
+/// bytes were read: reporting "how many images did this document have" is the count's
+/// own contract.
+#[tokio::test]
+#[serial]
+async fn opted_out_image_drop_still_reports_counts_images() {
+    use crate::core::config::ImageExtractionConfig;
+
+    let mut doc = make_doc("body", "text/plain");
+    for _ in 0..2 {
+        doc.images.push(crate::types::ExtractedImage {
+            data: bytes::Bytes::from_static(b"png-bytes"),
+            format: Cow::Borrowed("png"),
+            ..Default::default()
+        });
+    }
+    let config = ExtractionConfig {
+        images: Some(ImageExtractionConfig {
+            extract_images: false,
+            ..Default::default()
+        }),
+        disable_ocr: true,
+        postprocessor: Some(crate::core::config::PostProcessorConfig {
+            enabled: false,
+            ..Default::default()
+        }),
+        output_format: OutputFormat::Plain,
+        ..Default::default()
+    };
+
+    let processed = run_pipeline(doc, &config).await.unwrap();
+    assert!(
+        processed.images.as_ref().map_or(true, Vec::is_empty),
+        "opted-out extraction must return no images (regression #796)"
+    );
+    assert_eq!(
+        processed.counts.images, 2,
+        "the pre-derivation opt-out drop must feed DocumentCounts::images (GH#1703): \
+         the collection is gone, the count must not be"
+    );
+}
+
 /// GH#1662, GH#1752: `ExtractionConfig::runs_ocr_on_embedded_images` must be the ONLY
 /// expression of "do embedded images get OCR'd". This module used to re-derive it from
 /// `images.run_ocr_on_images` and `ocr.is_some()`, while `needs_image_data` -- the READ gate a

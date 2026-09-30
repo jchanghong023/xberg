@@ -11,18 +11,13 @@
 //! libavutil/channel_layout.h），只镜像到被访问的字段为止；资产按摘要安装，
 //! 布局与 DLL 严格同版本。
 
-#[cfg(windows)]
-use libloading::os::windows::{Library, Symbol};
-#[cfg(not(windows))]
-use libloading::{Library, Symbol};
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 
-use super::vad::SAMPLE_RATE;
-
 #[cfg(windows)]
-const DLL_SEARCH_FLAGS: u32 = libloading::os::windows::LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
-    | libloading::os::windows::LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+use super::DLL_SEARCH_FLAGS;
+use super::vad::SAMPLE_RATE;
+use super::{DynamicLibrary, DynamicSymbol};
 
 /// 钉定 FFmpeg n9.0.2 shared 构建必需且自洽的四个 DLL（依赖链已核对：
 /// avformat → avcodec/avutil，avcodec → avutil/swresample，swresample → avutil）。
@@ -235,15 +230,6 @@ type SwrInit = unsafe extern "C" fn(*mut SwrContext) -> c_int;
 type SwrFree = unsafe extern "C" fn(*mut *mut SwrContext);
 type SwrConvert = unsafe extern "C" fn(*mut SwrContext, *mut *const u8, c_int, *const *const u8, c_int) -> c_int;
 type SwrGetDelay = unsafe extern "C" fn(*mut SwrContext, i64) -> i64;
-
-#[cfg(windows)]
-type DynamicLibrary = Library;
-#[cfg(windows)]
-type DynamicSymbol<T> = Symbol<T>;
-#[cfg(not(windows))]
-type DynamicLibrary = Library;
-#[cfg(not(windows))]
-type DynamicSymbol<T> = Symbol<'static, T>;
 
 /// 已加载的 FFmpeg 原生库与函数集合。
 pub(crate) struct FfmpegLibs {
@@ -482,7 +468,9 @@ pub(crate) fn decode_audio_cancellable(
         let frame = FrameGuard { libs, frame };
 
         // 重采样器按首个解码帧的输出参数配置（解码输出可能与容器参数不同）。
-        let mut swr: *mut SwrContext = std::ptr::null_mut();
+        // 包进 SwrGuard（Option：首个解码帧前不存在），成功与全部错误路径
+        // 都由 Drop 释放（RAII 守卫约定，与本模块其余守卫一致）。
+        let mut swr: Option<SwrGuard> = None;
         let mut codec_rate = (*codecpar).sample_rate;
         if codec_rate <= 0 {
             codec_rate = SAMPLE_RATE;
@@ -494,9 +482,15 @@ pub(crate) fn decode_audio_cancellable(
         macro_rules! convert_frame {
             ($frame_ptr:expr) => {{
                 let view: &AVFrame = &*$frame_ptr;
-                if swr.is_null() {
-                    swr = build_resampler(libs, view, codec_rate)?;
+                if swr.is_none() {
+                    let ctx = build_resampler(libs, view, codec_rate)?;
+                    swr = Some(SwrGuard { libs, ctx });
                 }
+                // 上一分支保证 Some；ctx 来自 build_resampler 的成功返回（非空）。
+                let swr = swr
+                    .as_ref()
+                    .map(|guard| guard.ctx)
+                    .expect("重采样器已按首个解码帧构建");
                 let in_rate = if view.sample_rate > 0 {
                     view.sample_rate as i64
                 } else {
@@ -578,7 +572,8 @@ pub(crate) fn decode_audio_cancellable(
         }
 
         // 重采样器 flush：收干内部缓冲的尾部样本（尾部样本要求）。
-        if !swr.is_null() {
+        if let Some(guard) = swr.as_ref() {
+            let swr = guard.ctx;
             loop {
                 let delay = (libs.swr_get_delay)(swr, SAMPLE_RATE as i64);
                 let out_count = (delay.max(0) as usize).max(1);
@@ -601,8 +596,8 @@ pub(crate) fn decode_audio_cancellable(
                 total += produced as u64;
                 sink(&out_f32)?;
             }
-            (libs.swr_free)(&mut swr);
         }
+        // （swr_free 由 SwrGuard 的 Drop 执行，此处不再显式释放。）
 
         Ok(DecodeOutcome {
             total_samples: total,
@@ -696,6 +691,21 @@ struct FrameGuard<'f> {
 impl Drop for FrameGuard<'_> {
     fn drop(&mut self) {
         unsafe { (self.libs.frame_free)(&mut self.frame) };
+    }
+}
+
+struct SwrGuard<'f> {
+    libs: &'f FfmpegLibs,
+    ctx: *mut SwrContext,
+}
+
+impl Drop for SwrGuard<'_> {
+    fn drop(&mut self) {
+        // 判空防御：ctx 只经 build_resampler 的成功路径进入守卫，恒非空；
+        // 全部提前返回路径同样经此处释放（原裸指针管理漏掉的泄漏点）。
+        if !self.ctx.is_null() {
+            unsafe { (self.libs.swr_free)(&mut self.ctx) };
+        }
     }
 }
 

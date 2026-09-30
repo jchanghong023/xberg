@@ -92,20 +92,27 @@ where
 
 /// Document name constant used by the audio transcript extractor.
 ///
-/// `extract_content` only receives anonymous bytes (no source filename), so
-/// the SV-06 `# ` header falls back to this name on the extract path. Callers
-/// with a real path (e.g. the worker `transcribe` command) pass the
-/// real file name straight into `sensevoice::transcribe_bytes`.
+/// The SV-06 `# ` header prefers the input file's full name (extension
+/// included) carried in `ExtractionConfig::source_name` — the engine sets it
+/// on the bytes path and the file path fills it from the input path in
+/// `core::extractor::file` — matching the worker `transcribe` command's
+/// `path.file_name()`. Only truly anonymous bytes (a direct `extract_content`
+/// call with no `source_name`) fall back to this constant.
 const SENSEVOICE_DOCUMENT_NAME: &str = "audio-transcript";
 
 /// SenseVoice pipeline: FFmpeg DLL decode → Silero VAD → SenseVoice INT8,
 /// producing the SV-06 Markdown structure.
+///
+/// `source_name` becomes the SV-06 `# ` header name (TRANSCRIPTION.md: the
+/// input file's full name including extension); `None` falls back to
+/// [`SENSEVOICE_DOCUMENT_NAME`].
 ///
 /// Runs on the blocking thread pool under the shared transcription semaphore;
 /// the enclosing [`apply_timeout`] in `extract_content` bounds the whole call.
 async fn run_sensevoice_pipeline(
     content: &[u8],
     mime_type: &str,
+    source_name: Option<String>,
     tcfg: &crate::core::config::transcription::TranscriptionConfig,
     cancel: crate::cancellation::CancellationToken,
 ) -> Result<InternalDocument> {
@@ -113,7 +120,7 @@ async fn run_sensevoice_pipeline(
     let mime_owned = mime_type.to_string();
     let model_dir = tcfg.model_dir.clone();
     let max_duration_ms = tcfg.max_duration_ms;
-    let name = SENSEVOICE_DOCUMENT_NAME.to_string();
+    let name = source_name.unwrap_or_else(|| SENSEVOICE_DOCUMENT_NAME.to_string());
 
     let result = transcribe_holding_permit(TRANSCRIPTION_SEMAPHORE.clone(), move || {
         crate::transcription::sensevoice::transcribe_bytes_cancellable(
@@ -231,6 +238,7 @@ impl InternalDocumentExtractor for TranscriptionExtractor {
             run_sensevoice_pipeline(
                 content,
                 mime_type,
+                config.source_name.clone(),
                 tcfg,
                 config.cancel_token.clone().unwrap_or_default(),
             ),
@@ -622,6 +630,16 @@ mod tests {
         }
 
         let bytes = std::fs::read(&media).unwrap_or_else(|e| panic!("missing test media {media:?}: {e}"));
+        // B-D1 / TRANSCRIPTION.md: the SV-06 header must carry the input
+        // file's full name (extension included), exactly like the worker
+        // `transcribe` path. The engine sets this same field from
+        // `ExtractInput::filename` / the input path before `extract_content`
+        // runs; here the test sets it directly to the fixture's file name.
+        let file_name = media
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("test media path must end in a UTF-8 file name")
+            .to_string();
         let tcfg = TranscriptionConfig {
             model_dir: Some(model_root),
             // Real model load + decode needs more than the 10 s default? No —
@@ -629,7 +647,8 @@ mod tests {
             timeout_ms: Some(600_000),
             ..Default::default()
         };
-        let cfg = config_with_transcription(tcfg);
+        let mut cfg = config_with_transcription(tcfg);
+        cfg.source_name = Some(file_name.clone());
         let ext = TranscriptionExtractor;
         let doc = ext
             .extract_content(&bytes, "video/mp4", &cfg)
@@ -642,6 +661,15 @@ mod tests {
         assert!(
             kinds.iter().any(|k| k == "Title"),
             "expected a Title element, got {kinds:?}"
+        );
+        let title = doc
+            .elements
+            .iter()
+            .find(|e| e.kind == ElementKind::Title)
+            .expect("a Title element must exist (asserted above)");
+        assert_eq!(
+            title.text, file_name,
+            "the SV-06 header must be the input file's full name (worker `transcribe` parity)"
         );
         let texts: Vec<&str> = doc.elements.iter().map(|e| e.text.as_str()).collect();
         assert!(

@@ -537,6 +537,7 @@ pub(crate) fn acquire_artifact_file_lock(path: &Path) -> Result<ArtifactFileLock
         auto_rotate,
         feature = "ner-onnx",
         feature = "candle-paddleocr-vl",
+        feature = "candle-deepseek-ocr",
         feature = "chunking-tokenizers",
         feature = "onnx-runtime",
         feature = "static-embeddings"

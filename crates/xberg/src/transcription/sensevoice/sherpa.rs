@@ -4,19 +4,14 @@
 //! DLL 与 onnxruntime.dll 均为按摘要校验后的固定资产；符号在进程生命周期内保持
 //! 有效（库句柄有意泄漏到进程退出，见 [`Sherpa::load`]）。
 
-#[cfg(windows)]
-use libloading::os::windows::{Library, Symbol};
-#[cfg(not(windows))]
-use libloading::{Library, Symbol};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+use super::DLL_SEARCH_FLAGS;
 use super::output::normalize_terms;
 use super::vad::{SAMPLE_RATE, Segment, Transcriber, TranscriptLine, VAD_WINDOW, VadEngine};
-
-#[cfg(windows)]
-const DLL_SEARCH_FLAGS: u32 = libloading::os::windows::LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
-    | libloading::os::windows::LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+use super::{DynamicLibrary, DynamicSymbol};
 
 /// Silero VAD 阈值参数（与 JchTools 媒体链路一致，参数固定）。
 pub(crate) const VAD_THRESHOLD: f32 = 0.25;
@@ -298,15 +293,6 @@ pub(crate) struct Sherpa {
     vad_reset: DynamicSymbol<VadReset>,
     vad_clear: DynamicSymbol<VadReset>,
 }
-
-#[cfg(windows)]
-type DynamicLibrary = Library;
-#[cfg(windows)]
-type DynamicSymbol<T> = Symbol<T>;
-#[cfg(not(windows))]
-type DynamicLibrary = Library;
-#[cfg(not(windows))]
-type DynamicSymbol<T> = Symbol<'static, T>;
 
 unsafe fn load_library(path: &Path) -> Result<DynamicLibrary, String> {
     // SAFETY：FFI 加载钉定 DLL；调用方保证路径来自校验后的资产目录。

@@ -93,8 +93,9 @@ use commands::serve_command;
 ))]
 use commands::warm_command;
 use commands::{
-    BatchInputFormat, batch_command, clear_command, compiled_in_formats, doctor_command, extract_command, load_config,
-    manifest_command, snapshot_ocr_command, stats_command, validate_file_exists, validate_output_dir, worker_command,
+    BatchInputFormat, FORCED_EXIT_CODE, WorkerStartup, batch_command, clear_command, compiled_in_formats,
+    doctor_command, extract_command, load_config, manifest_command, snapshot_ocr_command, stats_command,
+    validate_file_exists, validate_output_dir, worker_command,
 };
 #[cfg(feature = "tree-sitter")]
 use commands::{cache_dir_command, clean_command, download_command, list_command};
@@ -315,7 +316,8 @@ enum Commands {
     /// det/rec set, and prints the grid-layout text (`--json` for a structured report
     /// with records and timings). Model root resolution: `--models` → `snapshot_ocr`
     /// config block → XBERG_SNAPSHOT_MODEL_DIR → <exe dir>/models/snapshot-ocr.
-    /// Requires ORT_DYLIB_PATH to point at onnxruntime before loading.
+    /// `ORT_DYLIB_PATH` is only needed for load-dynamic ort builds (the packaged
+    /// CLI); a missing dylib surfaces as the ort session error.
     SnapshotOcr {
         /// Path to the screenshot image (PNG).
         #[arg(long)]
@@ -804,12 +806,21 @@ fn main() -> Result<()> {
     // for the crate's recursive parsers, which overflows before any worker is even reached.
     // Run the CLI on a worker with that same budget so `xberg extract` behaves identically on
     // Windows and Unix. ~keep
-    std::thread::Builder::new()
+    let outcome = std::thread::Builder::new()
         .name("xberg-main".to_string())
         .stack_size(commands::extract::RUNTIME_WORKER_STACK_SIZE_BYTES)
         .spawn(run_cli)?
         .join()
-        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    // Worker disconnect/idle paths ask for a fixed non-zero exit code (WORKER.md
+    // P1/P4). It is stored rather than exited from inside the command, so run_cli
+    // — and with it the tracing guard — unwound and flushed by the time we
+    // hard-exit here.
+    let forced = FORCED_EXIT_CODE.load(std::sync::atomic::Ordering::Acquire);
+    if forced != 0 {
+        std::process::exit(forced);
+    }
+    outcome
 }
 
 #[expect(
@@ -945,9 +956,14 @@ fn run_cli() -> Result<()> {
             config_json_base64,
         } => {
             // The batch's fixed config is resolved once here; requests carry only a path.
+            // Worker-only keys (owner_token / idle_timeout_ms) are peeled off the raw
+            // JSON before the merge — ExtractionConfig (deny_unknown_fields) never
+            // sees them; every other unknown key still fails the merge.
+            let (startup, sanitized) =
+                WorkerStartup::strip_worker_keys(config_json.as_deref(), config_json_base64.as_deref())?;
             let mut config = load_config(config_path, !no_config_discovery)?;
-            apply_json_overrides(&mut config, config_json, config_json_base64)?;
-            worker_command(config)?;
+            apply_json_overrides(&mut config, sanitized, None)?;
+            worker_command(config, startup)?;
         }
 
         Commands::SnapshotOcr {

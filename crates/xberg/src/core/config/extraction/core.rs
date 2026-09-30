@@ -542,7 +542,10 @@ pub struct ExtractionConfig {
     /// Set internally during extraction (from `ExtractInput::filename` or a
     /// downloaded document's filename) so extractors such as the tree-sitter
     /// code extractor can fall back to extension-based detection when
-    /// content-based detection (e.g. shebang) is inconclusive. Excluded from
+    /// content-based detection (e.g. shebang) is inconclusive. The file path
+    /// is also filled in from `path.file_name()` before the extraction-cache
+    /// key is computed, and the transcription extractor titles its SV-06
+    /// output from this field (worker `transcribe` parity). Excluded from
     /// serialization and bindings — it is not a user-facing configuration value.
     ///
     /// `pub` (not `pub(crate)`) so binding crates can construct `ExtractionConfig`
@@ -1118,6 +1121,14 @@ impl ExtractionConfig {
         }
         if let Some(images) = &mut self.images {
             images.run_ocr_on_images = false;
+        }
+        // The PDF extractor's inline-image OCR block gates only on
+        // `pdf_options.ocr_inline_images` (it never consults `effective_disable_ocr`),
+        // so an explicit `true` from the caller would keep per-image OCR running in
+        // fast mode unless it is turned off here too.
+        #[cfg(feature = "pdf")]
+        if let Some(pdf) = &mut self.pdf_options {
+            pdf.ocr_inline_images = false;
         }
         #[cfg(feature = "layout-types")]
         {
@@ -2157,6 +2168,36 @@ mod tests {
         assert_eq!(round_tripped.ocr_near_empty_fallback, Some(true));
         assert_eq!(round_tripped.ocr_scanned_page_quality_gate, Some(false));
         assert_eq!(round_tripped.ocr_embedded_images, Some(true));
+    }
+
+    /// `disable_expensive_document_processing` (worker fast mode) must also turn off
+    /// `pdf_options.ocr_inline_images`: the PDF extractor's inline-image OCR block gates
+    /// only on that field, never on `effective_disable_ocr`, so a request that explicitly
+    /// enabled it would still run per-image OCR in fast mode. A `pdf_options` section that
+    /// is `None` must stay `None` (no panic, no materialization) -- the same no-op shape
+    /// the method's other optional sections already have.
+    #[test]
+    #[cfg(feature = "pdf")]
+    fn fast_mode_disables_pdf_inline_image_ocr() {
+        let mut config = ExtractionConfig {
+            pdf_options: Some(crate::core::config::PdfConfig {
+                ocr_inline_images: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        config.disable_expensive_document_processing();
+        assert!(
+            config.pdf_options.as_ref().is_some_and(|pdf| !pdf.ocr_inline_images),
+            "fast mode must not leave the PDF extractor's per-inline-image OCR block armed"
+        );
+
+        let mut absent = ExtractionConfig::default();
+        absent.disable_expensive_document_processing();
+        assert!(
+            absent.pdf_options.is_none(),
+            "a request without a pdf_options section must not gain one"
+        );
     }
 
     #[test]

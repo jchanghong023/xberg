@@ -729,14 +729,7 @@ fn generate_markdown_and_cells(
         if row_cells.iter().all(|cell| cell.trim().is_empty()) {
             continue;
         }
-        markdown.push_str("| ");
-        for (i, cell_str) in row_cells.iter().enumerate() {
-            if i > 0 {
-                markdown.push_str(" | ");
-            }
-            escape_markdown_into(&mut markdown, cell_str);
-        }
-        markdown.push_str(" |\n");
+        write_sparse_row_cells(&mut markdown, &row_cells);
         cells.push(row_cells);
     }
 

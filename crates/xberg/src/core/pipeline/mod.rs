@@ -157,6 +157,16 @@ fn should_retain_images_after_ocr(config: &ExtractionConfig) -> bool {
 /// `image_indices` need no matching cleanup: `execute_chunking` only populates them from
 /// `result.images.is_some()`, so setting `images` to `None` here already keeps chunks
 /// consistent by construction. ~keep
+///
+/// For every current configuration this is a no-op that returns 0: the pre-derivation
+/// `drop_opted_out_images` clears `doc.images` under a strictly WIDER condition
+/// (`!wants_own_bytes && !ocr_inline_images`, without `should_retain_images_after_ocr`'s
+/// `include_page_rasters` disjunct), so by the time this runs the collection is always
+/// already empty. It stays anyway, as the post-render WRITE gate: `extractors/pdf`'s
+/// `only_reason_images_were_requested_is_ocr` mirrors `should_retain_images_after_ocr`
+/// against it, and a future gate drift must not become a way for OCR-only bytes to leak
+/// back into a result that opted out of them (the GH#1662 lesson about separately-written
+/// copies of one condition). ~keep
 fn drop_ocr_only_images(result: &mut ExtractedDocument) -> usize {
     let dropped = result.images.take().map_or(0, |images| images.len());
     if let Some(ref mut pages) = result.pages {
@@ -549,7 +559,11 @@ async fn run_pipeline_impl(
 
     // Before the element-tree snapshot AND derivation: the opted-out entries must be
     // absent from `internal_document` too, or ElementBased consumers still see them.
-    drop_opted_out_images(&mut doc, config);
+    // The cleared count must be carried forward as well (GH#1703's counts half): this
+    // clear empties `doc.images` before `drop_ocr_only_images` below could ever count
+    // them, so `DocumentCounts::images` reports the number captured here or silently
+    // reports 0 for every opted-out run.
+    let images_dropped_by_opt_out = drop_opted_out_images(&mut doc, config);
 
     let doc_for_elements = if config.result_format == crate::types::ResultFormat::ElementBased {
         Some(doc.clone())
@@ -569,12 +583,17 @@ async fn run_pipeline_impl(
     // container populates for reasons that have nothing to do with OCR (markdown inline
     // data-URI images, Jupyter output/attachment images, ODT/DOCX/PPTX embedded pictures
     // read for their own sake). Dropping unconditionally here regressed all of those --
-    // `images` came back `None` even though no OCR ever ran. ~keep
-    let images_dropped_after_ocr = if config.runs_ocr_on_embedded_images() && !should_retain_images_after_ocr(config) {
-        drop_ocr_only_images(&mut result)
-    } else {
-        0
-    };
+    // `images` came back `None` even though no OCR ever ran. The opt-out pre-clear above
+    // has already emptied the collection for every configuration that reaches this arm
+    // (its drop condition is a strict superset), so `drop_ocr_only_images` contributes 0
+    // today; it stays as the drift-proof post-render WRITE gate, and its count is summed
+    // in so a future gate change cannot misreport either. ~keep
+    let images_dropped_after_ocr = images_dropped_by_opt_out
+        + if config.runs_ocr_on_embedded_images() && !should_retain_images_after_ocr(config) {
+            drop_ocr_only_images(&mut result)
+        } else {
+            0
+        };
 
     // #286: record the text the preserved element tree stands for, so the divergence check
     // below can tell whether post-processing has since made the tree a stale second copy of
@@ -865,8 +884,9 @@ pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -
         }
     };
 
-    // Same ordering as `run_pipeline`: drop before the element-tree snapshot.
-    drop_opted_out_images(&mut doc, config);
+    // Same ordering as `run_pipeline`: drop before the element-tree snapshot, and carry
+    // the cleared count into the totals below the same way (GH#1703's counts half).
+    let images_dropped_by_opt_out = drop_opted_out_images(&mut doc, config);
     let doc_for_elements = if config.result_format == crate::types::ResultFormat::ElementBased {
         Some(doc.clone())
     } else {
@@ -877,12 +897,16 @@ pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -
         crate::extraction::derive::derive_extraction_result(doc, include_structure, config.output_format.clone());
 
     // GH#1703: mirror `run_pipeline` -- rendering above has consumed the OCR text, so the bytes
-    // read only for embedded-image OCR (GH#1662) go unless the caller asked for images. ~keep
-    let images_dropped_after_ocr = if should_retain_images_after_ocr(config) {
-        0
-    } else {
-        drop_ocr_only_images(&mut result)
-    };
+    // read only for embedded-image OCR (GH#1662) go unless the caller asked for images. The
+    // opt-out pre-clear above feeds the count (it has already emptied the collection for every
+    // configuration that reaches this arm); the sum keeps the post-render WRITE gate's own
+    // contribution honest. ~keep
+    let images_dropped_after_ocr = images_dropped_by_opt_out
+        + if should_retain_images_after_ocr(config) {
+            0
+        } else {
+            drop_ocr_only_images(&mut result)
+        };
     result.internal_document = doc_for_elements;
 
     // #286: mirrors `run_pipeline` — see `discard_diverged_internal_document`.
@@ -1090,7 +1114,14 @@ fn apply_output_format_pass(
 /// regression #796's `extract_images = false` → empty `images` contract.
 /// `pdf_options.ocr_inline_images = true` is an explicit ask to surface inline
 /// images and keeps them.
-fn drop_opted_out_images(doc: &mut crate::types::internal::InternalDocument, config: &ExtractionConfig) {
+///
+/// Returns how many entries were cleared, so `DocumentCounts::images` (documented
+/// as always populated, even when the collection itself is not returned) still
+/// reports them (GH#1703's counts half): this clear runs ahead of
+/// `drop_ocr_only_images`, which can no longer see — let alone count — the entries
+/// it used to drop. Without the returned number, every opted-out run reported
+/// `counts.images = 0`.
+fn drop_opted_out_images(doc: &mut crate::types::internal::InternalDocument, config: &ExtractionConfig) -> usize {
     #[cfg(feature = "pdf")]
     let inline_ocr_forced = config
         .pdf_options
@@ -1099,8 +1130,36 @@ fn drop_opted_out_images(doc: &mut crate::types::internal::InternalDocument, con
     #[cfg(not(feature = "pdf"))]
     let inline_ocr_forced = false;
     if !config.wants_own_bytes_in_result() && !inline_ocr_forced {
+        let dropped = doc.images.len();
         doc.images.clear();
+        dropped
+    } else {
+        0
     }
+}
+
+/// The `Native` skip rule the sync and async re-encode passes share — one copy, so
+/// the two passes cannot drift apart: `Native` output leaves every image alone
+/// except metafiles, which convert to PNG even under `Native` (no Markdown preview
+/// renders `.emf`/`.wmf` refs), and (svg feature) SVGs pending sanitization.
+#[cfg(feature = "image-encode")]
+fn native_pass_skips(
+    config: &crate::core::config::extraction::ImageExtractionConfig,
+    images: Option<&[crate::types::ExtractedImage]>,
+) -> bool {
+    #[cfg(feature = "svg")]
+    let svg_sanitizing = config.svg.sanitize;
+    #[cfg(not(feature = "svg"))]
+    let svg_sanitizing = false;
+    matches!(
+        config.output_format,
+        crate::core::config::extraction::ImageOutputFormat::Native
+    ) && !svg_sanitizing
+        && !images.is_some_and(|images| {
+            images
+                .iter()
+                .any(|image| crate::core::image_encode::is_metafile_format(&image.format))
+        })
 }
 
 #[cfg(all(feature = "image-encode", any(not(feature = "tokio-runtime"), test)))]
@@ -1109,23 +1168,10 @@ fn apply_output_format_pass_with_security_limits(
     config: &crate::core::config::extraction::ImageExtractionConfig,
     security_limits: Option<&crate::extractors::security::SecurityLimits>,
 ) -> Vec<(u32, String, String)> {
-    use crate::core::config::extraction::ImageOutputFormat;
-
     // `Native` skips the pass entirely — except metafiles, which convert to PNG
     // even under `Native` (no Markdown preview renders `.emf`/`.wmf` refs), and
     // (svg feature) SVGs pending sanitization.
-    #[cfg(feature = "svg")]
-    let svg_sanitizing = config.svg.sanitize;
-    #[cfg(not(feature = "svg"))]
-    let svg_sanitizing = false;
-    if matches!(config.output_format, ImageOutputFormat::Native)
-        && !svg_sanitizing
-        && !result.images.as_ref().is_some_and(|images| {
-            images
-                .iter()
-                .any(|image| crate::core::image_encode::is_metafile_format(&image.format))
-        })
-    {
+    if native_pass_skips(config, result.images.as_deref()) {
         return Vec::new();
     }
 
@@ -1167,22 +1213,9 @@ async fn apply_output_format_pass_offload(
     config: &crate::core::config::extraction::ImageExtractionConfig,
     security_limits: Option<&crate::extractors::security::SecurityLimits>,
 ) -> crate::Result<Vec<(u32, String, String)>> {
-    use crate::core::config::extraction::ImageOutputFormat;
-
     // Same skip rule as the sync pass: `Native` is a no-op unless metafiles
     // (always PNG-converted) or sanitized SVGs are present.
-    #[cfg(feature = "svg")]
-    let svg_sanitizing = config.svg.sanitize;
-    #[cfg(not(feature = "svg"))]
-    let svg_sanitizing = false;
-    if matches!(config.output_format, ImageOutputFormat::Native)
-        && !svg_sanitizing
-        && !result.images.as_ref().is_some_and(|images| {
-            images
-                .iter()
-                .any(|image| crate::core::image_encode::is_metafile_format(&image.format))
-        })
-    {
+    if native_pass_skips(config, result.images.as_deref()) {
         return Ok(Vec::new());
     }
 
@@ -1315,8 +1348,7 @@ fn rewrite_content_image_extensions(content: &mut String, format_renames: &[(u32
             // contain a marker mid-text. The carve-out is a deliberate superset of
             // the lift's reach — any fence language, any position — because the
             // marker's target file exists under the new name either way.
-            let marker_line =
-                body.trim_start().starts_with("![") && body.contains("](") && body.trim_end().ends_with(')');
+            let marker_line = crate::extraction::markdown_utils::is_image_marker_line(body);
             if marker_line {
                 result.push_str(&rewrite_image_refs_on_unfenced_text(body, format_renames));
                 if had_cr {

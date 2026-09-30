@@ -2,7 +2,7 @@
 //! SenseVoice INT8 via sherpa-onnx C API), ported from the JchTools
 //! `markdown-media-worker` chain so both stacks produce identical semantics:
 //! 16 kHz mono decode, fixed VAD parameters, `use_itn=1` Chinese recognition,
-//! the fixed 34-entry terminology map, and the SV-06 Markdown layout.
+//! the fixed 37-entry terminology map, and the SV-06 Markdown layout.
 //!
 //! This is the transcription feature's only backend (SV-01).
 //!
@@ -16,6 +16,21 @@ mod ffmpeg_dll;
 mod output;
 mod sherpa;
 mod vad;
+
+// ffmpeg_dll 与 sherpa 两套钉定 DLL（FFmpeg、sherpa-onnx/onnxruntime）共用同一
+// libloading 平台管道：别名与搜索旗标只在此定义一次，防止两侧 cfg 漂移。
+#[cfg(windows)]
+pub(super) const DLL_SEARCH_FLAGS: u32 = libloading::os::windows::LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR
+    | libloading::os::windows::LOAD_LIBRARY_SEARCH_DEFAULT_DIRS;
+
+#[cfg(windows)]
+pub(super) type DynamicLibrary = libloading::os::windows::Library;
+#[cfg(windows)]
+pub(super) type DynamicSymbol<T> = libloading::os::windows::Symbol<T>;
+#[cfg(not(windows))]
+pub(super) type DynamicLibrary = libloading::Library;
+#[cfg(not(windows))]
+pub(super) type DynamicSymbol<T> = libloading::Symbol<'static, T>;
 
 // Re-exports for the extractor's SV-06 element assembly (keeps `output`
 // private while exposing the fixed wording helpers crate-wide).
@@ -257,16 +272,18 @@ fn get_or_create_session(model_root: &Path) -> Result<Arc<SenseVoiceSession>, St
     let model_path = sherpa::model_file(model_root, &SENSEVOICE_MODEL_RELATIVE);
     let tokens_path = sherpa::model_file(model_root, &TOKENS_RELATIVE);
     let vad_path = sherpa::model_file(model_root, &VAD_MODEL_RELATIVE);
+    // 模型存在性先于原生 DLL 解析：DLL 搜索依赖环境变量与安装位置（环境相关），
+    // 而缺模型是确定性错误，必须以「媒体模型缺失」首先浮现，不被 DLL 错误遮蔽。
+    for path in [&model_path, &tokens_path] {
+        if !path.is_file() {
+            return Err(format!("媒体模型缺失: {}", path.display()));
+        }
+    }
     let sherpa_path = resolve_sherpa_dll(model_root)?;
     let key = session_cache_key(&model_path, &tokens_path, &sherpa_path, RECOGNIZER_THREADS);
     let mut sessions = SESSIONS.lock().map_err(|e| format!("会话缓存损坏: {e}"))?;
     if let Some(session) = sessions.get(&key) {
         return Ok(Arc::clone(session));
-    }
-    for path in [&model_path, &tokens_path] {
-        if !path.is_file() {
-            return Err(format!("媒体模型缺失: {}", path.display()));
-        }
     }
     // 加载前离线校验摘要，不符即失败不推理（仅缓存未命中时执行）。
     verify_asset(
@@ -349,7 +366,21 @@ fn run_pipeline(
         let mut transcriber = sherpa::SenseVoiceTranscriber::new(&session.sherpa, session.recognizer);
         let mut pipeline = VadPipeline::new(&mut real_vad, &mut transcriber).with_cancel(cancel.clone());
 
-        let mut sink = |samples: &[f32]| -> Result<(), String> { vad_push(&mut pipeline, samples) };
+        // 时长上限在解码流内增量判定（契约「rejected after decode, before
+        // model work」）：VAD 累计样本一旦越限，sink 即返回错误中止解码循环
+        // 并向上传播，不再等解码收尾与全部推理跑完。sink 只在有音轨且产出
+        // 样本时被调用，无音轨容器不会触发（与既有 `outcome.has_audio` 门控
+        // 同义）。
+        let mut sink = |samples: &[f32]| -> Result<(), String> {
+            vad_push(&mut pipeline, samples)?;
+            if let Some(max_ms) = max_duration_ms {
+                let duration_ms = samples_to_ms(pipeline.total_samples());
+                if duration_ms > max_ms {
+                    return Err(duration_exceeded_error(duration_ms, max_ms));
+                }
+            }
+            Ok(())
+        };
         let outcome = decode_file(&libs, media_path, &mut sink, cancel)?;
         check_cancel(cancel)?;
         vad_finish(&mut pipeline)?;
@@ -359,14 +390,15 @@ fn run_pipeline(
         let total_samples = pipeline.total_samples();
         let lines = pipeline.into_lines();
 
+        // 兜底检查（非主检查，保留）：流内增量判定以 `pipeline.total_samples()`
+        // 为准，该计数在 `finish()` 前不含不足一个窗口的 pending 尾样本
+        // （≤511 样本 ≈ 32 ms），此处覆盖这段尾差，保证越限文件必然被拒。
         if outcome.has_audio
             && let Some(max_ms) = max_duration_ms
         {
             let duration_ms = samples_to_ms(total_samples);
             if duration_ms > max_ms {
-                return Err(format!(
-                    "Decoded audio duration {duration_ms} ms exceeds transcription.max_duration_ms limit of {max_ms}"
-                ));
+                return Err(duration_exceeded_error(duration_ms, max_ms));
             }
         }
 
@@ -424,6 +456,11 @@ fn seconds_to_ms(seconds: f32) -> u32 {
 
 fn samples_to_ms(total_samples: u64) -> u64 {
     (total_samples as f64 * 1000.0 / vad::SAMPLE_RATE as f64).round() as u64
+}
+
+/// 超时长错误的固定文本：流内增量判定与事后兜底共用，保证两处措辞逐字一致。
+fn duration_exceeded_error(duration_ms: u64, max_ms: u64) -> String {
+    format!("Decoded audio duration {duration_ms} ms exceeds transcription.max_duration_ms limit of {max_ms}")
 }
 
 /// Verify one pinned asset: exact byte length and exact SHA-256. Mismatch is a
@@ -552,15 +589,14 @@ fn resolve_sherpa_dll(model_root: &Path) -> Result<PathBuf, String> {
         return Ok(found);
     }
 
-    if let Some(dir) = std::env::var_os("PATH")
-        .and_then(|paths| std::env::split_paths(&paths).find(|p| DLL_NAMES.iter().any(|n| p.join(n).is_file())))
-    {
-        for name in DLL_NAMES {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                return Ok(candidate);
-            }
-        }
+    // 目录序优先、目录内按 DLL_NAMES 序：flat_map 展开后的首个命中文件
+    // 与原「先定位目录、再按名重扫」两段循环的语义一致。
+    if let Some(found) = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .flat_map(|p| DLL_NAMES.iter().map(move |n| p.join(n)))
+            .find(|p| p.is_file())
+    }) {
+        return Ok(found);
     }
 
     Err(format!(
@@ -573,8 +609,6 @@ fn resolve_sherpa_dll(model_root: &Path) -> Result<PathBuf, String> {
 /// `XBERG_FFMPEG_DLL_DIR` → exe-adjacent candidates → model-root candidates
 /// (JchTools layout) → `PATH`. The directory must hold the full pinned set.
 fn resolve_ffmpeg_dir(model_root: &Path) -> Result<PathBuf, String> {
-    let valid = |p: &Path| ffmpeg_dll::library_dir(p).is_some();
-
     if let Ok(value) = std::env::var(FFMPEG_DLL_DIR_ENV) {
         return ffmpeg_dll::library_dir(Path::new(&value))
             .ok_or_else(|| format!("{FFMPEG_DLL_DIR_ENV} 不是有效的 FFmpeg 共享库目录: {value}"));
@@ -585,9 +619,8 @@ fn resolve_ffmpeg_dir(model_root: &Path) -> Result<PathBuf, String> {
         .and_then(|exe| exe.parent().map(|p| p.to_path_buf()));
     if let Some(dir) = exe_dir {
         for sub in ["", "ffmpeg", "media-dlls", "media-dlls/ffmpeg", "bin"] {
-            let candidate = dir.join(sub);
-            if valid(&candidate) {
-                return ffmpeg_dll::library_dir(&candidate).ok_or_else(|| "FFmpeg 共享库目录校验不一致".to_string());
+            if let Some(found) = ffmpeg_dll::library_dir(&dir.join(sub)) {
+                return Ok(found);
             }
         }
     }
@@ -598,13 +631,15 @@ fn resolve_ffmpeg_dir(model_root: &Path) -> Result<PathBuf, String> {
         model_root.join("../ffmpeg"),
     ];
     for candidate in candidates {
-        if valid(&candidate) {
-            return ffmpeg_dll::library_dir(&candidate).ok_or_else(|| "FFmpeg 共享库目录校验不一致".to_string());
+        if let Some(found) = ffmpeg_dll::library_dir(&candidate) {
+            return Ok(found);
         }
     }
 
-    if let Some(dir) = std::env::var_os("PATH").and_then(|paths| std::env::split_paths(&paths).find(|p| valid(p))) {
-        return ffmpeg_dll::library_dir(&dir).ok_or_else(|| "FFmpeg 共享库目录校验不一致".to_string());
+    if let Some(found) = std::env::var_os("PATH")
+        .and_then(|paths| std::env::split_paths(&paths).find_map(|p| ffmpeg_dll::library_dir(&p)))
+    {
+        return Ok(found);
     }
 
     Err(format!(

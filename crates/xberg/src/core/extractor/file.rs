@@ -290,12 +290,41 @@ pub(crate) async fn extract_file(
     result
 }
 
+/// Fill `ExtractionConfig::source_name` from the input path when the field is
+/// unset.
+///
+/// (fork) B-D1 / TRANSCRIPTION.md: the file path knows the input's real file
+/// name, and the transcription extractor renders its SV-06 `# <file>` header
+/// from `source_name` — the same `path.file_name()` source the worker
+/// `transcribe` command uses, so both paths title their output identically.
+/// Only a `None` field is filled; an explicit `source_name` (engine bytes
+/// path, downloaded documents, API callers) always wins. A path without a
+/// UTF-8 file name leaves the field unset. Runs before
+/// `hash_extraction_config` so the extraction-cache key follows the
+/// output-affecting name (`source_name` is deliberately hashed — see
+/// `source_name_changes_the_cache_key`).
+fn fill_source_name_from_path<'a>(
+    config: std::borrow::Cow<'a, ExtractionConfig>,
+    path: &Path,
+) -> std::borrow::Cow<'a, ExtractionConfig> {
+    if config.source_name.is_some() {
+        return config;
+    }
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return config;
+    };
+    let mut owned = config.into_owned();
+    owned.source_name = Some(name.to_string());
+    std::borrow::Cow::Owned(owned)
+}
+
 pub(in crate::core::extractor) async fn extract_file_with_extractor(
     path: &Path,
     mime_type: &str,
     config: &ExtractionConfig,
 ) -> Result<ExtractedDocument> {
     let config = config.normalized();
+    let config = fill_source_name_from_path(config, path);
     let config = config.as_ref();
 
     if !config.use_cache || config.cache_ttl_secs == Some(0) {
@@ -509,6 +538,41 @@ mod tests {
             error,
             XbergError::Io(source) if source.kind() == std::io::ErrorKind::NotFound
         ));
+    }
+}
+
+/// (fork) B-D1: `fill_source_name_from_path` only fills an *unset*
+/// `source_name` from the input path; explicit values and paths without a
+/// file name are left untouched.
+#[cfg(test)]
+mod source_name_tests {
+    use super::fill_source_name_from_path;
+    use crate::core::config::ExtractionConfig;
+    use std::borrow::Cow;
+    use std::path::Path;
+
+    #[test]
+    fn fills_unset_source_name_with_the_file_name() {
+        let config = ExtractionConfig::default();
+        let filled = fill_source_name_from_path(Cow::Borrowed(&config), Path::new("media/meeting-01.mp3"));
+        assert_eq!(filled.source_name.as_deref(), Some("meeting-01.mp3"));
+    }
+
+    #[test]
+    fn keeps_an_explicitly_configured_source_name() {
+        let config = ExtractionConfig {
+            source_name: Some("explicit-name.wav".to_string()),
+            ..Default::default()
+        };
+        let filled = fill_source_name_from_path(Cow::Borrowed(&config), Path::new("other.wav"));
+        assert_eq!(filled.source_name.as_deref(), Some("explicit-name.wav"));
+    }
+
+    #[test]
+    fn leaves_source_name_unset_when_the_path_has_no_file_name() {
+        let config = ExtractionConfig::default();
+        let filled = fill_source_name_from_path(Cow::Borrowed(&config), Path::new(".."));
+        assert!(filled.source_name.is_none());
     }
 }
 

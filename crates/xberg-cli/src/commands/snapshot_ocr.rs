@@ -13,9 +13,11 @@
 //! not resolve is a hard error (no silent fallback); when nothing is set the
 //! error lists every searched location.
 //!
-//! `ORT_DYLIB_PATH` must point at onnxruntime before any model load (the crate
-//! pins the same-directory DLL first — anti-preemption); a missing variable is
-//! reported as a clear error instead of a search-path accident.
+//! `ORT_DYLIB_PATH` is only meaningful for `load-dynamic` ort builds (the
+//! packaged CLI resolves onnxruntime through it): ort itself honors the
+//! variable at session-build time, and a missing dylib there surfaces as the
+//! ort session error — mapped like any other model-load failure — instead of
+//! a search-path accident. Static ort builds ignore the variable entirely.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -136,21 +138,12 @@ fn rgb_to_bgr(rgb: image::RgbImage) -> std::result::Result<(u32, u32, Vec<u8>), 
     Ok((width, height, bgr))
 }
 
-/// Optional `ORT_DYLIB_PATH` pin: only meaningful for `load-dynamic` ort
-/// builds (the default workspace build statically links onnxruntime), where
-/// setting it before any session build prevents a stale PATH dll from winning
-/// the race. The default build accepts the variable being unset.
-fn require_ort_dylib() -> std::result::Result<(), String> {
-    Ok(())
-}
-
 /// Load the pinned model set from `models_dir`, returning the message plus its
 /// error category on failure (SNAP-04/SNAP-05: no fallback, no inference).
 pub(crate) fn load_models(
     models_dir: &Path,
     intra_threads: usize,
 ) -> std::result::Result<SnapshotOcrModels, (String, ErrorKind)> {
-    require_ort_dylib().map_err(|message| (message, KIND_ASSET_INVALID))?;
     SnapshotOcrModels::load(
         &models_dir.join(DET_FILE),
         &models_dir.join(REC_FILE),

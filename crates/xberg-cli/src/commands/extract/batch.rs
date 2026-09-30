@@ -110,13 +110,11 @@ pub fn batch_command(
                 {
                     xberg::extraction::markdown_utils::lift_image_markers_out_of_fences(&mut result.content);
                 }
-                if result.images.as_ref().is_some_and(|images| has_writable_images(images)) {
+                if let Some(images) = result.images.as_deref().filter(|images| has_writable_images(images)) {
                     let base = output_dir.as_deref().unwrap_or(Path::new("."));
                     let dir = batch_image_dir(base, i);
                     std::fs::create_dir_all(&dir).context("Failed to create the batch image directory")?;
-                    if let Some(images) = &result.images {
-                        write_extracted_images(images, &dir)?;
-                    }
+                    write_extracted_images(images, &dir)?;
                     result.content = prefix_image_refs(&result.content, &dir);
                 }
             }

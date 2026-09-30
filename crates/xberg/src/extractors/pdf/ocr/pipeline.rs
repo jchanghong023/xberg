@@ -20,8 +20,6 @@ use super::document::{
 // `layout-detection` and neither OCR frontend (the `formula-recognition,pdf` CI leg) both
 // blocks compile out, so importing these under the enclosing function's plain
 // `any(ocr, ocr-pipeline)` gate is an unused import. ~keep
-#[cfg(all(paddle_ocr, any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
-use super::document::merge_structured_ocr_pages_into_internal_document;
 #[cfg(all(
     any(feature = "ocr", feature = "ocr-pipeline"),
     any(feature = "ocr", feature = "ocr-wasm", not(feature = "layout-detection"))
@@ -295,16 +293,6 @@ enum AllPagesFailedPolicy {
     feature = "pdf",
     feature = "layout-detection"
 ))]
-enum MixedLayoutInputs {
-    Resolve,
-    Prepared(Option<PreparedLayoutInputs>),
-}
-
-#[cfg(all(
-    any(feature = "ocr", feature = "ocr-pipeline"),
-    feature = "pdf",
-    feature = "layout-detection"
-))]
 type PreparedLayoutInputs = (Vec<image::DynamicImage>, Vec<crate::layout::DetectionResult>);
 
 #[cfg(all(
@@ -369,8 +357,6 @@ pub(crate) async fn extract_mixed_ocr_native_with_single_block_pages(
         } else {
             AllPagesFailedPolicy::PreserveNative
         },
-        #[cfg(feature = "layout-detection")]
-        MixedLayoutInputs::Resolve,
     )
     .await
 }
@@ -383,7 +369,6 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
     content: &[u8],
     config: &ExtractionConfig,
     all_pages_failed_policy: AllPagesFailedPolicy,
-    #[cfg(feature = "layout-detection")] layout_inputs: MixedLayoutInputs,
 ) -> MixedOcrResult {
     let ocr_set: std::collections::HashSet<u32> = pages
         .ocr
@@ -443,16 +428,12 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
     // Layout detection for this mixed OCR route (#665). The full-document OCR routes
     // (`force_ocr`, the OCR-gate fallback) already run layout via `run_ocr_with_layout` ->
     // `layout_runner::run_layout_for_ocr`, keyed on `config.resolved_layout_config()` (i.e.
-    // `config.layout` being set, which `--layout` alone does). Reuse the resolved layout outcome
-    // supplied by a whole-document caller, including `None` when its gate skipped every page or
-    // the pass soft-failed; otherwise run the pass here for a selected-page call. This prevents
-    // duplicate layout work while keeping selected-page layout classification. `page_idx` is the
-    // document-wide 0-based index the layout pass uses. ~keep
+    // `config.layout` being set, which `--layout` alone does). A selected-page call has no
+    // whole-document layout outcome to reuse, so the pass runs here for the selected pages.
+    // `page_idx` is the document-wide 0-based index the layout pass uses. ~keep
     #[cfg(feature = "layout-detection")]
     let (layout_inputs_for_mixed, layout_pass_warning, layout_pass_glyph_drop_warnings): MixedLayoutOutcome =
-        if let MixedLayoutInputs::Prepared(inputs) = layout_inputs {
-            (inputs, None, Vec::new())
-        } else if let Some(layout_config) = config.resolved_layout_config() {
+        if let Some(layout_config) = config.resolved_layout_config() {
             let layout_thread_budget =
                 crate::core::config::concurrency::resolve_thread_budget(config.concurrency.as_ref());
             let default_security_limits = crate::extractors::security::SecurityLimits::default();
@@ -1624,101 +1605,6 @@ async fn extract_mixed_ocr_native_with_layout_inputs(
     ))
 }
 
-#[cfg(all(paddle_ocr, any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
-fn full_document_page_seed(page_count: usize, config: &ExtractionConfig) -> (String, Vec<crate::types::PageBoundary>) {
-    let marker_config = config.pages.as_ref().filter(|pages| pages.insert_page_markers);
-    let mut text = String::new();
-    let mut boundaries = Vec::with_capacity(page_count);
-    for page_index in 0..page_count {
-        if let Some(pages) = marker_config {
-            text.push_str(&pages.marker_format.replace("{page_num}", &(page_index + 1).to_string()));
-        } else if page_index > 0 {
-            text.push_str("\n\n");
-        }
-        boundaries.push(crate::types::PageBoundary {
-            byte_start: text.len(),
-            byte_end: text.len(),
-            page_number: page_index as u32 + 1,
-        });
-    }
-    (text, boundaries)
-}
-
-#[cfg(all(paddle_ocr, any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
-pub(crate) async fn extract_full_document_ocr_pipeline_per_page(
-    content: &[u8],
-    config: &ExtractionConfig,
-    _path: Option<&std::path::Path>,
-    page_ocr_hints: Option<PageOcrHints>,
-    #[cfg(feature = "layout-detection")] prepared_layout_inputs: Option<(
-        Vec<image::DynamicImage>,
-        Vec<crate::layout::DetectionResult>,
-    )>,
-) -> crate::Result<(
-    String,
-    Vec<crate::types::Table>,
-    Vec<crate::types::OcrElement>,
-    Option<crate::types::internal::InternalDocument>,
-    Vec<crate::types::LlmUsage>,
-    Vec<String>,
-    Option<Vec<crate::types::ExtractedImage>>,
-    Vec<crate::types::Formula>,
-    ahash::AHashMap<u32, crate::types::ImagePreprocessingMetadata>,
-    ahash::AHashMap<u32, crate::types::page::PageOcrConfidence>,
-)> {
-    if config.cancel_token.as_ref().is_some_and(|token| token.is_cancelled()) {
-        return Err(crate::XbergError::Cancelled);
-    }
-    let (_, page_count, _) = open_pdf_for_page_ocr(content)?;
-    let page_numbers = (1..=page_count as u32).collect::<Vec<_>>();
-    let mut single_block_pages = page_ocr_hints
-        .and_then(|hints| hints.single_block_pages)
-        .map(|pages| pages.iter().copied().collect::<Vec<_>>())
-        .unwrap_or_default();
-    single_block_pages.sort_unstable();
-    let (seed_text, boundaries) = full_document_page_seed(page_count, config);
-    let (text, accepted_pages, structured_pages, llm_usage, rasters, formulas, preprocessing, ocr_confidence, warnings) =
-        Box::pin(extract_mixed_ocr_native_with_layout_inputs(
-            &seed_text,
-            &boundaries,
-            MixedOcrPageSelection {
-                ocr: &page_numbers,
-                single_block: &single_block_pages,
-            },
-            content,
-            config,
-            AllPagesFailedPolicy::ReturnError,
-            #[cfg(feature = "layout-detection")]
-            MixedLayoutInputs::Prepared(prepared_layout_inputs),
-        ))
-        .await?;
-    if config.cancel_token.as_ref().is_some_and(|token| token.is_cancelled()) {
-        return Err(crate::XbergError::Cancelled);
-    }
-
-    let page_texts = page_numbers
-        .iter()
-        .map(|page| accepted_pages.get(page).cloned().unwrap_or_default())
-        .collect();
-    let mut document = crate::types::internal::InternalDocument::new("pdf");
-    document.processing_warnings = warnings;
-    merge_structured_ocr_pages_into_internal_document(&mut document, &accepted_pages, &structured_pages);
-    let tables = document.tables.clone();
-    let ocr_elements = document.prebuilt_ocr_elements.clone().unwrap_or_default();
-
-    Ok((
-        text,
-        tables,
-        ocr_elements,
-        Some(document),
-        llm_usage,
-        page_texts,
-        rasters,
-        formulas,
-        preprocessing,
-        ocr_confidence,
-    ))
-}
 /// Extract text from PDF using OCR on pre-rendered page images.
 ///
 /// When `layout_detections` are provided (pixel-space, from the same images), uses
@@ -4185,6 +4071,14 @@ pub(super) async fn run_ocr_pipeline_for_page(
 )> {
     use crate::plugins::registry::get_ocr_backend_registry;
 
+    // A pre-cancelled request must fail as `Cancelled` before any stage runs -- and ahead of
+    // this function's own no-available-backends / all-stages-failed errors, since each stage
+    // would only fail with the cancellation itself anyway. Same priority the per-page route
+    // gives a cancelled fan-out (see `extract_with_ocr_for_page`'s post-loop guard). ~keep
+    if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+        return Err(crate::XbergError::Cancelled);
+    }
+
     // Re-seed the built-in backends before deciding which pipeline stages are available. A
     // prior `clear_ocr_backends()` call in the same process (e.g. a binding e2e suite's
     // backend-management test running before this one) otherwise leaves the registry
@@ -4408,6 +4302,14 @@ pub(super) async fn run_ocr_pipeline_for_page(
                 stage_failures.push((stage.backend.clone(), e.to_string()));
             }
         }
+    }
+
+    // Mirrors `extract_with_ocr_for_page`'s own post-loop guard: a run cancelled mid-loop
+    // makes every remaining stage fail with `XbergError::Cancelled`, which the loop above
+    // folds into anonymous `stage_failures` -- surface the cancellation itself instead, and
+    // ahead of the all-stages-failed error and the image-XObject recovery below. ~keep
+    if config.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+        return Err(crate::XbergError::Cancelled);
     }
 
     match best_result {

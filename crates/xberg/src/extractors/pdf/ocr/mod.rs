@@ -61,8 +61,6 @@ pub(crate) use document::{
     merge_structured_ocr_pages_into_internal_document,
 };
 
-#[cfg(all(paddle_ocr, any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
-pub(crate) use pipeline::extract_full_document_ocr_pipeline_per_page;
 #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
 pub(crate) use pipeline::extract_mixed_ocr_native_with_single_block_pages;
 // ~keep Must match the definition's own gate in `pipeline.rs`; `#[cfg(test)]` alone left

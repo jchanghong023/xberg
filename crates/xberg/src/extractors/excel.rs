@@ -617,7 +617,7 @@ impl InternalDocumentExtractor for ExcelExtractor {
                     })
                     .await
                     .map_err(|e| crate::error::XbergError::parsing(format!("Excel extraction task failed: {}", e)))??;
-                    (read.0, read.1, read.2)
+                    read
                 } else {
                     let read = crate::extraction::excel::read_excel_bytes(content, extension, &security_limits)?;
                     let (pictures, shapes) = if want_drawings {

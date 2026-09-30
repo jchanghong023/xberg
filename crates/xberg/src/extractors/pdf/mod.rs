@@ -1379,42 +1379,10 @@ async fn run_ocr_with_layout(
     let ocr_config = config.ocr.as_ref().unwrap_or(&default_ocr_config);
 
     if let Some(pipeline) = ocr_config.effective_pipeline() {
-        #[cfg(paddle_ocr)]
-        // The synthesized classical pipeline is an automatic page-quality fallback. Running
-        // it here as one document lets a good page's score hide a bad page, so use the same
-        // page-local runner as selected-page OCR. Explicit pipelines retain their configured
-        // document scope because their stages may intentionally process the document. ~keep
-        if ocr_config.pipeline.is_none()
-            && ocr_config.vlm_fallback == crate::core::config::VlmFallbackPolicy::Disabled
-            && ocr_config.backend == "tesseract"
-        {
-            let (text, tables, elements, document, usage, page_texts, rasters, formulas, preprocessing, confidence) =
-                Box::pin(ocr::extract_full_document_ocr_pipeline_per_page(
-                    content,
-                    config,
-                    path,
-                    page_ocr_hints,
-                    #[cfg(feature = "layout-detection")]
-                    prepared_layout_inputs,
-                ))
-                .await?;
-            return Ok((
-                text,
-                tables,
-                elements,
-                document,
-                usage,
-                page_texts,
-                rasters,
-                formulas,
-                preprocessing,
-                confidence,
-                ocr_layout_gate_decisions,
-                layout_warning,
-                layout_glyph_drop_warnings,
-            ));
-        }
-
+        // 显式 pipeline 与 vlm_fallback 合成 pipeline 都按「整个文档」的既定作用域
+        // 运行（各 stage 可能刻意消费整档内容）。隐式 classical 自动回退已移除：
+        // 默认 backend 即最强 classical 引擎，默认配置不再合成 pipeline（见
+        // core/config/ocr.rs 的守护测试）。
         let (
             mut text,
             mut ocr_tables,
@@ -2998,18 +2966,18 @@ impl PdfExtractor {
         // Page-level image indices follow the OUTPUT gate, not the read gate: bytes read
         // for OCR (needs_image_data) must not leave `image_indices` pointing at entries
         // the caller opted out of (#796's contract extends to pages[].image_indices).
-        let pages_images: Vec<crate::types::ExtractedImage> = if images.is_some()
+        let pages_images: &[crate::types::ExtractedImage] = if images.is_some()
             && (extraction::pdf_image_output_requested(config)
                 || config
                     .pdf_options
                     .as_ref()
                     .is_some_and(|options| options.ocr_inline_images))
         {
-            images.clone().unwrap_or_default()
+            images.as_deref().unwrap_or(&[])
         } else {
-            Vec::new()
+            &[]
         };
-        let mut final_pages = assign_tables_and_images_to_pages(page_contents, &tables, pages_images.as_slice());
+        let mut final_pages = assign_tables_and_images_to_pages(page_contents, &tables, pages_images);
 
         let pre_formatted_output: Option<String> = None;
 
@@ -8136,7 +8104,11 @@ mod tests {
 
         const FABRICATED_NATIVE_TEXT: &str = "synthetic fabricated text used to verify the per page segmentation mode recorded after automatic ocr routing";
         let config = ExtractionConfig {
-            ocr: Some(OcrConfig::default()),
+            // 断言的是 Tesseract 的有效 PSM 元数据；显式钉住该前提。
+            ocr: Some(OcrConfig {
+                backend: "tesseract".to_string(),
+                ..Default::default()
+            }),
             pages: Some(PageConfig {
                 extract_pages: true,
                 ..Default::default()

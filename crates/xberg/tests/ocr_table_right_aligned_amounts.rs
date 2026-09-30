@@ -27,8 +27,18 @@ const EXPECTED: [[&str; 6]; 7] = [
 
 #[test]
 fn every_amount_stays_in_its_row_and_column() {
-    let document = extract_bytes_document_blocking(SCAN, "image/png", &ExtractionConfig::default())
-        .expect("the scanned table must extract with the default config");
+    // The scan's close right-aligned columns are a Tesseract page-segmentation scenario
+    // (upstream default backend); the fork's default OCR backend is PaddleOCR, so the
+    // premise is pinned here the same way the lib-suite PSM tests are. ~keep
+    let config = ExtractionConfig {
+        ocr: Some(xberg::core::config::OcrConfig {
+            backend: "tesseract".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let document = extract_bytes_document_blocking(SCAN, "image/png", &config)
+        .expect("the scanned table must extract with the pinned tesseract backend");
     let table = document.tables.first().expect("the scan must produce a table");
     let cells: Vec<Vec<&str>> = table
         .cells

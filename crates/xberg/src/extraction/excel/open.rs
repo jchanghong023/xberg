@@ -38,9 +38,8 @@ use super::*;
 /// (`.xls`/`.xla`). Only those may tolerate an unreadable entry header — what a stray central
 /// directory inside an OLE2 container produces: the ZIP validator stops at the first entry it
 /// cannot read, so tolerating it on a real ZIP would stop the accounting for every entry after
-/// it. The flag comes from the declared format, supplemented for `.xls` spellings only by
-/// whether calamine's sniffing actually selects its CFB reader — the exact condition under
-/// which no ZIP entry is ever decompressed.
+/// it. The flag comes from the declared format: `.xls`/`.xla` 走 CFB `Xls` reader，
+/// 从不解压 ZIP 条目。
 #[cfg(feature = "excel")]
 fn validate_zip_container<R: Read + Seek>(reader: R, limits: &SecurityLimits, declared_legacy: bool) -> Result<()> {
     let mut archive = match zip::ZipArchive::new(reader) {
@@ -62,35 +61,15 @@ fn validate_zip_container<R: Read + Seek>(reader: R, limits: &SecurityLimits, de
     }
 }
 
-/// Whether calamine's reader selection for this file lands on the CFB `Xls` reader.
-/// An exact `xls` extension is picked by name; every other spelling goes through
-/// content sniffing, which tries the CFB reader before the ZIP-based one — so
-/// `Xls::new` succeeding is exactly the condition under which no ZIP entry is ever
-/// decompressed. (A ZIP may carry arbitrary prefix data, so a CFB magic prefix alone
-/// proves nothing: a prefix-plus-ZIP file fails the CFB parse, sniffs to the Xlsx
-/// reader, and must stay on the strict, fully-accounted path.)
-#[cfg(feature = "excel")]
-pub(super) fn sniffs_to_cfb_reader(file: &std::fs::File) -> bool {
-    match file.try_clone() {
-        Ok(clone) => calamine::Xls::new(std::io::BufReader::new(clone)).is_ok(),
-        Err(_) => false,
-    }
-}
-
 /// Whether `validate_zip_container`'s unreadable-entry tolerance applies to this
-/// spreadsheet. Calamine reads an exact-`xls` by extension and an any-case `xla`
-/// through its explicit `Xls` (CFB) branch; every other spelling goes through content
-/// sniffing, which hands the file to the CFB reader exactly when `Xls::new` succeeds
-/// (`cfb_reader`) — and only then is no ZIP entry ever decompressed, which is what
-/// makes tolerating a stray central directory harmless. A renamed ZIP sniffs to the
-/// Xlsx reader and stays on the strict, fully-accounted path. `cfb_reader` is a
-/// closure, consulted only for a non-exact `.xls` spelling: the probe parses the whole
-/// workbook, a cost the already-decided extensions must not pay.
+/// spreadsheet: `.xls`/`.xla`（任意大小写）在下方直接派发 calamine 的 CFB `Xls`
+/// reader（扩展名决定，不做内容嗅探，与 [`read_excel_bytes`] 同一契约），因此
+/// OLE 容器后被追加的杂散 central directory 永远不会进入 ZIP 条目核算；其余
+/// 扩展名全额核算。被改名为 `*.xls` 的 ZIP 会在 XLS 解析处失败，同样不会有任何
+/// ZIP 条目被解压。
 #[cfg(feature = "excel")]
-pub(super) fn xls_zip_tolerance(raw_extension: &str, cfb_reader: impl FnOnce() -> bool) -> bool {
-    raw_extension == "xls"
-        || raw_extension.eq_ignore_ascii_case("xla")
-        || (raw_extension.eq_ignore_ascii_case("xls") && cfb_reader())
+pub(super) fn xls_zip_tolerance(raw_extension: &str) -> bool {
+    raw_extension.eq_ignore_ascii_case("xls") || raw_extension.eq_ignore_ascii_case("xla")
 }
 
 pub(crate) fn read_excel_file(file_path: &str, limits: &SecurityLimits) -> Result<ExcelReadResult> {
@@ -99,20 +78,15 @@ pub(crate) fn read_excel_file(file_path: &str, limits: &SecurityLimits) -> Resul
 
     #[cfg(feature = "excel")]
     {
-        let check_file = std::fs::File::open(file_path)?;
-        // Calamine picks its reader from the *raw* extension: only an exact `xls` reaches its
-        // CFB reader through `open_workbook_auto`, while `xla` in any casing hits the explicit
-        // `Xls` branch below. Every other spelling falls into content sniffing — which hands a
-        // CFB container to the same Xls reader but a ZIP to the Xlsx reader — so the tolerance
-        // has to follow the reader calamine will actually choose, not a lowercased path, or a
-        // ZIP renamed `BOOK.XLS` would be parsed as Xlsx without any zip validation. An
-        // upper-case `.XLS` that calamine really reads as CFB earns the same tolerance as an
-        // exact `.xls`; a prefix-plus-ZIP polyglot does not (it sniffs to Xlsx).
+        // `.xls`/`.xla`（任意大小写）由下方显式派发到 calamine 的 CFB `Xls`
+        // reader（扩展名决定，无内容嗅探），所以 OLE 容器携带的杂散 central
+        // directory 不能触发 ZIP 条目核算；其余扩展名全额核算。
         let raw_extension = Path::new(file_path)
             .extension()
             .and_then(|ext| ext.to_str())
             .unwrap_or_default();
-        let declared_legacy = xls_zip_tolerance(raw_extension, || sniffs_to_cfb_reader(&check_file));
+        let declared_legacy = xls_zip_tolerance(raw_extension);
+        let check_file = std::fs::File::open(file_path)?;
         validate_zip_container(std::io::BufReader::new(check_file), limits, declared_legacy)?;
     }
     #[cfg(not(feature = "excel"))]
@@ -145,6 +119,9 @@ pub(crate) fn read_excel_file(file_path: &str, limits: &SecurityLimits) -> Resul
     }
     if lower_path.ends_with(".xlsb") {
         return read_xlsb_file(file_path, office_metadata, warnings);
+    }
+    if lower_path.ends_with(".xls") {
+        return read_xls_file(file_path, office_metadata, warnings);
     }
 
     let workbook = match open_workbook_auto(Path::new(file_path)) {
@@ -248,17 +225,60 @@ fn read_xla_file(
     }
 }
 
+/// 把「构造 calamine 二进制 reader → 解析失败转 parsing 错误 → `process_workbook`」
+/// 这一骨架收敛到一处：XLS/XLSB/ODS 的 file/bytes 五个入口仅差 reader 构造方式与
+/// 错误文案 label，其余语句逐行相同。xlsx 家族与 xla/xlam 带 sidecar/fallback
+/// 逻辑，不经此处。错误文案由 `label` 拼出，与原字面量逐字节一致。
+fn read_binary_workbook<RS, W>(
+    open: impl FnOnce(RS) -> std::result::Result<W, W::Error>,
+    label: &str,
+    input: RS,
+    office_metadata: Option<HashMap<String, String>>,
+    mut warnings: Vec<ProcessingWarning>,
+) -> Result<ExcelReadResult>
+where
+    RS: std::io::Read + std::io::Seek,
+    W: Reader<RS>,
+    W::Error: std::fmt::Display,
+{
+    let workbook = open(input).map_err(|e| XbergError::parsing(format!("Failed to parse {label}: {}", e)))?;
+    let result = process_workbook(workbook, office_metadata, &mut warnings)?;
+    Ok((result, warnings))
+}
+
+/// Read a legacy `.xls` binary workbook through calamine's CFB reader directly —
+/// the file-path counterpart of [`read_xls_bytes`]. The extension decides (any
+/// casing), so a ZIP renamed `.xls` fails the XLS parse instead of being sniffed
+/// into the Xlsx reader.
+fn read_xls_file(
+    file_path: &str,
+    office_metadata: Option<HashMap<String, String>>,
+    warnings: Vec<ProcessingWarning>,
+) -> Result<ExcelReadResult> {
+    let file = std::fs::File::open(file_path)?;
+    read_binary_workbook(
+        calamine::Xls::new,
+        "XLS",
+        std::io::BufReader::new(file),
+        office_metadata,
+        warnings,
+    )
+}
+
 /// Read a `.xlsb` binary workbook file.
 fn read_xlsb_file(
     file_path: &str,
     office_metadata: Option<HashMap<String, String>>,
-    mut warnings: Vec<ProcessingWarning>,
+    warnings: Vec<ProcessingWarning>,
 ) -> Result<ExcelReadResult> {
     let file = std::fs::File::open(file_path)?;
-    let workbook = calamine::Xlsb::new(std::io::BufReader::new(file))
-        .map_err(|e| XbergError::parsing(format!("Failed to parse XLSB: {}", e)))?;
-    let result = process_workbook(workbook, office_metadata, &mut warnings)?;
-    Ok((result, warnings))
+    read_binary_workbook(
+        calamine::Xlsb::new,
+        "XLSB",
+        std::io::BufReader::new(file),
+        office_metadata,
+        warnings,
+    )
 }
 
 pub(crate) fn read_excel_bytes(data: &[u8], file_extension: &str, limits: &SecurityLimits) -> Result<ExcelReadResult> {
@@ -351,13 +371,9 @@ fn read_xlam_bytes(
 fn read_xls_bytes(
     data: &[u8],
     office_metadata: Option<HashMap<String, String>>,
-    mut warnings: Vec<ProcessingWarning>,
+    warnings: Vec<ProcessingWarning>,
 ) -> Result<ExcelReadResult> {
-    let cursor = Cursor::new(data);
-    let workbook =
-        calamine::Xls::new(cursor).map_err(|e| XbergError::parsing(format!("Failed to parse XLS: {}", e)))?;
-    let result = process_workbook(workbook, office_metadata, &mut warnings)?;
-    Ok((result, warnings))
+    read_binary_workbook(calamine::Xls::new, "XLS", Cursor::new(data), office_metadata, warnings)
 }
 
 /// Read `.xla` bytes: the byte-slice counterpart of [`read_xla_file`].
@@ -394,13 +410,15 @@ fn read_xla_bytes(
 fn read_xlsb_bytes(
     data: &[u8],
     office_metadata: Option<HashMap<String, String>>,
-    mut warnings: Vec<ProcessingWarning>,
+    warnings: Vec<ProcessingWarning>,
 ) -> Result<ExcelReadResult> {
-    let cursor = Cursor::new(data);
-    let workbook =
-        calamine::Xlsb::new(cursor).map_err(|e| XbergError::parsing(format!("Failed to parse XLSB: {}", e)))?;
-    let result = process_workbook(workbook, office_metadata, &mut warnings)?;
-    Ok((result, warnings))
+    read_binary_workbook(
+        calamine::Xlsb::new,
+        "XLSB",
+        Cursor::new(data),
+        office_metadata,
+        warnings,
+    )
 }
 
 /// Read `.ods` bytes. `read_excel_file` has no direct counterpart — an on-disk `.ods` falls
@@ -408,11 +426,7 @@ fn read_xlsb_bytes(
 fn read_ods_bytes(
     data: &[u8],
     office_metadata: Option<HashMap<String, String>>,
-    mut warnings: Vec<ProcessingWarning>,
+    warnings: Vec<ProcessingWarning>,
 ) -> Result<ExcelReadResult> {
-    let cursor = Cursor::new(data);
-    let workbook =
-        calamine::Ods::new(cursor).map_err(|e| XbergError::parsing(format!("Failed to parse ODS: {}", e)))?;
-    let result = process_workbook(workbook, office_metadata, &mut warnings)?;
-    Ok((result, warnings))
+    read_binary_workbook(calamine::Ods::new, "ODS", Cursor::new(data), office_metadata, warnings)
 }

@@ -32,43 +32,6 @@ pub(super) fn hash_config(config: &TesseractConfig, resolved_tessdata_path: &str
     hash_config_for_schema(config, resolved_tessdata_path, TESSERACT_RESULT_SCHEMA_VERSION)
 }
 
-/// Fold the caller's `security_limits` into an OCR cache key.
-///
-/// These bound the image decode inside `perform_ocr`, which runs only on a cache MISS -- so
-/// without them in the key, a request carrying a strict limit is served the result of an earlier
-/// permissive request and the limit never applies. That is both a silent policy bypass and the
-/// cause of a flaky `issue_1651_ocr_security_limits`: which of its sibling tests populated the
-/// entry first decided whether the limit was enforced. ~keep
-fn hash_security_limits(hasher: &mut blake3::Hasher, limits: Option<&crate::extractors::security::SecurityLimits>) {
-    let Some(limits) = limits else {
-        hasher.update(&[0]);
-        return;
-    };
-    hasher.update(&[1]);
-    for value in [
-        limits.max_archive_size,
-        limits.max_compression_ratio,
-        limits.max_files_in_archive,
-        limits.max_nesting_depth,
-        limits.max_entity_length,
-        limits.max_content_size,
-        limits.max_iterations,
-        limits.max_xml_depth,
-        limits.max_table_cells,
-    ] {
-        hasher.update(&value.to_le_bytes());
-    }
-    match limits.max_pages {
-        Some(pages) => {
-            hasher.update(&[1]);
-            hasher.update(&pages.to_le_bytes());
-        }
-        None => {
-            hasher.update(&[0]);
-        }
-    }
-}
-
 fn hash_config_for_schema(config: &TesseractConfig, resolved_tessdata_path: &str, result_schema_version: u8) -> String {
     let mut hasher = blake3::Hasher::new();
     hasher.update(&[result_schema_version]);
@@ -117,8 +80,6 @@ fn hash_config_for_schema(config: &TesseractConfig, resolved_tessdata_path: &str
         hash_bytes(&mut hasher, name.as_bytes());
         hash_bytes(&mut hasher, value.as_bytes());
     }
-
-    hash_security_limits(&mut hasher, config.security_limits.as_ref());
 
     hasher.update(&[config.auto_rotate as u8]);
     // `source_dpi` selects the scale factor the DPI-normalization step resizes by, so two calls

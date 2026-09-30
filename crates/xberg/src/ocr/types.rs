@@ -209,8 +209,8 @@ pub struct TesseractConfig {
     ///
     /// `#[serde(skip)]` because it is injected at runtime and never read from a config file.
     ///
-    /// These ARE part of the OCR cache key (`hash_security_limits` in
-    /// `ocr::processor::config`), and must stay there. This doc previously argued the opposite
+    /// These ARE part of the OCR cache key (the whole-object serde_json
+    /// encoding in `ocr::processor::config`), and must stay there. This doc previously argued the opposite
     /// -- that limits only gate whether a decode is attempted and never change the text
     /// Tesseract produces, so hashing them would split entries identical in content. The first
     /// half is true and the conclusion still does not follow: the gate lives inside

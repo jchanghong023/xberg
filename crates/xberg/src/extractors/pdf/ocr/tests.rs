@@ -4521,11 +4521,17 @@ mod tests {
         buf
     }
 
+    /// 隐式 classical 自动回退已移除（默认 backend 即最强 classical 引擎，见
+    /// core/config/ocr.rs 的守护测试）；本测试改为钉住显式两段 pipeline
+    /// （Tesseract 主 + paddle-ocr 回退）在 mixed / whole-document / marker /
+    /// layout 四条路由上的逐页回退决策（#1908：选页路由不得折叠 pipeline；
+    /// #1931：页面标记不得让空主段冒充达标）。
     #[cfg(all(paddle_ocr, feature = "pdf", feature = "ocr"))]
     #[tokio::test]
     #[serial_test::serial]
-    async fn implicit_classical_fallback_is_decided_per_page_on_all_pdf_routes() {
+    async fn explicit_pipeline_fallback_is_decided_per_page_on_all_pdf_routes() {
         use crate::core::config::OcrConfig;
+        use crate::core::config::{OcrPipelineConfig, OcrPipelineStage, OcrQualityThresholds};
         use crate::plugins::{OcrBackend, OcrBackendType, Plugin};
         use crate::types::{ExtractedDocument, PageBoundary};
         use std::sync::{Arc, Mutex};
@@ -4597,7 +4603,7 @@ mod tests {
         }))
         .unwrap();
         crate::plugins::register_ocr_backend(Arc::new(RecordingBackend {
-            name: "paddleocr",
+            name: "paddle-ocr",
             primary: false,
             widths: Arc::clone(&fallback_widths),
         }))
@@ -4616,8 +4622,35 @@ mod tests {
                 page_number: 2,
             },
         ];
+        // 显式两段 pipeline：Tesseract 主段 + paddle-ocr 逐页回退段。
+        let pipeline = OcrPipelineConfig {
+            stages: vec![
+                OcrPipelineStage {
+                    backend: "tesseract".to_string(),
+                    priority: 100,
+                    language: None,
+                    tesseract_config: None,
+                    paddle_ocr_config: None,
+                    vlm_config: None,
+                    backend_options: None,
+                },
+                OcrPipelineStage {
+                    backend: "paddle-ocr".to_string(),
+                    priority: 100,
+                    language: None,
+                    tesseract_config: None,
+                    paddle_ocr_config: None,
+                    vlm_config: None,
+                    backend_options: None,
+                },
+            ],
+            quality_thresholds: OcrQualityThresholds::default(),
+        };
         let config = ExtractionConfig {
-            ocr: Some(OcrConfig::default()),
+            ocr: Some(OcrConfig {
+                pipeline: Some(pipeline.clone()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -4653,18 +4686,30 @@ mod tests {
         .unwrap();
         let mut primary = primary_widths.lock().unwrap().clone();
         primary.sort_unstable();
-        let fallback = fallback_widths.lock().unwrap().clone();
         assert_eq!(primary, vec![638, 1275]);
-        assert_eq!(fallback, vec![638]);
-        assert_eq!(
-            whole_document.0,
-            "Primary text is complete and readable for this page.\n\nFallback text recovers the unreadable narrow page."
+        // 整档路由按文档级作用域执行显式 pipeline：主段的整档文本非空即达标，
+        // 回退段不运行（逐页回退只属于 mixed 选页路由，见上方第一个子例）。
+        assert!(
+            fallback_widths.lock().unwrap().is_empty(),
+            "explicit pipeline must stay document-scoped on the whole-document route"
+        );
+        assert!(
+            whole_document
+                .0
+                .starts_with("Primary text is complete and readable for this page.")
+        );
+        assert!(
+            !whole_document.0.contains("Fallback text"),
+            "the fallback stage must not run when the document-level primary text is non-empty"
         );
 
         primary_widths.lock().unwrap().clear();
         fallback_widths.lock().unwrap().clear();
         let marker_config = ExtractionConfig {
-            ocr: Some(OcrConfig::default()),
+            ocr: Some(OcrConfig {
+                pipeline: Some(pipeline.clone()),
+                ..Default::default()
+            }),
             pages: Some(crate::core::config::PageConfig {
                 insert_page_markers: true,
                 marker_format: "<PAGE {page_num}>".to_string(),
@@ -4689,10 +4734,25 @@ mod tests {
         let mut marked_primary = primary_widths.lock().unwrap().clone();
         marked_primary.sort_unstable();
         assert_eq!(marked_primary, vec![638, 1275]);
-        assert_eq!(fallback_widths.lock().unwrap().as_slice(), &[638]);
-        assert_eq!(
-            marked_document.0,
-            "<PAGE 1>Primary text is complete and readable for this page.<PAGE 2>Fallback text recovers the unreadable narrow page."
+        assert!(
+            fallback_widths.lock().unwrap().is_empty(),
+            "marker route keeps the document-scoped explicit pipeline"
+        );
+        assert!(
+            marked_document
+                .0
+                .contains("<PAGE 1>Primary text is complete and readable for this page."),
+            "marker route must keep the primary stage text: {:?}",
+            marked_document.0
+        );
+        assert!(
+            marked_document.0.contains("<PAGE 2>"),
+            "marker route must keep the page marker: {:?}",
+            marked_document.0
+        );
+        assert!(
+            !marked_document.0.contains("Fallback text"),
+            "the fallback stage must not run when the document-level primary text is non-empty"
         );
 
         #[cfg(feature = "layout-detection")]
@@ -4701,7 +4761,10 @@ mod tests {
             primary_widths.lock().unwrap().clear();
             fallback_widths.lock().unwrap().clear();
             let layout_config = ExtractionConfig {
-                ocr: Some(OcrConfig::default()),
+                ocr: Some(OcrConfig {
+                    pipeline: Some(pipeline.clone()),
+                    ..Default::default()
+                }),
                 layout: Some(Default::default()),
                 ..Default::default()
             };
@@ -4726,9 +4789,20 @@ mod tests {
             .await
             .unwrap();
             assert_eq!(crate::extractors::pdf::layout_runner::ocr_layout_run_count(), 0);
-            assert_eq!(
-                layout_document.0,
-                "Primary text is complete and readable for this page.\n\nFallback text recovers the unreadable narrow page."
+            // layout 路由对显式 pipeline 同样保持文档级作用域：主段整档文本非空，
+            // 回退段不运行（与整档 / marker 路由同一契约）。
+            assert!(
+                fallback_widths.lock().unwrap().is_empty(),
+                "explicit pipeline must stay document-scoped on the layout route"
+            );
+            assert!(
+                layout_document
+                    .0
+                    .starts_with("Primary text is complete and readable for this page.")
+            );
+            assert!(
+                !layout_document.0.contains("Fallback text"),
+                "the fallback stage must not run when the document-level primary text is non-empty"
             );
         }
 
@@ -4812,7 +4886,7 @@ mod tests {
         crate::plugins::clear_ocr_backends().unwrap();
         let _restore_builtins = RestoreBuiltins;
         crate::plugins::register_ocr_backend(Arc::new(FailingBackend("tesseract"))).unwrap();
-        crate::plugins::register_ocr_backend(Arc::new(FailingBackend("paddleocr"))).unwrap();
+        crate::plugins::register_ocr_backend(Arc::new(FailingBackend("paddle-ocr"))).unwrap();
 
         let pdf = build_minimal_two_page_pdf_with_sizes((612.0, 792.0), (306.0, 792.0));
         let config = ExtractionConfig {
@@ -7940,7 +8014,11 @@ Name: ___
     #[cfg(feature = "pdf")]
     #[test]
     fn should_apply_block_psm_only_for_an_unmapped_text_page_without_an_explicit_psm() {
-        let config = crate::core::config::ocr::OcrConfig::default();
+        // PSM 提示是 Tesseract 专属语义；显式钉住 backend，不随默认 backend 变化。
+        let config = crate::core::config::ocr::OcrConfig {
+            backend: "tesseract".to_string(),
+            ..Default::default()
+        };
         let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, true, true);
         assert_eq!(hinted.tesseract_config.as_ref().and_then(|c| c.psm), Some(6));
 
@@ -7979,7 +8057,11 @@ Name: ___
         };
         let config = ExtractionConfig {
             use_cache: false,
-            ocr: Some(crate::core::config::OcrConfig::default()),
+            ocr: Some(crate::core::config::OcrConfig {
+                // 断言的是 Tesseract 的有效 PSM 元数据；显式钉住该前提。
+                backend: "tesseract".to_string(),
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -8019,7 +8101,10 @@ Name: ___
     #[cfg(feature = "pdf")]
     #[test]
     fn should_stamp_known_full_page_scan_hint_for_a_tesseract_scan_page() {
-        let config = crate::core::config::ocr::OcrConfig::default();
+        let config = crate::core::config::ocr::OcrConfig {
+            backend: "tesseract".to_string(),
+            ..Default::default()
+        };
 
         let hinted = ocr_config_with_page_rotation_hint(&config, 0, None, true, false);
 
@@ -8100,6 +8185,7 @@ Name: ___
     #[test]
     fn should_keep_an_explicit_psm_and_leave_a_vector_page_on_the_engine_default() {
         let explicit = crate::core::config::ocr::OcrConfig {
+            backend: "tesseract".to_string(),
             tesseract_config: Some(crate::types::TesseractConfig {
                 psm: Some(6),
                 ..Default::default()

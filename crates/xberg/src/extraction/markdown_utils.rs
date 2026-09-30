@@ -80,8 +80,9 @@ impl FenceTracker {
 
 /// One full-line markdown image marker, `![alt](target)` (empty alt included).
 /// Shape only — this is the lift's decision predicate, reused to recognize the
-/// renderer's marker paragraphs ahead of an OCR fence.
-fn is_image_marker_line(line: &str) -> bool {
+/// renderer's marker paragraphs ahead of an OCR fence, and by the re-encode
+/// rewrite's fenced-marker carve-out (`core/pipeline/mod.rs`).
+pub(crate) fn is_image_marker_line(line: &str) -> bool {
     let line = line.trim();
     line.starts_with("![") && line.contains("](") && line.ends_with(')')
 }

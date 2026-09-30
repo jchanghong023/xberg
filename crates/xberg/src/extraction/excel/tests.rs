@@ -368,41 +368,63 @@ fn test_empty_used_range_rows_are_dropped() {
     assert_eq!(cells.len(), 3, "header plus two data rows: {cells:?}");
 }
 
-/// The unreadable-entry tolerance follows calamine's reader: an exact `xls`, an
-/// any-case `xla`, and an any-case `.xls` that calamine reads as CFB (`Xls::new`
-/// succeeds — content sniffing tries the CFB reader before the ZIP one). An
-/// upper-case `.XLS` that is really a ZIP sniffs to the Xlsx reader and stays
-/// strict. The probe must only run for the spelling that needs it.
+/// The unreadable-entry tolerance follows the declared extension: `.xls`/`.xla`
+///（任意大小写）在文件与 bytes 两条路径上都直接派发 calamine 的 CFB `Xls`
+/// reader（扩展名决定，无内容嗅探），被改名为 `*.xls` 的 ZIP 会在 XLS 解析处
+/// 失败、不会有任何 ZIP 条目被解压；其余扩展名保持全额核算。
 #[cfg(feature = "excel")]
 #[test]
-fn xls_zip_tolerance_follows_calamines_reader() {
+fn xls_zip_tolerance_follows_the_extension_contract() {
     use super::open::xls_zip_tolerance;
 
-    assert!(xls_zip_tolerance("xls", || panic!("exact xls never probes")));
-    assert!(xls_zip_tolerance("xla", || panic!("any-case xla never probes")));
-    assert!(xls_zip_tolerance("XLA", || panic!("any-case xla never probes")));
-    assert!(xls_zip_tolerance("XLS", || true));
-    assert!(!xls_zip_tolerance("XLS", || false), "a renamed ZIP stays strict");
-    assert!(!xls_zip_tolerance("xlsx", || true));
-    assert!(!xls_zip_tolerance("", || true));
+    assert!(xls_zip_tolerance("xls"));
+    assert!(xls_zip_tolerance("XLS"));
+    assert!(xls_zip_tolerance("xla"));
+    assert!(xls_zip_tolerance("XLA"));
+    assert!(!xls_zip_tolerance("xlsx"));
+    assert!(!xls_zip_tolerance(""));
 }
 
-/// A legacy `.xls` fixture parses with calamine's CFB reader — the probe's positive
-/// side; without it the tolerance for an upper-case `.XLS` would never engage.
-/// Skips when the fixture is absent.
+/// 真实遗留 `.xls` 工作簿以大写 `.XLS` 扩展名经文件路径解析成功：扩展名决定
+/// 派发（显式 CFB `Xls` reader），大写拼写不再被内容嗅探送进 Xlsx reader。
+/// 夹具缺失时跳过。
 #[cfg(feature = "excel")]
 #[test]
-fn cfb_reader_probe_recognizes_a_legacy_workbook() {
-    use super::open::sniffs_to_cfb_reader;
-
+fn legacy_xls_upper_case_extension_parses_through_the_xls_reader() {
     let legacy = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test_documents/xls/test_excel.xls");
-    let Ok(file) = std::fs::File::open(&legacy) else {
+    let Ok(bytes) = std::fs::read(&legacy) else {
         eprintln!("skipping: fixture not present at {legacy:?}");
         return;
     };
+    let directory = tempfile::tempdir().expect("create temporary directory");
+    let path = directory.path().join("legacy.XLS");
+    std::fs::write(&path, bytes).expect("write legacy workbook");
+
+    let (result, _warnings) = super::open::read_excel_file(path.to_str().expect("UTF-8 path"), &test_limits(10_000))
+        .expect("a real legacy workbook must parse through the XLS reader regardless of extension case");
+    assert!(!result.sheets.is_empty(), "the legacy workbook must yield its sheets");
+}
+
+/// 被改名为 `.XLS` 的 ZIP 必须在 XLS 解析处失败（扩展名决定派发），既不被嗅探进
+/// Xlsx reader 静默解析，也不进入 ZIP 条目核算——「改名 ZIP 保持安全」的性质由
+/// 显式派发结构保证（open.rs 的 read_xls_file），本用例把它钉成回归。
+#[cfg(feature = "excel")]
+#[test]
+fn zip_renamed_to_xls_fails_the_xls_parse_without_zip_accounting() {
+    let directory = tempfile::tempdir().expect("create temporary directory");
+    let path = directory.path().join("renamed.XLS");
+    std::fs::write(&path, b"PK not really a zip body").expect("write renamed zip");
+
+    let error = read_excel_file(path.to_str().expect("UTF-8 path"), &test_limits(10_000))
+        .expect_err("a ZIP renamed .XLS must fail the XLS parse");
+
     assert!(
-        sniffs_to_cfb_reader(&file),
-        "a real legacy workbook must open with calamine's CFB reader"
+        error.to_string().contains("Failed to parse XLS"),
+        "renamed ZIP must fail as an XLS parse error: {error}"
+    );
+    assert!(
+        !error.to_string().contains("Archive entry"),
+        "renamed ZIP must not enter ZIP entry accounting: {error}"
     );
 }
 

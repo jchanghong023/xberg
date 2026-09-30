@@ -607,6 +607,9 @@ fn apply_ocr_result(
             // repair must reach every representation it carries; otherwise the fence keeps
             // the unrepaired token right next to the repaired prose the standalone-image
             // route extracted.
+            // 与上游 standalone-image 路径（extractors/image.rs 的 GH#1789 块）同一门控：
+            // 修复实现住在 `extractors::pdf::ocr`，`ocr` 单开（不含 `pdf`）时不可达。
+            #[cfg(all(feature = "ocr", feature = "pdf"))]
             if ocr_config.numeric_repair {
                 let content_is_prose = crate::extractors::pdf::ocr::ocr_content_is_repairable_prose(ocr_config);
                 crate::extractors::pdf::ocr::repair_extracted_document_numbers(&mut ocr_document, content_is_prose);

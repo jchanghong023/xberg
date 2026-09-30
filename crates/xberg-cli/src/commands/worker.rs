@@ -12,6 +12,12 @@
 //!   disables document layout and image OCR in a request-local config copy.
 //! - `cancel` (`target_id`), `timeout_ms` on work requests, and in-process
 //!   `formats`, `capabilities`, `model_state` queries keep the same connection.
+//! - `keepalive` (P6): cheap liveness probe — proves the event loop answers,
+//!   loads no models, resets no timer; carries a small `models` summary.
+//! - `shutdown` (P3, optional `grace_ms`): acknowledged first
+//!   (`{"ok":true,"accepted":true}`), then the worker stops taking work, drains
+//!   in-flight requests up to the grace cap and exits 0.
+//! - `version` (P5): build identity plus the on-disk model inventory.
 //! - `ocr_snapshot` (`image_base64`, SNAP-14): recognize one in-memory screenshot
 //!   through the snapshot OCR channel; engine lazily loaded on the first request and
 //!   reused across batches. Success is `{"id":..,"ok":true,"text":..,"records":N,
@@ -23,6 +29,17 @@
 //! - `transcribe` (`path`, SV-12): transcribe one local media file through the
 //!   startup config's `transcription` backend (sensevoice), answering with the SV-06
 //!   `markdown`, segment list, duration and `has_audio`.
+//! - Unknown commands fail with `error_kind:"unsupported_command"` while keeping
+//!   the `unsupported command '<name>'` text prefix (P2; run49.1 passthrough).
+//!
+//! Lifecycle (P1/P3/P4): stdin EOF drains documents and cancels screenshots,
+//! but never past a hard cap — the process is gone within 5 s of the trigger.
+//! `shutdown` drains up to its grace and exits 0. A vanished host (failed
+//! stdout write, stdout probe, dead parent, failed stdin read) cancels
+//! everything and exits with the fixed code [`EXIT_PEER_DISCONNECTED`] (86);
+//! `idle_timeout_ms` exits with [`EXIT_IDLE_TIMEOUT`] (87). Exit codes other
+//! than 0 are routed through [`FORCED_EXIT_CODE`] so `main` applies them after
+//! `run_cli` unwinds.
 //!
 //! Model-session reuse is the point of this command: every ML backend the library
 //! uses (OCR engine pool, Tesseract processor, layout model caches, the SenseVoice
@@ -41,8 +58,9 @@
 //! another stdin line. Diagnostics and panic hooks write only to stderr.
 
 mod control;
+mod monitor;
 mod scheduler;
-use scheduler::run_worker_loop;
+use scheduler::{LoopExit, LoopOptions, run_worker_loop};
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -51,7 +69,8 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 use xberg::{ExtractInput, ExtractedDocument, ExtractionConfig, ProcessingWarning};
 
 use super::extract::{build_runtime, single_result_from_output};
@@ -72,6 +91,29 @@ const COMMAND_CANCEL: &str = "cancel";
 const COMMAND_FORMATS: &str = "formats";
 const COMMAND_CAPABILITIES: &str = "capabilities";
 const COMMAND_MODEL_STATE: &str = "model_state";
+/// Liveness probe (P6): proves the event loop answers; loads nothing and resets
+/// no per-request timer. The optional `models` summary is cheap state only.
+const COMMAND_KEEPALIVE: &str = "keepalive";
+/// Graceful stop (P3): acknowledged on the wire first, then the process drains
+/// up to `grace_ms` and exits 0. The engine never refuses to exit for in-flight
+/// work — at the cap it is cancelled.
+const COMMAND_SHUTDOWN: &str = "shutdown";
+/// Diagnostic manifest (P5): build identity plus the on-disk model inventory.
+const COMMAND_VERSION: &str = "version";
+/// Protocol-level unknown-command category (P2). The failure text keeps the
+/// `unsupported command '<name>'` prefix the run49.1 passthrough matches on.
+const KIND_UNSUPPORTED_COMMAND: &str = "unsupported_command";
+/// P1: fixed exit code when the stdio peer vanished (broken stdout, dead
+/// parent, failed stdin read).
+pub const EXIT_PEER_DISCONNECTED: i32 = 86;
+/// P4: exit code for the optional `idle_timeout_ms` self-exit (distinct from
+/// the disconnect code so callers can tell the two apart).
+pub const EXIT_IDLE_TIMEOUT: i32 = 87;
+/// Process exit code `main` applies after `run_cli` returns normally. Set only
+/// by the worker's disconnect/idle paths (P1/P4); 0 keeps the normal return.
+/// Setting it instead of calling `std::process::exit` from inside the command
+/// lets `run_cli` unwind (flushing tracing guards) before the hard exit.
+pub static FORCED_EXIT_CODE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 
 /// Run the startup document processing settings unchanged.
 const MODE_NORMAL: &str = "normal";
@@ -98,6 +140,9 @@ pub(crate) struct WorkerRequest {
     pub(crate) image_base64: Option<String>,
     #[serde(default)]
     pub(crate) timeout_ms: Option<u64>,
+    /// `shutdown` grace cap in milliseconds (P3); absent means the shipped default.
+    #[serde(default)]
+    pub(crate) grace_ms: Option<u64>,
     #[serde(default, deserialize_with = "deserialize_target_id")]
     pub(crate) target_id: Option<Value>,
     #[serde(skip)]
@@ -235,45 +280,22 @@ impl WorkerResponse {
     fn success(id: Value, document: ExtractedDocument) -> Self {
         let warnings = document.processing_warnings.clone();
         Self {
-            id,
-            ok: true,
             document: Some(document),
-            error: None,
             warnings,
-            error_kind: None,
-            text: None,
-            records: None,
-            elapsed_ms: None,
-            state: None,
-            markdown: None,
-            segments: None,
-            duration_ms: None,
-            has_audio: None,
-            extra: None,
+            ..Self::bare(id, true)
         }
     }
 
     fn failure(id: Value, error: String) -> Self {
         Self {
-            id,
-            ok: false,
-            document: None,
             error: Some(error),
-            warnings: Vec::new(),
-            error_kind: None,
-            text: None,
-            records: None,
-            elapsed_ms: None,
-            state: None,
-            markdown: None,
-            segments: None,
-            duration_ms: None,
-            has_audio: None,
-            extra: None,
+            ..Self::bare(id, false)
         }
     }
 
-    /// Response skeleton with the extract payload slots empty.
+    /// Response skeleton with every payload slot empty; command handlers fill in
+    /// only the fields their command carries (the `extract` wire shape stays
+    /// byte-compatible with the original contract).
     fn bare(id: Value, ok: bool) -> Self {
         Self {
             id,
@@ -403,7 +425,15 @@ fn validate_line(line: &str) -> std::result::Result<WorkerRequest, Box<WorkerRes
                 )));
             }
         }
-        COMMAND_FORMATS | COMMAND_CAPABILITIES | COMMAND_MODEL_STATE => {}
+        COMMAND_SHUTDOWN => {
+            if request.grace_ms == Some(0) {
+                return Err(Box::new(WorkerResponse::failure(
+                    id,
+                    "grace_ms must be positive".into(),
+                )));
+            }
+        }
+        COMMAND_FORMATS | COMMAND_CAPABILITIES | COMMAND_MODEL_STATE | COMMAND_KEEPALIVE | COMMAND_VERSION => {}
         COMMAND_EXTRACT => {}
         COMMAND_OCR_SNAPSHOT => {
             if request.image_base64.is_none() {
@@ -423,10 +453,15 @@ fn validate_line(line: &str) -> std::result::Result<WorkerRequest, Box<WorkerRes
             }
         }
         other => {
-            return Err(Box::new(WorkerResponse::failure(
+            // P2: structured category alongside the legacy text prefix — the
+            // run49.1 passthrough matches on the text, new callers on the kind.
+            let mut response = WorkerResponse::failure(
                 id,
                 format!("unsupported command '{other}'; use capabilities to list commands"),
-            )));
+            );
+            response.error_kind = Some(KIND_UNSUPPORTED_COMMAND);
+            response.extra = Some(serde_json::json!({ "command": other }));
+            return Err(Box::new(response));
         }
     }
     Ok(request)
@@ -528,22 +563,22 @@ fn ocr_snapshot_request(engine: &mut SnapshotOcrEngine, request: WorkerRequest, 
             KIND_INPUT_INVALID,
         )));
     };
-    RequestOutcome::Snapshot(match recognize_base64(engine, &encoded, cancel) {
-        Ok(Recognized {
-            text,
-            records,
-            elapsed_ms,
-        }) => {
-            let no_text = text.is_empty();
-            Ok(SnapshotSuccess {
+    RequestOutcome::Snapshot(recognize_base64(engine, &encoded, cancel).map(
+        |Recognized {
+             text,
+             records,
+             elapsed_ms,
+         }| {
+            // `text` moves into the success below, so the emptiness check runs first.
+            let error_kind = text.is_empty().then_some(KIND_NO_TEXT);
+            SnapshotSuccess {
                 records: records.len(),
                 elapsed_ms: elapsed_ms as u64,
-                error_kind: no_text.then_some(KIND_NO_TEXT),
+                error_kind,
                 text,
-            })
-        }
-        Err((message, kind)) => Err((message, kind)),
-    })
+            }
+        },
+    ))
 }
 
 /// Handle one `snapshot_state` request (SNAP-17). The query itself always succeeds;
@@ -649,6 +684,295 @@ fn transcribe_request(_config: &ExtractionConfig, _request: WorkerRequest) -> Re
     ))
 }
 
+/// Worker-only startup knobs parsed out of `--config-json` before the config
+/// merge (P2/P4). `ExtractionConfig` itself never sees these keys; the merge
+/// ignores them, `main` peels them off for the worker.
+#[derive(Debug, Default, Clone)]
+pub struct WorkerStartup {
+    /// Caller identity token echoed back in `capabilities.owner` (P2).
+    pub owner_token: Option<String>,
+    /// Exit after this long with no request traffic and no in-flight work (P4).
+    pub idle_timeout_ms: Option<u64>,
+}
+
+impl WorkerStartup {
+    /// Decode the raw `--config-json` / `--config-json-base64` payload, peel off
+    /// the worker-only keys (`owner_token`, P2 / `idle_timeout_ms`, P4) and
+    /// return the payload with those keys removed. `ExtractionConfig` uses
+    /// `deny_unknown_fields`, so the worker command must merge only the
+    /// sanitized payload — every *other* unknown key still fails the merge with
+    /// the usual typo-catching error. The returned `Option<String>` replaces
+    /// both CLI override forms (the base64 variant is decoded here).
+    pub fn strip_worker_keys(
+        config_json: Option<&str>,
+        config_json_base64: Option<&str>,
+    ) -> Result<(Self, Option<String>)> {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let (raw, original) = match (config_json, config_json_base64) {
+            (Some(text), _) => (
+                serde_json::from_str::<Value>(text).context("Failed to parse --config-json as JSON")?,
+                text.to_string(),
+            ),
+            (None, Some(encoded)) => {
+                let bytes = STANDARD
+                    .decode(encoded)
+                    .context("Failed to decode base64 in --config-json-base64")?;
+                let text = String::from_utf8(bytes).context("Base64-decoded content is not valid UTF-8")?;
+                (
+                    serde_json::from_str::<Value>(&text)
+                        .context("Failed to parse decoded --config-json-base64 as JSON")?,
+                    text,
+                )
+            }
+            (None, None) => return Ok((Self::default(), None)),
+        };
+        let Value::Object(mut fields) = raw else {
+            // A non-object payload cannot carry worker keys; pass it through so
+            // the config merge reports it exactly as `extract` would.
+            return Ok((Self::default(), Some(original)));
+        };
+        let owner_token = match fields.remove("owner_token") {
+            None => None,
+            Some(Value::String(token)) => Some(token),
+            Some(_) => anyhow::bail!("owner_token must be a string"),
+        };
+        let idle_timeout_ms = match fields.remove("idle_timeout_ms") {
+            None => None,
+            Some(Value::Number(number)) => {
+                let millis = number.as_u64().filter(|millis| *millis > 0);
+                if millis.is_none() {
+                    anyhow::bail!("idle_timeout_ms must be a positive integer (milliseconds)");
+                }
+                millis
+            }
+            Some(_) => anyhow::bail!("idle_timeout_ms must be a positive integer (milliseconds)"),
+        };
+        let sanitized = serde_json::to_string(&Value::Object(fields)).context("failed to re-serialize config")?;
+        Ok((
+            Self {
+                owner_token,
+                idle_timeout_ms,
+            },
+            Some(sanitized),
+        ))
+    }
+}
+
+/// Per-process identity reported in `capabilities` (P2). Every field is
+/// optional from the caller's perspective; we always fill the first three, and
+/// `owner` appears only when the startup config carried `owner_token`.
+#[derive(Debug)]
+pub(crate) struct WorkerIdentity {
+    instance_id: String,
+    started_at: String,
+    config_digest: String,
+}
+
+impl WorkerIdentity {
+    pub(crate) fn new(config: &ExtractionConfig) -> Self {
+        Self {
+            instance_id: fresh_instance_id(),
+            started_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            config_digest: sha256_hex(serde_json::to_string(config).unwrap_or_default().as_bytes()),
+        }
+    }
+}
+
+/// Random v4-shaped UUID from std's randomly seeded hasher (no new dependency);
+/// stable for the process lifetime.
+fn fresh_instance_id() -> String {
+    use std::hash::{BuildHasher, Hasher, RandomState};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0u128, |d| d.as_nanos());
+    let mut first = RandomState::new().build_hasher();
+    first.write_u32(std::process::id());
+    first.write_u128(nanos);
+    let hi = first.finish();
+    let mut second = RandomState::new().build_hasher();
+    second.write_u64(hi);
+    second.write_u128(!nanos);
+    let lo = second.finish();
+    let time_low = (hi >> 32) as u32;
+    let time_mid = ((hi >> 16) & 0xffff) as u16;
+    let time_hi = (0x4000 | (hi & 0x0fff)) as u16;
+    let clock_seq = (0x8000 | ((lo >> 48) & 0x3fff)) as u16;
+    let node = lo & 0x0000_ffff_ffff_ffff;
+    format!("{time_low:08x}-{time_mid:04x}-{time_hi:04x}-{clock_seq:04x}-{node:012x}")
+}
+
+/// sha256 of an in-memory byte string, lowercase hex.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// sha256 of an on-disk file (streamed); `None` when it cannot be read.
+fn file_sha256(path: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Some(hasher.finalize().iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// capabilities payload (P2): the pre-P2 capability keys plus the identity
+/// block. `owner` is present only when the caller injected `owner_token`.
+fn capabilities_payload(identity: &WorkerIdentity, owner_token: Option<&str>) -> Value {
+    let mut payload = serde_json::json!({
+        "protocol_version": 2,
+        "version": env!("CARGO_PKG_VERSION"),
+        "pid": std::process::id(),
+        "commands": [
+            "extract", "ocr_snapshot", "transcribe", "snapshot_state", "cancel",
+            "formats", "capabilities", "model_state", "keepalive", "shutdown", "version"
+        ],
+        "extract_modes": ["normal", "fast"],
+        "cancellation": "cooperative",
+        "timeout_ms": true,
+        "document_snapshot_concurrent": true,
+        "transcription": cfg!(feature = "transcription"),
+        "layout": cfg!(feature = "layout-detection"),
+        "paddle_ocr": cfg!(feature = "paddle-ocr"),
+        "instance_id": identity.instance_id,
+        "started_at": identity.started_at,
+        "config_digest": identity.config_digest,
+    });
+    if let Some(owner) = owner_token {
+        payload["owner"] = Value::String(owner.to_string());
+    }
+    payload
+}
+
+/// keepalive payload (P6): liveness plus a cheap readiness summary. It only
+/// proves the event loop answers; nothing is loaded and no timer is reset.
+fn keepalive_payload(status: &SnapshotState, document_backend: &str) -> Value {
+    let (snapshot, _) = status.get();
+    serde_json::json!({
+        "models": {
+            "snapshot": snapshot,
+            "document": document_backend,
+            "transcription": cfg!(feature = "transcription"),
+        }
+    })
+}
+
+/// `version` payload (P5): build identity plus the on-disk model inventory the
+/// process would use. Existence/size/sha256 only — nothing is loaded.
+fn version_payload(config: &ExtractionConfig) -> Value {
+    serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "build": {
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "debug": cfg!(debug_assertions),
+        },
+        "models": model_inventory(config),
+    })
+}
+
+fn model_inventory(config: &ExtractionConfig) -> Value {
+    let snapshot = match super::snapshot_ocr::resolve_models_dir(
+        None,
+        config
+            .snapshot_ocr
+            .as_ref()
+            .and_then(|block| block.models_dir.as_deref()),
+        std::env::var_os(super::snapshot_ocr::MODELS_DIR_ENV).as_deref(),
+    ) {
+        Ok(dir) => serde_json::json!({
+            "dir": dir.display().to_string(),
+            "members": [
+                model_entry("det.onnx", &dir.join("det.onnx")),
+                model_entry("rec.onnx", &dir.join("rec.onnx")),
+                model_entry("dict/dict.txt", &dir.join("dict").join("dict.txt")),
+            ],
+        }),
+        Err(error) => serde_json::json!({ "error": error }),
+    };
+    serde_json::json!({
+        "snapshot": snapshot,
+        "transcription": transcription_inventory(config),
+    })
+}
+
+/// Transcription inventory section; feature-off builds report their state
+/// instead of guessing paths that cannot be configured in that profile.
+#[cfg(feature = "transcription")]
+fn transcription_inventory(config: &ExtractionConfig) -> Value {
+    // Explicit config verbatim, else the environment override, else the first
+    // exe-adjacent candidate (mirrors the engine's own resolution order;
+    // report-only, never an error).
+    let root = config
+        .transcription
+        .as_ref()
+        .and_then(|block| block.model_dir.clone())
+        .or_else(|| std::env::var_os(xberg::transcription::sensevoice::MODEL_DIR_ENV).map(PathBuf::from))
+        .unwrap_or_else(transcription_exe_adjacent_root);
+    serde_json::json!({
+        "dir": root.display().to_string(),
+        "members": [
+            model_entry(
+                "sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx",
+                &root.join("sense_voice_zh_en_ja_ko_yue_2024_07_17").join("model.int8.onnx"),
+            ),
+            model_entry(
+                "sense_voice_zh_en_ja_ko_yue_2024_07_17/tokens.txt",
+                &root.join("sense_voice_zh_en_ja_ko_yue_2024_07_17").join("tokens.txt"),
+            ),
+            model_entry("vad/silero_vad.onnx", &root.join("vad").join("silero_vad.onnx")),
+        ],
+    })
+}
+
+#[cfg(not(feature = "transcription"))]
+fn transcription_inventory(_config: &ExtractionConfig) -> Value {
+    serde_json::json!({ "state": "unavailable", "error": "built without the transcription feature" })
+}
+
+/// One model-inventory row: where the engine would look, whether the file is
+/// there, and its identity when it is. A configured-but-missing root reports
+/// its configured path with `exists:false` — that mismatch is the diagnostic.
+fn model_entry(name: &str, path: &Path) -> Value {
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() => serde_json::json!({
+            "name": name,
+            "path": path.display().to_string(),
+            "exists": true,
+            "size_bytes": meta.len(),
+            "sha256": file_sha256(path),
+        }),
+        _ => serde_json::json!({
+            "name": name,
+            "path": path.display().to_string(),
+            "exists": false,
+        }),
+    }
+}
+
+/// Fallback exe-adjacent transcription candidates (the engine checks
+/// `media-models`, `models`, then the exe directory itself).
+fn transcription_exe_adjacent_root() -> PathBuf {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.to_path_buf()))
+        .unwrap_or_default();
+    [exe_dir.join("media-models"), exe_dir.join("models"), exe_dir.clone()]
+        .into_iter()
+        .find(|candidate| candidate.is_dir())
+        .unwrap_or(exe_dir)
+}
+
 /// Execute the `xberg worker` command.
 ///
 /// Builds the one tokio runtime and resolves the one config this worker will use for
@@ -661,7 +985,7 @@ fn transcribe_request(_config: &ExtractionConfig, _request: WorkerRequest) -> Re
     feature = "perf-tracing",
     tracing::instrument(target = "perf", name = "worker_command", skip_all)
 )]
-pub fn worker_command(config: ExtractionConfig) -> Result<()> {
+pub fn worker_command(config: ExtractionConfig, startup: WorkerStartup) -> Result<()> {
     let runtime = build_runtime(&config).context("failed to build the worker's tokio runtime")?;
     let cancel = Arc::new(AtomicBool::new(false));
     let mut snapshot_engine = SnapshotOcrEngine::new(config.snapshot_ocr.clone());
@@ -674,6 +998,12 @@ pub fn worker_command(config: ExtractionConfig) -> Result<()> {
         .as_ref()
         .map(|ocr| ocr.backend.clone())
         .unwrap_or_else(|| "paddle-ocr".into());
+    // P2: per-process identity for capabilities; P1: host-death watchers.
+    let identity = WorkerIdentity::new(&config);
+    let owner_token = startup.owner_token.clone();
+    let peer_gone = Arc::new(AtomicBool::new(false));
+    monitor::spawn_peer_gone_monitors(Arc::clone(&peer_gone));
+    let query_config = config.clone();
     let document = move |request: WorkerRequest| match request.command.as_str() {
         COMMAND_TRANSCRIBE => transcribe_request(&config, request),
         _ => RequestOutcome::Extract(extract_request(&runtime, &config, request)),
@@ -684,13 +1014,9 @@ pub fn worker_command(config: ExtractionConfig) -> Result<()> {
     };
     let query = move |command: &str| match command {
         COMMAND_FORMATS => RequestOutcome::Query(serde_json::json!({"formats": formats})),
-        COMMAND_CAPABILITIES => RequestOutcome::Query(serde_json::json!({
-            "protocol_version": 2, "version": env!("CARGO_PKG_VERSION"), "pid": std::process::id(),
-            "commands": ["extract", "ocr_snapshot", "transcribe", "snapshot_state", "cancel", "formats", "capabilities", "model_state"],
-            "extract_modes": ["normal", "fast"], "cancellation": "cooperative", "timeout_ms": true,
-            "document_snapshot_concurrent": true, "transcription": cfg!(feature = "transcription"),
-            "layout": cfg!(feature = "layout-detection"), "paddle_ocr": cfg!(feature = "paddle-ocr")
-        })),
+        COMMAND_CAPABILITIES => RequestOutcome::Query(capabilities_payload(&identity, owner_token.as_deref())),
+        COMMAND_VERSION => RequestOutcome::Query(version_payload(&query_config)),
+        COMMAND_KEEPALIVE => RequestOutcome::Query(keepalive_payload(&status, &document_backend)),
         COMMAND_MODEL_STATE => {
             let (snapshot, error) = status.get();
             #[cfg(feature = "ocr")]
@@ -715,7 +1041,27 @@ pub fn worker_command(config: ExtractionConfig) -> Result<()> {
     // Do not move a StdinLock across threads; the reader thread owns the handle.
     let stdin = std::io::BufReader::new(std::io::stdin());
     let mut stdout = std::io::stdout().lock();
-    run_worker_loop(stdin, &mut stdout, cancel, default_timeout, document, screenshot, query)
+    let options = LoopOptions {
+        idle_timeout: startup.idle_timeout_ms.map(Duration::from_millis),
+        peer_gone: Some(peer_gone),
+        ..LoopOptions::default()
+    };
+    let exit: LoopExit = run_worker_loop(
+        stdin,
+        &mut stdout,
+        cancel,
+        default_timeout,
+        options,
+        document,
+        screenshot,
+        query,
+    )?;
+    let code = scheduler::exit_code_for(exit);
+    if code != 0 {
+        tracing::warn!(code, reason = ?exit, "worker stopping after stdio disconnect or idle timeout");
+        FORCED_EXIT_CODE.store(code, std::sync::atomic::Ordering::Release);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -754,14 +1100,16 @@ mod tests {
     fn control_protocol_validates_target_timeout_mode_and_preserves_ids() {
         assert!(validate_line(r#"{"id":1,"command":"cancel","target_id":null}"#).is_ok());
         assert!(validate_line(r#"{"id":2,"command":"extract","path":"a.pdf","mode":"fast","timeout_ms":1}"#).is_ok());
-        for command in ["formats", "capabilities", "model_state"] {
+        for command in ["formats", "capabilities", "model_state", "keepalive", "version"] {
             assert!(validate_line(&json!({"id":3,"command":command}).to_string()).is_ok());
         }
+        assert!(validate_line(r#"{"id":5,"command":"shutdown","grace_ms":250}"#).is_ok());
         for value in [
             json!({"id":4,"command":"extract"}),
             json!({"id":4,"command":"cancel"}),
             json!({"id":4,"command":"ocr_snapshot","image_base64":"x","mode":"fast"}),
             json!({"id":4,"command":"extract","path":"x","timeout_ms":0}),
+            json!({"id":4,"command":"shutdown","grace_ms":0}),
         ] {
             assert_eq!(validate_line(&value.to_string()).unwrap_err().id, json!(4));
         }
@@ -881,6 +1229,11 @@ mod tests {
                 .unwrap_or_default()
                 .contains("unsupported command 'detect'")
         );
+        // P2: the structured category and command name ride alongside the legacy
+        // text prefix the run49.1 passthrough matches on.
+        assert_eq!(command.error_kind, Some(KIND_UNSUPPORTED_COMMAND));
+        let extra = command.extra.expect("unknown commands name the command");
+        assert_eq!(extra["command"], json!("detect"));
 
         let mode = process_line(
             r#"{"id":8,"command":"extract","path":"a.pdf","mode":"invalid"}"#,
@@ -1178,5 +1531,161 @@ mod tests {
             error.contains("File not found") || error.contains("not a file"),
             "unexpected: {error}"
         );
+    }
+
+    /// P2: capabilities carries the identity block and lists every command,
+    /// including the new keepalive/shutdown/version surface.
+    #[test]
+    fn capabilities_report_identity_and_the_full_command_surface() {
+        let identity = WorkerIdentity::new(&ExtractionConfig::default());
+        let payload = capabilities_payload(&identity, None);
+        assert_eq!(payload["protocol_version"], json!(2));
+        for command in [
+            "extract",
+            "ocr_snapshot",
+            "transcribe",
+            "cancel",
+            "keepalive",
+            "shutdown",
+            "version",
+        ] {
+            assert!(
+                payload["commands"].as_array().unwrap().contains(&json!(command)),
+                "capabilities.commands must list {command}"
+            );
+        }
+        assert!(
+            payload["instance_id"].as_str().unwrap().len() >= 32,
+            "stable instance id"
+        );
+        assert!(
+            payload["started_at"].as_str().unwrap().contains('T'),
+            "RFC3339 timestamp"
+        );
+        assert_eq!(
+            payload["config_digest"].as_str().unwrap().len(),
+            64,
+            "sha256 hex digest"
+        );
+        assert!(payload.get("owner").is_none(), "owner stays absent without owner_token");
+
+        let owned = capabilities_payload(&identity, Some("jchtools-host-a"));
+        assert_eq!(owned["owner"], json!("jchtools-host-a"));
+        // The digest tracks the effective config.
+        let mut other = ExtractionConfig::default();
+        other.force_ocr = true;
+        assert_ne!(WorkerIdentity::new(&other).config_digest, identity.config_digest);
+    }
+
+    /// P2/P4: the worker-only startup keys peel off both JSON forms into the
+    /// startup struct, and the sanitized payload (without those keys) is what
+    /// reaches the config merge. Everything else — including other unknown
+    /// fields, which the merge must still reject — passes through untouched.
+    #[test]
+    fn worker_startup_keys_parse_from_inline_and_base64_forms() {
+        let (plain, sanitized) = WorkerStartup::strip_worker_keys(
+            Some(r#"{"owner_token":"owner-1","idle_timeout_ms":1500,"snapshot_ocr":{"models_dir":"E:/m"}}"#),
+            None,
+        )
+        .expect("worker keys peel off");
+        assert_eq!(plain.owner_token.as_deref(), Some("owner-1"));
+        assert_eq!(plain.idle_timeout_ms, Some(1500));
+        let sanitized = sanitized.expect("sanitized payload");
+        let sanitized: Value = serde_json::from_str(&sanitized).unwrap();
+        assert!(
+            sanitized.get("owner_token").is_none(),
+            "worker keys must not reach the merge"
+        );
+        assert!(
+            sanitized.get("idle_timeout_ms").is_none(),
+            "worker keys must not reach the merge"
+        );
+        assert_eq!(
+            sanitized["snapshot_ocr"]["models_dir"],
+            json!("E:/m"),
+            "other fields survive"
+        );
+
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let encoded = STANDARD.encode(r#"{"owner_token":"owner-2"}"#);
+        let (decoded, sanitized) = WorkerStartup::strip_worker_keys(None, Some(&encoded)).expect("base64 form peels");
+        assert_eq!(decoded.owner_token.as_deref(), Some("owner-2"));
+        assert_eq!(decoded.idle_timeout_ms, None);
+        assert_eq!(sanitized.as_deref(), Some("{}"));
+
+        let (empty, none) = WorkerStartup::strip_worker_keys(None, None).expect("no overrides is valid");
+        assert_eq!(empty.owner_token, None);
+        assert_eq!(empty.idle_timeout_ms, None);
+        assert!(none.is_none());
+
+        for bad in [
+            r#"{"idle_timeout_ms":0}"#,
+            r#"{"idle_timeout_ms":-5}"#,
+            r#"{"idle_timeout_ms":"x"}"#,
+            r#"{"owner_token":7}"#,
+        ] {
+            assert!(
+                WorkerStartup::strip_worker_keys(Some(bad), None).is_err(),
+                "must be rejected at startup: {bad}"
+            );
+        }
+    }
+
+    /// P5: the version manifest reports build identity and the on-disk model
+    /// inventory — existence, size and digest for what is actually there.
+    #[test]
+    fn version_manifest_reports_build_and_model_inventory() {
+        let dir = std::env::temp_dir().join(format!("xberg-worker-version-ut-{}", std::process::id()));
+        let snapshot_dir = dir.join("snapshot");
+        std::fs::create_dir_all(snapshot_dir.join("dict")).expect("dirs");
+        std::fs::write(snapshot_dir.join("det.onnx"), b"det-bytes").expect("det");
+        let mut config = ExtractionConfig::default();
+        config.snapshot_ocr = Some(xberg::core::config::SnapshotOcrConfig {
+            models_dir: Some(snapshot_dir.clone()),
+            intra_threads: 1,
+        });
+        let payload = version_payload(&config);
+        assert_eq!(payload["version"], json!(env!("CARGO_PKG_VERSION")));
+        assert!(payload["build"]["os"].is_string());
+        let members = payload["models"]["snapshot"]["members"].as_array().expect("members");
+        let det = members
+            .iter()
+            .find(|m| m["name"] == json!("det.onnx"))
+            .expect("det entry");
+        assert_eq!(det["exists"], json!(true));
+        assert_eq!(det["size_bytes"], json!(9));
+        assert_eq!(det["sha256"].as_str().unwrap().len(), 64);
+        let rec = members
+            .iter()
+            .find(|m| m["name"] == json!("rec.onnx"))
+            .expect("rec entry");
+        assert_eq!(rec["exists"], json!(false));
+        assert!(payload["models"]["transcription"]["members"].as_array().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// P6: keepalive carries a cheap readiness summary and nothing heavy.
+    #[test]
+    fn keepalive_payload_reports_cheap_readiness() {
+        let engine = SnapshotOcrEngine::new(None);
+        let status = engine.state();
+        let payload = keepalive_payload(&status, "paddle-ocr");
+        assert_eq!(payload["models"]["snapshot"], json!("uninitialized"));
+        assert_eq!(payload["models"]["document"], json!("paddle-ocr"));
+        assert!(payload["models"]["transcription"].is_boolean());
+    }
+
+    /// P1/P4: stop reasons map to the documented exit codes.
+    #[test]
+    fn stop_reasons_map_to_documented_exit_codes() {
+        assert_eq!(scheduler::exit_code_for(LoopExit::SessionEnded), 0);
+        assert_eq!(
+            scheduler::exit_code_for(LoopExit::PeerDisconnected),
+            EXIT_PEER_DISCONNECTED
+        );
+        assert_eq!(scheduler::exit_code_for(LoopExit::IdleTimeout), EXIT_IDLE_TIMEOUT);
+        assert_ne!(EXIT_PEER_DISCONNECTED, 0);
+        assert_ne!(EXIT_IDLE_TIMEOUT, 0);
+        assert_ne!(EXIT_PEER_DISCONNECTED, EXIT_IDLE_TIMEOUT);
     }
 }
