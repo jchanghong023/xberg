@@ -466,6 +466,28 @@ def bigram_recall(source: str, md: str) -> float:
     return len(grams & out_set) / len(grams)
 
 
+def _cmp_norm(t: str) -> str:
+    """内嵌子文档比对的两侧归一化：剥 `<br>`（单元格换行的合法渲染）与表格/转义/
+    强调标记后去全部空白。源与 MD 同口径，跨格 bigram 不被渲染标记打断。"""
+    t = re.sub(r"<br\s*/?>", "", t, flags=re.I)
+    return _norm_ws(re.sub(r"[|\\*_`#>~<]", "", t))
+
+
+def apply_tolerated_codes(issues: list, exp: dict | None):
+    """按逐文件 tolerate_codes 移除被放行的问题。
+
+    金标准（人工修复的唯一真值）自身就会触发部分全局阈值码——那些码在这份文件上
+    不再是缺陷信号。返回 (过滤后 issues, 被放行的 issues)；tolerate_codes 必须在
+    期望文件中带 `_note_tolerate_codes` 实测证据（加载期自检不强制，披露靠维护约定）。
+    """
+    tolerated_names = set((exp or {}).get("tolerate_codes") or [])
+    if not tolerated_names:
+        return issues, []
+    kept = [i for i in issues if i.get("code") not in tolerated_names]
+    dropped = [i for i in issues if i.get("code") in tolerated_names]
+    return kept, dropped
+
+
 def char_volume_ratio(source: str, md: str) -> float | None:
     """norm(MD)/norm(源)；源过短返回 None。"""
     src_n = len(_norm_ws(source))
@@ -1807,14 +1829,17 @@ def judge_source_fidelity(src_file: Path, md_text: str, src_text, m, issues, exp
     if ext in ("docx", "pptx", "xlsx", "ods"):
         # 去掉表格分隔/转义/markdown 标记后再比对：源是「空格连接的行内单元格」，
         # MD 是「| 分隔 + \# 转义 + ** 加粗」，不归一化会把这些差异算成"文字丢失"。
-        cmp_text = _norm_ws(re.sub(r"[|\\*_`#>~]", "", md_text))
+        # `<br>`（单元格内换行的合法渲染，金标准表格在用）与 `<` 一并剥除——残留的
+        # "br" 字符会打断跨格 bigram（实测 HiTech 内嵌簿 0.945→0.996，缺口全是
+        # `<br>` 边界窗），两侧用同一归一化保持口径一致。
+        cmp_text = _cmp_norm(md_text)
         cmp_grams = ({cmp_text[i:i + 12] for i in range(len(cmp_text) - 11)}
                      if len(cmp_text) <= 600_000 else None)
         for name, text in _embedded_texts(src_file):
             paras = [p for p in text.splitlines() if len(_norm_ws(p)) >= 12]
             miss = []
             for p in paras:
-                pn = _norm_ws(re.sub(r"[|\\*_`#>~]", "", p))
+                pn = _cmp_norm(p)
                 if pn[:20] in cmp_text:
                     continue
                 if cmp_grams is not None and pn:
@@ -1822,7 +1847,7 @@ def judge_source_fidelity(src_file: Path, md_text: str, src_text, m, issues, exp
                     if g and len(g & cmp_grams) / len(g) >= 0.8:
                         continue          # 12-gram 八成命中 → 该段在，只是被标记/换行切开
                 miss.append(p)
-            bg = bigram_recall(text, cmp_text)
+            bg = bigram_recall(_cmp_norm(text), cmp_text)
             ratio = len(miss) / len(paras) if paras else 0.0
             if (bg >= 0 and bg < 0.95) or (len(miss) >= EMBED_LOSS_PARA_MIN
                                            and ratio >= EMBED_LOSS_RATIO):
@@ -2044,7 +2069,7 @@ KNOWN_FILE_KEYS = {
     "min_headings", "max_headings", "min_tables", "max_tables", "min_chars",
     "max_chars", "min_images", "max_images", "max_line_len", "max_code_tables",
     "max_highlights", "max_folded_cells", "max_bold_short_lines",
-    "require_nested_bullets",
+    "require_nested_bullets", "tolerate_codes",
 }
 KNOWN_RUN_KEYS = {"ocr_config", "layout_config"}
 KNOWN_TOP_KEYS = {"version", "note", "files", "run"}
@@ -2052,7 +2077,7 @@ KNOWN_TOP_KEYS = {"version", "note", "files", "run"}
 # 期望键的值类型契约：键存在但类型写错时检查同样静默失效——字符串 "3" 不是阈值
 # （_exp_int 只认 int）、字符串 "false" 在 truthy 读取下恒为真、裸字符串
 # forbidden_patterns 会被逐字符迭代成单字符正则。与键名拼错同等可见。
-_EXP_LIST_KEYS = {"required_tokens", "forbidden_patterns", "order"}
+_EXP_LIST_KEYS = {"required_tokens", "forbidden_patterns", "order", "tolerate_codes"}
 _EXP_BOOL_KEYS = {"require_chinese_ocr", "require_nested_bullets"}
 _EXP_NUMBER_KEYS = {"toc_heading_min_recall"}
 
@@ -3071,6 +3096,27 @@ def run_selftest() -> int:
         check("重复引用同一存在图片不判 IMG_LOST",
               not any(i["code"] == "IMG_LOST" for i in _issues3), str(_issues3))
 
+    # --- apply_tolerated_codes：逐文件容忍清单（金标准自身触发的码） ---
+    _ti = [make_issue("DUP_CONTENT", "x"), make_issue("ESCAPE_NOISE", "y"),
+           make_issue("IMG_MISSING", "z")]
+    _kept, _dropped = apply_tolerated_codes(_ti, {"tolerate_codes": ["DUP_CONTENT"]})
+    check("tolerate_codes 只放行列名码",
+          [i["code"] for i in _kept] == ["ESCAPE_NOISE", "IMG_MISSING"]
+          and [i["code"] for i in _dropped] == ["DUP_CONTENT"],
+          f"kept={[i['code'] for i in _kept]} dropped={[i['code'] for i in _dropped]}")
+    _kept2, _dropped2 = apply_tolerated_codes(_ti, None)
+    check("无期望时全保留", len(_kept2) == 3 and not _dropped2,
+          f"kept={len(_kept2)} dropped={len(_dropped2)}")
+
+    # --- _cmp_norm：<br> 与表格/强调标记双侧归一（EMBED_TEXT_LOSS 口径） ---
+    check("<br> 剥除后跨格文本可整串命中",
+          _cmp_norm("Input<br>Description<br>Author") == _cmp_norm("Input\nDescription\nAuthor"),
+          f"{_cmp_norm('Input<br>Description<br>Author')!r}")
+    check("大写 <BR/> 同样剥除",
+          "br" not in _cmp_norm("A<BR/>B").lower() and _cmp_norm("A<BR/>B") == "AB",
+          _cmp_norm("A<BR/>B"))
+    check("表格/转义/强调标记剥除", _cmp_norm("|**a**\\#b|") == "ab", _cmp_norm("|**a**\\#b|"))
+
     # --- compare_baseline：集合对比 + 同码次数恶化 + 金标准门控剔除 + unverified 跳过 ---
     global EXPECTATIONS_SHA256
     saved_sha = EXPECTATIONS_SHA256
@@ -3794,6 +3840,13 @@ def main():
                  "（该文件按 FAIL 记录，报告与基线对比照常）")
 
         check_s = time.time() - t_judge0
+        # 逐文件容忍清单：金标准自身就会触发的码（金标准=人工修复的唯一真值，判定器
+        # 的全局阈值与其形态冲突）按 tolerate_codes 放行。放行必须在期望文件里带
+        # _note_tolerate_codes 写明金标准实测证据；此处只按码名整条移除，不改计数口径。
+        issues, tolerated = apply_tolerated_codes(issues, exp)
+        if tolerated:
+            emit(f"  [tolerate] 按期望 tolerate_codes 放行 {len(tolerated)} 项: "
+                 f"{', '.join(sorted({i['code'] for i in tolerated}))}")
         verdict = issues_to_verdict(issues)
         report_file(f.name, verdict, m, recall_info, meta, elapsed, issues,
                     ocr_info=ocr_info)
