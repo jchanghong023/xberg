@@ -37,10 +37,10 @@ Xberg 通过一个本地 `worker` 进程同时提供文档转换与截图 OCR，
 
 - 响应（stdout，每个请求恰好一行完整 JSON，写出即 flush；并发完成时各行不得交错损坏，以 `id` 关联请求，允许按完成顺序返回）：
   - 成功或部分提取（`extract`）：`{"id":..,"ok":true,"document":{...},"warnings":[...]}`。`document` 与 `xberg extract --format json` 的 `result` 字段同构（`ExtractedDocument` 原样序列化，图片字节内联）；`warnings` 是 `document.processing_warnings` 的副本。部分提取（个别阶段失败但产出了文档）属于 `ok:true` + 非空 `warnings`。
-  - 截图识别（`ocr_snapshot`）成功：`{"id":..,"ok":true,"text":"<布局文本>","records":N,"elapsed_ms":M,"error_kind":null}`；无文字图片 `ok:true`、`text:""`、`error_kind:"no_text"`。
+  - 截图识别（`ocr_snapshot`）成功：`{"id":..,"ok":true,"text":"<布局文本>","records":N,"elapsed_ms":M}`（`error_kind` 键仅在有类别情形时出现，普通成功省略该键）；无文字图片 `ok:true`、`text:""`、`error_kind:"no_text"`。
   - 转写（`transcribe`）成功：`{"id":..,"ok":true,"markdown":"<SV-06 全文>","segments":[{"start_ms":..,"end_ms":..,"text":..}],"duration_ms":..,"has_audio":true}`；`markdown` 标题为输入路径的完整文件名（含扩展名）。
   - 状态查询（`snapshot_state`）：`{"id":..,"ok":true,"state":"uninitialized|loading|ready|error","error":null}`。
-  - 失败：`{"id":..,"ok":false,"error":"一行错误描述",...}`，无载荷字段；`ocr_snapshot` 失败额外带 `error_kind`（`model_not_ready|asset_invalid|input_invalid|cancelled|internal`，SNAP-15 类别），消息不含图像内容。冷启动期间后续截图的即时响应与重试语义见 [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md) SNAP-15。
+  - 失败：`{"id":..,"ok":false,"error":"一行错误描述",...}`，无载荷字段；`ocr_snapshot` 失败额外带 `error_kind`（`model_not_ready|asset_invalid|input_invalid|cancelled|internal`，SNAP-15 类别），消息不含图像内容。协议级错误 `duplicate_id`（在途 `id` 重复被调度层拒绝）不属于 SNAP-15 引擎类别，任意命令均可能携带。冷启动期间后续截图的即时响应与重试语义见 [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md) SNAP-15。
   - 请求行无法解析为 JSON 时：`id` 回 `null`，`ok:false`；有效 JSON 的字段校验失败仍回显可解析的 id。
 - 退出：调用方关闭 stdin 表示结束整个 worker 会话，而不是普通文档批次边界；在途文档请求收尾后正常退出（退出码 0），截图在途取消遵循 [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md) SNAP-16。stdout 写失败表示客户端断连，取消任务并以非零退出码结束。普通取消/超时走请求协议，不关闭共享连接。
 

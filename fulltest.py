@@ -288,7 +288,7 @@ def count_source_images(path: Path):
                 "pptx": ("ppt/media/",),
                 "xlsx": ("xl/media/",),
                 "ods": ("Pictures/", "ObjectReplacements/"),
-            }[ext if ext != "ods" else "ods"]
+            }[ext]
             with zipfile.ZipFile(path) as z:
                 n = sum(
                     1 for name in z.namelist()
@@ -681,14 +681,16 @@ def _summary_row(name, verdict, elapsed, issues, chars=0, recall=None,
 def _json_result(name, verdict, elapsed, m, issues, *, golden_applied,
                  recall_info=None, warnings=None, notes=None, counts=None,
                  extraction_method=None, ocr=None, source_pages=None,
-                 timing=None, adversarial=False):
+                 timing=None, adversarial=False, unverified=False):
     """`_quality-report.json` 逐文件记录的唯一构造点。
 
     正常/超时/缺资产跳过/对抗四条路径共用同一组键（同 json_metrics 注释）：按统一
-    schema 读取的消费方不必区分路径。路径间只有三处差别——正常路径多 timing 两个
-    耗时字段、对抗路径多 adversarial 标记、召回组字段来自 recall_info（其余路径
-    留空值）。曾发生超时记录漏 golden.applied 被基线对比判成假「已修复」的回归：
-    构造收敛到一处后，新增字段不会再「改了三条路径漏一条」。
+    schema 读取的消费方不必区分路径。路径间差别——正常路径多 timing 两个耗时字段、
+    对抗路径多 adversarial 标记、超时/缺资产路径多 unverified 标记（本轮未执行
+    判定，compare_baseline 见到即整文件跳过对比，防止「少测」被虚计成「已修复」）、
+    召回组字段来自 recall_info（其余路径留空值）。曾发生超时记录漏 golden.applied
+    被基线对比判成假「已修复」的回归：构造收敛到一处后，新增字段不会再
+    「改了三条路径漏一条」。
     """
     ri = recall_info or {}
     rec = {
@@ -709,6 +711,8 @@ def _json_result(name, verdict, elapsed, m, issues, *, golden_applied,
     }
     if adversarial:
         rec["adversarial"] = True
+    if unverified:
+        rec["unverified"] = True
     if timing is not None:
         rec["check_time_s"] = round(timing[0], 2)
         rec["source_time_s"] = round(timing[1], 2)
@@ -2233,13 +2237,20 @@ def compare_baseline(prev: dict, cur: list, expectations_loaded: bool = True) ->
     对抗语料文件本来就没有金标准条目，属设计内，不因此把整场对比标成「未加载金标准」。
     同一码次数增加（如 DUP_SPAM 2→5）不算新增但算恶化——只比集合会把它判成
     「无变化」，质量劣化被吞掉。
+    超时/缺媒体资产记录（unverified 标记）本轮未执行判定，其问题码集合只有
+    TIMEOUT/AV_NO_ASSETS 单码，与基线侧真实判定不可比：golden_applied=True 时
+    两侧都不剔除，基线里该文件的全部问题码会与单码集合相减、全进 fixed——把
+    「少测」虚计成「已修复」。任一侧（本轮或基线记录）unverified 即整文件跳过
+    new/fixed/worse，单独计入 totals.unverified 供报告呈现。旧格式基线无
+    unverified 键，按 False 处理（同 golden_applied 旧格式默认，重存基线后带上）。
     """
     # 键含 adversarial 标记：主队列与对抗语料允许同名文件（把主队列某文件的损坏
     # 副本放进 _adversarial/ 是扩充语料的常见方式），只按名字建字典会让对抗条目
     # 覆盖主队列条目——对账错位、金标准码被误剔、读数失真。
     prev_files = {(f.get("name"), bool(f.get("adversarial"))): f
                   for f in (prev.get("files") or [])}
-    out = {"files": {}, "totals": {"new": 0, "fixed": 0, "worsened": 0},
+    out = {"files": {}, "totals": {"new": 0, "fixed": 0, "worsened": 0,
+                                   "unverified": 0},
            "skipped_exp_codes": False, "expectations_changed": None}
     prev_sha = prev.get("expectations_sha256")
     if prev_sha and EXPECTATIONS_SHA256 and prev_sha != EXPECTATIONS_SHA256:
@@ -2250,6 +2261,12 @@ def compare_baseline(prev: dict, cur: list, expectations_loaded: bool = True) ->
         prev_rec = prev_files.get((name, bool(rec.get("adversarial")))) or {}
         # 报告与基线 JSON 的输出键：对抗条目带后缀，避免与同名主队列条目互相覆盖
         out_key = f"{name} [_adversarial]" if rec.get("adversarial") else name
+        # unverified（超时/缺媒体资产记录）：本轮或基线轮未执行判定，问题码集合不可比
+        # ——参与对比会把基线侧问题码虚计成「已修复」（golden_applied=True 时两侧都
+        # 不剔除，虚计最重）。整文件跳过 new/fixed/worse，单独计数（见函数 docstring）。
+        if rec.get("unverified") or prev_rec.get("unverified"):
+            out["totals"]["unverified"] += 1
+            continue
         # 基线未记录 golden_applied（旧格式）时按「有金标准」处理，保持原有可追踪性
         prev_applied = prev_rec.get("golden_applied", True)
         if not expectations_loaded:
@@ -2380,10 +2397,12 @@ def run_adversarial(cli: Path, adv_dir: Path, out_dir: Path, timeout: int,
         tag = (tags or {}).get(f) or f.stem
         emit(f"\n[对抗] {f.name} ({f.stat().st_size/1024:.1f} KB) ...")
         exp = expect_for(f.name)
+        timed_out = False
         try:
             md_text, meta, elapsed, rc = convert_one(
                 cli, f, out_dir, min(timeout, 300), env, transcription=False, tag=tag)
         except subprocess.TimeoutExpired:
+            timed_out = True
             m = structural_metrics("", out_dir / f"{tag}_images")
             issues = [make_issue("TIMEOUT", "对抗文件超时(疑似挂死而非快速失败)")]
             verdict = "FAIL"
@@ -2423,10 +2442,12 @@ def run_adversarial(cli: Path, adv_dir: Path, out_dir: Path, timeout: int,
             counts=meta.get("counts") or {}))
         # 对抗路径 rc!=0 的真实原因只在 meta 里（err.txt 可能缺失/陈旧），warnings/notes
         # 保留进 JSON，别让「图片目录创建失败」这类环境故障在报告里消失。
+        # 超时分支同样属「本轮未执行判定」：unverified=True 让基线对比整文件跳过，
+        # 基线里的对抗码不会因本轮挂死被虚计成「已修复」。
         JSON_RESULTS.append(_json_result(
             f.name, verdict, elapsed, m, issues, golden_applied=bool(exp),
             warnings=meta.get("warnings") or [], notes=meta.get("notes") or [],
-            adversarial=True))
+            adversarial=True, unverified=timed_out))
     return results
 
 
@@ -3050,7 +3071,7 @@ def run_selftest() -> int:
         check("重复引用同一存在图片不判 IMG_LOST",
               not any(i["code"] == "IMG_LOST" for i in _issues3), str(_issues3))
 
-    # --- compare_baseline：集合对比 + 同码次数恶化 + 金标准门控剔除 ---
+    # --- compare_baseline：集合对比 + 同码次数恶化 + 金标准门控剔除 + unverified 跳过 ---
     global EXPECTATIONS_SHA256
     saved_sha = EXPECTATIONS_SHA256
     try:
@@ -3122,6 +3143,57 @@ def run_selftest() -> int:
               and out_same_name["files"].get("broken.pdf [_adversarial]", {}).get("new") == ["ADV_PANIC"]
               and out_same_name["files"]["broken.pdf"]["fixed"] == ["GOLDEN_TOKEN_MISSING"],
               str(out_same_name))
+        # --- unverified（超时/缺媒体资产）记录：整文件不参与对比，防「少测」虚计成「已修复」 ---
+        # 本轮 unverified（缺资产 AV 记录：golden_applied=True + 仅 AV_NO_ASSETS 单码）：
+        # 不跳过时 drop=∅，基线侧两个码与单码集合相减、全进 fixed（含金标准码）——
+        # 正是本组用例锁定的假「已修复」。
+        out_unv = compare_baseline(
+            {"files": [
+                {"name": "a.mp4", "golden_applied": True, "issues": [
+                    {"code": "GOLDEN_TOKEN_MISSING"}, {"code": "DUP_SPAM"}]},
+                {"name": "b.pdf", "golden_applied": True,
+                 "issues": [{"code": "NOTES_MISSING"}]}]},
+            [{"name": "a.mp4", "golden": {"applied": True},
+              "issues": [{"code": "AV_NO_ASSETS"}], "unverified": True},
+             {"name": "b.pdf", "golden": {"applied": True}, "issues": []}],
+            expectations_loaded=True)
+        check("unverified 记录不产生 fixed/worse/new",
+              "a.mp4" not in out_unv["files"]
+              and out_unv["totals"]["new"] == 0
+              and out_unv["totals"]["worsened"] == 0
+              # 只有 b.pdf 的 NOTES_MISSING；不修时 a.mp4 会虚计 2 个 fixed
+              and out_unv["totals"]["fixed"] == 1
+              and out_unv["totals"]["unverified"] == 1,
+              str(out_unv))
+        check("正常记录的 fixed 计数不受 unverified 跳过影响",
+              out_unv["files"].get("b.pdf", {}).get("fixed") == ["NOTES_MISSING"],
+              str(out_unv))
+        # 基线侧 unverified（基线存有缺资产/超时记录）、本轮真实验证：同样不可比——
+        # 不跳过时基线单码集合会把本轮全部真实码虚计成「新增」、单码本身虚计成「已修复」。
+        out_prev_unv = compare_baseline(
+            {"files": [{"name": "a.mp4", "golden_applied": True, "unverified": True,
+                        "issues": [{"code": "AV_NO_ASSETS"}]}]},
+            [{"name": "a.mp4", "golden": {"applied": True},
+              "issues": [{"code": "DUP_SPAM"}]}],
+            expectations_loaded=True)
+        check("基线侧 unverified 记录同样整文件跳过",
+              "a.mp4" not in out_prev_unv["files"]
+              and out_prev_unv["totals"]["new"] == 0
+              and out_prev_unv["totals"]["fixed"] == 0
+              and out_prev_unv["totals"]["unverified"] == 1,
+              str(out_prev_unv))
+        # 对抗路径超时记录（adversarial+unverified）：基线对抗码不因本轮挂死虚计成「已修复」
+        out_adv_unv = compare_baseline(
+            {"files": [{"name": "empty.pdf", "golden_applied": False,
+                        "adversarial": True, "issues": [{"code": "ADV_EMPTY_OK"}]}]},
+            [{"name": "empty.pdf", "golden": {"applied": False}, "adversarial": True,
+              "issues": [{"code": "TIMEOUT"}], "unverified": True}],
+            expectations_loaded=True)
+        check("对抗超时记录不虚计基线对抗码为已修复",
+              "empty.pdf [_adversarial]" not in out_adv_unv["files"]
+              and out_adv_unv["totals"]["fixed"] == 0
+              and out_adv_unv["totals"]["unverified"] == 1,
+              str(out_adv_unv))
     finally:
         EXPECTATIONS_SHA256 = saved_sha
 
@@ -3342,7 +3414,7 @@ def run_selftest() -> int:
         check("a:t 实体字面量不必出现在 MD 里(不假报丢失)",
               _iss2 == [], str(_iss2))
 
-    # --- _json_result / _summary_row：四条路径共用同一组键（只有 timing/adversarial 差别） ---
+    # --- _json_result / _summary_row：四条路径共用同一组键（只有 timing/adversarial/unverified 差别） ---
     check("summary 行键集合固定",
           set(_summary_row("x", "PASS", 0.0, [])) ==
           {"name", "verdict", "elapsed", "recall", "num_recall",
@@ -3355,20 +3427,26 @@ def run_selftest() -> int:
     rec_n = _json_result("x", "PASS", 1.0, _m, [], golden_applied=True,
                          recall_info={"bigram": 0.9, "missing_nums": ["7"]},
                          timing=(1.0, 2.0))
-    rec_t = _json_result("x", "FAIL", 1.0, _m, [], golden_applied=False)
+    rec_t = _json_result("x", "FAIL", 1.0, _m, [], golden_applied=True,
+                         unverified=True)
     rec_a = _json_result("x", "PASS", 1.0, _m, [], golden_applied=False,
                          adversarial=True)
     check("正常路径比公共键集多 timing 两个字段",
           set(rec_n) == common | {"check_time_s", "source_time_s"}, str(sorted(rec_n)))
-    check("超时/缺资产路径与正常路径同 schema(仅无 timing)",
-          set(rec_t) == common, str(sorted(rec_t)))
+    check("超时/缺资产路径仅多 unverified 标记(无 timing)",
+          set(rec_t) == common | {"unverified"} and rec_t["unverified"] is True,
+          str(sorted(rec_t)))
     check("对抗路径仅多 adversarial 标记",
           set(rec_a) == common | {"adversarial"} and rec_a["adversarial"] is True,
           str(sorted(rec_a)))
+    check("对抗超时路径多 adversarial+unverified 两个标记",
+          set(_json_result("x", "FAIL", 1.0, _m, [], golden_applied=False,
+                           adversarial=True, unverified=True))
+          == common | {"adversarial", "unverified"})
     check("recall_info 只喂召回组字段，golden/ocr/counts 缺省不串值",
           rec_n["recall"] == 0.9 and rec_n["missing_numbers"] == ["7"]
           and rec_n["golden"] == {"applied": True}
-          and rec_t["recall"] is None and rec_t["golden"] == {"applied": False}
+          and rec_t["recall"] is None and rec_a["golden"] == {"applied": False}
           and rec_a["ocr"] is None and rec_a["counts"] == {})
 
     # --- ISSUE_META 登记：新问题码必须有严重度 ---
@@ -3567,8 +3645,11 @@ def main():
         # 产物命名 tag：与 convert_one 内部一致（同 stem 重名时带后缀，见 _stem_tags）
         tag = tags[f]
         img_dir = out_dir / f"{tag}_images"
-        # 超时记录也要带 golden.applied，否则基线与本次的问题码集合按「未加载金标准」剔除，
-        # 该文件会显示成一批假「已修复」。
+        # golden.applied 如实记录「有无金标准条目」，但注意方向：对超时/缺资产这类
+        # 「本轮未执行判定」的记录，applied=True 并不防假「已修复」——恰恰相反，两侧
+        # 都不剔除时基线里该文件的全部问题码会与 {TIMEOUT}/{AV_NO_ASSETS} 单码集合
+        # 相减、全进 fixed。真正的防护是这两类记录带 unverified=True（见 _json_result），
+        # compare_baseline 见到即整文件跳过对比。
         exp = expect_for(f.name)
         if av and media_assets is None:
             # 缺媒体资产：如实记「未验证」诊断并跳过（WARN，不伪装成通过）。
@@ -3581,7 +3662,7 @@ def main():
             results.append(_summary_row(f.name, verdict, 0.0, issues))
             JSON_RESULTS.append(_json_result(
                 f.name, verdict, 0.0, m, issues, golden_applied=bool(exp),
-                notes=["AV_NO_ASSETS"]))
+                notes=["AV_NO_ASSETS"], unverified=True))
             progress_line(i, verdict, 0.0, t_start)
             continue
         try:
@@ -3598,9 +3679,11 @@ def main():
             results.append(_summary_row(f.name, verdict, elapsed, issues))
             # 与正常路径保持同一组键：按统一 schema 读取 _quality-report.json 的消费方
             # 不会在超时文件上 KeyError，也无需区分「超时」与「字段缺失」。
+            # unverified=True：本轮未执行判定，基线对比整文件跳过（见 _json_result）。
             JSON_RESULTS.append(_json_result(
                 f.name, verdict, elapsed, m, issues, golden_applied=bool(exp),
-                warnings=meta.get("warnings") or [], notes=meta.get("notes") or []))
+                warnings=meta.get("warnings") or [], notes=meta.get("notes") or [],
+                unverified=True))
             progress_line(i, "TIMEOUT", elapsed, t_start)
             if not args.keep_going:
                 stopped_early, early_reason = True, f"{f.name} 超时"
@@ -3773,6 +3856,9 @@ def main():
         emit(f"  合计: 新增 {regression['totals']['new']} 项 | "
              f"已修复 {regression['totals']['fixed']} 项 | "
              f"恶化 {regression['totals']['worsened']} 项(同码次数增加)")
+        if regression["totals"].get("unverified"):
+            emit(f"  另有 {regression['totals']['unverified']} 个文件未参与对比"
+                 "（本轮或基线记录为未验证条目：超时/缺媒体资产，不产生新增/已修复/恶化）")
 
     if args.save_baseline:
         reason = baseline_block_reason(JSON_RESULTS, bool(EXPECTATIONS.get("files")),
@@ -3800,6 +3886,7 @@ def main():
                     {"name": r["name"], "verdict": r["verdict"],
                      "golden_applied": bool((r.get("golden") or {}).get("applied")),
                      "adversarial": bool(r.get("adversarial")),
+                     "unverified": bool(r.get("unverified")),
                      "issues": [{"code": i["code"], "message": i["message"]}
                                 for i in r["issues"]],
                      "metrics": r["metrics"]}

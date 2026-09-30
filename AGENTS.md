@@ -71,6 +71,7 @@
 | 标准报告 | `D:\测试转markdown转换效果\测试文档_md_fulltest\_quality-report.md` / `.json`。 |
 | 逐文件金标准 | `D:\测试转markdown转换效果\_expectations.json`，仓外不入 Git；合法键以 `KNOWN_FILE_KEYS` 为准。 |
 | 回归基线 | `D:\测试转markdown转换效果\_quality-baseline.json`，仓外不入 Git。 |
+| 人工修复金标准 | `D:\测试转markdown转换效果\标准markdown\`，仓外不入 Git。25 份语料平铺 md（23 文档 + 2 音视频转写）+ 各文档独立 `<名>_images\` 目录 + `_ledger\` 修复台账，2026-09-30 由引擎草稿经人工对照原文修复而成；**原文档是唯一真值，引擎输出不可信**。修改引擎转换行为后与其做内容级对比，差异按各文档台账「已知未达项」口径判定。2 份音视频转写为引擎原样收录；当日另有 2 份语料因校对代理被内容过滤拦截移出语料（`D:\测试转markdown转换效果\移出语料\`）。 |
 | 打包版报告副本 | `target/slowtest-report-<时间戳>.md` / `.json`。 |
 
 - 本地验收命令：`python fulltest.py` 默认遇 FAIL 即止；`--keep-going` 跑完；`--deep` 包含音视频，音视频默认超时 1800 秒；`--strict` 将 WARN 也算作失败。只需开发版 exe，不需打包；`--cli` 可明确本地 exe。

@@ -74,12 +74,30 @@ function Save-Pinned {
   $parent = Split-Path -Parent $Path
   if ($parent) { New-Item -ItemType Directory -Path $parent -Force | Out-Null }
   $tmp = "$Path.download"
+  # -TimeoutSec: PS7 defaults to an unbounded wait; a stalled/half-open
+  # connection never errors and would hang the whole provisioner (CI included).
+  # 600s leaves ample headroom for the largest asset (~239 MiB model); timeouts
+  # and transient failures fall into catch and retry with the same 3-attempt
+  # backoff (3s, 6s) as package-cli-windows.ps1. A persistent pin mismatch
+  # still fails the run after the final attempt.
+  $lastError = "unknown failure"
+  $ok = $false
   try {
-    Invoke-WebRequest -Uri $Url -OutFile $tmp -UseBasicParsing
-    if (-not (Test-Pinned -Path $tmp -SizeBytes $SizeBytes -Sha256 $Sha256)) {
-      throw "downloaded bytes do not match the pinned size/SHA-256: $Url"
+    for ($attempt = 1; $attempt -le 3 -and -not $ok; $attempt++) {
+      try {
+        Invoke-WebRequest -Uri $Url -OutFile $tmp -UseBasicParsing -TimeoutSec 600
+        if (-not (Test-Pinned -Path $tmp -SizeBytes $SizeBytes -Sha256 $Sha256)) {
+          throw "downloaded bytes do not match the pinned size/SHA-256: $Url"
+        }
+        Move-Item -Force -LiteralPath $tmp -Destination $Path
+        $ok = $true
+      }
+      catch {
+        $lastError = $_.Exception.Message
+        if ($attempt -lt 3) { Start-Sleep -Seconds (3 * $attempt) }
+      }
     }
-    Move-Item -Force -LiteralPath $tmp -Destination $Path
+    if (-not $ok) { throw "download failed after 3 attempts ($Url): $lastError" }
   }
   finally {
     if (Test-Path -LiteralPath $tmp) { Remove-Item -Force -LiteralPath $tmp }

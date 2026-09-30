@@ -26,7 +26,7 @@
 ## 本地调用接口
 
 - **SNAP-14（worker 协议扩展）** `xberg worker`（见 [WORKER.md](WORKER.md)）新增 `ocr_snapshot` 命令：请求携带图像字节（base64，PNG 或等价无损编码）与选区元数据，不要求也不鼓励调用方落盘——截图内容只驻内存。响应为单行 JSON：成功 `{"id":..,"ok":true,"text":"<布局文本>",...}`；失败 `{"id":..,"ok":false,"error":"<一行原因>","error_kind":"<错误类别>"}`。并发调度、进程内模型常驻、请求关联与退出语义遵循 [WORKER.md](WORKER.md)；文档转换进行中必须能在同一进程执行截图推理。
-- **SNAP-15（错误类别）** 至少区分：`model_not_ready`（未加载/加载中）、`asset_invalid`（缺失或校验失败）、`input_invalid`（图像无法解码）、`no_text`、`cancelled`、`internal`。错误消息不含图像内容。
+- **SNAP-15（错误类别）** 至少区分：`model_not_ready`（未加载/加载中）、`asset_invalid`（缺失或校验失败）、`input_invalid`（图像无法解码）、`no_text`、`cancelled`、`internal`。错误消息不含图像内容。调度层的协议级错误 `duplicate_id`（在途 `id` 重复被拒绝，任意命令均可能携带）不在此引擎类别枚举内，见 [WORKER.md](WORKER.md)。
   首个有效截图请求保留惰性加载并等待其结果；已有截图请求负责冷启动、模型尚未加载或加载中时，后续截图请求立即返回 `ok:false` + `model_not_ready`，不排入推理队列、不保留图像。调用方通过 `snapshot_state` 观察状态，就绪后重试；加载失败仍由负责加载的请求报告 `asset_invalid`，下一次请求可以重试加载。就绪后的普通推理保持有界排队。
 - **SNAP-16（取消边界）** 客户端在请求处理期间断开 stdin/管道连接时，worker 在瓦片或识别批次检查点终止该请求并回收资源；已断开请求的结果不得再写出，也不得把终止伪造成成功。检查点粒度与 SNAP2TEXT O-19 一致（取消不是错误）。
 - **SNAP-17（状态查询）** worker 协议提供截图通道状态查询（未初始化 / 加载中 / 就绪 / 错误 + 错误摘要），供调用方在模型常驻加载期间提示等待（对应 SNAP2TEXT O-13）。

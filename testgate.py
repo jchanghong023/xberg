@@ -56,6 +56,7 @@ PS1_PARSE_TARGETS = [
     "scripts/publish/cli/package-cli-windows.ps1",
     "scripts/publish/cli/offline-smoke.ps1",
     "scripts/ci/verify-windows-dll-closure.ps1",
+    "scripts/ci/actions/provision-media-assets.ps1",
 ]
 
 RELEASE_WORKFLOW = "build-windows-cli.yml"

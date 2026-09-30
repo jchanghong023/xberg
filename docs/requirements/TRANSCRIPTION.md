@@ -9,7 +9,7 @@
 - 唯一链路：FFmpeg 共享库（avutil-61 / swresample-7 / avcodec-63 / avformat-63，随包分发、运行期加载）解码并重采样为 16 kHz 单声道 s16 PCM（按原比例转 f32，完整处理解码器与重采样器尾部样本）→ Silero VAD 切分 → SenseVoice INT8 识别（经 sherpa-onnx v1.13.6 C API 运行期加载）→ 固定术语映射 → 段级时间戳输出。选第一条音轨；不提供云端、自动语言选择或后端切换。
 - VAD 参数固定：threshold 0.25、min_silence 0.5 s、min_speech 0.5 s、window 512、max_speech 10.0 s、buffer 60 s（16 kHz）。段时间戳语义 = VAD 段起止样本位置 ÷ 16000（不是 token 级时间戳）。
 - 识别固定：feature 80 维、16 kHz、language=zh、use_itn=1、provider cpu；模型、token 表、VAD 模型的版本/大小/SHA-256 钉定在二进制内清单并加载前校验（见 [DELIVERY.md](DELIVERY.md)）；摘要不符即失败，不做任何回退。
-- 转录正文应用固定字面术语映射（34 条，长源词优先、区分大小写、只作用于片段正文；如「扫描链」→`scan chain`、「固定型故障」→`stuck-at`、`systemverilog`→`SystemVerilog`），映射表随实现锁定，不扩大为通用润色，未列项保持原文。
+- 转录正文应用固定字面术语映射（37 条，长源词优先、区分大小写、只作用于片段正文；如「扫描链」→`scan chain`、「固定型故障」→`stuck-at`、`systemverilog`→`SystemVerilog`），映射表随实现锁定，不扩大为通用润色，未列项保持原文。
 - 输出结构固定（JchTools T-20 语义）：`# <输入文件全名（含扩展名）>`、`- 音频时长: HH:MM:SS.mmm`、`- 语音片段: N`、`## 转录`，每段一行 `[start --> end] text`（`HH:MM:SS.mmm`）。无音轨时时长行为 `- 音频时长: 无音频轨道` 且正文给出「（无音频轨道）」；有音轨但无语音时给出「（未检测到语音）」——两者是明确说明，不是失败。解码失败属于失败，不留下半成品。JSON 输出（`extract --format json`、worker `transcribe`）同时提供结构化段列表（`start_ms`/`end_ms`/`text`）。
 - 配置：`transcription.enabled`、`backend`（仅接受 `"sensevoice"`）、`model_dir`（缺省回退 `XBERG_SENSEVOICE_MODEL_DIR` 及 exe 旁候选）、`max_duration_ms`、`max_bytes`、`timeout_ms`。Whisper 专属键（`model`、`language`、`timestamps`、`model_cache_dir`、`allow_network`、`verify_hash`）已退役，传入时明确报错并提示 `backend:"sensevoice"`。
 - 原生库查找顺序：显式配置 → `XBERG_SHERPA_DLL_DIR` / `XBERG_FFMPEG_DLL_DIR` → exe 旁候选目录 → PATH；sherpa DLL 加载前先加载同目录 `onnxruntime.dll`，防 PATH 上旧运行库抢载。外部 ffmpeg 不再是任何路径的运行前提；`XBERG_FFMPEG`、`XBERG_ASF_DECODER` 环境变量退役。
