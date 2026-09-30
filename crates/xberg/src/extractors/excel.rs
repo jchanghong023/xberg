@@ -594,7 +594,7 @@ impl InternalDocumentExtractor for ExcelExtractor {
                     let extension_owned = extension.to_string();
                     let limits_owned = security_limits.clone();
                     let span = tracing::Span::current();
-                    let read = tokio::task::spawn_blocking(move || {
+                    tokio::task::spawn_blocking(move || {
                         let _guard = span.entered();
                         let result = crate::extraction::excel::read_excel_bytes(
                             &content_owned,
@@ -616,8 +616,7 @@ impl InternalDocumentExtractor for ExcelExtractor {
                         Ok::<_, crate::error::XbergError>((result, pictures, shapes))
                     })
                     .await
-                    .map_err(|e| crate::error::XbergError::parsing(format!("Excel extraction task failed: {}", e)))??;
-                    read
+                    .map_err(|e| crate::error::XbergError::parsing(format!("Excel extraction task failed: {}", e)))??
                 } else {
                     let read = crate::extraction::excel::read_excel_bytes(content, extension, &security_limits)?;
                     let (pictures, shapes) = if want_drawings {
