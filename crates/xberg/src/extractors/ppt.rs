@@ -215,12 +215,18 @@ impl PptExtractor {
                 &path,
                 max_object_bytes as u64,
             ) else {
-                warnings.push(crate::types::ProcessingWarning {
-                    source: Cow::Borrowed(SOURCE),
-                    message: Cow::Owned(format!(
-                        "Skipped embedded object '{path}': format identification not supported"
-                    )),
-                });
+                // An object carrying its own preview stream (`OlePres000`/`EPRINT`)
+                // reaches the reader as the exported display picture; a missing
+                // text layer is best-effort, not a content loss, and is not
+                // warned about. Only a preview-less object is a real skip.
+                if !crate::extraction::ooxml_embedded::ole_object_has_visual_representation(&object.data) {
+                    warnings.push(crate::types::ProcessingWarning {
+                        source: Cow::Borrowed(SOURCE),
+                        message: Cow::Owned(format!(
+                            "Skipped embedded object '{path}': format identification not supported"
+                        )),
+                    });
+                }
                 continue;
             };
             match crate::core::extractor::extract_bytes(&inner_bytes, &inner_mime, &child_config).await {
@@ -229,10 +235,17 @@ impl PptExtractor {
                     mime_type: inner_mime,
                     result: Box::new(result),
                 }),
-                Err(e) => warnings.push(crate::types::ProcessingWarning {
-                    source: Cow::Borrowed(SOURCE),
-                    message: Cow::Owned(format!("Failed to extract embedded object '{path}': {e}")),
-                }),
+                Err(e) => {
+                    // Same rule as the identification branch: a preview-backed
+                    // object that fails text extraction (e.g. a truncated Visio
+                    // stream) still delivers its visual form.
+                    if !crate::extraction::ooxml_embedded::ole_object_has_visual_representation(&object.data) {
+                        warnings.push(crate::types::ProcessingWarning {
+                            source: Cow::Borrowed(SOURCE),
+                            message: Cow::Owned(format!("Failed to extract embedded object '{path}': {e}")),
+                        });
+                    }
+                }
             }
         }
         (children, warnings)

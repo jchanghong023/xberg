@@ -9,6 +9,7 @@ use crate::extraction::doc::{DocParagraph, extract_doc_text};
 use crate::plugins::{InternalDocumentExtractor, Plugin};
 use crate::types::Metadata;
 use crate::types::internal::{ElementKind, InternalDocument, InternalElement};
+use crate::types::tables::Table;
 use ahash::AHashMap;
 use async_trait::async_trait;
 use std::borrow::Cow;
@@ -107,6 +108,15 @@ impl InternalDocumentExtractor for DocExtractor {
             push_blank_line_chunks(&mut doc, &result.content);
         } else {
             push_paragraph_elements(&mut doc, &result.paragraphs);
+        }
+
+        // `Data`-stream and `ObjectPool`-preview pictures follow the text: the
+        // legacy format's piece table carries no in-flow anchor for them, and
+        // an image the document certainly contains beats none at all. Indexes
+        // are assigned by the push order `push_image` enforces.
+        for image in result.images {
+            let image_index = doc.push_image(image);
+            doc.push_element(InternalElement::text(ElementKind::Image { image_index }, "", 0));
         }
 
         Ok(doc)
@@ -214,9 +224,79 @@ fn push_paragraph_elements(doc: &mut InternalDocument, paragraphs: &[DocParagrap
     // One entry per open container, holding whether it is ordered.
     let mut open: Vec<bool> = Vec::new();
 
-    for (i, paragraph) in paragraphs.iter().enumerate() {
+    let mut i = 0usize;
+    while i < paragraphs.len() {
+        let paragraph = &paragraphs[i];
+
+        if paragraph.in_table {
+            // A run of `sprmPFInTable` paragraphs is one Word table. Inside a
+            // row, each cell's ending `` mark normalized to a tab, and the
+            // row closes at its (usually empty) `sprmPFTtp` row-mark
+            // paragraph. A paragraph with no trailing tab continues the
+            // current cell (a multi-paragraph cell).
+            let mut rows: Vec<Vec<String>> = Vec::new();
+            let mut cells: Vec<String> = Vec::new();
+            let mut pending = String::new();
+            let mut j = i;
+            while j < paragraphs.len() && (paragraphs[j].in_table || paragraphs[j].row_mark) {
+                let p = &paragraphs[j];
+                let segments: Vec<&str> = p.content.split('\t').collect();
+                for (k, segment) in segments.iter().enumerate() {
+                    let segment = segment.trim();
+                    if !segment.is_empty() {
+                        if !pending.is_empty() {
+                            pending.push(' ');
+                        }
+                        pending.push_str(segment);
+                    }
+                    let last = k + 1 == segments.len();
+                    if !last {
+                        // An interior tab closes the cell accumulated so far.
+                        cells.push(std::mem::take(&mut pending));
+                    } else if p.content.ends_with('\t') {
+                        // The paragraph-final cell mark closes the last cell.
+                        cells.push(std::mem::take(&mut pending));
+                    }
+                }
+                if p.row_mark {
+                    if !pending.is_empty() {
+                        cells.push(std::mem::take(&mut pending));
+                    }
+                    if !cells.is_empty() {
+                        rows.push(std::mem::take(&mut cells));
+                    }
+                }
+                j += 1;
+            }
+            if !pending.is_empty() {
+                cells.push(pending);
+            }
+            if !cells.is_empty() {
+                rows.push(cells);
+            }
+            if !rows.is_empty() {
+                close_lists(doc, &mut open, 0);
+                let width = rows.iter().map(Vec::len).max().unwrap_or(0);
+                let cell_grid: Vec<Vec<String>> = rows
+                    .into_iter()
+                    .map(|mut row| {
+                        row.resize(width, String::new());
+                        row
+                    })
+                    .collect();
+                let index = doc.push_table(Table {
+                    cells: cell_grid,
+                    ..Default::default()
+                });
+                doc.push_element(InternalElement::text(ElementKind::Table { table_index: index }, "", 0));
+            }
+            i = j;
+            continue;
+        }
+
         let text = paragraph.content.trim();
         if text.is_empty() {
+            i += 1;
             continue;
         }
 
@@ -227,6 +307,7 @@ fn push_paragraph_elements(doc: &mut InternalDocument, paragraphs: &[DocParagrap
                 None => ElementKind::Paragraph,
             };
             doc.push_element(InternalElement::text(kind, text, 0));
+            i += 1;
             continue;
         };
 
@@ -251,6 +332,7 @@ fn push_paragraph_elements(doc: &mut InternalDocument, paragraphs: &[DocParagrap
             text,
             element_depth,
         ));
+        i += 1;
     }
 
     close_lists(doc, &mut open, 0);

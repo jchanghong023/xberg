@@ -385,6 +385,12 @@ pub(super) struct ParagraphListIndex {
     /// Paragraph style index (`istd`), for every paragraph that carries a
     /// `PAPX` -- not only list-bound ones.
     style_by_end_fc: AHashMap<u32, u16>,
+    /// Paragraphs whose PAPX carries `sprmPFInTable` (0x2416) with a non-zero
+    /// operand: the authoritative "this paragraph lives in a table" flag.
+    in_table_by_end_fc: AHashMap<u32, bool>,
+    /// Paragraphs whose PAPX carries `sprmPFTtp` (0x2417): the paragraph mark
+    /// that ends a table row.
+    row_mark_by_end_fc: AHashMap<u32, bool>,
 }
 
 impl ParagraphListIndex {
@@ -455,12 +461,30 @@ impl ParagraphListIndex {
             if let Some(binding) = list_binding_from_grpprl(grpprl) {
                 self.by_end_fc.insert(end_fc, binding);
             }
+            let (in_table, row_mark) = table_flags_from_grpprl(grpprl);
+            if in_table {
+                self.in_table_by_end_fc.insert(end_fc, true);
+            }
+            if row_mark {
+                self.row_mark_by_end_fc.insert(end_fc, true);
+            }
         }
     }
 
     /// Look up the binding for a paragraph whose mark ends at `end_fc`.
     pub(super) fn binding_for_paragraph_end(&self, end_fc: u32) -> Option<ListBinding> {
         self.by_end_fc.get(&end_fc).copied()
+    }
+
+    /// Whether the paragraph whose mark ends at `end_fc` carries `sprmPFInTable`.
+    pub(super) fn in_table_for_paragraph_end(&self, end_fc: u32) -> bool {
+        self.in_table_by_end_fc.get(&end_fc).copied().unwrap_or(false)
+    }
+
+    /// Whether the paragraph whose mark ends at `end_fc` is a table row mark
+    /// (`sprmPFTtp`).
+    pub(super) fn row_mark_for_paragraph_end(&self, end_fc: u32) -> bool {
+        self.row_mark_by_end_fc.get(&end_fc).copied().unwrap_or(false)
     }
 
     /// Look up the style index for a paragraph whose mark ends at `end_fc`.
@@ -503,7 +527,49 @@ impl ListTables {
             .binding_for_paragraph_end(end_fc)
             .map(|binding| (binding.ilvl, self.formats.is_ordered(binding.ilfo, binding.ilvl)))
     }
+
+    pub(super) fn in_table_for_paragraph_end(&self, end_fc: u32) -> bool {
+        self.index.in_table_for_paragraph_end(end_fc)
+    }
+
+    pub(super) fn row_mark_for_paragraph_end(&self, end_fc: u32) -> bool {
+        self.index.row_mark_for_paragraph_end(end_fc)
+    }
 }
+
+/// Read a PAPX grpprl's table flags: (`sprmPFInTable`, `sprmPFTtp`).
+fn table_flags_from_grpprl(grpprl: &[u8]) -> (bool, bool) {
+    let mut in_table = false;
+    let mut row_mark = false;
+    let mut pos = 0usize;
+    while pos + 3 <= grpprl.len() {
+        let sprm = u16::from_le_bytes([grpprl[pos], grpprl[pos + 1]]);
+        pos += 2;
+        let len = match sprm_operand_len(sprm) {
+            Some(len) => len,
+            None if sprm >> 13 == 6 => match grpprl.get(pos) {
+                Some(&cb) => usize::from(cb) + 1,
+                None => break,
+            },
+            None => break,
+        };
+        let Some(operand) = grpprl.get(pos..pos + len) else {
+            break;
+        };
+        pos += len;
+        match sprm {
+            SPRM_P_F_IN_TABLE => in_table = operand.first().is_some_and(|byte| *byte != 0),
+            SPRM_P_F_TTP => row_mark = operand.first().is_some_and(|byte| *byte != 0),
+            _ => {}
+        }
+    }
+    (in_table, row_mark)
+}
+
+/// `sprmPFInTable`: the paragraph lives inside a table (spra 1, one-byte operand).
+const SPRM_P_F_IN_TABLE: u16 = 0x2416;
+/// `sprmPFTtp`: the paragraph mark ends a table row (spra 1, one-byte operand).
+const SPRM_P_F_TTP: u16 = 0x2417;
 
 #[cfg(test)]
 mod tests {

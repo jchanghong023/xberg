@@ -245,7 +245,7 @@ fn test_process_sheet_empty() {
     assert_eq!(sheet.row_count, 0);
     assert_eq!(sheet.col_count, 0);
     assert_eq!(sheet.cell_count, 0);
-    assert!(sheet.markdown.contains("Empty sheet"));
+    assert!(sheet.markdown.contains("（原文为空工作表，无单元格内容）"));
 }
 
 #[test]

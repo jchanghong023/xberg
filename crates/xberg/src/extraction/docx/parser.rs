@@ -172,6 +172,15 @@ pub struct HeaderFooter {
     pub tables: Vec<Table>,
     /// Which pages this header/footer applies to.
     pub header_type: HeaderFooterType,
+    /// Drawings in this header or footer (logos, watermarks). Kept separately
+    /// from the body's `Document.elements` stream so the extractor can emit the
+    /// image ones around the body (header images above it, footer images below)
+    /// instead of dropping them with the header text.
+    pub drawings: Vec<super::drawing::Drawing>,
+    /// rId → target for this part's own relationships (`word/_rels/headerN.xml.rels`),
+    /// which are independent of `document.xml.rels` and are what a header
+    /// drawing's `r:embed` resolves against.
+    pub image_relationships: AHashMap<String, String>,
 }
 
 /// Specifies which pages a header or footer applies to.
@@ -3351,6 +3360,13 @@ impl<R: Read + Seek> DocxParser<R> {
                 Ok(xml) => {
                     let mut header_footer = HeaderFooter::default();
                     self.parse_header_footer_content(&xml, &mut header_footer, budget, &mut document.warnings)?;
+                    // The part's own rels (`word/_rels/headerN.xml.rels`) are what its
+                    // drawings' `r:embed` rIds resolve against — `document.xml.rels`
+                    // never sees them. Target-less parts simply keep an empty map.
+                    let rels_path = format!("word/_rels/{}.rels", path.rsplit('/').next().unwrap_or(&path));
+                    if let Ok(rels_xml) = self.read_file(&rels_path) {
+                        header_footer.image_relationships = Self::parse_relationships_xml(&rels_xml);
+                    }
                     if is_header {
                         document.headers.push(header_footer);
                     } else {
@@ -3438,6 +3454,7 @@ impl<R: Read + Seek> DocxParser<R> {
         let out = self.parse_body_elements(&mut reader, None, budget, warnings)?;
         header_footer.paragraphs = out.paragraphs;
         header_footer.tables = out.tables;
+        header_footer.drawings = out.drawings;
         Ok(())
     }
 

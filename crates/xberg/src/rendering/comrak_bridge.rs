@@ -46,11 +46,15 @@ fn mk_text<'a>(arena: &'a comrak::Arena<'a>, text: &str) -> &'a AstNode<'a> {
 }
 
 /// Collapse multiple consecutive spaces into a single space.
+///
+/// Non-breaking spaces join the collapse: a run of U+00A0 is a space to every
+/// reader, and slides use long NBSP runs as visual indentation that otherwise
+/// survives into the Markdown as `[ \u00a0-\u00ff]{6,}`-shaped noise.
 fn normalize_text(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut prev_space = false;
     for ch in text.chars() {
-        if ch == '\n' || ch == ' ' {
+        if ch == '\n' || ch == ' ' || ch == '\u{a0}' {
             if !prev_space {
                 result.push(' ');
             }

@@ -48,7 +48,7 @@ enum GraphicFrameContent {
     SmartArt(DiagramReference),
 }
 
-pub(super) fn parse_slide_xml(xml_data: &[u8]) -> Result<Vec<SlideElement>> {
+pub(super) fn parse_slide_xml(xml_data: &[u8], slide_number: u32) -> Result<Vec<SlideElement>> {
     let xml_str = utf8_validation::from_utf8(xml_data)
         .map_err(|_| XbergError::parsing("Invalid UTF-8 in slide XML".to_string()))?;
 
@@ -69,7 +69,7 @@ pub(super) fn parse_slide_xml(xml_data: &[u8]) -> Result<Vec<SlideElement>> {
 
     let mut elements = Vec::new();
     for child_node in sp_tree.children().filter(|n| n.is_element()) {
-        elements.extend(parse_group(&child_node, xml_str)?);
+        elements.extend(parse_group(&child_node, xml_str, slide_number)?);
     }
 
     Ok(elements)
@@ -80,7 +80,7 @@ pub(super) fn parse_slide_xml(xml_data: &[u8]) -> Result<Vec<SlideElement>> {
 /// `xml_str` is the full original slide document text, needed to slice out
 /// raw OMML XML by byte range for the shared OMML-to-LaTeX converter (see
 /// `omml_node_to_run`).
-fn parse_group(node: &Node, xml_str: &str) -> Result<Vec<SlideElement>> {
+fn parse_group(node: &Node, xml_str: &str, slide_number: u32) -> Result<Vec<SlideElement>> {
     let tag_name = node.tag_name().name();
     let namespace = node.tag_name().namespace().unwrap_or("");
 
@@ -88,7 +88,7 @@ fn parse_group(node: &Node, xml_str: &str) -> Result<Vec<SlideElement>> {
     // connector geometry). Recurse into mc:Choice (preferred) or mc:Fallback
     // rather than dropping the subtree — see #79.
     if namespace == MARKUP_COMPATIBILITY_NAMESPACE && tag_name == "AlternateContent" {
-        return parse_alternate_content_shapes(node, xml_str);
+        return parse_alternate_content_shapes(node, xml_str, slide_number);
     }
 
     let mut elements = Vec::new();
@@ -101,7 +101,7 @@ fn parse_group(node: &Node, xml_str: &str) -> Result<Vec<SlideElement>> {
 
     match tag_name {
         "sp" | "cxnSp" => {
-            if let Some(content) = parse_sp(node, xml_str)? {
+            if let Some(content) = parse_sp(node, xml_str, slide_number)? {
                 match content {
                     ParsedContent::Text(text) => elements.push(SlideElement::Text(text, position)),
                     ParsedContent::List(list) => elements.push(SlideElement::List(list, position)),
@@ -133,7 +133,7 @@ fn parse_group(node: &Node, xml_str: &str) -> Result<Vec<SlideElement>> {
         },
         "grpSp" => {
             for child in node.children().filter(|n| n.is_element()) {
-                elements.extend(parse_group(&child, xml_str)?);
+                elements.extend(parse_group(&child, xml_str, slide_number)?);
             }
         }
         _ => elements.push(SlideElement::Unknown),
@@ -145,7 +145,7 @@ fn parse_group(node: &Node, xml_str: &str) -> Result<Vec<SlideElement>> {
 /// Resolve an `mc:AlternateContent` shape wrapper: prefer `mc:Choice` content
 /// (the modern representation, e.g. an extension shape or connector), and
 /// fall back to `mc:Fallback` only if `mc:Choice` yielded nothing.
-fn parse_alternate_content_shapes(node: &Node, xml_str: &str) -> Result<Vec<SlideElement>> {
+fn parse_alternate_content_shapes(node: &Node, xml_str: &str, slide_number: u32) -> Result<Vec<SlideElement>> {
     let choice = node.children().find(|n| {
         n.is_element()
             && n.tag_name().namespace() == Some(MARKUP_COMPATIBILITY_NAMESPACE)
@@ -160,7 +160,7 @@ fn parse_alternate_content_shapes(node: &Node, xml_str: &str) -> Result<Vec<Slid
     if let Some(choice_node) = choice {
         let mut elements = Vec::new();
         for child in choice_node.children().filter(|n| n.is_element()) {
-            elements.extend(parse_group(&child, xml_str)?);
+            elements.extend(parse_group(&child, xml_str, slide_number)?);
         }
         if !elements.is_empty() {
             return Ok(elements);
@@ -170,7 +170,7 @@ fn parse_alternate_content_shapes(node: &Node, xml_str: &str) -> Result<Vec<Slid
     if let Some(fallback_node) = fallback {
         let mut elements = Vec::new();
         for child in fallback_node.children().filter(|n| n.is_element()) {
-            elements.extend(parse_group(&child, xml_str)?);
+            elements.extend(parse_group(&child, xml_str, slide_number)?);
         }
         return Ok(elements);
     }
@@ -213,8 +213,50 @@ fn is_title_placeholder(sp_node: &Node) -> bool {
 /// shape is dropped here instead of filtering field runs by their value.
 const FURNITURE_PLACEHOLDER_TYPES: &[&str] = &["sldNum", "ftr", "dt"];
 
-fn parse_sp(sp_node: &Node, xml_str: &str) -> Result<Option<ParsedContent>> {
+/// The slide-visible `Page N` marker of a page-number placeholder, if the shape
+/// has exactly that form: a literal run reading `Page` and an `a:fld` of type
+/// `slidenum`. The number is `slide_number`, not the field's cached text.
+fn page_number_marker(sp_node: &Node, slide_number: u32) -> Option<String> {
+    let mut has_slidenum_field = false;
+    let mut literals: Vec<&str> = Vec::new();
+    for node in sp_node.descendants() {
+        if node.has_tag_name((DRAWINGML_NAMESPACE, "fld")) {
+            if node.attribute("type").is_some_and(|kind| kind == "slidenum") {
+                has_slidenum_field = true;
+            } else {
+                return None;
+            }
+        } else if node.has_tag_name((DRAWINGML_NAMESPACE, "r"))
+            && let Some(text) = node.text()
+        {
+            literals.push(text);
+        }
+    }
+    if !has_slidenum_field {
+        return None;
+    }
+    let joined = literals.concat();
+    let trimmed = joined.trim();
+    if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("page") {
+        return None;
+    }
+    Some(format!("Page {slide_number}"))
+}
+
+fn parse_sp(sp_node: &Node, xml_str: &str, slide_number: u32) -> Result<Option<ParsedContent>> {
     if placeholder_type(sp_node).is_some_and(|kind| FURNITURE_PLACEHOLDER_TYPES.contains(&kind)) {
+        // The page-number furniture itself is visible content: a deck whose
+        // date placeholder carries a literal `Page ` run before its slide-number
+        // field shows "Page N" on every slide. The field's cached value can be
+        // stale (written by an earlier save), so the number is substituted from
+        // the slide's own position, and only that exact shape form is kept --
+        // repeated footer/date text stays dropped as furniture.
+        if let Some(page_marker) = page_number_marker(sp_node, slide_number) {
+            return Ok(Some(ParsedContent::Text(TextElement {
+                runs: vec![Run::plain(page_marker)],
+                is_title: false,
+            })));
+        }
         return Ok(None);
     }
 

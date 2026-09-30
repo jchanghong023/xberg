@@ -267,10 +267,15 @@ fn owned_xlsx_cell_value(value: &DataRef<'_>) -> Data {
     }
 }
 
+/// Placeholder body for a sheet with no cell content, matching the human-fixed
+/// golden standard's wording for empty worksheets. Shared with the extractor so
+/// the element stream and the sheet markdown agree.
+pub(crate) const EMPTY_SHEET_PLACEHOLDER: &str = "（原文为空工作表，无单元格内容）";
+
 fn empty_excel_sheet(sheet_name: &str) -> ExcelSheet {
     ExcelSheet {
         name: sheet_name.to_owned(),
-        markdown: format!("## {}\n\n*Empty sheet*", sheet_name),
+        markdown: format!("## {}\n\n{}", sheet_name, EMPTY_SHEET_PLACEHOLDER),
         row_count: 0,
         col_count: 0,
         cell_count: 0,
@@ -428,7 +433,7 @@ fn process_sparse_sheet_from_cells(
     let SparseSheetIndex { cols, rows, cell_map } = index_sparse_sheet_cells(&cells);
 
     if cols.is_empty() || rows.is_empty() {
-        let markdown = format!("## {}\n\n*Empty sheet*", sheet_name);
+        let markdown = format!("## {}\n\n{}", sheet_name, EMPTY_SHEET_PLACEHOLDER);
         return Ok(ExcelSheet {
             name: sheet_name.to_owned(),
             markdown,
@@ -576,7 +581,7 @@ fn process_sheet(name: &str, range: &Range<Data>, warnings: &mut Vec<ProcessingW
     let estimated_capacity = 50 + (cols * 20) + (cell_count * 12);
 
     if rows == 0 || cols == 0 {
-        let markdown = format!("## {}\n\n*Empty sheet*", name);
+        let markdown = format!("## {}\n\n{}", name, EMPTY_SHEET_PLACEHOLDER);
         ExcelSheet {
             name: name.to_owned(),
             markdown,

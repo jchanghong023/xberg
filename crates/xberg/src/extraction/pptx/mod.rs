@@ -158,6 +158,20 @@ fn join_runs(runs: &[Run], extract: impl Fn(&Run) -> String) -> String {
     result
 }
 
+/// [`join_runs`] for the Markdown path: adjacent runs with the same bold
+/// formatting each wrap their own `**`, and the closing marker of one glued to
+/// the opener of the next (`**DFT****新员工…**`) re-parses as broken emphasis.
+/// Removing the empty `****` junction merges them into one span, the shape the
+/// source's own formatting (one bold phrase split across runs) meant.
+pub(super) fn join_runs_md(runs: &[Run]) -> String {
+    let joined = join_runs(runs, Run::render_as_md);
+    if joined.contains("****") {
+        joined.replace("****", "")
+    } else {
+        joined
+    }
+}
+
 /// Extract PPTX content from a file path.
 ///
 /// # Arguments

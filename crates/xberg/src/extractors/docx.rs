@@ -66,6 +66,117 @@ fn drawing_alt_text(drawing: &crate::extraction::docx::drawing::Drawing) -> Opti
     crate::extraction::markdown_utils::sanitize_image_alt_text(raw)
 }
 
+/// Load one drawing's image bytes and metadata into an [`ExtractedImage`].
+///
+/// Shared by the body, header, and footer image loops so all three load bytes the
+/// same way; `rels` is whichever relationships part the drawing's `r:embed`
+/// resolves against (`document.xml.rels` for the body, the part's own
+/// `_rels/headerN.xml.rels` for headers/footers). Returns `None` for a
+/// shape-only drawing (no image relationship) — the same rule
+/// `build_internal_document` uses to skip its `ElementKind::Image`, so the
+/// caller's sequential `image_index` assignment stays aligned with the elements.
+/// The returned entry's `image_index` is a placeholder the caller overwrites.
+fn load_docx_drawing_image<R: std::io::Read + std::io::Seek>(
+    archive: &mut zip::ZipArchive<R>,
+    drawing: &crate::extraction::docx::drawing::Drawing,
+    rels: &AHashMap<String, String>,
+    extract_image_data: bool,
+    page_number: Option<u32>,
+) -> Option<ExtractedImage> {
+    // A drawing with no relationship is a shape (text box, rule, rectangle), not an
+    // image: it can never yield bytes, and reporting it as an image with an empty
+    // `data` buffer and a placeholder `format` misleads every consumer.
+    let rid = drawing.image_ref.as_ref()?;
+
+    let description = drawing_alt_text(drawing);
+    let source_path = rels.get(rid).cloned();
+
+    let mut image_data = None;
+    if extract_image_data
+        && let Some(target) = rels.get(rid)
+        // Relationships in `word/_rels/*.rels` resolve relative to `word/`. An
+        // in-bounds `..` (e.g. `../media/image1.png`, the normal shape for an image
+        // that lives at the package root) is legitimate and must resolve; only a `..`
+        // that pops past the package root is rejected. A leading `/` re-roots to the
+        // package root, same as before.
+        && let Ok(zip_path) = crate::extractors::security::resolve_container_entry("word", target)
+        && let Ok(mut file) = archive.by_name(&zip_path)
+        && file.size() <= crate::extraction::docx::MAX_IMAGE_FILE_SIZE
+    {
+        // `file.size()` is the ZIP central directory's *declared* uncompressed size,
+        // which the archive's author chooses freely; the `zip` crate puts no `Take` on
+        // the decompressed side, so a member forging a small declared size while
+        // carrying a large deflate stream inflates without bound here. Bound the read
+        // by the declared size (already checked against `MAX_IMAGE_FILE_SIZE` above)
+        // and drop any member that yields more bytes than it declared.
+        // GHSA-85w9-wqcq-x48r. ~keep
+        let declared_size = file.size();
+        let mut data = Vec::with_capacity(usize::try_from(declared_size).unwrap_or(0));
+        let mut bounded = std::io::Read::take(&mut file, declared_size.saturating_add(1));
+        if std::io::Read::read_to_end(&mut bounded, &mut data).is_ok()
+            && u64::try_from(data.len()).unwrap_or(u64::MAX) <= declared_size
+        {
+            image_data = Some(data);
+        }
+    }
+
+    let (data, format, width, height) = if let Some(data) = image_data {
+        let format = crate::extraction::image_format::detect_image_format(&data);
+        let emus_per_px = crate::extraction::docx::EMUS_PER_PIXEL_96DPI;
+        let (w, h) = drawing
+            .extent
+            .as_ref()
+            .map(|e| {
+                (
+                    Some(u32::try_from(e.cx.max(0) / emus_per_px).unwrap_or(0)),
+                    Some(u32::try_from(e.cy.max(0) / emus_per_px).unwrap_or(0)),
+                )
+            })
+            .unwrap_or((None, None));
+        (Bytes::from(data), format, w, h)
+    } else {
+        let format = source_path
+            .as_ref()
+            .and_then(|p| p.rsplit('.').next())
+            .map(|ext| Cow::Owned(ext.to_lowercase()))
+            .unwrap_or(Cow::Borrowed("png"));
+        (Bytes::new(), format, None, None)
+    };
+
+    let (image_kind, kind_confidence) =
+        crate::extraction::image_kind::classify(crate::extraction::image_kind::ImageClassifyInput {
+            bytes: &data,
+            format: format.as_ref(),
+            width,
+            height,
+            colorspace: None,
+            bits_per_component: None,
+            is_mask: false,
+        });
+
+    Some(ExtractedImage {
+        data,
+        format,
+        image_index: u32::MAX,
+        page_number,
+        width,
+        height,
+        colorspace: None,
+        bits_per_component: None,
+        is_mask: false,
+        description,
+        ocr_result: None,
+        bounding_box: None,
+        source_path,
+        image_kind: Some(image_kind),
+        kind_confidence: Some(kind_confidence),
+        cluster_id: None,
+        caption: None,
+        qr_codes: None,
+        data_base64: None,
+    })
+}
+
 /// Build an `InternalDocument` from parsed DOCX data.
 ///
 /// Creates a flat element list with headings, paragraphs, lists, tables, images,
@@ -99,13 +210,20 @@ fn build_internal_document(
     let mut bookmark_elements: AHashMap<String, u32> = AHashMap::new();
     let mut pending_anchor_links: Vec<(u32, String, RelationshipKind)> = Vec::new();
 
-    // `doc.images` is produced by the caller from the same `doc.drawings` list, in order,
-    // emitting one entry per drawing that has an image relationship and none for shape-only
-    // drawings (text boxes, rules). Renderers resolve an `ElementKind::Image` by indexing
-    // `doc.images`, so the element must carry that sequential index — not the raw drawing
-    // index, which is shifted by every skipped shape and would drop or mis-point markers.
-    // The two derivations must agree, so both key on exactly `image_ref.is_some()`. ~keep
-    let mut next_image_index: u32 = 0;
+    // `doc.images` is produced by the caller from the same drawing lists, in order —
+    // header/footer images first, then one entry per body drawing that has an image
+    // relationship and none for shape-only drawings (text boxes, rules). Renderers
+    // resolve an `ElementKind::Image` by indexing `doc.images`, so the element must
+    // carry that sequential index — not the raw drawing index, which is shifted by
+    // every skipped shape and would drop or mis-point markers. The derivations must
+    // agree, so all three key on exactly `image_ref.is_some()`. ~keep
+    //
+    // Header images are emitted before the body (a header logo belongs at the top of
+    // the page it heads), footer images after it. Neither carries the Header/Footer
+    // content layer: the content filter drops layer-tagged elements wholesale, and a
+    // logo must survive `include_headers = false` even while the header's text does
+    // not.
+    let mut next_image_index: u32 = push_header_footer_images(&mut builder, &doc.headers, inject_placeholders, 0);
     let image_indices: Vec<Option<u32>> = doc
         .drawings
         .iter()
@@ -426,6 +544,9 @@ fn build_internal_document(
     for hf in &doc.footers {
         push_header_footer_content(&mut builder, hf, ContentLayer::Footer);
     }
+    // Footer images follow the body (and the body's images), keeping `doc.images`
+    // ordered exactly as the caller appends them: headers, body, footers.
+    push_header_footer_images(&mut builder, &doc.footers, inject_placeholders, next_image_index);
 
     for note in doc.footnotes.iter().chain(doc.endnotes.iter()) {
         let text: String = note
@@ -503,6 +624,52 @@ fn push_header_footer_content(
             builder.set_layer(idx, layer);
         }
     }
+}
+
+/// Push image elements for a header/footer part's drawings, returning the next
+/// unassigned image index.
+///
+/// One `ElementKind::Image` per drawing with an image relationship — the same
+/// `image_ref.is_some()` rule the caller's `doc.images` derivation keys on, so
+/// the sequential indexes stay in lockstep. Deliberately not layer-tagged: the
+/// content filter removes layer-tagged elements when `include_headers`/
+/// `include_footers` are off, and a header logo must survive that filter even
+/// when the header's text does not.
+fn push_header_footer_images(
+    builder: &mut InternalDocumentBuilder,
+    hfs: &[crate::extraction::docx::parser::HeaderFooter],
+    inject_placeholders: bool,
+    mut next_image_index: u32,
+) -> u32 {
+    if !inject_placeholders {
+        // Still count: the caller appends these parts' images to `doc.images`
+        // regardless (image data extraction is independent of placeholder
+        // injection), so the body's indexes must skip past them either way.
+        for hf in hfs {
+            next_image_index += hf.drawings.iter().filter(|d| d.image_ref.is_some()).count() as u32;
+        }
+        return next_image_index;
+    }
+    for hf in hfs {
+        for drawing in &hf.drawings {
+            if drawing.image_ref.is_none() {
+                continue;
+            }
+            let description = drawing_alt_text(drawing);
+            let text_val = description.as_deref().unwrap_or("");
+            let elem = crate::types::internal::InternalElement::text(
+                crate::types::internal::ElementKind::Image {
+                    image_index: next_image_index,
+                },
+                text_val,
+                0,
+            )
+            .with_page(1);
+            builder.push_element(elem);
+            next_image_index += 1;
+        }
+    }
+    next_image_index
 }
 
 /// Collect plain text, annotations, and math formulas from a slice of Runs.
@@ -681,6 +848,8 @@ type DocxParseResult = (
     // 1-based page number per drawing, index-aligned with the drawings vec. ~keep
     Vec<usize>,
     AHashMap<String, String>,
+    Vec<crate::extraction::docx::parser::HeaderFooter>,
+    Vec<crate::extraction::docx::parser::HeaderFooter>,
     InternalDocument,
 );
 
@@ -743,6 +912,8 @@ fn parse_docx_core(
     let drawing_page_nums = doc.drawing_page_numbers();
     let drawings = std::mem::take(&mut doc.drawings);
     let image_rels = std::mem::take(&mut doc.image_relationships);
+    let headers = std::mem::take(&mut doc.headers);
+    let footers = std::mem::take(&mut doc.footers);
     Ok((
         text,
         tables,
@@ -750,6 +921,8 @@ fn parse_docx_core(
         drawings,
         drawing_page_nums,
         image_rels,
+        headers,
+        footers,
         internal_doc,
     ))
 }
@@ -861,7 +1034,17 @@ impl InternalDocumentExtractor for DocxExtractor {
         let budget = SecurityBudget::from_config(config);
         let limits = config.security_limits.clone().unwrap_or_default();
         let content_owned: Arc<[u8]> = Arc::from(content);
-        let (text, tables, page_boundaries, drawings, drawing_page_nums, image_rels, mut internal_doc) = {
+        let (
+            text,
+            tables,
+            page_boundaries,
+            drawings,
+            drawing_page_nums,
+            image_rels,
+            headers,
+            footers,
+            mut internal_doc,
+        ) = {
             #[cfg(feature = "tokio-runtime")]
             if crate::core::batch_mode::is_batch_mode() {
                 if config.cancel_token.as_ref().map(|t| t.is_cancelled()).unwrap_or(false) {
@@ -1091,115 +1274,45 @@ impl InternalDocumentExtractor for DocxExtractor {
 
         let extract_image_data = config.needs_image_data();
         let mut extracted_images = Vec::with_capacity(drawings.len());
-        for (idx, drawing) in drawings.iter().enumerate() {
-            let description = drawing_alt_text(drawing);
-            let source_path = drawing.image_ref.as_ref().and_then(|rid| image_rels.get(rid)).cloned();
-
-            let mut image_data = None;
-            if extract_image_data
-                && let Some(ref rid) = drawing.image_ref
-                && let Some(target) = image_rels.get(rid)
-                // Relationships in `word/_rels/document.xml.rels` resolve relative to
-                // `word/`. An in-bounds `..` (e.g. `../media/image1.png`, the normal shape
-                // for an image that lives at the package root) is legitimate and must
-                // resolve; only a `..` that pops past the package root is rejected. A
-                // leading `/` re-roots to the package root, same as before.
-                && let Ok(zip_path) = crate::extractors::security::resolve_container_entry("word", target)
-                && let Ok(mut file) = archive.by_name(&zip_path)
-                && file.size() <= crate::extraction::docx::MAX_IMAGE_FILE_SIZE
-            {
-                // `file.size()` is the ZIP central directory's *declared* uncompressed size,
-                // which the archive's author chooses freely; the `zip` crate puts no `Take` on
-                // the decompressed side, so a member forging a small declared size while
-                // carrying a large deflate stream inflates without bound here. Bound the read
-                // by the declared size (already checked against `MAX_IMAGE_FILE_SIZE` above)
-                // and drop any member that yields more bytes than it declared.
-                // GHSA-85w9-wqcq-x48r. ~keep
-                let declared_size = file.size();
-                let mut data = Vec::with_capacity(usize::try_from(declared_size).unwrap_or(0));
-                let mut bounded = std::io::Read::take(&mut file, declared_size.saturating_add(1));
-                if std::io::Read::read_to_end(&mut bounded, &mut data).is_ok()
-                    && u64::try_from(data.len()).unwrap_or(u64::MAX) <= declared_size
-                {
-                    image_data = Some(data);
+        // Header images first, then the body's, then the footer's — the exact order
+        // `build_internal_document` assigns their `ElementKind::Image` indexes, so the
+        // sequential `image_index` set on each entry stays in lockstep with the elements.
+        for hf in &headers {
+            for drawing in &hf.drawings {
+                if let Some(mut image) = load_docx_drawing_image(
+                    &mut archive,
+                    drawing,
+                    &hf.image_relationships,
+                    extract_image_data,
+                    Some(1),
+                ) {
+                    image.image_index = extracted_images.len() as u32;
+                    extracted_images.push(image);
                 }
             }
-
-            let (data, format, width, height) = if let Some(data) = image_data {
-                let format = crate::extraction::image_format::detect_image_format(&data);
-                let emus_per_px = crate::extraction::docx::EMUS_PER_PIXEL_96DPI;
-                let (w, h) = drawing
-                    .extent
-                    .as_ref()
-                    .map(|e| {
-                        (
-                            Some(u32::try_from(e.cx.max(0) / emus_per_px).unwrap_or(0)),
-                            Some(u32::try_from(e.cy.max(0) / emus_per_px).unwrap_or(0)),
-                        )
-                    })
-                    .unwrap_or((None, None));
-                (Bytes::from(data), format, w, h)
-            } else {
-                let format = source_path
-                    .as_ref()
-                    .and_then(|p| p.rsplit('.').next())
-                    .map(|ext| Cow::Owned(ext.to_lowercase()))
-                    .unwrap_or(Cow::Borrowed("png"));
-                (Bytes::new(), format, None, None)
-            };
-
-            // A drawing with no relationship is a shape (text box, rule, rectangle), not an
-            // image: it can never yield bytes, and reporting it as an image with an empty
-            // `data` buffer and a placeholder `format` misleads every consumer. `doc.images`
-            // therefore contains exactly the drawings with a relationship, in order — the
-            // same rule `build_internal_document` uses to assign each `ElementKind::Image`
-            // its index, so the two can never disagree. ~keep
-            if drawing.image_ref.is_none() {
-                continue;
-            }
-
-            // Taken from the parsed element list, not by searching rendered markdown for a
-            // placeholder: `to_markdown` renders every drawing to the same `![alt](image)`
-            // target, so the per-image key this used to look for never existed and every image
-            // fell through to page 1 (GH#1546). The element walk is also independent of
-            // `inject_placeholders`, which suppresses those placeholders entirely. ~keep
+        }
+        for (idx, drawing) in drawings.iter().enumerate() {
             let page_number = Some(drawing_page_nums.get(idx).copied().unwrap_or(1) as u32);
-
-            let (image_kind, kind_confidence) =
-                crate::extraction::image_kind::classify(crate::extraction::image_kind::ImageClassifyInput {
-                    bytes: &data,
-                    format: format.as_ref(),
-                    width,
-                    height,
-                    colorspace: None,
-                    bits_per_component: None,
-                    is_mask: false,
-                });
-
-            // Sequential over emitted images only: skipping shape-only drawings above must not
-            // leave gaps, and `page_contents[].image_indices` is built by position.
-            let image_index = extracted_images.len() as u32;
-            extracted_images.push(ExtractedImage {
-                data,
-                format,
-                image_index,
-                page_number,
-                width,
-                height,
-                colorspace: None,
-                bits_per_component: None,
-                is_mask: false,
-                description,
-                ocr_result: None,
-                bounding_box: None,
-                source_path,
-                image_kind: Some(image_kind),
-                kind_confidence: Some(kind_confidence),
-                cluster_id: None,
-                caption: None,
-                qr_codes: None,
-                data_base64: None,
-            });
+            if let Some(mut image) =
+                load_docx_drawing_image(&mut archive, drawing, &image_rels, extract_image_data, page_number)
+            {
+                image.image_index = extracted_images.len() as u32;
+                extracted_images.push(image);
+            }
+        }
+        for hf in &footers {
+            for drawing in &hf.drawings {
+                if let Some(mut image) = load_docx_drawing_image(
+                    &mut archive,
+                    drawing,
+                    &hf.image_relationships,
+                    extract_image_data,
+                    Some(1),
+                ) {
+                    image.image_index = extracted_images.len() as u32;
+                    extracted_images.push(image);
+                }
+            }
         }
 
         let page_contents = {

@@ -8,7 +8,7 @@ use ahash::AHashMap;
 use crate::error::Result;
 
 use super::content_builder::ContentBuilder;
-use super::{join_runs, parser};
+use super::{join_runs, join_runs_md, parser};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct ElementPosition {
@@ -44,6 +44,17 @@ pub(super) struct Run {
 }
 
 impl Run {
+    /// A run with no formatting, used for synthesized text (the page-number
+    /// marker a slide's date placeholder displays).
+    pub(super) fn plain(text: String) -> Self {
+        Self {
+            text,
+            formatting: Formatting::default(),
+            hyperlink_id: None,
+            math_latex: None,
+        }
+    }
+
     pub(super) fn extract(&self) -> String {
         if let Some((ref latex, _)) = self.math_latex {
             latex.clone()
@@ -66,17 +77,24 @@ impl Run {
 
         let mut result = self.text.clone();
 
-        if self.formatting.bold {
-            result = format!("**{}**", result);
+        // Bold/italic around a run with no visible characters only adds
+        // unpaired `**` noise (empty placeholder runs of a template, bold tabs
+        // under an underline blank); emphasis is meaningless there. The
+        // underline blank itself stays wrapped — `<u>&#9;&#9;</u>` is the
+        // form-blank rendering the golden standard keeps.
+        if !self.text.is_empty() && !result.trim().is_empty() {
+            if self.formatting.bold {
+                result = format!("**{}**", result);
+            }
+            if self.formatting.italic {
+                result = format!("*{}*", result);
+            }
+            if self.formatting.strikethrough {
+                result = format!("~~{}~~", result);
+            }
         }
-        if self.formatting.italic {
-            result = format!("*{}*", result);
-        }
-        if self.formatting.underlined {
+        if !result.is_empty() && self.formatting.underlined {
             result = format!("<u>{}</u>", result);
-        }
-        if self.formatting.strikethrough {
-            result = format!("~~{}~~", result);
         }
 
         result
@@ -227,7 +245,7 @@ pub(super) enum ParsedContent {
 
 impl Slide {
     pub(super) fn from_xml(slide_number: u32, xml_data: &[u8], rels_data: Option<&[u8]>) -> Result<Self> {
-        let elements = parser::parse_slide_xml(xml_data)?;
+        let elements = parser::parse_slide_xml(xml_data, slide_number)?;
 
         let (images, hyperlinks, rel_targets) = if let Some(rels) = rels_data {
             let slide_rels = parser::parse_slide_rels(rels)?;
@@ -249,7 +267,7 @@ impl Slide {
         let text_content: String = if config.plain {
             join_runs(&text.runs, Run::extract)
         } else {
-            join_runs(&text.runs, Run::render_as_md)
+            join_runs_md(&text.runs)
         };
         builder.add_text(&text_content);
     }

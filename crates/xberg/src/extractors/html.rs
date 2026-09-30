@@ -18,8 +18,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use html_to_markdown_rs::InlineImageFormat;
 use std::borrow::Cow;
-#[cfg(feature = "tokio-runtime")]
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 /// `ProcessingWarning::source` for every warning this extractor emits (#171).
 const HTML_WARNING_SOURCE: &str = "html";
@@ -566,6 +567,185 @@ pub(crate) fn apply_content_filter_to_html_options(
     Some(opts)
 }
 
+/// Whether a link destination carries a URL scheme (`http:`, `data:`, `mailto:` …)
+/// and is therefore not a claim about a file next to the source document.
+fn has_url_scheme(dest: &str) -> bool {
+    let mut chars = dest.chars();
+    let Some(first) = chars.next() else { return false };
+    if !first.is_ascii_alphabetic() {
+        return false;
+    }
+    let mut len = 1usize;
+    for c in chars {
+        if c == ':' {
+            return true;
+        }
+        if !(c.is_ascii_alphanumeric() || c == '+' || c == '.' || c == '-') || len > 32 {
+            return false;
+        }
+        len += 1;
+    }
+    false
+}
+
+/// Percent-decode a link destination. Saved-page converters keep the source
+/// HTML's URL encoding (`%E8%80%83` for CJK bytes, `%20` for spaces), and no
+/// filesystem lookup resolves those bytes as-is.
+fn percent_decode_target(target: &str) -> Cow<'_, str> {
+    let mut out = String::with_capacity(target.len());
+    let mut rest = target;
+    let mut changed = false;
+    while let Some(pos) = rest.find('%') {
+        out.push_str(&rest[..pos]);
+        let hex = rest[pos + 1..].chars().take(2).collect::<String>();
+        if hex.len() == 2
+            && hex.chars().all(|c| c.is_ascii_hexdigit())
+            && let Ok(byte) = u8::from_str_radix(&hex, 16)
+        {
+            out.push(byte as char);
+            rest = &rest[pos + 3..];
+            changed = true;
+        } else {
+            out.push('%');
+            rest = &rest[pos + 1..];
+        }
+    }
+    out.push_str(rest);
+    if changed {
+        Cow::Owned(out)
+    } else {
+        Cow::Borrowed(target)
+    }
+}
+
+/// Resolve a relative image destination against the source file's directory,
+/// returning `None` for destinations that are not file-relative claims
+/// (schemes like `http:`/`data:`, site-absolute `/img/x.png`, or engine
+/// `image_N.ext` refs produced by this same rewrite).
+fn local_image_target(dest: &str, source_dir: &Path) -> Option<PathBuf> {
+    if dest.is_empty() || dest.starts_with('/') || dest.starts_with('#') {
+        return None;
+    }
+    let decoded = percent_decode_target(dest);
+    let cleaned = decoded.trim_start_matches("./");
+    let cleaned = cleaned.trim_end_matches('/');
+    if cleaned.is_empty() {
+        return None;
+    }
+    Some(source_dir.join(cleaned.replace('\\', "/")))
+}
+
+/// Outcome of rewriting one inline image reference.
+enum RefAction {
+    /// Point at the extracted image file (`image_N.ext`).
+    Extracted(String),
+    /// Target missing next to the source file: keep the alt text, drop the ref.
+    Dropped,
+    /// Leave the reference exactly as it was.
+    Keep,
+}
+
+/// Rewrite inline image references that cannot ship inside portable Markdown:
+///
+/// 1. `![alt](data:image/...;base64,…)` — html-to-markdown serializes inline
+///    `<svg>` elements (Tier-1 path) and data-URI `<img>` sources as
+///    multi-kilobyte data URIs straight into the text. Each payload is decoded
+///    into an [`ExtractedImage`] and the ref repointed at the `image_N.ext`
+///    file the pipeline writes; the output-format pass renames the extension
+///    in the content again if it re-encodes the image (`svg` → `png`).
+/// 2. `![alt](<local path>)` whose target does not exist next to the source
+///    file (a saved page whose `_files` folder was not kept): keep the alt
+///    text, drop the reference — a ref resolving to nothing is a broken link,
+///    not content. Only decidable when the source directory is known; without
+///    it (byte-stream extraction) local refs pass through untouched.
+///
+/// Returns the rewritten content, the decoded images (already indexed), and a
+/// text-replacement list (`old -> new`) covering both ref swaps and token
+/// drops so callers can apply the same edits to already-mapped element texts.
+fn rewrite_inline_image_refs(
+    content: &str,
+    source_dir: Option<&Path>,
+    images: &mut Vec<ExtractedImage>,
+) -> (String, Vec<(String, String)>) {
+    static IMG_REF_RE: OnceLock<regex::Regex> = OnceLock::new();
+    let re = IMG_REF_RE.get_or_init(|| {
+        regex::Regex::new(r#"!\[(?P<alt>[^\]]*)\]\(\s*(?P<dest><[^>]*>|[^)\s]+)(?P<title>\s+"[^"]*")?\s*\)"#)
+            .expect("static image-ref regex must compile")
+    });
+
+    let mut replacements: Vec<(String, String)> = Vec::new();
+    let mut out = String::with_capacity(content.len());
+    let mut fence = crate::extraction::markdown_utils::FenceTracker::default();
+
+    for line in content.split_inclusive('\n') {
+        let had_newline = line.ends_with('\n');
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let had_cr = body.ends_with('\r');
+        let body = body.strip_suffix('\r').unwrap_or(body);
+
+        if fence.fenced(body) {
+            out.push_str(line);
+            continue;
+        }
+
+        let rewritten = re.replace_all(body, |caps: &regex::Captures<'_>| {
+            let whole = caps.get(0).expect("whole match exists").as_str();
+            let alt = caps.name("alt").map(|m| m.as_str()).unwrap_or_default();
+            let title = caps.name("title").map(|m| m.as_str()).unwrap_or("");
+            let dest_raw = caps.name("dest").expect("dest group exists").as_str();
+            let dest = dest_raw
+                .strip_prefix('<')
+                .and_then(|d| d.strip_suffix('>'))
+                .unwrap_or(dest_raw);
+
+            let action = if dest.starts_with("data:image/") {
+                match crate::extractors::markdown_utils::decode_data_uri_image(dest, images.len() as u32) {
+                    Some(mut image) => {
+                        image.description = (!alt.trim().is_empty()).then(|| alt.trim().to_string());
+                        let index = images.len() as u32;
+                        let new_ref = format!("image_{index}.{}", image.format);
+                        images.push(image);
+                        RefAction::Extracted(format!("![{alt}]({new_ref}{title})"))
+                    }
+                    None => RefAction::Keep,
+                }
+            } else if dest.starts_with("image_") || has_url_scheme(dest) {
+                RefAction::Keep
+            } else if let Some(dir) = source_dir {
+                match local_image_target(dest, dir) {
+                    Some(path) if path.is_file() => RefAction::Keep,
+                    Some(_) => RefAction::Dropped,
+                    None => RefAction::Keep,
+                }
+            } else {
+                RefAction::Keep
+            };
+
+            match action {
+                RefAction::Extracted(new_token) => {
+                    replacements.push((whole.to_string(), new_token.clone()));
+                    Cow::Owned(new_token)
+                }
+                RefAction::Dropped => {
+                    replacements.push((whole.to_string(), alt.to_string()));
+                    Cow::Owned(alt.to_string())
+                }
+                RefAction::Keep => Cow::Owned(whole.to_string()),
+            }
+        });
+
+        out.push_str(&rewritten);
+        if had_cr {
+            out.push('\r');
+        }
+        if had_newline {
+            out.push('\n');
+        }
+    }
+
+    (out, replacements)
+}
+
 impl Plugin for HtmlExtractor {
     fn name(&self) -> &str {
         "html-extractor"
@@ -586,6 +766,21 @@ impl Plugin for HtmlExtractor {
 
 impl SyncExtractor for HtmlExtractor {
     fn extract_sync(&self, content: &[u8], mime_type: &str, config: &ExtractionConfig) -> Result<InternalDocument> {
+        self.extract_sync_with_source(content, mime_type, config, None)
+    }
+}
+
+impl HtmlExtractor {
+    /// Byte-stream entry plus the optional source-file directory. The directory
+    /// makes relative image refs decidable: a target missing next to the source
+    /// file is a broken link and is dropped instead of shipped as a dead ref.
+    fn extract_sync_with_source(
+        &self,
+        content: &[u8],
+        mime_type: &str,
+        config: &ExtractionConfig,
+        source_dir: Option<&Path>,
+    ) -> Result<InternalDocument> {
         let _span = tracing::debug_span!("extract_html", element_count = tracing::field::Empty,).entered();
 
         // A non-UTF-8 page still extracts, but every undecodable byte has already become
@@ -629,6 +824,23 @@ impl SyncExtractor for HtmlExtractor {
 
         let format_metadata = html_metadata.map(|m: HtmlMetadata| crate::types::FormatMetadata::Html(Box::new(m)));
 
+        let should_extract_images = config.needs_image_data();
+
+        // Repoint data-URI image refs at extracted files and drop refs to files
+        // missing next to the source. Runs before the text feeds both the
+        // pre-rendered content and the mapped element stream, so both stay
+        // byte-identical on the refs. Only when image data is requested: a
+        // caller that opted out of images gets the raw refs, not half of them.
+        let mut rewrite_images: Vec<ExtractedImage> = Vec::new();
+        let mut ref_replacements: Vec<(String, String)> = Vec::new();
+        let content_text = if should_extract_images {
+            let (rewritten, replacements) = rewrite_inline_image_refs(&content_text, source_dir, &mut rewrite_images);
+            ref_replacements = replacements;
+            rewritten
+        } else {
+            content_text
+        };
+
         let (pre_formatted, pre_rendered) = match config.output_format {
             OutputFormat::Markdown => {
                 let normalized = normalize_html_markdown(content_text.clone());
@@ -661,6 +873,28 @@ impl SyncExtractor for HtmlExtractor {
             InternalDocumentBuilder::new("html").build()
         };
 
+        // The mapped elements carry the same ref text as the pre-rendered
+        // content (both derive from the conversion pass), so the rewrites must
+        // land there too — otherwise a re-render from elements (pre-rendered
+        // content dropped after a captioning pass) resurrects the giant
+        // data URIs and the dead refs.
+        if !ref_replacements.is_empty() {
+            for element in doc.elements.iter_mut() {
+                for (old, new) in &ref_replacements {
+                    if element.text.contains(old.as_str()) {
+                        element.text = element.text.replace(old.as_str(), new);
+                    }
+                }
+            }
+        }
+
+        // Register the decoded data-URI images first so their `image_N.ext`
+        // refs (already rewritten into the text above) resolve to these
+        // indexes; the inline-image pass below continues the numbering.
+        for image in rewrite_images {
+            doc.push_image(image);
+        }
+
         if decoded_lossily {
             crate::core::diagnostics::push_lossy_decode_warning(
                 &mut doc.processing_warnings,
@@ -684,8 +918,6 @@ impl SyncExtractor for HtmlExtractor {
         recover_mathml_formulas(&html, &mut doc);
         recover_table_captions(&html, &mut doc);
 
-        let should_extract_images = config.needs_image_data();
-
         // Images extracted here (with binary data and OCR eligibility) each need a matching
         // `ElementKind::Image` element: every renderer resolves images by walking elements, not
         // by reading `doc.images` directly, so a raw `push_image` alone silently drops them.
@@ -698,7 +930,18 @@ impl SyncExtractor for HtmlExtractor {
                 apply_content_filter_to_html_options(config.html_options.clone(), config.content_filter.as_ref());
             let inline_images = crate::extraction::html::extract_html_inline_images(&html, image_html_options)?;
 
-            for (i, img) in inline_images.into_iter().enumerate() {
+            // The data-URI rewrite above may already have registered the same
+            // bytes (the inline-SVG Tier-1 path emits a data-URI ref that the
+            // rewrite decodes, while this pass captures the same element when
+            // its converter tier records images). Skip byte-identical repeats
+            // instead of writing a duplicate file no ref points at.
+            let seen: HashSet<Vec<u8>> = doc.images.iter().map(|img| img.data.to_vec()).collect();
+            let index_offset = doc.images.len();
+            let mut next_index = index_offset;
+            for img in inline_images {
+                if seen.contains(img.data.as_slice()) {
+                    continue;
+                }
                 let (width, height) = img.dimensions.map_or((None, None), |d| (Some(d.width), Some(d.height)));
                 let format: Cow<'static, str> = match img.format {
                     InlineImageFormat::Png => Cow::Borrowed("png"),
@@ -724,7 +967,7 @@ impl SyncExtractor for HtmlExtractor {
                 let extracted = ExtractedImage {
                     data: Bytes::from(img.data),
                     format,
-                    image_index: i as u32,
+                    image_index: next_index as u32,
                     page_number: None,
                     width,
                     height,
@@ -744,6 +987,7 @@ impl SyncExtractor for HtmlExtractor {
                 };
                 let description = extracted.description.clone();
                 let image_index = doc.push_image(extracted);
+                next_index += 1;
                 let text = description.unwrap_or_default();
                 doc.push_element(crate::types::internal::InternalElement::text(
                     crate::types::internal::ElementKind::Image { image_index },
@@ -780,7 +1024,7 @@ impl InternalDocumentExtractor for HtmlExtractor {
     ))]
     async fn extract_path(&self, path: &Path, mime_type: &str, config: &ExtractionConfig) -> Result<InternalDocument> {
         let bytes = crate::core::io::read_file_async(path).await?;
-        self.extract_content(&bytes, mime_type, config).await
+        self.extract_sync_with_source(&bytes, mime_type, config, path.parent())
     }
 
     fn supported_mime_types(&self) -> &[&str] {

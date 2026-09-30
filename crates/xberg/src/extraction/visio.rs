@@ -853,19 +853,17 @@ fn decode_visio_lzw(data: &[u8], max_size: usize) -> std::result::Result<Vec<u8>
         }
     }
 
-    // Truncated input is refused even when some bytes already decoded: partial
-    // output would flow into the chunk scanner as if it were the whole stream
-    // and come out as silently truncated text. A truncated descendant stream is
-    // dropped by the caller's recovery; a truncated root stream fails the read.
-    if truncated {
-        return Err(VisioLzwError::Malformed(XbergError::parsing(
-            "Truncated Visio LZW stream",
-        )));
-    }
+    // Truncated input is delivered as its decoded prefix when one exists: the
+    // chunk scanner stops at the first chunk whose declared length runs past
+    // the available bytes, so the text recovered before the cut survives
+    // instead of the whole stream being dropped. A prefix too short to even
+    // carry the 4-byte block header is still refused.
     if output.len() < 4 {
-        return Err(VisioLzwError::Malformed(XbergError::parsing(
-            "Visio LZW stream has no block header",
-        )));
+        return Err(VisioLzwError::Malformed(XbergError::parsing(if truncated {
+            "Truncated Visio LZW stream"
+        } else {
+            "Visio LZW stream has no block header"
+        })));
     }
     Ok(output)
 }

@@ -2,6 +2,7 @@
 
 use crate::Result;
 use crate::core::config::ExtractionConfig;
+use crate::extraction::excel::EMPTY_SHEET_PLACEHOLDER;
 use crate::extraction::excel::images::{XlsxPicture, XlsxShapeText};
 use crate::extractors::security::SecurityBudget;
 use crate::plugins::{InternalDocumentExtractor, Plugin};
@@ -215,7 +216,8 @@ impl ExcelExtractor {
     /// `Some(Vec<PageContent>)` with one entry per sheet so that `ExtractedDocument.pages`
     /// is always `Some` for Excel.
     ///
-    /// Empty sheets still produce a `PageContent` entry so the page index aligns with the
+    /// Empty sheets still produce a `PageContent` entry (heading plus the
+    /// empty-sheet placeholder body) so the page index aligns with the
     /// sheet index. The top-level `content` remains the concatenation of all per-sheet
     /// content, preserving backward compat for callers that do not read `pages`.
     ///
@@ -327,8 +329,20 @@ impl ExcelExtractor {
                     ocr_confidence: None,
                 });
             } else {
+                // An empty sheet is still a sheet in the workbook's reading
+                // order: emit its heading plus a placeholder body so the page
+                // structure survives conversion instead of silently dropping
+                // the sheet (matching the human-fixed golden standard).
+                if !sheet.name.is_empty() {
+                    builder.push_heading(2, &format!("{}{hidden_suffix}", sheet.name), None, None);
+                    builder.push_paragraph(EMPTY_SHEET_PLACEHOLDER, Vec::new(), None, None);
+                }
                 let content = match name_opt.as_deref() {
-                    Some(n) => format!("## {}{hidden_suffix}\n\n", Self::escape_sheet_name_for_heading(n)),
+                    Some(n) => format!(
+                        "## {}{hidden_suffix}\n\n{}",
+                        Self::escape_sheet_name_for_heading(n),
+                        EMPTY_SHEET_PLACEHOLDER
+                    ),
                     None => String::new(),
                 };
 

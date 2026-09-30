@@ -5,6 +5,7 @@
 //!
 //! Supports Word 97, 2000, XP, and 2003 (.doc) files.
 
+mod images;
 mod papx;
 
 use crate::error::{Result, XbergError};
@@ -29,6 +30,12 @@ pub(crate) struct DocParagraph {
     /// `Some(level)` when the paragraph's style resolves to `heading 1`..
     /// `heading 9`, directly or through its base style.
     pub heading_level: Option<u8>,
+    /// The paragraph's PAPX carries `sprmPFInTable`: it is a row of a Word
+    /// table, with cell text separated by tabs in `content`.
+    pub in_table: bool,
+    /// The paragraph's PAPX carries `sprmPFTtp`: this (usually empty) mark
+    /// ends a table row.
+    pub row_mark: bool,
 }
 
 /// What the Word97+ text path produces: the assembled text plus the paragraph
@@ -73,6 +80,9 @@ pub(crate) struct DocExtractionResult {
     /// carries no paragraph properties (Word 6/95, or the contiguous
     /// fallback), in which case callers keep using `content`. ~keep
     pub paragraphs: Vec<DocParagraph>,
+    /// Picture blobs found in the `Data` stream and in `ObjectPool` preview
+    /// streams. Empty for documents that carry no pictures.
+    pub images: Vec<crate::types::extraction::ExtractedImage>,
 }
 
 /// Metadata extracted from DOC files.
@@ -123,6 +133,7 @@ pub(crate) fn extract_doc_text(content: &[u8]) -> Result<DocExtractionResult> {
             metadata,
             processing_warnings: Vec::new(),
             paragraphs: Vec::new(),
+            images: Vec::new(),
         });
     }
     let use_1table = (flags_a & 0x0200) != 0;
@@ -133,11 +144,17 @@ pub(crate) fn extract_doc_text(content: &[u8]) -> Result<DocExtractionResult> {
 
     let mut processing_warnings = Vec::new();
 
+    // Picture extraction is best-effort: a stream that cannot be read or a
+    // blob that does not close cleanly degrades to fewer images, never to a
+    // failed text extraction.
+    let pictures = images::extract_doc_images(&mut comp).unwrap_or_default();
+
     extract_text_word97(&word_doc, &table_stream, &mut processing_warnings).map(|main| DocExtractionResult {
         content: main.content,
         metadata,
         processing_warnings,
         paragraphs: main.paragraphs,
+        images: pictures,
     })
 }
 
@@ -366,20 +383,32 @@ fn push_paragraph(
     list_tables: &papx::ListTables,
 ) {
     let raw: String = main.chars().skip(start).take(end.saturating_sub(start)).collect();
-    let content = normalize_doc_text(&raw);
-    if content.is_empty() {
-        return;
-    }
     // Word keys a paragraph's PAPX on the FC one past its paragraph mark,
     // which is exactly what `fc_ends` recorded for that character.
     let list = mark_fc_end
         .and_then(|fc_end| list_tables.membership_for_paragraph_end(fc_end))
         .map(|(level, ordered)| DocListMembership { level, ordered });
     let heading_level = mark_fc_end.and_then(|fc_end| list_tables.heading_level_for_paragraph_end(fc_end));
+    let in_table = mark_fc_end.is_some_and(|fc_end| list_tables.in_table_for_paragraph_end(fc_end));
+    let row_mark = mark_fc_end.is_some_and(|fc_end| list_tables.row_mark_for_paragraph_end(fc_end));
+    // A table paragraph keeps its trailing cell mark: the tab that a cell's
+    // ending `` normalizes to is the cell boundary, and trimming it away
+    // would merge every cell of a row.
+    let content = if in_table || row_mark {
+        let stripped = strip_doc_field_instructions(&raw);
+        collapse_excess_newlines(&stripped)
+    } else {
+        normalize_doc_text(&raw)
+    };
+    if content.is_empty() && !row_mark {
+        return;
+    }
     out.push(DocParagraph {
         content,
         list,
         heading_level,
+        in_table,
+        row_mark,
     });
 }
 

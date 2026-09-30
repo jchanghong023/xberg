@@ -247,7 +247,13 @@ fn filter_page_marker_comments(output: String, page_marker_format: Option<&str>)
 /// Apply the `escape_markdown`-dependent unescape pass to rendered output.
 fn unescape_markdown_output(mut output: String, escape_markdown: bool) -> String {
     if escape_markdown {
-        const UNESCAPE_TARGETS: &[char] = &['_', '[', ']', '(', ')', '*', '='];
+        // `.` joins the blind targets: comrak only writes `\.` as an
+        // ordered-list-marker guard ("1\\. title"), and the human-fixed golden
+        // standard keeps those markers unescaped — the rendered list reads the
+        // same and the escape only counts as noise. Mid-text `\.` does not
+        // occur (comrak never escapes it there), so the position-blind pass is
+        // safe.
+        const UNESCAPE_TARGETS: &[char] = &['_', '[', ']', '(', ')', '*', '=', '.'];
         if matches!(unescape_backslash_sequences(&output, UNESCAPE_TARGETS), Cow::Owned(_)) {
             output = apply_outside_fences(&output, |span| {
                 unescape_backslash_sequences(span, UNESCAPE_TARGETS).into_owned()
@@ -256,6 +262,9 @@ fn unescape_markdown_output(mut output: String, escape_markdown: bool) -> String
 
         if output.contains("\\*") || output.contains("\\#") {
             output = apply_outside_fences(&output, rewrite_leading_marker_escapes);
+        }
+        if output.contains("\\#") {
+            output = apply_outside_fences(&output, unescape_midline_hash_escapes);
         }
     } else {
         const UNESCAPE_TARGETS: &[char] = &['_', '[', ']', '(', ')', '*', '=', '-', '#'];
@@ -266,6 +275,45 @@ fn unescape_markdown_output(mut output: String, escape_markdown: bool) -> String
         }
     }
     output
+}
+
+/// Drop `\#` escapes that sit mid-line.
+///
+/// A `#` away from a line start is literal text in every CommonMark renderer;
+/// comrak still escapes it after whitespace ("=on \\#define …"), where the
+/// golden standard keeps the raw character. Leading `\#` escapes keep their
+/// backslash — that is the heading-guard position [`rewrite_leading_marker_escapes`]
+/// already owns, and the golden standard keeps forms like `\#dump` escaped.
+fn unescape_midline_hash_escapes(input: &str) -> String {
+    if !input.contains("\\#") {
+        return input.to_string();
+    }
+    let trailing_newline = input.ends_with('\n');
+    let mut out = input
+        .lines()
+        .map(|line| {
+            let leading = line.len() - line.trim_start_matches(' ').len();
+            let mut out = String::with_capacity(line.len());
+            let bytes = line.as_bytes();
+            let mut i = 0usize;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'#' && i > leading {
+                    out.push('#');
+                    i += 2;
+                    continue;
+                }
+                let c = line[i..].chars().next().expect("valid UTF-8");
+                out.push(c);
+                i += c.len_utf8();
+            }
+            out
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if trailing_newline {
+        out.push('\n');
+    }
+    out
 }
 
 /// Append the `## Annotations` section to rendered output, when present.

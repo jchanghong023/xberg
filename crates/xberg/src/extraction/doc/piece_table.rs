@@ -210,12 +210,26 @@ fn decode_piece_chars(
             DecodedPiece { chars, fc_ends }
         };
 
-        let suspicious = piece
-            .chars
-            .iter()
-            .filter(|c| (0x4E00..=0x9FFF).contains(&(**c as u32)))
-            .count();
-        if piece.len() > 4 && suspicious > piece.len() / 4 {
+        // A piece flagged uncompressed whose bytes are really single-byte text
+        // lands in the CJK range only through printable-ASCII byte pairs (both
+        // bytes 0x20..=0x7E), while genuine UTF-16 CJK mixes in characters
+        // whose low byte is a control or >= 0x80 (不 U+4E0D, 件 U+4EF6, …).
+        // Falling back to CP1252 on CJK density alone re-decoded every genuine
+        // Chinese piece into mojibake; require the artifact shape — a CJK-dense
+        // piece with essentially no genuine-looking CJK unit — instead.
+        let mut cjk_range_units = 0usize;
+        let mut cjk_genuine_units = 0usize;
+        for c in &piece.chars {
+            let unit = *c as u32;
+            if (0x4E00..=0x9FFF).contains(&unit) {
+                cjk_range_units += 1;
+                let low_byte = (unit & 0xFF) as u8;
+                if !(0x20..=0x7E).contains(&low_byte) {
+                    cjk_genuine_units += 1;
+                }
+            }
+        }
+        if piece.len() > 4 && cjk_range_units > piece.len() / 4 && cjk_genuine_units * 10 <= cjk_range_units {
             let cp1252_end = (byte_offset + char_count).min(word_doc.len());
             return decode_cp1252(byte_offset, cp1252_end);
         }

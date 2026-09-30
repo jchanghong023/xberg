@@ -530,8 +530,17 @@ impl InternalDocument {
     }
 
     /// Push an image and return its index (for use in `ElementKind::Image`).
-    pub fn push_image(&mut self, image: ExtractedImage) -> u32 {
+    ///
+    /// The pushed entry's `image_index` field is reset to the returned position:
+    /// renderers bake `image_<position>.<format>` references from the element's
+    /// index, while the CLI names written files and the re-encode rename pass
+    /// keys off the *field* — an extractor that hands over images whose fields
+    /// were numbered in a different order than they are pushed (PPT: extraction
+    /// order vs. per-slide placement) would otherwise emit references and files
+    /// under different numbers.
+    pub fn push_image(&mut self, mut image: ExtractedImage) -> u32 {
         let idx = self.images.len() as u32;
+        image.image_index = idx;
         self.images.push(image);
         idx
     }

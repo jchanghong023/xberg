@@ -355,12 +355,32 @@ fn extract_notes_text(notes_xml: &[u8]) -> Result<String> {
     let doc = Document::parse(xml_str)
         .map_err(|e| crate::error::XbergError::parsing(format!("Failed to parse notes XML: {}", e)))?;
 
+    // The notes body placeholder carries the speaker's text; the date and
+    // slide-number placeholders that every notes layout also carries hold only
+    // cached `a:fld` values ("2026/7/31", page digits) that are dynamic fields,
+    // not notes content. Collect text per shape and keep the body placeholder
+    // (and any shape with no placeholder type) only.
+    const EXCLUDED_PLACEHOLDERS: &[&str] = &["dt", "sldNum", "sldImg", "hdr", "ftr"];
     let mut text_parts = Vec::with_capacity(16);
-    for node in doc.descendants() {
-        if node.has_tag_name((DRAWINGML_NAMESPACE, "t"))
-            && let Some(text) = node.text()
+    for sp in doc
+        .descendants()
+        .filter(|node| node.has_tag_name((PRESENTATIONML_NAMESPACE, "sp")))
+    {
+        let placeholder_type = sp
+            .descendants()
+            .find(|node| node.has_tag_name((PRESENTATIONML_NAMESPACE, "ph")))
+            .and_then(|ph| ph.attribute("type"));
+        if let Some(kind) = placeholder_type
+            && EXCLUDED_PLACEHOLDERS.contains(&kind)
         {
-            text_parts.push(text);
+            continue;
+        }
+        for node in sp.descendants() {
+            if node.has_tag_name((DRAWINGML_NAMESPACE, "t"))
+                && let Some(text) = node.text()
+            {
+                text_parts.push(text);
+            }
         }
     }
 

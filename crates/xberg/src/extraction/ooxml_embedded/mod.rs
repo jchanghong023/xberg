@@ -159,6 +159,20 @@ pub(crate) fn append_embedded_object_text(document: &mut crate::types::internal:
             // The images stay on the child for structured consumers.
             continue;
         }
+        // A CAD/DXF exchange dump is machine geometry, not document prose: the
+        // child extractor flattens it onto a handful of enormous lines, and
+        // inlining that only destroys the host's readability (a single
+        // 100k+ character "line" of group codes). Replace it with a quote
+        // note; the payload itself stays available to structured consumers
+        // on the child result.
+        let body = if is_cad_dump(&body) {
+            format!(
+                "> 内嵌 CAD 图形对象（DXF 交换文本，约 {} 字符）不展开内联，原文内容以子文档结果为准。",
+                body.chars().count()
+            )
+        } else {
+            body
+        };
         for image in child_images {
             // Stage only the images the rewritten body actually points at: a
             // child asset its own Markdown never referenced would otherwise be
@@ -189,6 +203,13 @@ pub(crate) fn append_embedded_object_text(document: &mut crate::types::internal:
         let raw = InternalElement::text(ElementKind::RawBlock, format!("\n{content}\n"), 0);
         document.push_element(raw);
     }
+}
+
+/// Whether an embedded child's body is a flattened CAD/DXF exchange dump:
+/// dominated by at least one enormous line and carrying AutoCAD group markers.
+fn is_cad_dump(body: &str) -> bool {
+    let longest = body.lines().map(str::len).max().unwrap_or(0);
+    longest > 5_000 && (body.contains("AcDb") || (body.contains("SECTION") && body.contains("ENDSEC")))
 }
 
 /// Copy a nested document's Markdown into the parent body, moving its
@@ -608,6 +629,29 @@ fn read_embedded_entry_bytes(
     Some(data)
 }
 
+/// Whether an OLE compound object carries its own visual representation — an
+/// `OlePres000`/`EPRINT` preview stream.
+///
+/// Such an object's content reaches the reader through its display picture
+/// (the host document shows the preview, and the extractor surfaces that
+/// picture through the metafile/rasterization path), so a failed text-layer
+/// extraction is not a content loss. Callers use this to decide between a
+/// genuine-loss warning and a silent best-effort skip.
+#[cfg(any(feature = "office", feature = "hwp", feature = "email"))]
+pub(crate) fn ole_object_has_visual_representation(data: &[u8]) -> bool {
+    let Ok(compound) = cfb::CompoundFile::open(std::io::Cursor::new(data)) else {
+        return false;
+    };
+    let paths = collect_ole_stream_paths(&compound);
+    ["OlePres000", "EPRINT"].iter().any(|stem| {
+        has_ole_stream(
+            &compound,
+            &paths,
+            &[&format!("\x02{stem}"), &format!("\x03{stem}"), stem],
+        )
+    })
+}
+
 /// Unwrap and recursively extract an OLE (CFB) compound-file embedded object.
 async fn extract_ole_entry(
     data: &[u8],
@@ -626,22 +670,30 @@ async fn extract_ole_entry(
                     result: Box::new(result),
                 }),
                 Err(e) => {
-                    warnings.push(embedded_objects_warning(
-                        source_label,
-                        format!("Failed to extract embedded OLE object '{}': {}", filename, e),
-                    ));
+                    // A preview-backed object (`OlePres000`/`EPRINT`) delivers its
+                    // visual form through the display-picture path even when the
+                    // text layer fails (e.g. a truncated Visio stream); that is
+                    // best-effort, not a loss. Only a preview-less object warns.
+                    if !ole_object_has_visual_representation(data) {
+                        warnings.push(embedded_objects_warning(
+                            source_label,
+                            format!("Failed to extract embedded OLE object '{}': {}", filename, e),
+                        ));
+                    }
                     None
                 }
             }
         }
         None => {
-            warnings.push(embedded_objects_warning(
-                source_label,
-                format!(
-                    "Skipped OLE compound file '{}': format identification not supported",
-                    filename
-                ),
-            ));
+            if !ole_object_has_visual_representation(data) {
+                warnings.push(embedded_objects_warning(
+                    source_label,
+                    format!(
+                        "Skipped OLE compound file '{}': format identification not supported",
+                        filename
+                    ),
+                ));
+            }
             None
         }
     }
