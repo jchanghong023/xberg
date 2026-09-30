@@ -1042,20 +1042,12 @@ pub fn worker_command(config: ExtractionConfig, startup: WorkerStartup) -> Resul
     let stdin = std::io::BufReader::new(std::io::stdin());
     let mut stdout = std::io::stdout().lock();
     let options = LoopOptions {
+        default_timeout,
         idle_timeout: startup.idle_timeout_ms.map(Duration::from_millis),
         peer_gone: Some(peer_gone),
         ..LoopOptions::default()
     };
-    let exit: LoopExit = run_worker_loop(
-        stdin,
-        &mut stdout,
-        cancel,
-        default_timeout,
-        options,
-        document,
-        screenshot,
-        query,
-    )?;
+    let exit: LoopExit = run_worker_loop(stdin, &mut stdout, cancel, options, document, screenshot, query)?;
     let code = scheduler::exit_code_for(exit);
     if code != 0 {
         tracing::warn!(code, reason = ?exit, "worker stopping after stdio disconnect or idle timeout");

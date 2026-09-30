@@ -21,6 +21,9 @@ Xberg 通过一个本地 `worker` 进程同时提供文档转换与截图 OCR，
 - 交付必须区分源码实现、类型检查、真实模型 E2E 与发布包验证。新增接口须覆盖取消运行/排队任务、超时后复用、模式隔离、进程内查询及 ID 关联；未运行发布包验收不得声称实际发布版本已满足。
 
 - 启动：`xberg worker --config-json <固定配置>`（同时支持 `--config` / `--config-json-base64` / `--no-config-discovery`，语义与 `extract` 相同）。启动配置同时包含文档转换配置和独立的 `snapshot_ocr` 截图配置，两者分别固定；请求仅通过 mode 选择文档处理方式，不接受任意配置覆盖。两场景的模型集、模型路径、推理参数与会话分别生效；截图配置不覆盖文档 OCR 配置，文档设置也不覆盖截图配置，不为共用进程而强制两套模型或参数相同。
+- `--config-json` 还接受两个 worker 专属顶层键（在合并前被剥离，`ExtractionConfig` 的 `deny_unknown_fields` 不会看到；其余未知顶层字段仍按原样拒绝，保留拼写错误防护）：
+  - `owner_token`（字符串，P2）：调用方属主标识，原样回报在 `capabilities.owner`，用于认领/区分同一台机器上的多个 xberg 进程；缺省时该键不出现；
+  - `idle_timeout_ms`（正整数毫秒，P4）：无在途请求且无任何请求流量持续该时长后引擎自行退出，退出码 87；缺省不启用。
 - 请求（stdin，逐行一个 JSON）：
 
   ```json
@@ -28,10 +31,11 @@ Xberg 通过一个本地 `worker` 进程同时提供文档转换与截图 OCR，
   ```
 
   - `id`：任意 JSON 值，响应原样回显，用于关联；调用方须为同时在途的请求使用可区分的 id。
-  - `command`：支持 `extract`、`ocr_snapshot`、`snapshot_state`、`transcribe`、`cancel`、`formats`、`capabilities`、`model_state`。
+  - `command`：支持 `extract`、`ocr_snapshot`、`snapshot_state`、`transcribe`、`cancel`、`formats`、`capabilities`、`model_state`、`keepalive`、`shutdown`、`version`。
   - `path`：本地文件路径（`extract` / `transcribe` 使用）。
   - `image_base64`：图像字节（PNG 或等价无损编码；`ocr_snapshot` 使用，字节只驻内存）。
   - `mode`：可省略；`normal` 按启动配置处理，`extract` 还支持 `fast`；其他命令不接受 fast。
+  - `grace_ms`（`shutdown` 专用，正整数毫秒，可省略）：停机宽限上限；缺省用引擎内置默认（4 秒）。
   - 未知字段忽略；空白行跳过。
   - 每个通道的待处理队列有界；队列满时以对应 `id` 返回明确失败并提示稍后重试，不阻塞另一通道或状态查询，不静默丢请求。
 
@@ -40,9 +44,18 @@ Xberg 通过一个本地 `worker` 进程同时提供文档转换与截图 OCR，
   - 截图识别（`ocr_snapshot`）成功：`{"id":..,"ok":true,"text":"<布局文本>","records":N,"elapsed_ms":M}`（`error_kind` 键仅在有类别情形时出现，普通成功省略该键）；无文字图片 `ok:true`、`text:""`、`error_kind:"no_text"`。
   - 转写（`transcribe`）成功：`{"id":..,"ok":true,"markdown":"<SV-06 全文>","segments":[{"start_ms":..,"end_ms":..,"text":..}],"duration_ms":..,"has_audio":true}`；`markdown` 标题为输入路径的完整文件名（含扩展名）。
   - 状态查询（`snapshot_state`）：`{"id":..,"ok":true,"state":"uninitialized|loading|ready|error","error":null}`。
-  - 失败：`{"id":..,"ok":false,"error":"一行错误描述",...}`，无载荷字段；`ocr_snapshot` 失败额外带 `error_kind`（`model_not_ready|asset_invalid|input_invalid|cancelled|internal`，SNAP-15 类别），消息不含图像内容。协议级错误 `duplicate_id`（在途 `id` 重复被调度层拒绝）不属于 SNAP-15 引擎类别，任意命令均可能携带。冷启动期间后续截图的即时响应与重试语义见 [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md) SNAP-15。
+  - 保活探测（`keepalive`，P6）：`{"id":..,"ok":true,"models":{"snapshot":"..","document":"..","transcription":bool}}`。语义边界：**只**证明事件循环存活并应答，不触发模型加载、不查询重量级缓存、不重置任何请求级计时器；`idle_timeout_ms` 启用时任何请求（含 keepalive）都会刷新空闲计时。调用方仅应断言 `ok:true`。
+  - 优雅停机（`shutdown`，P3）：先回 `{"id":..,"ok":true,"accepted":true}`（写出即 flush），随后停止接受新请求（宽限窗口内到达的请求按 `id` 回 `ok:false` "worker is shutting down"；空闲态则直接退出，不再应答），在途请求最多等到 `grace_ms`（缺省 4 秒）后取消并退出，退出码 0。引擎不得以「还有在途任务」为由拒绝退出；卡在不可中断原生调用中的线程由进程退出回收。
+  - 版本清单（`version`，P5）：`{"id":..,"ok":true,"version":"..","build":{"os":..,"arch":..,"debug":bool},"models":{"snapshot":{...},"transcription":{...}}}`。模型清单按引擎自身解析顺序报告每个成员的路径、是否存在、大小与 sha256（缺失即 `exists:false`，不报错、不加载、不联网）；无 transcription feature 的构建报告 `"state":"unavailable"`。诊断通道选择：本命令 + stderr 现状（tracing 单行文本）即满足 P5 的「二选一」，stderr 改结构化 JSON 流未实施。
+  - 失败：`{"id":..,"ok":false,"error":"一行错误描述",...}`，无载荷字段；`ocr_snapshot` 失败额外带 `error_kind`（`model_not_ready|asset_invalid|input_invalid|cancelled|internal`，SNAP-15 类别），消息不含图像内容。协议级错误 `duplicate_id`（在途 `id` 重复被调度层拒绝）与 `unsupported_command`（未知命令，附结构化 `command` 键）不属于 SNAP-15 引擎类别，任意命令均可能携带。未知命令的 `error` 文案必须保留 `unsupported command '<name>'` 前缀——run49.1 旧版直通（capabilities 失败文案含该前缀即放行）依赖它，两侧不得删。冷启动期间后续截图的即时响应与重试语义见 [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md) SNAP-15。
   - 请求行无法解析为 JSON 时：`id` 回 `null`，`ok:false`；有效 JSON 的字段校验失败仍回显可解析的 id。
-- 退出：调用方关闭 stdin 表示结束整个 worker 会话，而不是普通文档批次边界；在途文档请求收尾后正常退出（退出码 0），截图在途取消遵循 [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md) SNAP-16。stdout 写失败表示客户端断连，取消任务并以非零退出码结束。普通取消/超时走请求协议，不关闭共享连接。
+  - 能力握手（`capabilities`）除既有能力键外回报进程身份（P2，全部可选、缺任一调用方按旧语义处理）：`instance_id`（进程生命周期内稳定的 UUID 形态标识）、`started_at`（RFC3339 启动时刻）、`config_digest`（生效配置序列化后的 sha256）、`owner`（仅当启动配置带 `owner_token` 时出现，原样回报）。`commands` 数组增量列出全部命令（含 keepalive/shutdown/version）；`protocol_version` 保持 2——本轮均为向后兼容增量，不升版本。
+
+- 退出（2026-09-30 P1 起的完整语义）：
+  - **正常会话结束**（调用方关 stdin 或 `shutdown`）：在途文档请求收尾后退出，退出码 0；但收尾有硬上限——从触发点起引擎内置 4 秒（合同 ≤5 秒，留拆除余量），到点取消一切在途请求并由进程退出回收卡在原生调用中的线程，不再等待、不再补发结果。EOF 后截图在途取消遵循 [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md) SNAP-16。
+  - **宿主消失**（stdout 写失败、stdout 管道断裂、父进程死亡、stdin 读失败）：取消全部在途请求、不再写任何响应，以**固定退出码 86** 退出。检测通道（Windows）：每秒一次对 stdout 原生句柄的 `FlushFileBuffers` + 零字节 `WriteFile` 探测（只认断管族错误，console/重定向句柄的其余错误忽略，不影响手工运行）；父进程死亡用可等待句柄监视（toolhelp 快照取父 PID 后 `WaitForSingleObject`，取不到即放弃该通道，不误报——父 PID 被复用只会漏报不会误杀）。进程同时死掉时 stdin EOF 与 86 路径存在微秒级竞态，宿主被杀场景的验收只断言「进程 ≤5 秒消失」，退出码不作为区分依据。
+  - **空闲自退**（P4，仅当配置 `idle_timeout_ms`）：无在途请求且无任何请求流量持续该时长后以**退出码 87** 退出（区别于 86）。
+  - 退出码路由：非 0 码（86/87）经进程内静态变量由 `main` 在 `run_cli` 正常展开（tracing guard 已 flush）之后 `std::process::exit` 应用；普通取消/超时仍走请求协议，不关闭共享连接。
 
 ## 语义需求
 
@@ -53,6 +66,9 @@ Xberg 通过一个本地 `worker` 进程同时提供文档转换与截图 OCR，
 5. **模型与配置隔离**：文档 OCR 和截图 OCR 使用各自模型及配置，按各自合同校验和执行；隔离必须在上述单进程内实现，不能通过再启动 Xberg 实例实现。并发或交替请求均不得串用模型、线程参数、预处理、阈值或布局配置。
 6. **通信边界**：stdout 只输出协议消息；诊断日志（tracing、panic 输出）一律走 stderr。
 7. **故障职责边界**：worker 实现请求级取消与超时，不自我重启。JchTools 管理连接和崩溃后的恢复、目录持久化、UI 配置与单实例启动。普通停止一项任务不得结束共享进程。
+8. **父进程死亡即自退（2026-09-30，调用方 P1）**：worker 默认携带断连自退语义，无需调用方传任何参数——stdin EOF / stdout 断裂 / 父进程死亡 / stdin 读失败任一触发，引擎在 ≤5 秒内自行终止（内置 4 秒硬上限 + 拆除余量）。退出码：正常会话结束 0；宿主断连 86；空闲自退 87。孤儿引擎不得继续存活占用资源或挡住下一次启动。
+9. **优雅停机不拒退（P3）**：`shutdown` 先应答后退出；宽限（请求 `grace_ms` 或缺省 4 秒）是上限不是谈判空间，到点必须退。
+10. **一切增量向后兼容**：新命令可发现（capabilities.commands 增量列出）、新字段可选、错误类别只增不改名；`unsupported command '<name>'` 文案前缀在结构化 error_kind 普及前必须保留；protocol_version 仅在语义不兼容时 +1。
 
 ## 完成判据与验证
 
@@ -61,6 +77,7 @@ Xberg 通过一个本地 `worker` 进程同时提供文档转换与截图 OCR，
 - 模型常驻验收：在同一个 worker 内连续转换使用同一模型的文档，穿插多次截图，并在下一文档批次再次使用，两套已加载模型均不重复加载或互相替换。用模型加载事件或等价可观测证据确认复用，单纯更快不足以证明；转写会话复用的既有要求继续有效。
 - UT 覆盖：协议解析与字段语义（id 回显、mode 默认、未知字段忽略、缺字段拒绝）、跨场景调度、并发响应行完整性与 EOF 退出、坏 JSON / 不支持的 command / 不支持的 mode / 缺失文件 / handler panic 的故障隔离、真实 extract 路径（真实临时文件成功 + 缺失文件失败）、响应 wire 形状；CLI 解析测试证明 `worker` 子命令在所有 feature profile 注册。
 - fulltest 语料验收不覆盖 worker 协议（它只走 `extract`）。UT 覆盖协议和局部处理；E2E 必须经真实 `xberg worker` 子进程或调用方集成跨过 stdin/stdout、模型加载与退出边界，UT 不能替代这一链路。
+- 生命周期 E2E（无需模型，`python scripts/tests/worker_lifecycle.py`，仅用户点名时运行）：capabilities 身份字段与命令面、keepalive/version/formats/未知命令 wire 形状、真实 extract（normal+fast）、shutdown 空闲立即退（码 0）、关 stdin ≤5 秒退（码 0）、关 stdout 读端 ≤5 秒退（码 86）、杀宿主 ≤5 秒内进程消失、`idle_timeout_ms` 自退（码 87）、超时自报后进程存活、结束时无 debug 二进制残留进程。带真实模型的并发/取消/超时 E2E 仍以 `worker_concurrency.py` 为准。
 
 ## 实现与验证状态
 
@@ -72,4 +89,16 @@ Xberg 通过一个本地 `worker` 进程同时提供文档转换与截图 OCR，
 - 后续 2026-09-27 历史冒烟记录已验证截图模型和 SenseVoice 的批内复用（第二次请求无再加载；当时数据位于 `.tmp/contrast/` 与 `.tmp/worker_smoke.py`），因此“全部模型复用仍待验证”的旧笼统结论已过时。该记录不证明文档 OCR 各缓存路径或 JchTools 侧完整集成均已验收；这部分尚无本文记录的完整证据。
 - **同进程并发已实施、待运行验收**：2026-09-29 改为独立 stdin 读取、文档工作线程、截图工作线程及单一响应出口。两工作线程保有各自配置与模型，状态查询不等待推理；响应通过 id 关联，可以先返回后到达的截图请求。同类文档顺序处理，满队列明确失败；未启动额外 Xberg 进程。历史 smoke 不代替新并发链路验收。
 - stdin EOF 现在可在截图处理期间置取消标志，已有瓦片/识别批次检查点负责停止；EOF 后不输出该截图结果，文档请求正常收尾。stdout 写失败也会取消截图并结束调度，不等待下一次 stdin 输入。仅关闭 stdout 而保持 stdin 打开时仍须一次写入才能发现断连；其他截图接口边界见 [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md)。
-- 新增调度 UT（受控阻塞文档期间截图与查询完成、跨批次复用、EOF 取消、错误隔离、完整响应、队列满）及真实模型 E2E 脚本，入口见 [AGENTS.md](../../AGENTS.md)。UT 中的模型处理桩只证明调度；E2E 使用真实 CLI、文档和截图、内容断言及同 PID 起止事件，缺少模型或不能观察到重叠不能通过。本轮标准 feature 集 cargo check 与 fastcheck 已通过；按运行授权边界未执行 Rust UT、真实 worker E2E、fulltest、slowtest 或调用方集成，尚不宣称功能验收完成。
+- 新增调度 UT（受控阻塞文档期间截图与查询完成、跨批次复用、EOF 取消、错误隔离、完整响应、队列满）及真实模型 E2E 脚本，入口见 [AGENTS.md](../../AGENTS.md)。UT 中的模型处理桩只证明调度；E2E 使用真实 CLI、文档和截图、内容断言及同 PID 起止事件，缺少模型或不能观察到重叠不能通过。
+
+## 实现与验证状态（2026-09-30 P1–P6 轮）
+
+- **已实施（本轮，全部带 UT/E2E）**：
+  - P1 断连自退：调度器新增停机状态机（EOF/断连/停机共用，触发即设硬上限）；`worker/monitor.rs` 的 Windows 双监视（父进程死亡句柄等待 + stdout 管道探测，探测原语有真实管道 UT）；退出码 0/86/87 经 `main` 尾部的 `FORCED_EXIT_CODE` 在 tracing guard 展开后应用。仅关闭 stdout 而无写入的场景由探测覆盖（探测原语在真实 OS 管道上 UT 验证 + 真实二进制 E2E 验证 1.11 秒内退出）。
+  - P2：capabilities 增 `instance_id` / `started_at` / `config_digest` / `owner`（仅配置时）；`--config-json` 顶层 `owner_token` 在合并前剥离（其余未知字段仍拒绝）；未知命令回 `error_kind:"unsupported_command"` + 结构化 `command` 键，文案前缀保留。
+  - P3：`shutdown`（`grace_ms` 可选，缺省 4 秒）先应答后停机，宽限内拒新请求，到点强制退出，码 0。
+  - P4：`--config-json` 顶层 `idle_timeout_ms`（正整数，0/负数/非整数启动即拒）空闲自退，码 87。
+  - P5：`version` 命令（构建信息 + 模型清单路径/存在/大小/sha256，不加载不联网）；stderr 保持 tracing 单行文本（结构化 JSON 流未实施，按「二选一」满足）。
+  - P6：`keepalive` 命令（廉价就绪摘要，语义如上文）。
+- **本轮验证（2026-09-30，Windows 11，标准 fork feature 集）**：标准 `cargo check` 通过；`cargo test -p xberg-cli`（标准集）全部通过，含 worker 模块 42 项（新增：shutdown 应答/拒新/排空/强制、EOF 硬上限、断连标志取消、空闲自退、stdin 读错误映射、keepalive/version 内联应答、capabilities 身份、启动键剥离、版本清单、退出码映射、探测原语真实管道检测）；`server_test`（mcp feature 腿重编）通过；真实二进制 E2E `scripts/tests/worker_lifecycle.py` 全部通过（关 stdin 0.05s 码 0、关 stdout 读端 1.11s 码 86、杀宿主 0.15s 消失、shutdown 空闲 0.05s 码 0、idle 1.26s 码 87、超时自报后存活）。
+- **本轮未验证/边界**：本机无截图与转写模型资产，`ocr_snapshot`/`transcribe`/带模型的并发与取消重叠未在本轮 E2E 重放（既有覆盖以 `worker_concurrency.py` 为准，须用户点名）；宿主被杀时 stdin EOF（码 0）与断连（码 86）存在微秒级竞态，验收只断言进程消失；fulltest/slowtest 门与发布包验收未运行，不宣称发布版本已满足；磁盘不足时按缓存纪律清理了 `target/debug` 下 27.2 GB 历史 PDB（纯调试副产物，不影响增量构建）。

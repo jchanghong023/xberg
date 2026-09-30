@@ -11,14 +11,96 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use super::{
-    COMMAND_OCR_SNAPSHOT, COMMAND_SNAPSHOT_STATE, RequestOutcome, WorkerRequest, WorkerResponse, process_request,
-    render_outcome, validate_line,
+    COMMAND_OCR_SNAPSHOT, COMMAND_SHUTDOWN, COMMAND_SNAPSHOT_STATE, RequestOutcome, WorkerRequest, WorkerResponse,
+    process_request, render_outcome, validate_line,
 };
 use crate::commands::extract::RUNTIME_WORKER_STACK_SIZE_BYTES;
 
 // Bounded queues avoid retaining an unlimited number of base64 screenshots while
 // still letting the other channel and status queries progress under backpressure.
 const QUEUE_CAPACITY: usize = 8;
+
+/// Hard cap from a stop trigger (stdin EOF, `shutdown`, disconnect) to process
+/// exit. The P1 contract allows 5 s; 4 s leaves margin for teardown (main
+/// unwinding, exit-code plumbing) so the observed exit stays inside 5 s.
+pub(crate) const EXIT_GRACE: Duration = Duration::from_secs(4);
+
+/// Why the dispatcher stopped serving; drives the process exit code (P1/P3/P4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoopExit {
+    /// stdin closed or `shutdown` accepted; in-flight work drained within the
+    /// grace cap. Exit code 0.
+    SessionEnded,
+    /// The stdio peer vanished: stdout write failure or probe, dead parent, or a
+    /// broken stdin read. In-flight work is cancelled, not drained. Fixed
+    /// non-zero exit code (86).
+    PeerDisconnected,
+    /// `idle_timeout_ms` elapsed with no request traffic and no in-flight work.
+    /// Distinct non-zero exit code (87).
+    IdleTimeout,
+}
+
+/// Exit code for each stop reason; 0 keeps `main`'s normal return.
+pub(crate) fn exit_code_for(exit: LoopExit) -> i32 {
+    match exit {
+        LoopExit::SessionEnded => 0,
+        LoopExit::PeerDisconnected => super::EXIT_PEER_DISCONNECTED,
+        LoopExit::IdleTimeout => super::EXIT_IDLE_TIMEOUT,
+    }
+}
+
+/// Dispatcher-level startup knobs; request handlers stay outside. Keeps
+/// `run_worker_loop` at seven arguments (clippy's too-many-arguments budget).
+pub(super) struct LoopOptions {
+    /// Per-request timeout when the request itself carries no `timeout_ms`
+    /// (the startup config's `extraction_timeout_secs`).
+    pub(super) default_timeout: Option<Duration>,
+    /// P4: exit after this long with no request traffic and no in-flight work.
+    pub(super) idle_timeout: Option<Duration>,
+    /// P1: set asynchronously by the disconnect monitor (stdout probe /
+    /// parent-death watch).
+    pub(super) peer_gone: Option<Arc<AtomicBool>>,
+    /// P1/P3: hard cap from stop trigger to exit. Overridable so tests exercise
+    /// the deadline in milliseconds instead of the shipped 4 s.
+    pub(super) drain_grace: Duration,
+}
+
+impl Default for LoopOptions {
+    fn default() -> Self {
+        Self {
+            default_timeout: None,
+            idle_timeout: None,
+            peer_gone: None,
+            drain_grace: EXIT_GRACE,
+        }
+    }
+}
+
+/// stdout wrapper for the dispatcher: the first write failure marks the peer
+/// gone (polled at the top of the loop) instead of unwinding as an error, so a
+/// broken pipe maps to the fixed disconnect exit code (P1), never exit 1.
+struct PeerWriter<'a, W: Write> {
+    inner: &'a mut W,
+    gone: bool,
+}
+
+impl<'a, W: Write> PeerWriter<'a, W> {
+    fn new(inner: &'a mut W) -> Self {
+        Self { inner, gone: false }
+    }
+
+    /// Best-effort send; false means the peer is gone (this or an earlier call).
+    fn send(&mut self, response: &WorkerResponse) -> bool {
+        if self.gone {
+            return false;
+        }
+        if write_response(self.inner, response).is_err() {
+            tracing::warn!("worker stdout write failed; treating the peer as disconnected");
+            self.gone = true;
+        }
+        !self.gone
+    }
+}
 
 enum Event {
     Line(String),
@@ -85,7 +167,11 @@ fn write_response<W: Write>(writer: &mut W, response: &WorkerResponse) -> Result
         .context("failed to flush a worker response line to stdout")
 }
 
-fn enqueue<W: Write>(queue: &SyncSender<WorkerRequest>, request: WorkerRequest, writer: &mut W) -> Result<bool> {
+fn enqueue<W: Write>(
+    queue: &SyncSender<WorkerRequest>,
+    request: WorkerRequest,
+    writer: &mut PeerWriter<W>,
+) -> Result<bool> {
     match queue.try_send(request) {
         Ok(()) => Ok(true),
         Err(TrySendError::Full(request)) => {
@@ -93,7 +179,7 @@ fn enqueue<W: Write>(queue: &SyncSender<WorkerRequest>, request: WorkerRequest, 
             if request.command == COMMAND_OCR_SNAPSHOT {
                 response.error_kind = Some(super::super::snapshot_ocr::KIND_INTERNAL);
             }
-            write_response(writer, &response)?;
+            writer.send(&response);
             Ok(false)
         }
         Err(TrySendError::Disconnected(_)) => anyhow::bail!("worker request thread stopped unexpectedly"),
@@ -107,11 +193,11 @@ pub(super) fn run_worker_loop<R, W, D, S, Q>(
     reader: R,
     writer: &mut W,
     cancel: Arc<AtomicBool>,
-    default_timeout: Option<Duration>,
+    options: LoopOptions,
     document: D,
     screenshot: S,
     mut query: Q,
-) -> Result<()>
+) -> Result<LoopExit>
 where
     R: BufRead + Send + 'static,
     W: Write,
@@ -169,117 +255,236 @@ where
     }
     let mut active = Active(Vec::new());
     let mut finished = 0;
-    while finished < 2 || queues.is_some() {
+    let mut writer = PeerWriter::new(writer);
+    let mut stdin_broken = false;
+    // Stop-trigger state (P1/P3): hard deadline plus the exit reason it serves.
+    let mut draining: Option<(Instant, LoopExit)> = None;
+    // `shutdown` was accepted: trailing requests get an explicit refusal.
+    let mut shutting_down = false;
+    // Whether stdin reached EOF (the input thread has nothing left to read).
+    let mut stdin_eof = false;
+    let mut last_activity = Instant::now();
+
+    let exit = 'dispatch: loop {
         for (_, control, screenshot) in &active.0 {
             control.expire();
             if *screenshot && cancel.load(Ordering::Acquire) {
                 control.stop("cancelled");
             }
         }
+        // P1: the monitor flag, a failed stdout write, or a broken stdin read all
+        // mean the host is gone — cancel everything and stop serving now.
+        if stdin_broken
+            || writer.gone
+            || options
+                .peer_gone
+                .as_ref()
+                .is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
+            cancel.store(true, Ordering::Release);
+            for (_, control, _) in &active.0 {
+                control.stop("cancelled");
+            }
+            break 'dispatch LoopExit::PeerDisconnected;
+        }
+        if finished == 2 && queues.is_none() {
+            break 'dispatch LoopExit::SessionEnded;
+        }
+        if let Some((deadline, reason)) = draining {
+            // Drained, or the hard cap hit: cancel whatever is left and stop. A
+            // stuck native call must not hold the process past the cap.
+            if active.0.is_empty() || Instant::now() >= deadline {
+                cancel.store(true, Ordering::Release);
+                for (_, control, _) in &active.0 {
+                    control.stop("cancelled");
+                }
+                break 'dispatch reason;
+            }
+        } else if let Some(idle) = options.idle_timeout
+            && active.0.is_empty()
+            && last_activity.elapsed() >= idle
+        {
+            cancel.store(true, Ordering::Release);
+            break 'dispatch LoopExit::IdleTimeout;
+        }
         let next = active.0.iter().filter_map(|(_, c, _)| c.deadline()).min();
         // Poll disconnection flags too, without spawning a timer per request.
         let wait = next
             .map(|d| d.saturating_duration_since(Instant::now()))
             .unwrap_or(Duration::from_millis(50))
-            .min(Duration::from_millis(50));
+            .min(Duration::from_millis(50))
+            .min(draining.map_or(Duration::from_millis(50), |(d, _)| {
+                d.saturating_duration_since(Instant::now())
+            }));
         let event = match incoming.recv_timeout(wait) {
             Ok(event) => event,
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => anyhow::bail!("worker event channel closed unexpectedly"),
         };
         match event {
-            Event::Line(line) => match validate_line(&line) {
-                Err(response) => write_response(writer, &response)?,
-                Ok(request) if active.0.iter().any(|(id, _, _)| *id == request.id) => {
-                    let mut response = WorkerResponse::failure(request.id, "duplicate active request id".into());
-                    response.error_kind = Some("duplicate_id");
-                    write_response(writer, &response)?;
+            Event::Line(line) => {
+                last_activity = Instant::now();
+                if shutting_down {
+                    let id = serde_json::from_str::<serde_json::Value>(&line)
+                        .ok()
+                        .and_then(|raw| raw.get("id").cloned())
+                        .unwrap_or(serde_json::Value::Null);
+                    writer.send(&WorkerResponse::failure(id, "worker is shutting down".into()));
+                    continue;
                 }
-                Ok(request) if request.command == super::COMMAND_CANCEL => {
-                    let target = request.target_id.unwrap_or(serde_json::Value::Null);
-                    let accepted = active
-                        .0
-                        .iter()
-                        .find(|(id, _, _)| *id == target)
-                        .is_some_and(|(_, c, _)| c.stop("cancelled"));
-                    let response = render_outcome(
-                        request.id,
-                        RequestOutcome::Query(serde_json::json!({"target_id": target, "accepted": accepted})),
-                    );
-                    write_response(writer, &response)?;
-                }
-                Ok(request)
-                    if matches!(
-                        request.command.as_str(),
-                        COMMAND_SNAPSHOT_STATE
-                            | super::COMMAND_FORMATS
-                            | super::COMMAND_CAPABILITIES
-                            | super::COMMAND_MODEL_STATE
-                    ) =>
-                {
-                    let outcome = query(&request.command);
-                    write_response(writer, &render_outcome(request.id, outcome))?;
-                }
-                Ok(mut request) => {
-                    let (documents, screenshots) = queues.as_ref().context("request received after stdin closed")?;
-                    let screenshot = request.command == COMMAND_OCR_SNAPSHOT;
-                    if screenshot && cancel.load(Ordering::Acquire) {
-                        continue;
+                match validate_line(&line) {
+                    Err(response) => {
+                        writer.send(&response);
                     }
-                    // The first cold request owns lazy initialization. While it is queued
-                    // or loading, answer later screenshots promptly so the caller can show
-                    // loading state and retry; never retain them for surprise late inference.
-                    if screenshot
-                        && active.0.iter().any(|(_, _, screenshot)| *screenshot)
-                        && matches!(
-                            query(COMMAND_SNAPSHOT_STATE),
-                            RequestOutcome::State {
-                                state: "uninitialized" | "loading",
-                                ..
-                            }
-                        )
-                    {
+                    Ok(request) if active.0.iter().any(|(id, _, _)| *id == request.id) => {
+                        let mut response = WorkerResponse::failure(request.id, "duplicate active request id".into());
+                        response.error_kind = Some("duplicate_id");
+                        writer.send(&response);
+                    }
+                    Ok(request) if request.command == super::COMMAND_CANCEL => {
+                        let target = request.target_id.unwrap_or(serde_json::Value::Null);
+                        let accepted = active
+                            .0
+                            .iter()
+                            .find(|(id, _, _)| *id == target)
+                            .is_some_and(|(_, c, _)| c.stop("cancelled"));
                         let response = render_outcome(
                             request.id,
-                            RequestOutcome::Snapshot(Err((
-                                "snapshot models are loading; query snapshot_state and retry when ready".into(),
-                                super::super::snapshot_ocr::KIND_MODEL_NOT_READY,
-                            ))),
+                            RequestOutcome::Query(serde_json::json!({"target_id": target, "accepted": accepted})),
                         );
-                        write_response(writer, &response)?;
-                        continue;
+                        writer.send(&response);
                     }
-                    let timeout = request.timeout_ms.map(Duration::from_millis).or(default_timeout);
-                    request.control = match RequestControl::with_timeout(timeout) {
-                        Ok(control) => control,
-                        Err(error) => {
-                            write_response(writer, &WorkerResponse::failure(request.id, error.into()))?;
+                    Ok(request) if request.command == COMMAND_SHUTDOWN => {
+                        // P3: acknowledge first (the line is flushed), then stop
+                        // taking work and drain up to the grace cap; exit 0.
+                        let grace = request.grace_ms.map(Duration::from_millis);
+                        writer.send(&render_outcome(
+                            request.id,
+                            RequestOutcome::Query(serde_json::json!({"accepted": true})),
+                        ));
+                        shutting_down = true;
+                        queues.take();
+                        let deadline = Instant::now() + grace.unwrap_or(options.drain_grace);
+                        draining = Some(match draining {
+                            Some((earlier, reason)) if earlier < deadline => (earlier, reason),
+                            _ => (deadline, LoopExit::SessionEnded),
+                        });
+                    }
+                    Ok(request)
+                        if matches!(
+                            request.command.as_str(),
+                            COMMAND_SNAPSHOT_STATE
+                                | super::COMMAND_FORMATS
+                                | super::COMMAND_CAPABILITIES
+                                | super::COMMAND_MODEL_STATE
+                                | super::COMMAND_KEEPALIVE
+                                | super::COMMAND_VERSION
+                        ) =>
+                    {
+                        let outcome = query(&request.command);
+                        writer.send(&render_outcome(request.id, outcome));
+                    }
+                    Ok(mut request) => {
+                        let (documents, screenshots) = match queues.as_ref() {
+                            Some(pair) => pair,
+                            None => {
+                                writer.send(&WorkerResponse::failure(
+                                    request.id,
+                                    "worker session is ending; request refused".into(),
+                                ));
+                                continue;
+                            }
+                        };
+                        let screenshot = request.command == COMMAND_OCR_SNAPSHOT;
+                        if screenshot && cancel.load(Ordering::Acquire) {
                             continue;
                         }
-                    };
-                    let entry = (request.id.clone(), request.control.clone(), screenshot);
-                    if enqueue(if screenshot { screenshots } else { documents }, request, writer)? {
-                        active.0.push(entry);
+                        // The first cold request owns lazy initialization. While it is queued
+                        // or loading, answer later screenshots promptly so the caller can show
+                        // loading state and retry; never retain them for surprise late inference.
+                        if screenshot
+                            && active.0.iter().any(|(_, _, screenshot)| *screenshot)
+                            && matches!(
+                                query(COMMAND_SNAPSHOT_STATE),
+                                RequestOutcome::State {
+                                    state: "uninitialized" | "loading",
+                                    ..
+                                }
+                            )
+                        {
+                            let response = render_outcome(
+                                request.id,
+                                RequestOutcome::Snapshot(Err((
+                                    "snapshot models are loading; query snapshot_state and retry when ready".into(),
+                                    super::super::snapshot_ocr::KIND_MODEL_NOT_READY,
+                                ))),
+                            );
+                            writer.send(&response);
+                            continue;
+                        }
+                        let timeout = request
+                            .timeout_ms
+                            .map(Duration::from_millis)
+                            .or(options.default_timeout);
+                        request.control = match RequestControl::with_timeout(timeout) {
+                            Ok(control) => control,
+                            Err(error) => {
+                                writer.send(&WorkerResponse::failure(request.id, error.into()));
+                                continue;
+                            }
+                        };
+                        let entry = (request.id.clone(), request.control.clone(), screenshot);
+                        if enqueue(if screenshot { screenshots } else { documents }, request, &mut writer)? {
+                            active.0.push(entry);
+                        }
                     }
                 }
-            },
+            }
             Event::InputClosed(result) => {
                 queues.take();
-                result.context("failed to read a worker request line from stdin")?;
+                stdin_eof = true;
+                if result.is_err() {
+                    // Reading stdin failed — the host vanished mid-read (P1).
+                    stdin_broken = true;
+                    continue;
+                }
+                // Clean EOF (WORKER.md): drain documents, screenshots are already
+                // cancelled, but never past the hard cap.
+                let deadline = Instant::now() + options.drain_grace;
+                draining = Some(match draining {
+                    Some((earlier, reason)) if earlier < deadline => (earlier, reason),
+                    _ => (deadline, LoopExit::SessionEnded),
+                });
             }
             Event::Response(response, screenshot) => {
                 active.0.retain(|(id, _, _)| *id != response.id);
                 if !screenshot || !cancel.load(Ordering::Acquire) {
-                    write_response(writer, &response)?;
+                    writer.send(&response);
                 }
             }
             Event::Finished => finished += 1,
         }
+    };
+
+    // Join only what has provably finished: a forced stop may leave lane threads
+    // inside uninterruptible native calls, and after `shutdown` the input thread
+    // may still be blocked in a read — dropping the handle detaches the thread
+    // and the process exit reclaims it.
+    if finished == 2 {
+        for handle in [document_thread, screenshot_thread] {
+            handle.join().map_err(|_| anyhow::anyhow!("worker thread panicked"))?;
+        }
+    } else {
+        drop((document_thread, screenshot_thread));
     }
-    for handle in [input_thread, document_thread, screenshot_thread] {
-        handle.join().map_err(|_| anyhow::anyhow!("worker thread panicked"))?;
+    if stdin_eof {
+        input_thread
+            .join()
+            .map_err(|_| anyhow::anyhow!("worker thread panicked"))?;
+    } else {
+        drop(input_thread);
     }
-    Ok(())
+    Ok(exit)
 }
 
 #[cfg(test)]
@@ -310,7 +515,7 @@ mod tests {
                     pending: Vec::new(),
                 },
                 Arc::new(AtomicBool::new(false)),
-                None,
+                LoopOptions::default(),
                 document_ok,
                 move |request: WorkerRequest| {
                     assert!(
@@ -378,7 +583,7 @@ mod tests {
                     pending: Vec::new(),
                 },
                 Arc::new(AtomicBool::new(false)),
-                None,
+                LoopOptions::default(),
                 move |request: WorkerRequest| {
                     if request.id == json!(1) {
                         started.send(()).unwrap();
@@ -436,7 +641,7 @@ mod tests {
                     pending: Vec::new(),
                 },
                 Arc::new(AtomicBool::new(false)),
-                None,
+                LoopOptions::default(),
                 document_ok,
                 move |request: WorkerRequest| {
                     assert_ne!(request.id, json!(2), "expired queued request must never execute");
@@ -592,7 +797,7 @@ mod tests {
                     pending: Vec::new(),
                 },
                 Arc::new(AtomicBool::new(false)),
-                None,
+                LoopOptions::default(),
                 document,
                 screenshot,
                 state,
@@ -648,7 +853,16 @@ mod tests {
                 );
                 snapshot_ok(request)
             };
-            run_worker_loop(reader, &mut output, cancel, None, document_ok, screenshot, state).expect("EOF clean");
+            run_worker_loop(
+                reader,
+                &mut output,
+                cancel,
+                LoopOptions::default(),
+                document_ok,
+                screenshot,
+                state,
+            )
+            .expect("EOF clean");
             output
         });
         send(
@@ -680,7 +894,7 @@ mod tests {
             reader,
             &mut output,
             Arc::new(AtomicBool::new(false)),
-            None,
+            LoopOptions::default(),
             document,
             snapshot_ok,
             state,
@@ -725,8 +939,17 @@ mod tests {
         let observed = Arc::clone(&cancel);
         let (done, completed) = channel();
         let handle = thread::spawn(move || {
-            let result = run_worker_loop(reader, &mut BrokenWriter, cancel, None, document_ok, snapshot_ok, state);
-            done.send(result.is_err()).expect("test listening");
+            let result = run_worker_loop(
+                reader,
+                &mut BrokenWriter,
+                cancel,
+                LoopOptions::default(),
+                document_ok,
+                snapshot_ok,
+                state,
+            );
+            done.send(matches!(result, Ok(LoopExit::PeerDisconnected)))
+                .expect("test listening");
         });
         send(&stdin, json!({"id":1,"command":"snapshot_state"}));
         assert!(completed.recv_timeout(DEADLINE).expect("must not wait for EOF"));
@@ -761,7 +984,7 @@ mod tests {
                     pending: Vec::new(),
                 },
                 cancel,
-                None,
+                LoopOptions::default(),
                 |request| {
                     if request.command == super::super::COMMAND_TRANSCRIBE {
                         RequestOutcome::Transcribe(Err("no such media".into()))
@@ -799,13 +1022,286 @@ mod tests {
     }
 
     #[test]
+    fn keepalive_and_version_answer_inline_without_enqueuing_work() {
+        let (stdin, reader) = input();
+        let (responses, output) = channel();
+        let thread = thread::spawn(move || {
+            run_worker_loop(
+                reader,
+                &mut Output {
+                    responses,
+                    pending: Vec::new(),
+                },
+                Arc::new(AtomicBool::new(false)),
+                LoopOptions::default(),
+                |request| panic!("query commands must not run document work, got {}", request.command),
+                |request| panic!("query commands must not run snapshot work, got {}", request.command),
+                move |command| match command {
+                    "keepalive" => RequestOutcome::Query(json!({"models": {"snapshot": "ready"}})),
+                    "version" => RequestOutcome::Query(json!({"version": "9.9.9-test", "models": []})),
+                    _ => state(command),
+                },
+            )
+        });
+        send(&stdin, json!({"id":1,"command":"keepalive"}));
+        let response = output.recv_timeout(DEADLINE).expect("keepalive answered inline");
+        assert_eq!(response["id"], 1);
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["models"]["snapshot"], "ready");
+        send(&stdin, json!({"id":2,"command":"version"}));
+        let response = output.recv_timeout(DEADLINE).expect("version answered inline");
+        assert_eq!(response["id"], 2);
+        assert_eq!(response["ok"], true);
+        assert_eq!(response["version"], "9.9.9-test");
+        drop(stdin);
+        thread.join().unwrap().unwrap();
+    }
+
+    /// P3: `shutdown` acknowledges on the wire first, refuses later requests,
+    /// lets in-flight work finish inside the grace and exits cleanly (code 0).
+    #[test]
+    fn shutdown_acknowledges_refuses_new_work_and_drains_inflight() {
+        let (stdin, reader) = input();
+        let (responses, output) = channel();
+        let (started, running) = channel();
+        let (release, wait) = channel();
+        let thread = thread::spawn(move || {
+            run_worker_loop(
+                reader,
+                &mut Output {
+                    responses,
+                    pending: Vec::new(),
+                },
+                Arc::new(AtomicBool::new(false)),
+                LoopOptions::default(),
+                move |request| {
+                    if request.id == json!(1) {
+                        started.send(()).unwrap();
+                        wait.recv_timeout(DEADLINE).unwrap();
+                    }
+                    document_ok(request)
+                },
+                snapshot_ok,
+                state,
+            )
+        });
+        send(&stdin, json!({"id":1,"command":"extract","path":"long.pdf"}));
+        running.recv_timeout(DEADLINE).expect("document started");
+        send(&stdin, json!({"id":2,"command":"shutdown","grace_ms":8000}));
+        let accepted = output.recv_timeout(DEADLINE).expect("shutdown acknowledged");
+        assert_eq!(accepted["id"], 2);
+        assert_eq!(accepted["ok"], true);
+        assert_eq!(accepted["accepted"], true);
+        for id in [3, 4] {
+            send(&stdin, json!({"id":id,"command":"extract","path":"late.txt"}));
+            let refused = output.recv_timeout(DEADLINE).expect("late request refused");
+            assert_eq!(refused["id"], id);
+            assert_eq!(refused["ok"], false);
+            assert!(refused["error"].as_str().unwrap().contains("shutting down"));
+        }
+        release.send(()).expect("release document");
+        let drained = output
+            .recv_timeout(DEADLINE)
+            .expect("in-flight document still finishes");
+        assert_eq!(drained["id"], 1);
+        assert_eq!(drained["ok"], true);
+        drop(stdin);
+        let exit = thread.join().unwrap().unwrap();
+        assert_eq!(exit, LoopExit::SessionEnded);
+    }
+
+    /// P3: the grace cap is a hard stop — a request stuck in native code must
+    /// not hold the process open past `grace_ms`.
+    #[test]
+    fn shutdown_deadline_forces_exit_despite_stuck_native_work() {
+        let (stdin, reader) = input();
+        let (responses, output) = channel();
+        let thread = thread::spawn(move || {
+            run_worker_loop(
+                reader,
+                &mut Output {
+                    responses,
+                    pending: Vec::new(),
+                },
+                Arc::new(AtomicBool::new(false)),
+                LoopOptions::default(),
+                move |request| {
+                    // Simulates a native call that ignores cooperative cancellation.
+                    let until = Instant::now() + Duration::from_secs(8);
+                    while Instant::now() < until {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    document_ok(request)
+                },
+                snapshot_ok,
+                state,
+            )
+        });
+        send(&stdin, json!({"id":1,"command":"extract","path":"stuck.pdf"}));
+        send(&stdin, json!({"id":2,"command":"shutdown","grace_ms":150}));
+        let accepted = output.recv_timeout(DEADLINE).expect("shutdown acknowledged");
+        assert_eq!(accepted["accepted"], true);
+        let started = Instant::now();
+        let exit = thread.join().unwrap().unwrap();
+        assert_eq!(exit, LoopExit::SessionEnded);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "shutdown must not wait for stuck work, took {:?}",
+            started.elapsed()
+        );
+        drop(stdin);
+    }
+
+    /// P1: stdin EOF drains documents, but never past the hard cap — work that
+    /// ignores cooperative cancellation is abandoned at the deadline (exit 0).
+    #[test]
+    fn eof_deadline_cancels_work_that_ignores_cancellation() {
+        let (stdin, reader) = input();
+        let (responses, _output) = channel();
+        let thread = thread::spawn(move || {
+            run_worker_loop(
+                reader,
+                &mut Output {
+                    responses,
+                    pending: Vec::new(),
+                },
+                Arc::new(AtomicBool::new(false)),
+                LoopOptions {
+                    drain_grace: Duration::from_millis(150),
+                    ..LoopOptions::default()
+                },
+                move |request| {
+                    let until = Instant::now() + Duration::from_secs(8);
+                    while Instant::now() < until {
+                        thread::sleep(Duration::from_millis(20));
+                    }
+                    document_ok(request)
+                },
+                snapshot_ok,
+                state,
+            )
+        });
+        send(&stdin, json!({"id":1,"command":"extract","path":"stuck.pdf"}));
+        let started = Instant::now();
+        drop(stdin);
+        let exit = thread.join().unwrap().unwrap();
+        assert_eq!(exit, LoopExit::SessionEnded);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "EOF must cap the drain, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// P1: the monitor flag (stdout probe / parent death) cancels in-flight work
+    /// and ends the loop immediately without writing anything.
+    #[test]
+    fn monitor_peer_gone_flag_cancels_and_exits_without_writing() {
+        let (stdin, reader) = input();
+        let flag = Arc::new(AtomicBool::new(false));
+        let loop_flag = Arc::clone(&flag);
+        let (started, running) = channel();
+        let thread = thread::spawn(move || {
+            let mut output = Vec::new();
+            let document = move |request| {
+                started.send(()).expect("test listening");
+                let until = Instant::now() + Duration::from_secs(2);
+                while Instant::now() < until {
+                    thread::sleep(Duration::from_millis(1));
+                }
+                document_ok(request)
+            };
+            let exit = run_worker_loop(
+                reader,
+                &mut output,
+                Arc::new(AtomicBool::new(false)),
+                LoopOptions {
+                    peer_gone: Some(loop_flag),
+                    ..LoopOptions::default()
+                },
+                document,
+                snapshot_ok,
+                state,
+            )
+            .unwrap();
+            (exit, output)
+        });
+        send(&stdin, json!({"id":1,"command":"extract","path":"busy.pdf"}));
+        running.recv_timeout(DEADLINE).expect("document started");
+        flag.store(true, Ordering::Release);
+        let (exit, output) = thread.join().expect("joined");
+        assert_eq!(exit, LoopExit::PeerDisconnected);
+        assert!(output.is_empty(), "no responses may be written to a gone peer");
+        drop(stdin);
+    }
+
+    /// P4: a quiet worker with `idle_timeout_ms` set exits on its own once no
+    /// request traffic and no in-flight work remain.
+    #[test]
+    fn idle_timeout_exits_a_quiet_worker() {
+        let (stdin, reader) = input();
+        let thread = thread::spawn(move || {
+            let mut output = Vec::new();
+            let exit = run_worker_loop(
+                reader,
+                &mut output,
+                Arc::new(AtomicBool::new(false)),
+                LoopOptions {
+                    idle_timeout: Some(Duration::from_millis(80)),
+                    ..LoopOptions::default()
+                },
+                document_ok,
+                snapshot_ok,
+                state,
+            )
+            .unwrap();
+            (exit, output)
+        });
+        let started = Instant::now();
+        let (exit, output) = thread.join().expect("joined");
+        assert_eq!(exit, LoopExit::IdleTimeout);
+        assert!(output.is_empty());
+        assert!(started.elapsed() < Duration::from_secs(3));
+        drop(stdin);
+    }
+
+    /// P1: a failed stdin read (host vanished mid-read) is a disconnect, not an
+    /// anyhow error — the exit code must stay the fixed non-zero one.
+    #[test]
+    fn broken_stdin_read_maps_to_peer_disconnected() {
+        struct BrokenStdin;
+        impl Read for BrokenStdin {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+        let reader = BufReader::new(BrokenStdin);
+        let mut output = Vec::new();
+        let exit = run_worker_loop(
+            reader,
+            &mut output,
+            Arc::new(AtomicBool::new(false)),
+            LoopOptions::default(),
+            document_ok,
+            snapshot_ok,
+            state,
+        )
+        .unwrap();
+        assert_eq!(exit, LoopExit::PeerDisconnected);
+    }
+
+    #[test]
     fn queue_backpressure_returns_a_correlated_failure_without_blocking() {
         let (queue, _receiver) = mpsc::sync_channel(1);
         let mut output = Vec::new();
-        for id in [1, 2] {
-            let request = super::super::parse_request(&json!({"id":id,"command":"extract","path":"a.txt"}).to_string())
-                .expect("request");
-            enqueue(&queue, request, &mut output).expect("write succeeds");
+        {
+            let mut writer = PeerWriter::new(&mut output);
+            for id in [1, 2] {
+                let request =
+                    super::super::parse_request(&json!({"id":id,"command":"extract","path":"a.txt"}).to_string())
+                        .expect("request");
+                enqueue(&queue, request, &mut writer).expect("write succeeds");
+            }
         }
         let response: Value = serde_json::from_slice(&output).expect("one response for rejected request");
         assert_eq!(response["id"], 2);

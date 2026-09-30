@@ -57,7 +57,7 @@ pub use server::{mcp_command, resolve_mcp_allowed_hosts};
 pub use snapshot_ocr::snapshot_ocr_command;
 #[cfg(feature = "tree-sitter")]
 pub use tree_sitter::{cache_dir_command, clean_command, download_command, list_command};
-pub use worker::worker_command;
+pub use worker::{FORCED_EXIT_CODE, WorkerStartup, worker_command};
 
 /// Validates that a directory exists and is accessible.
 ///

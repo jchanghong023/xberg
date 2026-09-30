@@ -221,12 +221,15 @@ all = [
 anstyle = "1"
 anyhow = { workspace = true }
 base64 = { workspace = true }
+chrono = { workspace = true }
 clap = { workspace = true }
 clap_complete = "4.6"
 libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_toon_format = { workspace = true }
+# Worker identity/config digests and the `version` model inventory (WORKER.md P2/P5).
+sha2 = { workspace = true }
 # xberg-cli is native-only (never built for wasm32); restore the OS-dependent tokio features
 # trimmed from the workspace-level baseline (see root Cargo.toml).
 tokio = { workspace = true, features = ["process", "fs", "rt-multi-thread"] }
@@ -250,6 +253,9 @@ tempfile = { workspace = true }
 ureq = { version = "3.4", features = ["json"] }
 
 # Windows peak-RSS self-report for the extract JSON envelope (`peak_memory` module);
-# same windows-sys version `xberg-windows-metafile` pins.
+# same windows-sys version `xberg-windows-metafile` pins. The extra features serve
+# the worker's host-death monitors (WORKER.md P1): ToolHelp walks the process list
+# for the parent PID, FileSystem probes the stdout pipe, Pipes (CreatePipe) only
+# for that probe's own unit test.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_Storage_FileSystem", "Win32_System_Pipes", "Win32_Security"] }
