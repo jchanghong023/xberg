@@ -1881,52 +1881,45 @@ mod tests {
         );
     }
 
+    // (fork) The upstream #2022 tests asserted that a default config *synthesises* a
+    // classical paddle fallback from the tesseract table settings. This fork dropped
+    // that synthesis on purpose — the default backend is already the strongest classical
+    // engine compiled in, and a weaker second engine wins exactly where it misreads
+    // (see `effective_pipeline`'s doc). These rewritten tests pin that decision: no
+    // table setting and no explicit `paddle_ocr_config` may conjure a pipeline.
     #[cfg(all(feature = "ocr", paddle_ocr, feature = "pdf"))]
     #[test]
-    fn should_enable_tables_for_synthesized_paddle_fallback_when_tesseract_tables_are_enabled() {
-        let pipeline = OcrConfig::default()
-            .effective_pipeline()
-            .expect("paddle-ocr feature must produce a pipeline");
+    fn should_not_synthesise_a_fallback_pipeline_from_tesseract_table_settings() {
+        let config = OcrConfig {
+            tesseract_config: Some(crate::types::TesseractConfig {
+                enable_table_detection: true,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
 
-        assert_eq!(
-            pipeline.stages[1].paddle_ocr_config,
-            Some(serde_json::json!({"enable_table_detection": true}))
+        assert!(
+            config.effective_pipeline().is_none(),
+            "tesseract table settings must not synthesise a classical fallback pipeline"
         );
     }
 
     #[cfg(all(feature = "ocr", paddle_ocr, feature = "pdf"))]
     #[test]
-    fn should_leave_synthesized_paddle_tables_disabled_when_tesseract_tables_are_disabled() {
+    fn should_not_synthesise_a_pipeline_from_an_explicit_paddle_config() {
         let config = OcrConfig {
-            tesseract_config: Some(crate::types::TesseractConfig {
-                enable_table_detection: false,
-                ..Default::default()
-            }),
+            paddle_ocr_config: Some(serde_json::json!({
+                "enable_table_detection": false,
+                "model_tier": "server"
+            })),
             ..Default::default()
         };
-        let pipeline = config
-            .effective_pipeline()
-            .expect("paddle-ocr feature must produce a pipeline");
 
-        assert_eq!(pipeline.stages[1].paddle_ocr_config, None);
-    }
-
-    #[cfg(all(feature = "ocr", paddle_ocr, feature = "pdf"))]
-    #[test]
-    fn should_preserve_explicit_paddle_table_setting_in_synthesized_fallback() {
-        let paddle_ocr_config = serde_json::json!({
-            "enable_table_detection": false,
-            "model_tier": "server"
-        });
-        let config = OcrConfig {
-            paddle_ocr_config: Some(paddle_ocr_config.clone()),
-            ..Default::default()
-        };
-        let pipeline = config
-            .effective_pipeline()
-            .expect("paddle-ocr feature must produce a pipeline");
-
-        assert_eq!(pipeline.stages[1].paddle_ocr_config, Some(paddle_ocr_config));
+        assert!(
+            config.effective_pipeline().is_none(),
+            "an explicit paddle_ocr_config tunes the single backend; it must not create a pipeline \
+             (an explicit mix is expressed through `pipeline`)"
+        );
     }
 
     #[cfg(all(feature = "ocr", feature = "pdf"))]

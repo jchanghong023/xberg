@@ -267,8 +267,17 @@ fn normalize_ods_row_whitespace(data: &[u8], limits: &SecurityLimits) -> Result<
 /// cannot read, so tolerating it on a real ZIP would stop the accounting for every entry after
 /// it. The flag comes from the declared format: `.xls`/`.xla` 走 CFB `Xls` reader，
 /// 从不解压 ZIP 条目。
-#[cfg(feature = "excel")]
+#[cfg(any(feature = "excel", feature = "excel-wasm"))]
 fn validate_zip_container<R: Read + Seek>(reader: R, limits: &SecurityLimits, declared_legacy: bool) -> Result<()> {
+    if declared_legacy {
+        // `.xls`/`.xla` never parse as a ZIP: calamine reads the OLE/CFB container
+        // itself, so instead of ZIP entry accounting the container's streams get the
+        // size accounting (upstream #2024's XLS hardening, folded into this fork's
+        // declared-format contract). A payload that is not a CFB at all stays
+        // tolerated here so the subsequent calamine open reports the clearer format
+        // error, matching this function's non-ZIP tolerance for modern extensions.
+        return validate_legacy_cfb_container(reader, limits);
+    }
     let mut archive = match zip::ZipArchive::new(reader) {
         Ok(archive) => archive,
         Err(_) => return Ok(()),
@@ -294,9 +303,39 @@ fn validate_zip_container<R: Read + Seek>(reader: R, limits: &SecurityLimits, de
 /// OLE 容器后被追加的杂散 central directory 永远不会进入 ZIP 条目核算；其余
 /// 扩展名全额核算。被改名为 `*.xls` 的 ZIP 会在 XLS 解析处失败，同样不会有任何
 /// ZIP 条目被解压。
-#[cfg(feature = "excel")]
+#[cfg(any(feature = "excel", feature = "excel-wasm"))]
 pub(super) fn xls_zip_tolerance(raw_extension: &str) -> bool {
     raw_extension.eq_ignore_ascii_case("xls") || raw_extension.eq_ignore_ascii_case("xla")
+}
+
+/// Size-account an `.xls`/`.xla` OLE/CFB container (upstream #2024): every stream's
+/// declared length must fit both `SecurityLimits::max_archive_size` and the container
+/// itself, so a forged FAT chain cannot make calamine allocate past either bound.
+/// A payload that cannot be opened as CFB returns `Ok(())` — calamine reports the
+/// format error with more context than a validation message here.
+#[cfg(any(feature = "excel", feature = "excel-wasm"))]
+fn validate_legacy_cfb_container<R: Read + Seek>(mut reader: R, limits: &SecurityLimits) -> Result<()> {
+    let container_size = reader.seek(std::io::SeekFrom::End(0))?;
+    reader.seek(std::io::SeekFrom::Start(0))?;
+    let Ok(compound) = cfb::OpenOptions::new().open_with(reader) else {
+        return Ok(());
+    };
+    let configured_limit = limits.max_archive_size as u64;
+    for entry in compound.walk().filter(|entry| entry.is_stream()) {
+        let declared_size = entry.len();
+        if declared_size > configured_limit {
+            return Err(XbergError::validation(format!(
+                "XLS stream declares {declared_size} bytes, which exceeds the configured limit of \
+                 {configured_limit} bytes (SecurityLimits::max_archive_size)"
+            )));
+        }
+        if declared_size > container_size {
+            return Err(XbergError::validation(format!(
+                "XLS stream declares {declared_size} bytes, which exceeds the {container_size}-byte container"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn read_excel_file(file_path: &str, limits: &SecurityLimits) -> Result<ExcelReadResult> {
@@ -529,7 +568,7 @@ fn read_xlsb_file(
 pub(crate) fn read_excel_bytes(data: &[u8], file_extension: &str, limits: &SecurityLimits) -> Result<ExcelReadResult> {
     let warnings: Vec<ProcessingWarning> = Vec::new();
 
-    #[cfg(feature = "excel")]
+    #[cfg(any(feature = "excel", feature = "excel-wasm"))]
     {
         // `.xls`/`.xla` are dispatched straight to calamine's CFB reader below (no content
         // sniffing on this bytes path), so an unreadable entry header in a stray central
@@ -538,7 +577,7 @@ pub(crate) fn read_excel_bytes(data: &[u8], file_extension: &str, limits: &Secur
         let extension = file_extension.to_lowercase();
         validate_zip_container(Cursor::new(data), limits, extension == ".xls" || extension == ".xla")?;
     }
-    #[cfg(not(feature = "excel"))]
+    #[cfg(not(any(feature = "excel", feature = "excel-wasm")))]
     let _ = limits;
 
     #[cfg(feature = "office")]

@@ -134,7 +134,7 @@ pub(crate) fn extract_tables_native(doc: &mut NativeDocument) -> Result<(Vec<Nat
                 continue;
             }
 
-            let (mut cells, markdown, grid) = convert_extracted_table(&extracted_table);
+            let (mut cells, markdown, mut grid) = convert_extracted_table(&extracted_table);
 
             if cells.is_empty() || markdown.trim().is_empty() {
                 continue;
@@ -157,6 +157,11 @@ pub(crate) fn extract_tables_native(doc: &mut NativeDocument) -> Result<(Vec<Nat
             // row, 60% bit-shaped grid) are what make it safe, not the entry point.
             let split_count = crate::pdf::table_reconstruct::split_merged_truth_table_cells(&mut cells);
             let markdown = if split_count > 0 {
+                // The split rewrote `cells` after the grid was derived from the
+                // pre-split table: a grid consumer would read merged "110" values the
+                // markdown no longer shows. The grid has no spanning rows/cols worth
+                // keeping out of sync, so drop it for the split table.
+                grid = None;
                 table_to_markdown(&cells)
             } else {
                 markdown
@@ -267,7 +272,7 @@ pub(crate) fn extract_tables_bordered(
                 continue;
             }
 
-            let (mut cells, markdown, grid) = convert_extracted_table(&extracted_table);
+            let (mut cells, markdown, mut grid) = convert_extracted_table(&extracted_table);
 
             if cells.is_empty() || markdown.trim().is_empty() {
                 continue;
@@ -290,6 +295,11 @@ pub(crate) fn extract_tables_bordered(
             // markdown keeps the flat field in step with the cells.
             let split_count = crate::pdf::table_reconstruct::split_merged_truth_table_cells(&mut cells);
             let markdown = if split_count > 0 {
+                // The split rewrote `cells` after the grid was derived from the
+                // pre-split table: a grid consumer would read merged "110" values the
+                // markdown no longer shows. The grid has no spanning rows/cols worth
+                // keeping out of sync, so drop it for the split table.
+                grid = None;
                 table_to_markdown(&cells)
             } else {
                 markdown
