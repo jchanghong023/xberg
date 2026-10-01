@@ -340,17 +340,6 @@ impl EngineSlots {
     }
 }
 
-/// Parse a `paddle_ocr_config` override.
-///
-/// Configuration validation and every page both call this, so an invalid override
-/// fails before any page runs. ~keep
-pub(crate) fn parse_paddle_ocr_config(value: &serde_json::Value) -> Result<PaddleOcrConfig> {
-    serde_json::from_value(value.clone()).map_err(|e| crate::XbergError::Validation {
-        message: format!("Failed to deserialize paddle_ocr_config: {}", e),
-        source: None,
-    })
-}
-
 /// PaddleOCR backend using ONNX Runtime.
 ///
 /// Maintains a pool of OCR engines keyed by script family. Each family has its own
@@ -1575,10 +1564,12 @@ impl OcrBackend for PaddleOcrBackend {
             });
         }
 
-        let effective_config: Arc<PaddleOcrConfig> = if let Some(ref paddle_json) = config.paddle_ocr_config {
-            Arc::new(parse_paddle_ocr_config(paddle_json)?)
-        } else {
-            Arc::clone(&self.config)
+        let effective_config: Arc<PaddleOcrConfig> = match crate::core::config::ocr::resolve_paddle_ocr_settings(
+            config.paddle_ocr_settings.as_ref(),
+            config.paddle_ocr_config.as_ref(),
+        )? {
+            Some(overridden) => Arc::new(overridden),
+            None => Arc::clone(&self.config),
         };
 
         let security_limits = Self::resolve_security_limits(config);
@@ -1782,12 +1773,13 @@ impl OcrBackend for PaddleOcrBackend {
     fn probe(&self, config: &OcrConfig) -> crate::doctor::DoctorCheck {
         use crate::doctor::DoctorCheck;
 
-        let effective_config: PaddleOcrConfig = match &config.paddle_ocr_config {
-            Some(paddle_json) => match parse_paddle_ocr_config(paddle_json) {
-                Ok(overridden) => overridden,
-                Err(e) => return DoctorCheck::fail("ocr.paddle-ocr", e.to_string()),
-            },
-            None => (*self.config).clone(),
+        let effective_config = match crate::core::config::ocr::resolve_paddle_ocr_settings(
+            config.paddle_ocr_settings.as_ref(),
+            config.paddle_ocr_config.as_ref(),
+        ) {
+            Ok(Some(overridden)) => overridden,
+            Ok(None) => (*self.config).clone(),
+            Err(error) => return DoctorCheck::fail("ocr.paddle-ocr", error.to_string()),
         };
 
         let languages = config.effective_languages();
@@ -2741,10 +2733,8 @@ mod tests {
         assert!(result.is_err(), "Should error on empty image");
     }
 
-    /// The page path rejects an invalid override before it decodes the image. `auto_rotate`
-    /// makes the undecodable bytes fail fast if the override were skipped, so no model loads.
     #[tokio::test]
-    async fn test_paddle_ocr_process_image_rejects_invalid_paddle_ocr_config() {
+    async fn test_paddle_ocr_process_image_rejects_invalid_legacy_config() {
         let backend = PaddleOcrBackend::new().unwrap();
         let config = OcrConfig {
             backend: "paddle-ocr".to_string(),
@@ -2756,14 +2746,37 @@ mod tests {
         match backend.process_image(b"not an image", &config).await {
             Err(crate::XbergError::Validation { message, .. }) => assert!(
                 message.contains("Failed to deserialize paddle_ocr_config"),
-                "the page must reject the override: {message}"
+                "the page must reject the legacy override: {message}"
             ),
             other => panic!("expected a paddle_ocr_config validation error, got {other:?}"),
         }
     }
 
+    #[tokio::test]
+    async fn should_process_unknown_legacy_config_keys_past_backend_validation() {
+        let backend = PaddleOcrBackend::new().unwrap();
+        let config = OcrConfig {
+            backend: "paddle-ocr".to_string(),
+            paddle_ocr_config: Some(serde_json::json!({
+                "model_tier": "server",
+                "vendor_extension": true
+            })),
+            ..Default::default()
+        };
+
+        match backend.process_image(b"not an image", &config).await {
+            Err(crate::XbergError::Validation { message, .. })
+                if message.contains("Failed to deserialize paddle_ocr_config") =>
+            {
+                panic!("unknown legacy keys must not fail backend config parsing: {message}")
+            }
+            Err(_) => {}
+            Ok(_) => panic!("invalid image bytes must still fail after config parsing"),
+        }
+    }
+
     #[test]
-    fn test_paddle_ocr_probe_rejects_invalid_paddle_ocr_config_with_the_shared_parse() {
+    fn test_paddle_ocr_probe_rejects_invalid_legacy_config() {
         let backend = PaddleOcrBackend::new().unwrap();
         let config = OcrConfig {
             backend: "paddle-ocr".to_string(),
@@ -2773,14 +2786,25 @@ mod tests {
 
         let check = backend.probe(&config);
 
+        assert!(matches!(check.status, crate::doctor::ProbeStatus::Fail), "{check:?}");
+        assert!(check.message.contains("Failed to deserialize paddle_ocr_config"));
+    }
+
+    #[test]
+    fn test_paddle_ocr_probe_uses_the_paddle_ocr_settings_override() {
+        let backend = PaddleOcrBackend::new().unwrap();
+        let empty_cache = tempfile::tempdir().unwrap();
+        let config = OcrConfig {
+            backend: "paddle-ocr".to_string(),
+            paddle_ocr_settings: Some(PaddleOcrConfig::new("en").with_cache_dir(empty_cache.path().to_path_buf())),
+            ..Default::default()
+        };
+
+        let check = backend.probe(&config);
+
         assert!(
-            matches!(check.status, crate::doctor::ProbeStatus::Fail),
-            "an invalid paddle_ocr_config must fail the doctor check: {check:?}"
-        );
-        assert!(
-            check.message.contains("Failed to deserialize paddle_ocr_config"),
-            "the doctor check must report the same error as extraction: {}",
-            check.message
+            matches!(check.status, crate::doctor::ProbeStatus::Skip),
+            "the probe must look for models in the override's cache dir: {check:?}"
         );
     }
 

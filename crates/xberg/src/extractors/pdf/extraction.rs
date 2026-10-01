@@ -1110,6 +1110,7 @@ mod tests {
                     llm: crate::core::config::LlmConfig::default(),
                     prompt: None,
                     min_image_area: 1,
+                    alt_text: Default::default(),
                 }),
                 ..ocr_only_config()
             };

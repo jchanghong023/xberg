@@ -8,7 +8,7 @@ use ahash::AHashMap;
 use crate::error::Result;
 
 use super::content_builder::ContentBuilder;
-use super::{join_runs, join_runs_md, parser};
+use super::{PptxInternalSlideElement, join_runs, join_runs_md, parser};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct ElementPosition {
@@ -322,6 +322,25 @@ impl Slide {
         builder.add_image_with_desc(&img_ref.id, img_ref.description.as_deref(), target);
     }
 
+    fn internal_image_element(&self, img_ref: &ImageReference, image_index: Option<u32>) -> PptxInternalSlideElement {
+        let target = self
+            .images
+            .iter()
+            .find(|relationship| relationship.id == img_ref.id)
+            .map(|relationship| relationship.target.clone())
+            .unwrap_or_default();
+        let alt_text = img_ref
+            .description
+            .as_deref()
+            .map(|description| description.replace('\n', " ").replace('\r', ""))
+            .unwrap_or_default();
+        PptxInternalSlideElement::Image {
+            alt_text: alt_text.trim().to_string(),
+            target,
+            image_index,
+        }
+    }
+
     /// Find the element index `to_markdown` should render as the slide's
     /// title: the first explicitly-marked title with non-empty text, or
     /// (failing that) the first short (<100 char) text element, matching the
@@ -414,6 +433,75 @@ impl Slide {
         }
 
         builder.build().0
+    }
+
+    pub(super) fn to_internal_elements(
+        &self,
+        config: &ParserConfig,
+        image_indices: &[Option<u32>],
+    ) -> Vec<PptxInternalSlideElement> {
+        let mut element_indices: Vec<usize> = (0..self.elements.len()).collect();
+        element_indices.sort_by_key(|&i| {
+            let pos = self.elements[i].position();
+            (pos.y, pos.x)
+        });
+
+        let title_idx = Self::find_markdown_title_index(&self.elements, &element_indices);
+        let mut internal_elements = Vec::with_capacity(element_indices.len());
+
+        if let Some(tidx) = title_idx
+            && let SlideElement::Text(text, _) = &self.elements[tidx]
+        {
+            let text_content = if config.plain {
+                join_runs(&text.runs, Run::extract)
+            } else {
+                join_runs_md(&text.runs)
+            };
+            let mut builder = ContentBuilder::new(config.plain);
+            builder.add_title(text_content.replace('\n', " ").trim());
+            internal_elements.push(PptxInternalSlideElement::Markdown(builder.build().0));
+        }
+
+        let mut image_ordinal = 0_usize;
+        for &idx in &element_indices {
+            if Some(idx) == title_idx {
+                continue;
+            }
+
+            if let SlideElement::Image(img_ref, _) = &self.elements[idx] {
+                let image_index = image_indices.get(image_ordinal).copied().flatten();
+                image_ordinal += 1;
+                if config.plain || !config.inject_placeholders {
+                    continue;
+                }
+                internal_elements.push(self.internal_image_element(img_ref, image_index));
+                continue;
+            }
+
+            let mut builder = ContentBuilder::new(config.plain);
+            match &self.elements[idx] {
+                SlideElement::Text(text, _) => Self::render_text_markdown(&mut builder, text, config),
+                SlideElement::Table(table, _) => Self::render_table_markdown(&mut builder, table, config),
+                SlideElement::List(list, _) => Self::render_list_markdown(&mut builder, list, config),
+                SlideElement::Chart(chart_ref, _) => {
+                    if let Some(text) = chart_ref.resolved_text.as_deref() {
+                        builder.add_text(text);
+                    }
+                }
+                SlideElement::SmartArt(diagram_ref, _) => {
+                    if let Some(text) = diagram_ref.resolved_text.as_deref() {
+                        builder.add_text(text);
+                    }
+                }
+                SlideElement::Image(_, _) | SlideElement::Unknown => {}
+            }
+            let markdown = builder.build().0;
+            if !markdown.is_empty() {
+                internal_elements.push(PptxInternalSlideElement::Markdown(markdown));
+            }
+        }
+
+        internal_elements
     }
 
     pub(super) fn image_count(&self) -> usize {

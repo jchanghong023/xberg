@@ -471,6 +471,26 @@ fn is_list_marker_content(text: &str) -> bool {
     tokens.peek().is_some() && tokens.all(is_list_marker_cell)
 }
 
+/// Whether a cell reads as an annotation continuing the title to its left, rather than as a
+/// standalone column label. Parentheses mark an annotation directly; otherwise require a
+/// multiword phrase introduced by a connective so case alone cannot turn `debit` into one. ~keep
+fn reads_as_title_continuation(text: &str) -> bool {
+    let trimmed = text.trim();
+    if let Some(parenthesized) = trimmed.strip_prefix('(').and_then(|rest| rest.strip_suffix(')')) {
+        return parenthesized.chars().any(char::is_alphabetic);
+    }
+
+    let mut words = trimmed.split_whitespace();
+    let Some(first) = words.next() else {
+        return false;
+    };
+    words.next().is_some()
+        && matches!(
+            first.to_ascii_lowercase().as_str(),
+            "as" | "at" | "by" | "for" | "from" | "in" | "of" | "per" | "to" | "with" | "without"
+        )
+}
+
 fn post_process_table_inner(
     mut table: Vec<Vec<String>>,
     min_columns: usize,
@@ -759,8 +779,10 @@ fn post_process_table_inner(
 
     // The GH#1832 title continuation and its numeric data share one OCR track, while the
     // following period header occupies the next track on a lower header row. Preserve that
-    // pre-merge geometry so an ordinary sparse value column with its own header is not mistaken
-    // for the crossed title/value track after the header rows are flattened. ~keep
+    // pre-merge geometry, but require the first-row text to read as a title annotation rather
+    // than a standalone column label. Geometry alone cannot distinguish "In thousands" from
+    // "debit", and folding the latter silently moves its values under the next column (#2029).
+    // ~keep
     let mut split_title_value_columns: Vec<bool> = (0..column_count)
         .map(|column| {
             header_rows.len() >= 2
@@ -770,6 +792,9 @@ fn post_process_table_inner(
                     .get(column - 1)
                     .is_some_and(|cell| !cell.trim().is_empty())
                 && header_rows[0].get(column).is_some_and(|cell| !cell.trim().is_empty())
+                && header_rows[0]
+                    .get(column)
+                    .is_some_and(|cell| reads_as_title_continuation(cell))
                 && header_rows[0].get(column + 1).is_none_or(|cell| cell.trim().is_empty())
                 && header_rows
                     .iter()
@@ -1394,9 +1419,12 @@ fn find_data_start(table: &[Vec<String>], layout_guided: bool) -> usize {
         .unwrap_or(0);
     if !layout_guided
         && first_numeric_row > 0
-        && table
-            .get(first_numeric_row)
-            .is_some_and(|row| row_reads_as_year_header(row))
+        && table.get(first_numeric_row).is_some_and(|row| {
+            row_reads_as_year_header(row)
+                || table
+                    .get(first_numeric_row + 1)
+                    .is_some_and(|next| row_reads_as_structural_period_header(row, next))
+        })
         && table
             .get(first_numeric_row + 1)
             .is_some_and(|row| digit_cell_count(row) >= DEFAULT_MIN_DATA_ROW_DIGIT_CELLS)
@@ -1465,6 +1493,57 @@ fn row_reads_as_year_header(row: &[String]) -> bool {
         && populated.iter().all(|cell| {
             cell.strip_prefix("Year ")
                 .is_some_and(|number| !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit()))
+        })
+}
+
+/// A neutral period-header row is identified by its relationship to the first amount row, not by
+/// English wording: each short populated label occupies a column whose next cell is numeric,
+/// while none of the labels has amount syntax. Word labels cover quarters and localized periods;
+/// all-digit labels must either form a consecutive four-digit year sequence or precede explicit
+/// amount syntax so an ordinary integer data row cannot masquerade as a header. ~keep
+fn row_reads_as_structural_period_header(row: &[String], next: &[String]) -> bool {
+    let populated: Vec<(usize, &str)> = row
+        .iter()
+        .enumerate()
+        .map(|(column, cell)| (column, cell.trim()))
+        .filter(|(_, cell)| !cell.is_empty())
+        .collect();
+
+    let labels_are_words = populated.iter().all(|(_, cell)| cell.chars().any(char::is_alphabetic));
+    let labels_are_bare_years = populated
+        .iter()
+        .all(|(_, cell)| cell.len() == 4 && cell.bytes().all(|byte| byte.is_ascii_digit()));
+    let labels_are_consecutive_years = labels_are_bare_years
+        && populated.windows(2).all(|pair| {
+            let left = pair[0].1.parse::<u16>().ok();
+            let right = pair[1].1.parse::<u16>().ok();
+            left.zip(right).is_some_and(|(left, right)| right == left + 1)
+        });
+    let next_cells_are_values = populated
+        .iter()
+        .all(|(column, _)| next.get(*column).is_some_and(|cell| is_numeric_value_cell(cell.trim())));
+
+    populated.len() >= 2
+        && populated.iter().all(|(_, cell)| {
+            cell.chars().count() <= 24 && cell.split_whitespace().count() <= 3 && !cell_has_amount_syntax(cell)
+        })
+        && (labels_are_words || labels_are_bare_years)
+        && next_cells_are_values
+        && (!labels_are_bare_years
+            || labels_are_consecutive_years
+            || populated.iter().all(|(column, _)| {
+                next.get(*column)
+                    .is_some_and(|cell| cell_has_amount_syntax(cell.trim()))
+            }))
+}
+
+fn cell_has_amount_syntax(cell: &str) -> bool {
+    cell.chars().any(|character| character.is_ascii_digit())
+        && cell.chars().any(|character| {
+            matches!(
+                character,
+                ',' | '.' | '+' | '-' | '\u{2212}' | '$' | '€' | '£' | '(' | ')'
+            )
         })
 }
 
@@ -6596,6 +6675,189 @@ mod tests {
 
         assert_eq!(processed[0], ["Summary in thousands", "Year 1", "Year 2"]);
         assert_eq!(processed[3], ["Item 3", "302", "62,000"]);
+    }
+
+    #[test]
+    fn a_title_continuation_folds_regardless_of_case_or_parentheses() {
+        for continuation in ["In thousands", "(in thousands)"] {
+            let mut table = vec![
+                vec!["Summary".into(), continuation.into(), String::new(), String::new()],
+                vec![String::new(), String::new(), "Year 1".into(), "Year 2".into()],
+            ];
+            for row in 0..12u32 {
+                let (short, year_1) = if row % 3 == 2 {
+                    ((300 + row).to_string(), String::new())
+                } else {
+                    (String::new(), format!("{},000", 40 + row))
+                };
+                table.push(vec![
+                    format!("Item {}", row + 1),
+                    short,
+                    year_1,
+                    format!("{},000", 60 + row),
+                ]);
+            }
+
+            let processed =
+                post_process_table(table, false, false).expect("the split title/value track must not reject the table");
+
+            assert_eq!(
+                processed[0],
+                [format!("Summary {continuation}"), "Year 1".into(), "Year 2".into()]
+            );
+            assert_eq!(processed[3], ["Item 3", "302", "62,000"]);
+        }
+    }
+
+    #[test]
+    fn issue_2028_structural_period_headers_remain_above_table_data() {
+        let period_headers = [
+            ["2031", "2032", "2033"],
+            ["Q1", "Q2", "Q3"],
+            ["Period 1", "Period 2", "Period 3"],
+        ];
+
+        for periods in period_headers {
+            let mut table = vec![
+                vec![
+                    "Summary".into(),
+                    "in thousands".into(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                ],
+                vec![
+                    String::new(),
+                    String::new(),
+                    periods[0].into(),
+                    periods[1].into(),
+                    periods[2].into(),
+                ],
+            ];
+            for row in 0..12u32 {
+                let amount = |base: u32| {
+                    if periods[0] == "Q1" {
+                        (base + row).to_string()
+                    } else {
+                        format!("{},000", base + row)
+                    }
+                };
+                table.push(vec![
+                    format!("Item {}", row + 1),
+                    String::new(),
+                    amount(40),
+                    amount(60),
+                    amount(80),
+                ]);
+            }
+
+            assert_eq!(
+                find_data_start(&table, false),
+                2,
+                "period labels {periods:?} must remain part of the header"
+            );
+
+            let processed = post_process_table(table, false, false).expect("the titled period table must survive");
+            assert_eq!(
+                processed[0],
+                ["Summary in thousands", periods[0], periods[1], periods[2]]
+            );
+            let expected = if periods[0] == "Q1" {
+                ["Item 1", "40", "60", "80"]
+            } else {
+                ["Item 1", "40,000", "60,000", "80,000"]
+            };
+            assert_eq!(processed[1], expected);
+        }
+    }
+
+    #[test]
+    fn issue_2028_bare_year_headers_precede_plain_integer_values() {
+        let mut table = vec![
+            vec![
+                "Summary".into(),
+                "in thousands".into(),
+                String::new(),
+                String::new(),
+                String::new(),
+            ],
+            vec![
+                String::new(),
+                String::new(),
+                "2031".into(),
+                "2032".into(),
+                "2033".into(),
+            ],
+        ];
+        for row in 0..12u32 {
+            table.push(vec![
+                format!("Item {}", row + 1),
+                String::new(),
+                (40 + row).to_string(),
+                (60 + row).to_string(),
+                (80 + row).to_string(),
+            ]);
+        }
+
+        assert_eq!(find_data_start(&table, false), 2);
+
+        let processed = post_process_table(table, false, false).expect("the titled year table must survive");
+        assert_eq!(processed[0], ["Summary in thousands", "2031", "2032", "2033"]);
+        assert_eq!(processed[1], ["Item 1", "40", "60", "80"]);
+    }
+
+    #[test]
+    fn issue_2029_staggered_ledger_headers_keep_both_value_columns() {
+        let mut table = vec![
+            vec!["Date".into(), "Description".into(), "Debit".into(), String::new()],
+            vec![String::new(), String::new(), String::new(), "Credit".into()],
+        ];
+        for row in 0..12u32 {
+            let (debit, credit) = if row % 4 == 0 {
+                (format!("{}.25", 10 + row), String::new())
+            } else {
+                (String::new(), format!("{}.50", 20 + row))
+            };
+            table.push(vec![
+                format!("2031-01-{:02}", row + 1),
+                format!("Entry {}", row + 1),
+                debit,
+                credit,
+            ]);
+        }
+
+        let processed = post_process_table(table, false, false).expect("the staggered ledger must survive");
+
+        assert_eq!(processed[0], ["Date", "Description", "Debit", "Credit"]);
+        assert_eq!(processed[1], ["2031-01-01", "Entry 1", "10.25", ""]);
+        assert_eq!(processed[2], ["2031-01-02", "Entry 2", "", "21.50"]);
+    }
+
+    #[test]
+    fn issue_2029_lowercase_standalone_header_keeps_its_value_column() {
+        let mut table = vec![
+            vec!["Date".into(), "Description".into(), "debit".into(), String::new()],
+            vec![String::new(), String::new(), String::new(), "Credit".into()],
+        ];
+        for row in 0..12u32 {
+            let (debit, credit) = if row % 4 == 0 {
+                (format!("{}.25", 10 + row), String::new())
+            } else {
+                (String::new(), format!("{}.50", 20 + row))
+            };
+            table.push(vec![
+                format!("2031-01-{:02}", row + 1),
+                format!("Entry {}", row + 1),
+                debit,
+                credit,
+            ]);
+        }
+
+        let processed = post_process_table(table, false, false).expect("the staggered ledger must survive");
+
+        assert_eq!(processed[0], ["Date", "Description", "debit", "Credit"]);
+        assert_eq!(processed[1], ["2031-01-01", "Entry 1", "10.25", ""]);
+        assert_eq!(processed[2], ["2031-01-02", "Entry 2", "", "21.50"]);
     }
 
     /// A real sparse headed value column can be mutually exclusive with the value column beside

@@ -52,7 +52,10 @@ pub struct SecurityLimits {
     /// document (GH#1721).
     pub max_content_size: usize,
 
-    /// Maximum iterations per operation
+    /// Maximum iterations per operation.
+    ///
+    /// For external redaction findings, this may lower but cannot raise the
+    /// fixed 10,000-finding ceiling.
     pub max_iterations: usize,
 
     /// Maximum XML depth (1024 levels)

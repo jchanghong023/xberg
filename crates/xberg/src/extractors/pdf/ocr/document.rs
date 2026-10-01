@@ -603,6 +603,7 @@ pub(super) fn single_stage_pipeline_for_layout(
             },
             tesseract_config: ocr_config.tesseract_config.clone(),
             paddle_ocr_config: None,
+            paddle_ocr_settings: None,
             vlm_config: None,
             backend_options: ocr_config.backend_options.clone(),
         }],

@@ -52,8 +52,6 @@ mod tract_parity;
 
 #[cfg(paddle_ocr)]
 pub use backend::PaddleOcrBackend;
-#[cfg(paddle_ocr)]
-pub(crate) use backend::parse_paddle_ocr_config;
 pub use config::{PaddleInferenceBackend, PaddleLanguage, PaddleOcrConfig};
 pub use model_manager::{ModelPaths, RecModelPaths, ResolvedRecModel, SharedModelPaths};
 

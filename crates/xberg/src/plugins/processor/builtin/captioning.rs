@@ -20,7 +20,7 @@ use tokio::task::JoinSet;
 
 use crate::RegionKind;
 use crate::Result;
-use crate::core::config::{CaptioningConfig, ExtractionConfig};
+use crate::core::config::{CaptionAltTextMode, CaptioningConfig, ExtractionConfig};
 use crate::llm::region_extractor::extract_region_with_vlm_usage;
 use crate::plugins::{Plugin, PostProcessor, ProcessingStage, register_post_processor};
 use crate::types::{ExtractedDocument, ExtractedImage};
@@ -124,19 +124,13 @@ fn apply_caption_outcome(
     captured_usage: &mut Vec<crate::types::LlmUsage>,
     idx: usize,
     outcome: CaptionOutcome,
+    alt_text: CaptionAltTextMode,
 ) {
     match outcome {
         Ok((text, usage)) => {
             let trimmed = text.trim().to_string();
             if !trimmed.is_empty() {
-                // Renderers emit `description` at the image placeholder but never
-                // read `caption`, so a caption produced here would otherwise never
-                // reach the output text. Mirror it into `description` when that is
-                // unset so the VLM caption is actually rendered at the image (#1340).
-                if images[idx].description.is_none() {
-                    images[idx].description = Some(trimmed.clone());
-                }
-                images[idx].caption = Some(trimmed);
+                apply_caption_text(&mut images[idx], &trimmed, alt_text);
             }
             if let Some(mut usage) = usage {
                 if usage.source.is_empty() || usage.source == "vlm_ocr" {
@@ -159,6 +153,17 @@ fn apply_caption_outcome(
             });
         }
     }
+}
+
+fn apply_caption_text(image: &mut ExtractedImage, caption: &str, alt_text: CaptionAltTextMode) {
+    image.description = Some(match (alt_text, image.description.as_deref()) {
+        (CaptionAltTextMode::Preserve, Some(description)) => description.to_string(),
+        (CaptionAltTextMode::Combine, Some(description)) if !description.trim().is_empty() => {
+            format!("{}: {caption}", description.trim())
+        }
+        _ => caption.to_string(),
+    });
+    image.caption = Some(caption.to_string());
 }
 
 /// Caption every eligible image in `images`, returning the collected VLM usage.
@@ -223,7 +228,14 @@ async fn caption_images_with_vlm(
             }
         };
 
-        apply_caption_outcome(result, images, &mut captured_usage, idx, outcome);
+        apply_caption_outcome(
+            result,
+            images,
+            &mut captured_usage,
+            idx,
+            outcome,
+            caption_config.alt_text,
+        );
 
         if let Some(task) = pending.pop_front() {
             spawn_caption_task(&mut join_set, Arc::clone(&llm), prompt.clone(), task);
@@ -269,7 +281,7 @@ pub fn register() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::config::{CaptioningConfig, LlmConfig};
+    use crate::core::config::{CaptionAltTextMode, CaptioningConfig, LlmConfig};
     use bytes::Bytes;
     use std::borrow::Cow;
 
@@ -281,6 +293,7 @@ mod tests {
             },
             prompt: None,
             min_image_area,
+            alt_text: CaptionAltTextMode::Preserve,
         }
     }
 
@@ -341,6 +354,55 @@ mod tests {
     fn unknown_dimensions_pass_through() {
         let image = image_with(None, None, false);
         assert!(image_is_caption_candidate(&image, 1_000));
+    }
+
+    #[test]
+    fn preserve_keeps_existing_alt_text() {
+        let mut image = image_with(None, None, false);
+        image.description = Some("Author alt text".to_string());
+
+        apply_caption_text(&mut image, "VLM caption", CaptionAltTextMode::Preserve);
+
+        assert_eq!(image.description.as_deref(), Some("Author alt text"));
+        assert_eq!(image.caption.as_deref(), Some("VLM caption"));
+    }
+
+    #[test]
+    fn combine_joins_existing_alt_text_and_caption() {
+        let mut image = image_with(None, None, false);
+        image.description = Some("Author alt text".to_string());
+
+        apply_caption_text(&mut image, "VLM caption", CaptionAltTextMode::Combine);
+
+        assert_eq!(image.description.as_deref(), Some("Author alt text: VLM caption"));
+        assert_eq!(image.caption.as_deref(), Some("VLM caption"));
+    }
+
+    #[test]
+    fn replace_overwrites_existing_alt_text() {
+        let mut image = image_with(None, None, false);
+        image.description = Some("Picture 1".to_string());
+
+        apply_caption_text(&mut image, "VLM caption", CaptionAltTextMode::Replace);
+
+        assert_eq!(image.description.as_deref(), Some("VLM caption"));
+        assert_eq!(image.caption.as_deref(), Some("VLM caption"));
+    }
+
+    #[test]
+    fn all_modes_use_caption_when_alt_text_is_missing() {
+        for mode in [
+            CaptionAltTextMode::Preserve,
+            CaptionAltTextMode::Combine,
+            CaptionAltTextMode::Replace,
+        ] {
+            let mut image = image_with(None, None, false);
+
+            apply_caption_text(&mut image, "VLM caption", mode);
+
+            assert_eq!(image.description.as_deref(), Some("VLM caption"));
+            assert_eq!(image.caption.as_deref(), Some("VLM caption"));
+        }
     }
 
     #[tokio::test]

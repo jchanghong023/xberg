@@ -172,20 +172,20 @@ fn paddle_v6_presets_pin_model_tier_and_layout() {
         let config = build_extraction_config(pipeline);
         let ocr = config.ocr.as_ref().expect("Paddle preset must configure OCR");
         let paddle = ocr
-            .paddle_ocr_config
+            .paddle_ocr_settings
             .as_ref()
             .expect("Paddle preset must pin model identity");
 
         assert_eq!(ocr.backend, "paddleocr", "unexpected backend for {}", pipeline.name());
         assert!(!ocr.auto_rotate, "canonical Paddle preset must use the public default");
         assert_eq!(
-            paddle["model_version"],
+            paddle.model_version,
             PP_OCR_V6,
             "unexpected version for {}",
             pipeline.name()
         );
         assert_eq!(
-            paddle["model_tier"],
+            paddle.model_tier,
             expected_tier,
             "unexpected tier for {}",
             pipeline.name()
@@ -232,17 +232,19 @@ fn paddle_quality_sweep_presets_pin_every_swept_dimension() {
     for (pipeline, expected) in cases {
         let config = build_extraction_config(pipeline);
         let ocr = config.ocr.expect("quality preset must configure OCR");
-        let paddle = ocr.paddle_ocr_config.expect("quality preset must pin Paddle settings");
+        let paddle = ocr
+            .paddle_ocr_settings
+            .expect("quality preset must pin Paddle settings");
 
         assert!(config.force_ocr);
         assert!(config.layout.is_some());
         assert_eq!(ocr.backend, "paddleocr");
-        assert_eq!(paddle["model_version"], PP_OCR_V6);
-        assert_eq!(paddle["model_tier"], "small");
-        assert_eq!(paddle["det_limit_side_len"], expected.det_limit_side_len);
-        assert_eq!(paddle["det_db_thresh"], expected.det_db_thresh);
-        assert_eq!(paddle["det_db_box_thresh"], expected.det_db_box_thresh);
-        assert_eq!(paddle["drop_score"], expected.drop_score);
+        assert_eq!(paddle.model_version, PP_OCR_V6);
+        assert_eq!(paddle.model_tier, "small");
+        assert_eq!(paddle.det_limit_side_len, expected.det_limit_side_len);
+        assert_eq!(paddle.det_db_thresh, expected.det_db_thresh);
+        assert_eq!(paddle.det_db_box_thresh, expected.det_db_box_thresh);
+        assert_eq!(paddle.drop_score, expected.drop_score);
     }
 }
 
@@ -256,7 +258,7 @@ fn paddle_rotation_presets_differ_only_by_auto_rotate() {
     assert!(auto_ocr.auto_rotate);
     assert!(!no_rotate_ocr.auto_rotate);
     assert_eq!(auto_ocr.backend, no_rotate_ocr.backend);
-    assert_eq!(auto_ocr.paddle_ocr_config, no_rotate_ocr.paddle_ocr_config);
+    assert_eq!(auto_ocr.paddle_ocr_settings, no_rotate_ocr.paddle_ocr_settings);
 }
 
 #[test]
@@ -361,12 +363,12 @@ fn legacy_paddle_server_presets_pin_v5_server_models() {
         let config = build_extraction_config(pipeline);
         let ocr = config.ocr.as_ref().expect("legacy server preset must configure OCR");
         let paddle = ocr
-            .paddle_ocr_config
+            .paddle_ocr_settings
             .as_ref()
             .expect("legacy server preset must pin model identity");
 
         assert!(!ocr.auto_rotate, "canonical Paddle preset must use the public default");
-        assert_eq!(paddle["model_version"], PP_OCR_V5);
-        assert_eq!(paddle["model_tier"], "server");
+        assert_eq!(paddle.model_version, PP_OCR_V5);
+        assert_eq!(paddle.model_tier, "server");
     }
 }

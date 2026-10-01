@@ -191,17 +191,11 @@ fn prepare_batch(config: &RuntimeResponsivenessConfig) -> Result<PreparedBatch> 
         .ocr
         .as_ref()
         .map(|ocr| {
-            let paddle = ocr.paddle_ocr_config.as_ref();
+            let paddle = ocr.paddle_ocr_settings.as_ref();
             (
                 Some(ocr.backend.clone()),
-                paddle
-                    .and_then(|value| value.get("model_version"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
-                paddle
-                    .and_then(|value| value.get("model_tier"))
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_owned),
+                paddle.map(|value| value.model_version.clone()),
+                paddle.map(|value| value.model_tier.clone()),
             )
         })
         .unwrap_or_default();

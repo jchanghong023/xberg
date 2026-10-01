@@ -141,15 +141,16 @@ fn build_paddle_extraction_config_with_quality_profile(
     layout: Option<xberg::core::config::layout::LayoutDetectionConfig>,
     quality_profile: Option<PaddleQualityProfile>,
 ) -> xberg::ExtractionConfig {
-    let mut paddle_ocr_config = serde_json::json!({
-        "model_version": model_version,
-        "model_tier": model_tier
-    });
+    let mut paddle_ocr_settings = xberg::PaddleOcrConfig {
+        model_version: model_version.to_string(),
+        model_tier: model_tier.to_string(),
+        ..Default::default()
+    };
     if let Some(profile) = quality_profile {
-        paddle_ocr_config["det_limit_side_len"] = serde_json::json!(profile.det_limit_side_len);
-        paddle_ocr_config["det_db_thresh"] = serde_json::json!(profile.det_db_thresh);
-        paddle_ocr_config["det_db_box_thresh"] = serde_json::json!(profile.det_db_box_thresh);
-        paddle_ocr_config["drop_score"] = serde_json::json!(profile.drop_score);
+        paddle_ocr_settings.det_limit_side_len = profile.det_limit_side_len;
+        paddle_ocr_settings.det_db_thresh = profile.det_db_thresh;
+        paddle_ocr_settings.det_db_box_thresh = profile.det_db_box_thresh;
+        paddle_ocr_settings.drop_score = profile.drop_score;
     }
 
     xberg::ExtractionConfig {
@@ -159,7 +160,7 @@ fn build_paddle_extraction_config_with_quality_profile(
             backend: "paddleocr".to_string(),
             language: vec!["eng".to_string()],
             auto_rotate: false,
-            paddle_ocr_config: Some(paddle_ocr_config),
+            paddle_ocr_settings: Some(paddle_ocr_settings),
             ..Default::default()
         }),
         layout,

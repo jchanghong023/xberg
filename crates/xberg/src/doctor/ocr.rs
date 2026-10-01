@@ -270,8 +270,9 @@ fn stage_backend_config(parent: &OcrConfig, stage: &OcrPipelineStage) -> OcrConf
     if let Some(tesseract) = stage.tesseract_config.as_ref() {
         config.tesseract_config = Some(tesseract.clone());
     }
-    if let Some(paddle) = stage.paddle_ocr_config.as_ref() {
-        config.paddle_ocr_config = Some(paddle.clone());
+    if stage.paddle_ocr_config.is_some() || stage.paddle_ocr_settings.is_some() {
+        config.paddle_ocr_config = stage.paddle_ocr_config.clone();
+        config.paddle_ocr_settings = stage.paddle_ocr_settings.clone();
     }
     config.vlm_config = stage.vlm_config.clone();
     config.backend_options = stage.backend_options.clone();
@@ -480,6 +481,7 @@ mod tests {
                         language: Some(vec!["deu".to_string()]),
                         tesseract_config: None,
                         paddle_ocr_config: None,
+                        paddle_ocr_settings: None,
                         vlm_config: None,
                         backend_options: Some(serde_json::json!({"mode": "accurate"})),
                     }],
@@ -541,7 +543,10 @@ mod tests {
                         priority: 100,
                         language: Some(vec!["deu".to_string()]),
                         tesseract_config: Some(Default::default()),
-                        paddle_ocr_config: Some(serde_json::json!({"model_tier": "server"})),
+                        paddle_ocr_config: None,
+                        paddle_ocr_settings: Some(
+                            crate::paddle_ocr::PaddleOcrConfig::new("en").with_model_tier("server"),
+                        ),
                         vlm_config: Some(crate::core::config::LlmConfig {
                             model: "test/model".to_string(),
                             ..Default::default()
@@ -562,8 +567,11 @@ mod tests {
         assert_eq!(captured[0].language, ["deu"]);
         assert!(captured[0].tesseract_config.is_some());
         assert_eq!(
-            captured[0].paddle_ocr_config,
-            Some(serde_json::json!({"model_tier": "server"}))
+            captured[0]
+                .paddle_ocr_settings
+                .as_ref()
+                .map(|paddle| paddle.model_tier.as_str()),
+            Some("server")
         );
         assert_eq!(captured[0].vlm_config.as_ref().unwrap().model, "test/model");
         assert_eq!(
@@ -673,6 +681,7 @@ mod tests {
                         language: None,
                         tesseract_config: None,
                         paddle_ocr_config: None,
+                        paddle_ocr_settings: None,
                         vlm_config: None,
                         backend_options: None,
                     }],
@@ -728,6 +737,7 @@ mod tests {
             language: Some(vec![language.to_string()]),
             tesseract_config: None,
             paddle_ocr_config: None,
+            paddle_ocr_settings: None,
             vlm_config: None,
             backend_options: None,
         };

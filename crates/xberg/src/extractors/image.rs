@@ -2995,6 +2995,7 @@ mod tests {
                     language: None,
                     tesseract_config: None,
                     paddle_ocr_config: None,
+                    paddle_ocr_settings: None,
                     vlm_config: None,
                     backend_options: None,
                 }],
@@ -5259,6 +5260,7 @@ mod tests {
                 },
                 prompt: None,
                 min_image_area: 0,
+                alt_text: Default::default(),
             }),
             ..Default::default()
         };
@@ -5437,6 +5439,7 @@ mod tests {
                 },
                 prompt: None,
                 min_image_area: u32::MAX,
+                alt_text: Default::default(),
             }),
             ..Default::default()
         };

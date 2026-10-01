@@ -74,7 +74,7 @@ Redaction runs as the Late stage. After it runs, the original content is dropped
 | `Person` | NER | Requires `RedactionConfig.ner = Some(NerConfig)`. |
 | `Organization` | NER | Same. |
 | `Location` | NER | Same. |
-| `Custom(label)` | User-supplied | `custom_terms` or `custom_patterns`. |
+| `Custom(label)` | User-supplied | `custom_terms`, `custom_patterns` or `findings`. |
 
 ## Strategies
 
@@ -124,6 +124,30 @@ To redact names, organisations, and locations, attach a `NerConfig`:
 </Tabs>
 
 Choose the NER backend per the [NER guide](/guides/ner/). The LLM backend can call provider-hosted models; the `xberg-gliner` ONNX backend runs locally with exported artifacts from `xberg-io/gliner-models`. Private or non-public artifacts require Hugging Face credentials supported by `hf-hub`.
+
+## External Findings
+
+When another engine has already inspected the extracted text, such as Microsoft Presidio or AWS Comprehend, pass its findings to `extract_with_external_redaction`. The operation runs in the Late redaction stage, before a configured DOCX or PDF renderer, and reports each match as `PiiCategory::Custom(label)`. `redact_external` applies the same rules to an owned `ExtractedDocument`.
+
+```rust
+let findings = xberg::text::redaction::parse_external_findings_bounded(raw_json, 10_000)?;
+let output = xberg::extract_with_external_redaction(
+    input,
+    &config,
+    findings,
+    Some("unicode_code_points"),
+    Some(10_000),
+).await?;
+```
+
+- `label` is required. Presidio's `entity_type` and Comprehend's `Type` are accepted in its place, as are Comprehend's `Text`, `BeginOffset`, `EndOffset` and `Score`. Other fields are ignored, so raw engine output can be passed unchanged.
+- `text` is the value to redact. Without it, the value is read from `content` at `start..end`, counted in the requested `RedactionOffsetEncoding`: `UnicodeCodePoints` (as Presidio reports them), `Utf8Bytes` or `Utf16CodeUnits`. Offsets only line up with `content` extracted under the same settings, so prefer supplying `text`.
+- A finding is matched case-sensitively and on word boundaries, like an NER mention. It needs no allowlist and is kept even when `categories` filters out the built-in detectors.
+- Redaction fails rather than skipping a finding it cannot resolve: a span outside `content`, inside a character, or cutting a word, which usually means the wrong offset encoding.
+- The caller supplies `max_findings`; the bounded parser stops at the first entry beyond that limit instead of allocating the complete input.
+- The one-step operation accepts one bytes input. Read and bound file or standard-input findings at the application boundary, then pass their parsed values to the operation.
+- On the command line, `--redaction-findings findings.json` sets `findings_path`, and `--redaction-findings -` reads them from stdin instead.
+- Inline, file, and combined request findings are capped at the lower of `SecurityLimits.max_iterations` and 10,000. Request-scoped calls apply their `max_findings` value as an additional lower cap. A findings file may not exceed `SecurityLimits.max_content_size`. `findings_path` is not supported on WebAssembly.
 
 ## Output Shape
 

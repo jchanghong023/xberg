@@ -101,17 +101,18 @@ impl ExtractionConfig {
                 self.ocr = Some(OcrConfig::default());
             }
             if let Some(ref mut ocr) = self.ocr {
-                let mut paddle = match ocr.paddle_ocr_config.take() {
-                    Some(serde_json::Value::Object(map)) => map,
-                    _ => serde_json::Map::new(),
-                };
+                let mut paddle = super::super::ocr::resolve_paddle_ocr_settings(
+                    ocr.paddle_ocr_settings.as_ref(),
+                    ocr.paddle_ocr_config.as_ref(),
+                )?
+                .unwrap_or_default();
                 if let Some(version) = paddle_model_version {
-                    paddle.insert("model_version".to_string(), serde_json::Value::String(version));
+                    paddle.model_version = version;
                 }
                 if let Some(tier) = paddle_model_tier {
-                    paddle.insert("model_tier".to_string(), serde_json::Value::String(tier));
+                    paddle.model_tier = tier;
                 }
-                ocr.paddle_ocr_config = Some(serde_json::Value::Object(paddle));
+                ocr.paddle_ocr_settings = Some(paddle);
             }
         }
 
@@ -648,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn paddle_model_env_vars_populate_paddle_ocr_config() {
+    fn paddle_model_env_vars_populate_paddle_ocr_settings() {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         clear_paddle_model_env();
         unsafe {
@@ -662,10 +663,10 @@ mod tests {
         let paddle = config
             .ocr
             .as_ref()
-            .and_then(|o| o.paddle_ocr_config.as_ref())
-            .expect("paddle_ocr_config should be populated");
-        assert_eq!(paddle.get("model_version").and_then(|v| v.as_str()), Some("pp-ocrv5"));
-        assert_eq!(paddle.get("model_tier").and_then(|v| v.as_str()), Some("server"));
+            .and_then(|o| o.paddle_ocr_settings.as_ref())
+            .expect("paddle_ocr_settings should be populated");
+        assert_eq!(paddle.model_version, "pp-ocrv5");
+        assert_eq!(paddle.model_tier, "server");
         clear_paddle_model_env();
     }
 
@@ -687,10 +688,13 @@ mod tests {
         config
             .apply_env_overrides()
             .expect("paddle model env override should apply");
-        let paddle = config.ocr.as_ref().unwrap().paddle_ocr_config.as_ref().unwrap();
-        assert_eq!(paddle.get("model_version").and_then(|v| v.as_str()), Some("pp-ocrv5"));
-        assert_eq!(paddle.get("drop_score").and_then(|v| v.as_f64()), Some(0.7));
-        assert!(paddle.get("model_tier").is_none());
+        let paddle = config.ocr.as_ref().unwrap().paddle_ocr_settings.as_ref().unwrap();
+        assert_eq!(paddle.model_version, "pp-ocrv5");
+        assert_eq!(paddle.drop_score, 0.7);
+        assert_eq!(
+            paddle.model_tier,
+            crate::paddle_ocr::PaddleOcrConfig::default().model_tier
+        );
         clear_paddle_model_env();
     }
 

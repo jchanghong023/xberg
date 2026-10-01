@@ -148,7 +148,7 @@ fn test_extract_pptx_from_bytes_multiple_slides() {
         internal
             .slide_contents
             .iter()
-            .map(|(number, _)| *number)
+            .map(|slide| slide.slide_number)
             .collect::<Vec<_>>(),
         vec![1, 2, 3]
     );

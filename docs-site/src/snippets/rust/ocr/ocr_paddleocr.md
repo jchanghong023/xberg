@@ -7,7 +7,7 @@ async fn main() -> xberg::Result<()> {
         ocr: Some(OcrConfig {
             backend: "paddleocr".to_string(),
             language: vec!["en".to_string()],
-            // paddle_ocr_config: Some(serde_json::json!({"model_tier": "server"})), // for max accuracy
+            // paddle_ocr_settings: Some(PaddleOcrConfig::new("en").with_model_tier("server")), // for max accuracy
             ..Default::default()
         }),
         ..Default::default()

@@ -242,6 +242,7 @@ impl ExtractionOverrides {
                 tesseract_config: None,
                 output_format: None,
                 paddle_ocr_config: None,
+                paddle_ocr_settings: None,
                 element_config: None,
                 quality_thresholds: None,
                 pipeline: None,

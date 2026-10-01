@@ -52,6 +52,7 @@ fn captioning_config(model: &str, api_key: String) -> CaptioningConfig {
         llm: llm(model, api_key),
         prompt: None,
         min_image_area: 0,
+        alt_text: Default::default(),
     }
 }
 
@@ -120,6 +121,7 @@ async fn captioning_post_processor_is_noop_without_images() {
             },
             prompt: None,
             min_image_area: 1024,
+            alt_text: Default::default(),
         }),
         ..Default::default()
     };
@@ -164,6 +166,7 @@ async fn captioning_post_processor_tolerates_vlm_failure() {
             },
             prompt: None,
             min_image_area: 0,
+            alt_text: Default::default(),
         }),
         ..Default::default()
     };

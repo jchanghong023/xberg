@@ -216,6 +216,7 @@ fn test_ocr_language_without_ocr_flag_existing_config() {
             tesseract_config: None,
             output_format: None,
             paddle_ocr_config: None,
+            paddle_ocr_settings: None,
             element_config: None,
             quality_thresholds: None,
             pipeline: None,
@@ -257,6 +258,7 @@ fn test_ocr_language_updates_existing_nested_tesseract_config() {
             }),
             output_format: None,
             paddle_ocr_config: None,
+            paddle_ocr_settings: None,
             element_config: None,
             quality_thresholds: None,
             pipeline: None,
@@ -402,6 +404,7 @@ fn test_ocr_no_cache_changes_only_use_cache_when_tesseract_config_already_set() 
             tesseract_config: Some(non_default_tesseract_config.clone()),
             output_format: None,
             paddle_ocr_config: None,
+            paddle_ocr_settings: None,
             element_config: None,
             quality_thresholds: None,
             pipeline: None,
@@ -549,6 +552,7 @@ fn test_ocr_no_cache_false_re_enables_an_already_disabled_cache() {
             }),
             output_format: None,
             paddle_ocr_config: None,
+            paddle_ocr_settings: None,
             element_config: None,
             quality_thresholds: None,
             pipeline: None,
@@ -593,6 +597,7 @@ fn test_ocr_language_updates_tesseract_pipeline_stages() {
                         language: Some(vec!["eng".to_string()]),
                         tesseract_config: Some(tesseract_config),
                         paddle_ocr_config: None,
+                        paddle_ocr_settings: None,
                         vlm_config: None,
                         backend_options: None,
                     },
@@ -602,6 +607,7 @@ fn test_ocr_language_updates_tesseract_pipeline_stages() {
                         language: Some(vec!["en".to_string()]),
                         tesseract_config: None,
                         paddle_ocr_config: None,
+                        paddle_ocr_settings: None,
                         vlm_config: None,
                         backend_options: None,
                     },
@@ -630,6 +636,7 @@ fn test_ocr_language_updates_tesseract_pipeline_stages() {
     assert_eq!(stages[1].language, Some(vec!["en".to_string()]));
     assert!(stages[1].tesseract_config.is_none());
     assert!(stages[1].paddle_ocr_config.is_none());
+    assert!(stages[1].paddle_ocr_settings.is_none());
     assert!(stages[1].vlm_config.is_none());
     assert!(stages[1].backend_options.is_none());
 }

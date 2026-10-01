@@ -919,6 +919,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  PaddleOcrConfig dco_decode_box_autoadd_paddle_ocr_config(dynamic raw);
+
+  @protected
   PaddleOcrVlTaskKind dco_decode_box_autoadd_paddle_ocr_vl_task_kind(
     dynamic raw,
   );
@@ -1076,6 +1079,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   CandleTrocrVariant dco_decode_candle_trocr_variant(dynamic raw);
+
+  @protected
+  CaptionAltTextMode dco_decode_caption_alt_text_mode(dynamic raw);
 
   @protected
   CaptioningConfig dco_decode_captioning_config(dynamic raw);
@@ -1328,6 +1334,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ExecutionProviderType dco_decode_execution_provider_type(dynamic raw);
+
+  @protected
+  ExternalRedactionFinding dco_decode_external_redaction_finding(dynamic raw);
 
   @protected
   ExtractInput dco_decode_extract_input(dynamic raw);
@@ -1654,6 +1663,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ExcelSheet> dco_decode_list_excel_sheet(dynamic raw);
+
+  @protected
+  List<ExternalRedactionFinding> dco_decode_list_external_redaction_finding(
+    dynamic raw,
+  );
 
   @protected
   List<ExtractInput> dco_decode_list_extract_input(dynamic raw);
@@ -2276,6 +2290,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  PaddleOcrConfig? dco_decode_opt_box_autoadd_paddle_ocr_config(dynamic raw);
+
+  @protected
   PaddleOcrVlTaskKind? dco_decode_opt_box_autoadd_paddle_ocr_vl_task_kind(
     dynamic raw,
   );
@@ -2669,6 +2686,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RedactionFinding dco_decode_redaction_finding(dynamic raw);
+
+  @protected
+  RedactionOffsetEncoding dco_decode_redaction_offset_encoding(dynamic raw);
 
   @protected
   RedactionPattern dco_decode_redaction_pattern(dynamic raw);
@@ -3710,6 +3730,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  PaddleOcrConfig sse_decode_box_autoadd_paddle_ocr_config(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PaddleOcrVlTaskKind sse_decode_box_autoadd_paddle_ocr_vl_task_kind(
     SseDeserializer deserializer,
   );
@@ -3921,6 +3946,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   CandleTrocrVariant sse_decode_candle_trocr_variant(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  CaptionAltTextMode sse_decode_caption_alt_text_mode(
     SseDeserializer deserializer,
   );
 
@@ -4203,6 +4233,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ExecutionProviderType sse_decode_execution_provider_type(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ExternalRedactionFinding sse_decode_external_redaction_finding(
     SseDeserializer deserializer,
   );
 
@@ -4603,6 +4638,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   List<ExcelSheet> sse_decode_list_excel_sheet(SseDeserializer deserializer);
+
+  @protected
+  List<ExternalRedactionFinding> sse_decode_list_external_redaction_finding(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<ExtractInput> sse_decode_list_extract_input(
@@ -5417,6 +5457,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  PaddleOcrConfig? sse_decode_opt_box_autoadd_paddle_ocr_config(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   PaddleOcrVlTaskKind? sse_decode_opt_box_autoadd_paddle_ocr_vl_task_kind(
     SseDeserializer deserializer,
   );
@@ -5924,6 +5969,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   RedactionFinding sse_decode_redaction_finding(SseDeserializer deserializer);
+
+  @protected
+  RedactionOffsetEncoding sse_decode_redaction_offset_encoding(
+    SseDeserializer deserializer,
+  );
 
   @protected
   RedactionPattern sse_decode_redaction_pattern(SseDeserializer deserializer);
@@ -7333,6 +7383,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_box_autoadd_paddle_ocr_config(
+    PaddleOcrConfig self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_paddle_ocr_vl_task_kind(
     PaddleOcrVlTaskKind self,
     SseSerializer serializer,
@@ -7611,6 +7667,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_candle_trocr_variant(
     CandleTrocrVariant self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_caption_alt_text_mode(
+    CaptionAltTextMode self,
     SseSerializer serializer,
   );
 
@@ -7983,6 +8045,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_execution_provider_type(
     ExecutionProviderType self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_external_redaction_finding(
+    ExternalRedactionFinding self,
     SseSerializer serializer,
   );
 
@@ -8514,6 +8582,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_excel_sheet(
     List<ExcelSheet> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_external_redaction_finding(
+    List<ExternalRedactionFinding> self,
     SseSerializer serializer,
   );
 
@@ -9517,6 +9591,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_paddle_ocr_config(
+    PaddleOcrConfig? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_paddle_ocr_vl_task_kind(
     PaddleOcrVlTaskKind? self,
     SseSerializer serializer,
@@ -10155,6 +10235,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_redaction_finding(
     RedactionFinding self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_redaction_offset_encoding(
+    RedactionOffsetEncoding self,
     SseSerializer serializer,
   );
 

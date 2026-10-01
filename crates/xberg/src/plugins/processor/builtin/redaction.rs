@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use crate::Result;
 use crate::core::config::ExtractionConfig;
 use crate::plugins::{Plugin, PostProcessor, ProcessingStage, register_post_processor};
-use crate::text::redaction::redact;
+use crate::text::redaction::engine::{redact_with_external_findings, redact_with_security_limits};
 use crate::types::ExtractedDocument;
 
 /// Redaction post-processor.
@@ -44,8 +44,15 @@ impl Plugin for RedactionProcessor {
 #[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
 impl PostProcessor for RedactionProcessor {
     async fn process(&self, result: &mut ExtractedDocument, config: &ExtractionConfig) -> Result<()> {
-        let Some(redaction_config) = config.redaction.as_ref() else {
-            return Ok(());
+        let external = crate::text::redaction::external::current_external_redaction();
+        let default_config;
+        let redaction_config = match config.redaction.as_ref() {
+            Some(config) => config,
+            None if external.is_some() => {
+                default_config = crate::core::config::redaction::RedactionConfig::default();
+                &default_config
+            }
+            None => return Ok(()),
         };
 
         tracing::info!(
@@ -55,7 +62,35 @@ impl PostProcessor for RedactionProcessor {
             "running redaction pipeline"
         );
 
-        redact(result, redaction_config).await
+        let default_limits;
+        let limits = match config.security_limits.as_ref() {
+            Some(limits) => limits,
+            None => {
+                default_limits = crate::extractors::security::SecurityLimits::default();
+                &default_limits
+            }
+        };
+
+        let outcome = match external.as_ref() {
+            Some(request) => redact_with_external_findings(result, redaction_config, request, limits).await,
+            None => redact_with_security_limits(result, redaction_config, limits).await,
+        };
+        // Redaction is security processing: every failure must abort instead of becoming a warning. ~keep
+        let outcome = outcome.map_err(|err| match err {
+            fatal @ (crate::XbergError::Io(_)
+            | crate::XbergError::LockPoisoned(_)
+            | crate::XbergError::Plugin { .. }) => fatal,
+            other => crate::XbergError::Plugin {
+                message: other.to_string(),
+                plugin_name: self.name().to_string(),
+            },
+        });
+        if outcome.is_ok()
+            && let Some(request) = external
+        {
+            request.mark_consumed();
+        }
+        outcome
     }
 
     fn processing_stage(&self) -> ProcessingStage {
@@ -63,7 +98,7 @@ impl PostProcessor for RedactionProcessor {
     }
 
     fn should_process(&self, _result: &ExtractedDocument, config: &ExtractionConfig) -> bool {
-        config.redaction.is_some()
+        config.redaction.is_some() || crate::text::redaction::external::external_redaction_is_scoped()
     }
 
     fn priority(&self) -> i32 {

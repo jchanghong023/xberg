@@ -1190,6 +1190,7 @@ mod cache_key_tests {
                 language: None,
                 tesseract_config: None,
                 paddle_ocr_config: None,
+                paddle_ocr_settings: None,
                 vlm_config: Some(vlm_config),
                 backend_options: None,
             }
@@ -1398,6 +1399,7 @@ mod cache_key_tests {
             llm,
             prompt: None,
             min_image_area: CaptioningConfig::default_min_image_area(),
+            alt_text: Default::default(),
         };
         let a = ExtractionConfig {
             captioning: Some(build(cache_on)),
@@ -1411,6 +1413,27 @@ mod cache_key_tests {
             hash_extraction_config(&a, "image/png"),
             hash_extraction_config(&b, "image/png"),
             "captioning.llm.cache is a cache-control field and must not affect the extraction-cache key"
+        );
+    }
+
+    #[test]
+    fn captioning_alt_text_mode_changes_the_cache_key() {
+        use crate::core::config::{CaptionAltTextMode, CaptioningConfig};
+
+        let build = |alt_text| ExtractionConfig {
+            captioning: Some(CaptioningConfig {
+                llm: crate::core::config::LlmConfig::default(),
+                prompt: None,
+                min_image_area: CaptioningConfig::default_min_image_area(),
+                alt_text,
+            }),
+            ..Default::default()
+        };
+
+        assert_ne!(
+            hash_extraction_config(&build(CaptionAltTextMode::Preserve), "image/png"),
+            hash_extraction_config(&build(CaptionAltTextMode::Replace), "image/png"),
+            "captioning alt-text precedence changes rendered output and must affect the cache key"
         );
     }
 

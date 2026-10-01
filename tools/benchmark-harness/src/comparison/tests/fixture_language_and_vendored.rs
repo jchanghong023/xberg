@@ -156,7 +156,7 @@ fn fixture_language_preserves_explicit_paddle_backend_and_model_tier() {
     let ocr = config.ocr.expect("Paddle preset must configure OCR");
     assert_eq!(ocr.language, ["deu", "eng"]);
     assert_eq!(ocr.backend, "paddleocr");
-    assert_eq!(ocr.paddle_ocr_config.expect("model identity")["model_tier"], "small");
+    assert_eq!(ocr.paddle_ocr_settings.expect("model identity").model_tier, "small");
 }
 
 fn create_vendored_fixture(root: &Path, content: &str) -> (std::path::PathBuf, std::path::PathBuf) {

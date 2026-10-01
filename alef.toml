@@ -6,7 +6,7 @@
 # for. 0.83.0 additionally fixes the php/napi/pyo3 mirror defaults, the elixir bytes
 # hop and the typescript/wasm mock-url builder that this repo's e2e legs were red on.
 # ~keep
-alef_version = "0.103.1"
+alef_version = "0.103.6"
 languages = [
   "python",
   "node",
@@ -610,14 +610,13 @@ traineddata = "traineddata"
 "tools/benchmark-harness/baselines/initial_baseline.json" = ["file-too-long"]
 "tools/benchmark-harness/guardrails.json" = ["file-too-long"]
 # --- quality-debt baseline (generated) ---
-# 490 size/complexity findings across 184 files that predate these metrics, listed per file
+# 485 size/complexity rule attachments across 179 files that predate these metrics, listed per file
 # rather than switching the rules off, so the metrics still fire on every file NOT listed
 # here -- new code stays covered, and each path below is one discrete unit of work.
 #
-# These counts describe THIS BLOCK only. The tracked #1567 headline counts the same six
-# rules across the whole table including the ~keep sections outside this block, which is
-# currently 232 files / 623 attachments. Four different numbers have described this one
-# baseline at various times; prefer a fresh TOML parse over any of them. ~keep
+# These counts describe THIS BLOCK only. A fresh uncached lint run for #1567 reports 1,578
+# suppressed findings across these 179 files; one attachment can suppress many findings.
+# Prefer a fresh TOML parse and uncached lint run over historical issue counts. ~keep
 # TODO(xberg-io/xberg#1567): pay this down file by file and delete each entry as it goes green.
 # Do not add new paths here without a very good reason. ~keep
 ".github/workflows/benchmarks.yaml" = ["file-too-long"]
@@ -1085,17 +1084,12 @@ traineddata = "traineddata"
 "crates/xberg/src/table_core.rs" = ["file-too-long", "function-too-long"]
 "crates/xberg/src/text/redaction/engine.rs" = ["cyclomatic-complexity", "file-too-long", "function-too-long"]
 "crates/xberg/src/transcription/engine.rs" = ["function-too-long"]
-"crates/xberg/src/types/document_structure/tests.rs" = ["function-too-long"]
 "crates/xberg/src/types/extraction.rs" = ["file-too-long", "type-too-long"]
-"crates/xberg/src/types/internal/tests.rs" = ["function-too-long"]
 "crates/xberg/src/types/internal_builder.rs" = ["file-too-long", "too-many-parameters"]
 "crates/xberg/src/types/metadata.rs" = ["cyclomatic-complexity", "file-too-long", "function-too-long"]
-"crates/xberg/tests/cross_format_parity.rs" = ["file-too-long"]
 "crates/xberg/tests/pdf_image_extraction_tests.rs" = ["file-too-long"]
 "crates/xberg/tests/pdf_markdown_regression.rs" = ["file-too-long"]
 "crates/xberg/tests/pipeline_integration.rs" = ["file-too-long"]
-"crates/xberg/tests/plugin_ocr_backend_test.rs" = ["file-too-long"]
-"crates/xberg/tests/typst_behavioral_tests.rs" = ["file-too-long"]
 "docs-site/src/content/docs/cli/usage.mdx" = ["file-too-long"]
 "docs-site/src/content/docs/guides/ocr.mdx" = ["file-too-long"]
 "scripts/ci/check-ffi-declaration-parity.py" = ["function-too-long"]
@@ -1390,6 +1384,7 @@ error_type = "XbergError"
 error_constructor = "xberg::XbergError::Other({msg})"
 version_from = "Cargo.toml"
 workspace_root = "."
+crate_attributes = ["allow(deprecated)"]
 sources = [
   "crates/xberg/src/lib.rs",
   "crates/xberg/src/error.rs",
@@ -1517,6 +1512,7 @@ features = [
   "transcription-types",
   "classification",
   "captioning",
+  "formula-recognition",
   "ner-onnx",
   "ner-llm",
   "diff",
@@ -1527,6 +1523,24 @@ features = [
   "presets",
   "structured",
   "url-ingestion",
+]
+
+# Keep these published native-wrapper Cargo feature names even when their only Rust
+# cfg-gated symbols are intentionally excluded from generated binding surfaces. ~keep
+wrapper_default_features = [
+  "captioning",
+  "chunking",
+  "embeddings",
+  "formula-recognition",
+  "liter-llm",
+  "mcp",
+  "mcp-http",
+  "ner-onnx",
+  "paddle-ocr-types",
+  "redaction-rehydrate",
+  "sparse-embeddings",
+  "tokio-runtime",
+  "transcription",
 ]
 
 [[crates.source_crates]]
@@ -1897,6 +1911,9 @@ custom_rust_modules = ["bridge", "engine"]
 extra_features = ["sceptre-wasm"]
 exclude_types = ["OcrFallbackDecision", "OcrProcessor", "OcrCacheStats", "TessdataManager", "PageLayoutResult"]
 exclude_functions = [
+  # Request-scoped extraction uses Tokio task-local state; browser callers can
+  # apply owned findings with `redact_external` instead. ~keep
+  "extract_with_external_redaction",
   "embed_texts",
   "embed_text",
   "detect_layout",
@@ -2107,6 +2124,7 @@ features = [
   "transcription-types",
   "classification",
   "captioning",
+  "formula-recognition",
   "ner-onnx",
   "ner-llm",
   "diff",
@@ -3437,7 +3455,7 @@ result_var = "result"
 async = true
 returns_result = true
 args = [
-  { name = "input", field = "input", type = "json_object", owned = true, go_type = "ExtractInput", element_type = "ExtractInput" },
+  { name = "input", field = "input.extract_input", type = "json_object", owned = true, go_type = "ExtractInput", element_type = "ExtractInput" },
   { name = "config", field = "config", type = "json_object", optional = true },
 ]
 
@@ -3544,6 +3562,35 @@ from_json_module = "xberg._xberg"
 [crates.e2e.calls.extract.overrides.node]
 options_type = "ExtractionConfig"
 enum_fields = { chunker_type = "ChunkerType" }
+
+[crates.e2e.calls.extract_with_external_redaction]
+function = "extract_with_external_redaction"
+module = "xberg"
+async = true
+returns_result = true
+streaming = false
+args = [
+  { name = "input", field = "input", type = "json_object", owned = true, go_type = "ExtractInput", element_type = "ExtractInput" },
+  { name = "config", field = "config", type = "json_object" },
+  { name = "findings_json", field = "input.findings_json", type = "string" },
+  { name = "offset_encoding", field = "input.offset_encoding", type = "string", optional = true },
+  { name = "max_findings", field = "input.max_findings", type = "u32", optional = true },
+]
+
+[crates.e2e.calls.extract_with_external_redaction.overrides.python]
+module = "xberg"
+function = "extract_with_external_redaction"
+options_type = "ExtractionConfig"
+options_via = "from_json"
+from_json_module = "xberg._xberg"
+
+[crates.e2e.calls.extract_with_external_redaction.overrides.node]
+module = "xberg"
+function = "extractWithExternalRedaction"
+options_type = "ExtractionConfig"
+
+[crates.e2e.calls.extract_with_external_redaction.overrides.swift]
+unnamed_arg_indices = [0, 1, 2, 3, 4]
 
 [crates.e2e.calls.list_supported_formats]
 result_is_simple = true
@@ -5269,7 +5316,7 @@ path = "../../packages/swift"
 path = "../../packages/zig"
 
 [crates.e2e.registry.packages.zig]
-hash = "xberg-v1.3.0-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+hash = "xberg-v1.3.2-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 
 [crates.e2e.packages.wasm]
 name = "@xberg-io/xberg-wasm"
@@ -5554,6 +5601,7 @@ snippets = { basic_extraction = "api/extract.md", async_extraction = "api/extrac
 
 [[crates.trait_bridges]]
 trait_name = "OcrBackend"
+exclude_languages = ["php:callbacks"]
 super_trait = "xberg::plugins::Plugin"
 registry_getter = "xberg::plugins::registry::get_ocr_backend_registry"
 register_fn = "register_ocr_backend"
@@ -5562,6 +5610,7 @@ clear_fn = "clear_ocr_backends"
 
 [[crates.trait_bridges]]
 trait_name = "PostProcessor"
+exclude_languages = ["php:callbacks"]
 super_trait = "xberg::plugins::Plugin"
 registry_getter = "xberg::plugins::registry::get_post_processor_registry"
 register_fn = "register_post_processor"
@@ -5570,6 +5619,7 @@ clear_fn = "clear_post_processors"
 
 [[crates.trait_bridges]]
 trait_name = "Validator"
+exclude_languages = ["php:callbacks"]
 super_trait = "xberg::plugins::Plugin"
 registry_getter = "xberg::plugins::registry::get_validator_registry"
 register_fn = "register_validator"
@@ -5578,6 +5628,7 @@ clear_fn = "clear_validators"
 
 [[crates.trait_bridges]]
 trait_name = "DocumentExtractor"
+exclude_languages = ["php:callbacks"]
 super_trait = "xberg::plugins::Plugin"
 registry_getter = "xberg::plugins::registry::get_document_extractor_registry"
 register_fn = "register_document_extractor"
@@ -5586,6 +5637,7 @@ clear_fn = "clear_document_extractors"
 
 [[crates.trait_bridges]]
 trait_name = "EmbeddingBackend"
+exclude_languages = ["php:callbacks"]
 super_trait = "xberg::plugins::Plugin"
 registry_getter = "xberg::plugins::registry::get_embedding_backend_registry"
 register_fn = "register_embedding_backend"
@@ -5594,6 +5646,7 @@ clear_fn = "clear_embedding_backends"
 
 [[crates.trait_bridges]]
 trait_name = "Renderer"
+exclude_languages = ["php:callbacks"]
 super_trait = "xberg::plugins::Plugin"
 registry_getter = "xberg::plugins::registry::get_renderer_registry"
 register_fn = "register_renderer"
@@ -5602,6 +5655,7 @@ clear_fn = "clear_renderers"
 
 [[crates.trait_bridges]]
 trait_name = "RerankerBackend"
+exclude_languages = ["php:callbacks"]
 super_trait = "xberg::plugins::Plugin"
 registry_getter = "xberg::plugins::registry::get_reranker_backend_registry"
 register_fn = "register_reranker_backend"
@@ -5610,6 +5664,7 @@ clear_fn = "clear_reranker_backends"
 
 [[crates.trait_bridges]]
 trait_name = "TokenizerBackend"
+exclude_languages = ["php:callbacks"]
 super_trait = "xberg::plugins::Plugin"
 registry_getter = "xberg::plugins::registry::get_tokenizer_backend_registry"
 register_fn = "register_tokenizer_backend"

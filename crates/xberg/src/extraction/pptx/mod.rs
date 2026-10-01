@@ -93,13 +93,13 @@ pub struct PptxExtractionOptions {
 
 /// Crate-internal PPTX extraction output.
 ///
-/// `slide_contents` keeps the archive-derived slide number alongside each
-/// rendered slide. The public result remains unchanged, while the internal
-/// extractor can rebuild page-aware elements without embedding forgeable
-/// boundary markers in user-controlled text.
+/// `slide_contents` keeps archive-derived slide numbers and structural image
+/// identity alongside rendered non-image content. The public result remains
+/// unchanged while the internal extractor avoids parsing user-authored text as
+/// image provenance. ~keep
 pub(crate) struct PptxInternalExtraction {
     pub(crate) result: PptxExtractionResult,
-    pub(crate) slide_contents: Vec<(u32, String)>,
+    pub(crate) slide_contents: Vec<PptxInternalSlide>,
     /// `(latex, is_display)` for every math run, in slide order. The text
     /// flattens a math run into its LaTeX, which cannot be told apart from
     /// author text that holds the same characters.
@@ -107,6 +107,20 @@ pub(crate) struct PptxInternalExtraction {
     /// Whether the text is plain. Plain text holds the bare LaTeX of a math
     /// run; markdown text holds `$$latex$$` or `$latex$`.
     pub(crate) plain_output: bool,
+}
+
+pub(crate) struct PptxInternalSlide {
+    pub(crate) slide_number: u32,
+    pub(crate) elements: Vec<PptxInternalSlideElement>,
+}
+
+pub(crate) enum PptxInternalSlideElement {
+    Markdown(String),
+    Image {
+        alt_text: String,
+        target: String,
+        image_index: Option<u32>,
+    },
 }
 
 impl Default for PptxExtractionOptions {
@@ -222,34 +236,40 @@ pub(crate) fn extract_pptx_from_bytes_with_slide_contents(
     extract_pptx_from_container(container, options, warnings)
 }
 
+fn ordered_slide_images(slide: &elements::Slide) -> Vec<(&elements::ImageReference, &elements::ElementPosition)> {
+    let mut images: Vec<_> = slide
+        .elements
+        .iter()
+        .filter_map(|element| match element {
+            SlideElement::Image(image, position) => Some((image, position)),
+            _ => None,
+        })
+        .collect();
+    images.sort_by_key(|(_, position)| (position.y, position.x));
+    images
+}
+
 /// Read one slide's referenced images (by relationship ID, not iteration
 /// position -- see #91) and append each as an `ExtractedImage`. A reference
 /// the image map has no bytes for is skipped with a `ProcessingWarning`,
-/// rather than aborting the slide.
+/// rather than aborting the slide. ~keep
 fn extract_slide_images<R: std::io::Read + std::io::Seek>(
     slide: &elements::Slide,
     iterator: &mut SlideIterator<R>,
     extracted_images: &mut Vec<ExtractedImage>,
     warnings: &mut Vec<ProcessingWarning>,
-) {
+) -> Vec<Option<u32>> {
     let Ok(image_data) = iterator.get_slide_images(slide) else {
-        return;
+        return Vec::new();
     };
 
-    // Pair each image element with its bytes by relationship ID, not by
-    // iteration position: `image_data` is a hash map, so its iteration
-    // order is unrelated to the document order of `slide.elements`.
-    // Indexing into a separately-collected, document-ordered Vec by a
-    // hash-map enumeration index silently mismatched dimensions/alt-text
-    // with the wrong shape whenever a slide had more than one image (#91).
-    for (img_ref, pos) in slide.elements.iter().filter_map(|e| {
-        if let SlideElement::Image(img_ref, pos) = e {
-            Some((img_ref, pos))
-        } else {
-            None
-        }
-    }) {
+    let image_elements = ordered_slide_images(slide);
+    let mut image_indices = Vec::with_capacity(image_elements.len());
+
+    // Keep image indices in Slide::to_markdown's stable visual order. ~keep
+    for (img_ref, pos) in image_elements {
         let Some(data) = image_data.get(&img_ref.id) else {
+            image_indices.push(None);
             push_warning(
                 warnings,
                 "pptx",
@@ -263,6 +283,7 @@ fn extract_slide_images<R: std::io::Read + std::io::Seek>(
 
         let format = detect_image_format(data);
         let image_index = extracted_images.len();
+        image_indices.push(Some(image_index as u32));
 
         let width = if pos.cx > 0 { Some((pos.cx / 9525) as u32) } else { None };
         let height = if pos.cy > 0 { Some((pos.cy / 9525) as u32) } else { None };
@@ -311,6 +332,8 @@ fn extract_slide_images<R: std::io::Read + std::io::Seek>(
             data_base64: None,
         });
     }
+
+    image_indices
 }
 
 /// Mark each tracked page as non-blank when an extracted image landed on it,
@@ -373,7 +396,7 @@ struct SlideProcessingContext<'a> {
     content_builder: &'a mut ContentBuilder,
     doc_builder: &'a mut Option<DocumentStructureBuilder>,
     image_index_counter: &'a mut u32,
-    slide_contents: &'a mut Vec<(u32, String)>,
+    slide_contents: &'a mut Vec<PptxInternalSlide>,
     collected_hyperlinks: &'a mut Vec<(String, Option<String>)>,
     collected_formulas: &'a mut Vec<(String, bool)>,
     extracted_images: &'a mut Vec<ExtractedImage>,
@@ -404,18 +427,28 @@ fn process_one_slide<R: std::io::Read + std::io::Seek>(
         ctx.content_builder.add_notes(note_text);
     }
 
-    let mut internal_slide_content = slide_content.clone();
+    let image_indices = if ctx.config.extract_images {
+        extract_slide_images(&slide, iterator, ctx.extracted_images, warnings)
+    } else {
+        Vec::new()
+    };
+    let mut internal_elements = slide.to_internal_elements(ctx.config, &image_indices);
     if let Some(ref note_text) = slide_notes
         && !note_text.trim().is_empty()
     {
+        let mut note_content = String::new();
         if ctx.plain {
-            internal_slide_content.push_str("\n\nNotes:\n");
+            note_content.push_str("Notes:\n");
         } else {
-            internal_slide_content.push_str("\n\n### Notes:\n");
+            note_content.push_str("### Notes:\n");
         }
-        internal_slide_content.push_str(note_text);
+        note_content.push_str(note_text);
+        internal_elements.push(PptxInternalSlideElement::Markdown(note_content));
     }
-    ctx.slide_contents.push((slide.slide_number, internal_slide_content));
+    ctx.slide_contents.push(PptxInternalSlide {
+        slide_number: slide.slide_number,
+        elements: internal_elements,
+    });
 
     let slide_section = ctx.section_names.get(&slide.slide_number).cloned();
 
@@ -435,10 +468,6 @@ fn process_one_slide<R: std::io::Read + std::io::Seek>(
 
     collect_slide_hyperlinks(&slide, ctx.collected_hyperlinks);
     collect_slide_formulas(&slide, ctx.collected_formulas);
-
-    if ctx.config.extract_images {
-        extract_slide_images(&slide, iterator, ctx.extracted_images, warnings);
-    }
 
     *ctx.total_image_count += slide.image_count();
     *ctx.total_table_count += slide.table_count();

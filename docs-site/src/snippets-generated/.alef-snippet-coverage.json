@@ -23,6 +23,9 @@
     "c/contract/api_extract_batch_uri_with_config.md",
     "c/contract/api_extract_bytes_input.md",
     "c/contract/api_extract_uri.md",
+    "c/contract/api_extract_with_external_redaction.md",
+    "c/contract/api_extract_with_external_redaction_default_encoding.md",
+    "c/contract/api_extract_with_external_redaction_invalid_encoding.md",
     "c/contract/config_document_structure_with_headings.md",
     "c/contract/config_element_types.md",
     "c/contract/config_embedding_plugin.md",
@@ -30,6 +33,7 @@
     "c/contract/config_keywords.md",
     "c/contract/config_llm_max_concurrency.md",
     "c/contract/config_llm_structured_extraction.md",
+    "c/contract/config_ocr_pipeline_nested_types.md",
     "c/contract/config_pages.md",
     "c/contract/config_quality_enabled.md",
     "c/contract/config_security_limits.md",
@@ -123,6 +127,9 @@
     "csharp/contract/api_extract_batch_uri_with_config.md",
     "csharp/contract/api_extract_bytes_input.md",
     "csharp/contract/api_extract_uri.md",
+    "csharp/contract/api_extract_with_external_redaction.md",
+    "csharp/contract/api_extract_with_external_redaction_default_encoding.md",
+    "csharp/contract/api_extract_with_external_redaction_invalid_encoding.md",
     "csharp/contract/config_document_structure_with_headings.md",
     "csharp/contract/config_element_types.md",
     "csharp/contract/config_embedding_plugin.md",
@@ -130,6 +137,7 @@
     "csharp/contract/config_keywords.md",
     "csharp/contract/config_llm_max_concurrency.md",
     "csharp/contract/config_llm_structured_extraction.md",
+    "csharp/contract/config_ocr_pipeline_nested_types.md",
     "csharp/contract/config_pages.md",
     "csharp/contract/config_quality_enabled.md",
     "csharp/contract/config_security_limits.md",
@@ -223,6 +231,9 @@
     "dart/contract/api_extract_batch_uri_with_config.md",
     "dart/contract/api_extract_bytes_input.md",
     "dart/contract/api_extract_uri.md",
+    "dart/contract/api_extract_with_external_redaction.md",
+    "dart/contract/api_extract_with_external_redaction_default_encoding.md",
+    "dart/contract/api_extract_with_external_redaction_invalid_encoding.md",
     "dart/contract/config_document_structure_with_headings.md",
     "dart/contract/config_element_types.md",
     "dart/contract/config_embedding_plugin.md",
@@ -230,6 +241,7 @@
     "dart/contract/config_keywords.md",
     "dart/contract/config_llm_max_concurrency.md",
     "dart/contract/config_llm_structured_extraction.md",
+    "dart/contract/config_ocr_pipeline_nested_types.md",
     "dart/contract/config_pages.md",
     "dart/contract/config_quality_enabled.md",
     "dart/contract/config_security_limits.md",
@@ -323,6 +335,9 @@
     "elixir/contract/api_extract_batch_uri_with_config.md",
     "elixir/contract/api_extract_bytes_input.md",
     "elixir/contract/api_extract_uri.md",
+    "elixir/contract/api_extract_with_external_redaction.md",
+    "elixir/contract/api_extract_with_external_redaction_default_encoding.md",
+    "elixir/contract/api_extract_with_external_redaction_invalid_encoding.md",
     "elixir/contract/config_document_structure_with_headings.md",
     "elixir/contract/config_element_types.md",
     "elixir/contract/config_embedding_plugin.md",
@@ -330,6 +345,7 @@
     "elixir/contract/config_keywords.md",
     "elixir/contract/config_llm_max_concurrency.md",
     "elixir/contract/config_llm_structured_extraction.md",
+    "elixir/contract/config_ocr_pipeline_nested_types.md",
     "elixir/contract/config_pages.md",
     "elixir/contract/config_quality_enabled.md",
     "elixir/contract/config_security_limits.md",
@@ -423,6 +439,9 @@
     "go/contract/api_extract_batch_uri_with_config.md",
     "go/contract/api_extract_bytes_input.md",
     "go/contract/api_extract_uri.md",
+    "go/contract/api_extract_with_external_redaction.md",
+    "go/contract/api_extract_with_external_redaction_default_encoding.md",
+    "go/contract/api_extract_with_external_redaction_invalid_encoding.md",
     "go/contract/config_document_structure_with_headings.md",
     "go/contract/config_element_types.md",
     "go/contract/config_embedding_plugin.md",
@@ -430,6 +449,7 @@
     "go/contract/config_keywords.md",
     "go/contract/config_llm_max_concurrency.md",
     "go/contract/config_llm_structured_extraction.md",
+    "go/contract/config_ocr_pipeline_nested_types.md",
     "go/contract/config_pages.md",
     "go/contract/config_quality_enabled.md",
     "go/contract/config_security_limits.md",
@@ -523,6 +543,9 @@
     "java/contract/api_extract_batch_uri_with_config.md",
     "java/contract/api_extract_bytes_input.md",
     "java/contract/api_extract_uri.md",
+    "java/contract/api_extract_with_external_redaction.md",
+    "java/contract/api_extract_with_external_redaction_default_encoding.md",
+    "java/contract/api_extract_with_external_redaction_invalid_encoding.md",
     "java/contract/config_document_structure_with_headings.md",
     "java/contract/config_element_types.md",
     "java/contract/config_embedding_plugin.md",
@@ -530,6 +553,7 @@
     "java/contract/config_keywords.md",
     "java/contract/config_llm_max_concurrency.md",
     "java/contract/config_llm_structured_extraction.md",
+    "java/contract/config_ocr_pipeline_nested_types.md",
     "java/contract/config_pages.md",
     "java/contract/config_quality_enabled.md",
     "java/contract/config_security_limits.md",
@@ -623,6 +647,9 @@
     "kotlin-android/contract/api_extract_batch_uri_with_config.md",
     "kotlin-android/contract/api_extract_bytes_input.md",
     "kotlin-android/contract/api_extract_uri.md",
+    "kotlin-android/contract/api_extract_with_external_redaction.md",
+    "kotlin-android/contract/api_extract_with_external_redaction_default_encoding.md",
+    "kotlin-android/contract/api_extract_with_external_redaction_invalid_encoding.md",
     "kotlin-android/contract/config_document_structure_with_headings.md",
     "kotlin-android/contract/config_element_types.md",
     "kotlin-android/contract/config_embedding_plugin.md",
@@ -630,6 +657,7 @@
     "kotlin-android/contract/config_keywords.md",
     "kotlin-android/contract/config_llm_max_concurrency.md",
     "kotlin-android/contract/config_llm_structured_extraction.md",
+    "kotlin-android/contract/config_ocr_pipeline_nested_types.md",
     "kotlin-android/contract/config_pages.md",
     "kotlin-android/contract/config_quality_enabled.md",
     "kotlin-android/contract/config_security_limits.md",
@@ -723,6 +751,9 @@
     "php/contract/api_extract_batch_uri_with_config.md",
     "php/contract/api_extract_bytes_input.md",
     "php/contract/api_extract_uri.md",
+    "php/contract/api_extract_with_external_redaction.md",
+    "php/contract/api_extract_with_external_redaction_default_encoding.md",
+    "php/contract/api_extract_with_external_redaction_invalid_encoding.md",
     "php/contract/config_document_structure_with_headings.md",
     "php/contract/config_element_types.md",
     "php/contract/config_embedding_plugin.md",
@@ -730,6 +761,7 @@
     "php/contract/config_keywords.md",
     "php/contract/config_llm_max_concurrency.md",
     "php/contract/config_llm_structured_extraction.md",
+    "php/contract/config_ocr_pipeline_nested_types.md",
     "php/contract/config_pages.md",
     "php/contract/config_quality_enabled.md",
     "php/contract/config_security_limits.md",
@@ -823,6 +855,9 @@
     "python/contract/api_extract_batch_uri_with_config.md",
     "python/contract/api_extract_bytes_input.md",
     "python/contract/api_extract_uri.md",
+    "python/contract/api_extract_with_external_redaction.md",
+    "python/contract/api_extract_with_external_redaction_default_encoding.md",
+    "python/contract/api_extract_with_external_redaction_invalid_encoding.md",
     "python/contract/config_document_structure_with_headings.md",
     "python/contract/config_element_types.md",
     "python/contract/config_embedding_plugin.md",
@@ -830,6 +865,7 @@
     "python/contract/config_keywords.md",
     "python/contract/config_llm_max_concurrency.md",
     "python/contract/config_llm_structured_extraction.md",
+    "python/contract/config_ocr_pipeline_nested_types.md",
     "python/contract/config_pages.md",
     "python/contract/config_quality_enabled.md",
     "python/contract/config_security_limits.md",
@@ -923,6 +959,9 @@
     "ruby/contract/api_extract_batch_uri_with_config.md",
     "ruby/contract/api_extract_bytes_input.md",
     "ruby/contract/api_extract_uri.md",
+    "ruby/contract/api_extract_with_external_redaction.md",
+    "ruby/contract/api_extract_with_external_redaction_default_encoding.md",
+    "ruby/contract/api_extract_with_external_redaction_invalid_encoding.md",
     "ruby/contract/config_document_structure_with_headings.md",
     "ruby/contract/config_element_types.md",
     "ruby/contract/config_embedding_plugin.md",
@@ -930,6 +969,7 @@
     "ruby/contract/config_keywords.md",
     "ruby/contract/config_llm_max_concurrency.md",
     "ruby/contract/config_llm_structured_extraction.md",
+    "ruby/contract/config_ocr_pipeline_nested_types.md",
     "ruby/contract/config_pages.md",
     "ruby/contract/config_quality_enabled.md",
     "ruby/contract/config_security_limits.md",
@@ -1023,6 +1063,9 @@
     "rust/contract/api_extract_batch_uri_with_config.md",
     "rust/contract/api_extract_bytes_input.md",
     "rust/contract/api_extract_uri.md",
+    "rust/contract/api_extract_with_external_redaction.md",
+    "rust/contract/api_extract_with_external_redaction_default_encoding.md",
+    "rust/contract/api_extract_with_external_redaction_invalid_encoding.md",
     "rust/contract/config_document_structure_with_headings.md",
     "rust/contract/config_element_types.md",
     "rust/contract/config_embedding_plugin.md",
@@ -1030,6 +1073,7 @@
     "rust/contract/config_keywords.md",
     "rust/contract/config_llm_max_concurrency.md",
     "rust/contract/config_llm_structured_extraction.md",
+    "rust/contract/config_ocr_pipeline_nested_types.md",
     "rust/contract/config_pages.md",
     "rust/contract/config_quality_enabled.md",
     "rust/contract/config_security_limits.md",
@@ -1135,6 +1179,9 @@
     "swift/contract/api_extract_batch_uri_with_config.md",
     "swift/contract/api_extract_bytes_input.md",
     "swift/contract/api_extract_uri.md",
+    "swift/contract/api_extract_with_external_redaction.md",
+    "swift/contract/api_extract_with_external_redaction_default_encoding.md",
+    "swift/contract/api_extract_with_external_redaction_invalid_encoding.md",
     "swift/contract/config_document_structure_with_headings.md",
     "swift/contract/config_element_types.md",
     "swift/contract/config_embedding_plugin.md",
@@ -1142,6 +1189,7 @@
     "swift/contract/config_keywords.md",
     "swift/contract/config_llm_max_concurrency.md",
     "swift/contract/config_llm_structured_extraction.md",
+    "swift/contract/config_ocr_pipeline_nested_types.md",
     "swift/contract/config_pages.md",
     "swift/contract/config_quality_enabled.md",
     "swift/contract/config_security_limits.md",
@@ -1235,6 +1283,9 @@
     "typescript/contract/api_extract_batch_uri_with_config.md",
     "typescript/contract/api_extract_bytes_input.md",
     "typescript/contract/api_extract_uri.md",
+    "typescript/contract/api_extract_with_external_redaction.md",
+    "typescript/contract/api_extract_with_external_redaction_default_encoding.md",
+    "typescript/contract/api_extract_with_external_redaction_invalid_encoding.md",
     "typescript/contract/config_document_structure_with_headings.md",
     "typescript/contract/config_element_types.md",
     "typescript/contract/config_embedding_plugin.md",
@@ -1242,6 +1293,7 @@
     "typescript/contract/config_keywords.md",
     "typescript/contract/config_llm_max_concurrency.md",
     "typescript/contract/config_llm_structured_extraction.md",
+    "typescript/contract/config_ocr_pipeline_nested_types.md",
     "typescript/contract/config_pages.md",
     "typescript/contract/config_quality_enabled.md",
     "typescript/contract/config_security_limits.md",
@@ -1342,6 +1394,7 @@
     "wasm/contract/config_keywords.md",
     "wasm/contract/config_llm_max_concurrency.md",
     "wasm/contract/config_llm_structured_extraction.md",
+    "wasm/contract/config_ocr_pipeline_nested_types.md",
     "wasm/contract/config_pages.md",
     "wasm/contract/config_quality_enabled.md",
     "wasm/contract/config_security_limits.md",
@@ -1435,6 +1488,9 @@
     "zig/contract/api_extract_batch_uri_with_config.md",
     "zig/contract/api_extract_bytes_input.md",
     "zig/contract/api_extract_uri.md",
+    "zig/contract/api_extract_with_external_redaction.md",
+    "zig/contract/api_extract_with_external_redaction_default_encoding.md",
+    "zig/contract/api_extract_with_external_redaction_invalid_encoding.md",
     "zig/contract/config_document_structure_with_headings.md",
     "zig/contract/config_element_types.md",
     "zig/contract/config_embedding_plugin.md",
@@ -1442,6 +1498,7 @@
     "zig/contract/config_keywords.md",
     "zig/contract/config_llm_max_concurrency.md",
     "zig/contract/config_llm_structured_extraction.md",
+    "zig/contract/config_ocr_pipeline_nested_types.md",
     "zig/contract/config_pages.md",
     "zig/contract/config_quality_enabled.md",
     "zig/contract/config_security_limits.md",
@@ -1781,6 +1838,42 @@
     },
     {
       "key": {
+        "fixture_id": "api_extract_with_external_redaction",
+        "language": "c"
+      },
+      "path": "c/contract/api_extract_with_external_redaction.md",
+      "language": "c",
+      "target": "c",
+      "session": "c",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_default_encoding",
+        "language": "c"
+      },
+      "path": "c/contract/api_extract_with_external_redaction_default_encoding.md",
+      "language": "c",
+      "target": "c",
+      "session": "c",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+        "language": "c"
+      },
+      "path": "c/contract/api_extract_with_external_redaction_invalid_encoding.md",
+      "language": "c",
+      "target": "c",
+      "session": "c",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
         "fixture_id": "config_document_structure_with_headings",
         "language": "c"
       },
@@ -1857,6 +1950,18 @@
         "language": "c"
       },
       "path": "c/contract/config_llm_structured_extraction.md",
+      "language": "c",
+      "target": "c",
+      "session": "c",
+      "requires": [],
+      "side_effect": "server"
+    },
+    {
+      "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "c"
+      },
+      "path": "c/contract/config_ocr_pipeline_nested_types.md",
       "language": "c",
       "target": "c",
       "session": "c",
@@ -2981,6 +3086,42 @@
     },
     {
       "key": {
+        "fixture_id": "api_extract_with_external_redaction",
+        "language": "csharp"
+      },
+      "path": "csharp/contract/api_extract_with_external_redaction.md",
+      "language": "csharp",
+      "target": "csharp",
+      "session": "csharp",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_default_encoding",
+        "language": "csharp"
+      },
+      "path": "csharp/contract/api_extract_with_external_redaction_default_encoding.md",
+      "language": "csharp",
+      "target": "csharp",
+      "session": "csharp",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+        "language": "csharp"
+      },
+      "path": "csharp/contract/api_extract_with_external_redaction_invalid_encoding.md",
+      "language": "csharp",
+      "target": "csharp",
+      "session": "csharp",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
         "fixture_id": "config_document_structure_with_headings",
         "language": "csharp"
       },
@@ -3057,6 +3198,18 @@
         "language": "csharp"
       },
       "path": "csharp/contract/config_llm_structured_extraction.md",
+      "language": "csharp",
+      "target": "csharp",
+      "session": "csharp",
+      "requires": [],
+      "side_effect": "server"
+    },
+    {
+      "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "csharp"
+      },
+      "path": "csharp/contract/config_ocr_pipeline_nested_types.md",
       "language": "csharp",
       "target": "csharp",
       "session": "csharp",
@@ -4181,6 +4334,42 @@
     },
     {
       "key": {
+        "fixture_id": "api_extract_with_external_redaction",
+        "language": "dart"
+      },
+      "path": "dart/contract/api_extract_with_external_redaction.md",
+      "language": "dart",
+      "target": "dart",
+      "session": "dart",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_default_encoding",
+        "language": "dart"
+      },
+      "path": "dart/contract/api_extract_with_external_redaction_default_encoding.md",
+      "language": "dart",
+      "target": "dart",
+      "session": "dart",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+        "language": "dart"
+      },
+      "path": "dart/contract/api_extract_with_external_redaction_invalid_encoding.md",
+      "language": "dart",
+      "target": "dart",
+      "session": "dart",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
         "fixture_id": "config_document_structure_with_headings",
         "language": "dart"
       },
@@ -4257,6 +4446,18 @@
         "language": "dart"
       },
       "path": "dart/contract/config_llm_structured_extraction.md",
+      "language": "dart",
+      "target": "dart",
+      "session": "dart",
+      "requires": [],
+      "side_effect": "server"
+    },
+    {
+      "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "dart"
+      },
+      "path": "dart/contract/config_ocr_pipeline_nested_types.md",
       "language": "dart",
       "target": "dart",
       "session": "dart",
@@ -5381,6 +5582,42 @@
     },
     {
       "key": {
+        "fixture_id": "api_extract_with_external_redaction",
+        "language": "elixir"
+      },
+      "path": "elixir/contract/api_extract_with_external_redaction.md",
+      "language": "elixir",
+      "target": "elixir",
+      "session": "elixir",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_default_encoding",
+        "language": "elixir"
+      },
+      "path": "elixir/contract/api_extract_with_external_redaction_default_encoding.md",
+      "language": "elixir",
+      "target": "elixir",
+      "session": "elixir",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+        "language": "elixir"
+      },
+      "path": "elixir/contract/api_extract_with_external_redaction_invalid_encoding.md",
+      "language": "elixir",
+      "target": "elixir",
+      "session": "elixir",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
         "fixture_id": "config_document_structure_with_headings",
         "language": "elixir"
       },
@@ -5457,6 +5694,18 @@
         "language": "elixir"
       },
       "path": "elixir/contract/config_llm_structured_extraction.md",
+      "language": "elixir",
+      "target": "elixir",
+      "session": "elixir",
+      "requires": [],
+      "side_effect": "server"
+    },
+    {
+      "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "elixir"
+      },
+      "path": "elixir/contract/config_ocr_pipeline_nested_types.md",
       "language": "elixir",
       "target": "elixir",
       "session": "elixir",
@@ -6581,6 +6830,42 @@
     },
     {
       "key": {
+        "fixture_id": "api_extract_with_external_redaction",
+        "language": "go"
+      },
+      "path": "go/contract/api_extract_with_external_redaction.md",
+      "language": "go",
+      "target": "go",
+      "session": "go",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_default_encoding",
+        "language": "go"
+      },
+      "path": "go/contract/api_extract_with_external_redaction_default_encoding.md",
+      "language": "go",
+      "target": "go",
+      "session": "go",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+        "language": "go"
+      },
+      "path": "go/contract/api_extract_with_external_redaction_invalid_encoding.md",
+      "language": "go",
+      "target": "go",
+      "session": "go",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
         "fixture_id": "config_document_structure_with_headings",
         "language": "go"
       },
@@ -6657,6 +6942,18 @@
         "language": "go"
       },
       "path": "go/contract/config_llm_structured_extraction.md",
+      "language": "go",
+      "target": "go",
+      "session": "go",
+      "requires": [],
+      "side_effect": "server"
+    },
+    {
+      "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "go"
+      },
+      "path": "go/contract/config_ocr_pipeline_nested_types.md",
       "language": "go",
       "target": "go",
       "session": "go",
@@ -7781,6 +8078,42 @@
     },
     {
       "key": {
+        "fixture_id": "api_extract_with_external_redaction",
+        "language": "java"
+      },
+      "path": "java/contract/api_extract_with_external_redaction.md",
+      "language": "java",
+      "target": "java",
+      "session": "java",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_default_encoding",
+        "language": "java"
+      },
+      "path": "java/contract/api_extract_with_external_redaction_default_encoding.md",
+      "language": "java",
+      "target": "java",
+      "session": "java",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+        "language": "java"
+      },
+      "path": "java/contract/api_extract_with_external_redaction_invalid_encoding.md",
+      "language": "java",
+      "target": "java",
+      "session": "java",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
         "fixture_id": "config_document_structure_with_headings",
         "language": "java"
       },
@@ -7857,6 +8190,18 @@
         "language": "java"
       },
       "path": "java/contract/config_llm_structured_extraction.md",
+      "language": "java",
+      "target": "java",
+      "session": "java",
+      "requires": [],
+      "side_effect": "server"
+    },
+    {
+      "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "java"
+      },
+      "path": "java/contract/config_ocr_pipeline_nested_types.md",
       "language": "java",
       "target": "java",
       "session": "java",
@@ -8981,6 +9326,42 @@
     },
     {
       "key": {
+        "fixture_id": "api_extract_with_external_redaction",
+        "language": "kotlin_android"
+      },
+      "path": "kotlin-android/contract/api_extract_with_external_redaction.md",
+      "language": "kotlin",
+      "target": "kotlin_android",
+      "session": "kotlin_android",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_default_encoding",
+        "language": "kotlin_android"
+      },
+      "path": "kotlin-android/contract/api_extract_with_external_redaction_default_encoding.md",
+      "language": "kotlin",
+      "target": "kotlin_android",
+      "session": "kotlin_android",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+        "language": "kotlin_android"
+      },
+      "path": "kotlin-android/contract/api_extract_with_external_redaction_invalid_encoding.md",
+      "language": "kotlin",
+      "target": "kotlin_android",
+      "session": "kotlin_android",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
         "fixture_id": "config_document_structure_with_headings",
         "language": "kotlin_android"
       },
@@ -9057,6 +9438,18 @@
         "language": "kotlin_android"
       },
       "path": "kotlin-android/contract/config_llm_structured_extraction.md",
+      "language": "kotlin",
+      "target": "kotlin_android",
+      "session": "kotlin_android",
+      "requires": [],
+      "side_effect": "server"
+    },
+    {
+      "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "kotlin_android"
+      },
+      "path": "kotlin-android/contract/config_ocr_pipeline_nested_types.md",
       "language": "kotlin",
       "target": "kotlin_android",
       "session": "kotlin_android",
@@ -10181,6 +10574,42 @@
     },
     {
       "key": {
+        "fixture_id": "api_extract_with_external_redaction",
+        "language": "php"
+      },
+      "path": "php/contract/api_extract_with_external_redaction.md",
+      "language": "php",
+      "target": "php",
+      "session": "php",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_default_encoding",
+        "language": "php"
+      },
+      "path": "php/contract/api_extract_with_external_redaction_default_encoding.md",
+      "language": "php",
+      "target": "php",
+      "session": "php",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+        "language": "php"
+      },
+      "path": "php/contract/api_extract_with_external_redaction_invalid_encoding.md",
+      "language": "php",
+      "target": "php",
+      "session": "php",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
         "fixture_id": "config_document_structure_with_headings",
         "language": "php"
       },
@@ -10257,6 +10686,18 @@
         "language": "php"
       },
       "path": "php/contract/config_llm_structured_extraction.md",
+      "language": "php",
+      "target": "php",
+      "session": "php",
+      "requires": [],
+      "side_effect": "server"
+    },
+    {
+      "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "php"
+      },
+      "path": "php/contract/config_ocr_pipeline_nested_types.md",
       "language": "php",
       "target": "php",
       "session": "php",
@@ -11381,6 +11822,42 @@
     },
     {
       "key": {
+        "fixture_id": "api_extract_with_external_redaction",
+        "language": "python"
+      },
+      "path": "python/contract/api_extract_with_external_redaction.md",
+      "language": "python",
+      "target": "python",
+      "session": "python",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_default_encoding",
+        "language": "python"
+      },
+      "path": "python/contract/api_extract_with_external_redaction_default_encoding.md",
+      "language": "python",
+      "target": "python",
+      "session": "python",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+        "language": "python"
+      },
+      "path": "python/contract/api_extract_with_external_redaction_invalid_encoding.md",
+      "language": "python",
+      "target": "python",
+      "session": "python",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
         "fixture_id": "config_document_structure_with_headings",
         "language": "python"
       },
@@ -11457,6 +11934,18 @@
         "language": "python"
       },
       "path": "python/contract/config_llm_structured_extraction.md",
+      "language": "python",
+      "target": "python",
+      "session": "python",
+      "requires": [],
+      "side_effect": "server"
+    },
+    {
+      "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "python"
+      },
+      "path": "python/contract/config_ocr_pipeline_nested_types.md",
       "language": "python",
       "target": "python",
       "session": "python",
@@ -12581,6 +13070,42 @@
     },
     {
       "key": {
+        "fixture_id": "api_extract_with_external_redaction",
+        "language": "ruby"
+      },
+      "path": "ruby/contract/api_extract_with_external_redaction.md",
+      "language": "ruby",
+      "target": "ruby",
+      "session": "ruby",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_default_encoding",
+        "language": "ruby"
+      },
+      "path": "ruby/contract/api_extract_with_external_redaction_default_encoding.md",
+      "language": "ruby",
+      "target": "ruby",
+      "session": "ruby",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+        "language": "ruby"
+      },
+      "path": "ruby/contract/api_extract_with_external_redaction_invalid_encoding.md",
+      "language": "ruby",
+      "target": "ruby",
+      "session": "ruby",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
         "fixture_id": "config_document_structure_with_headings",
         "language": "ruby"
       },
@@ -12657,6 +13182,18 @@
         "language": "ruby"
       },
       "path": "ruby/contract/config_llm_structured_extraction.md",
+      "language": "ruby",
+      "target": "ruby",
+      "session": "ruby",
+      "requires": [],
+      "side_effect": "server"
+    },
+    {
+      "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "ruby"
+      },
+      "path": "ruby/contract/config_ocr_pipeline_nested_types.md",
       "language": "ruby",
       "target": "ruby",
       "session": "ruby",
@@ -13847,6 +14384,51 @@
     },
     {
       "key": {
+        "fixture_id": "api_extract_with_external_redaction",
+        "language": "rust"
+      },
+      "path": "rust/contract/api_extract_with_external_redaction.md",
+      "language": "rust",
+      "target": "rust",
+      "session": "rust",
+      "requires": [
+        "crate:serde_json",
+        "crate:tokio"
+      ],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_default_encoding",
+        "language": "rust"
+      },
+      "path": "rust/contract/api_extract_with_external_redaction_default_encoding.md",
+      "language": "rust",
+      "target": "rust",
+      "session": "rust",
+      "requires": [
+        "crate:serde_json",
+        "crate:tokio"
+      ],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+        "language": "rust"
+      },
+      "path": "rust/contract/api_extract_with_external_redaction_invalid_encoding.md",
+      "language": "rust",
+      "target": "rust",
+      "session": "rust",
+      "requires": [
+        "crate:serde_json",
+        "crate:tokio"
+      ],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
         "fixture_id": "config_document_structure_with_headings",
         "language": "rust"
       },
@@ -13941,6 +14523,21 @@
         "language": "rust"
       },
       "path": "rust/contract/config_llm_structured_extraction.md",
+      "language": "rust",
+      "target": "rust",
+      "session": "rust",
+      "requires": [
+        "crate:serde_json",
+        "crate:tokio"
+      ],
+      "side_effect": "server"
+    },
+    {
+      "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "rust"
+      },
+      "path": "rust/contract/config_ocr_pipeline_nested_types.md",
       "language": "rust",
       "target": "rust",
       "session": "rust",
@@ -15350,6 +15947,42 @@
     },
     {
       "key": {
+        "fixture_id": "api_extract_with_external_redaction",
+        "language": "swift"
+      },
+      "path": "swift/contract/api_extract_with_external_redaction.md",
+      "language": "swift",
+      "target": "swift",
+      "session": "swift",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_default_encoding",
+        "language": "swift"
+      },
+      "path": "swift/contract/api_extract_with_external_redaction_default_encoding.md",
+      "language": "swift",
+      "target": "swift",
+      "session": "swift",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+        "language": "swift"
+      },
+      "path": "swift/contract/api_extract_with_external_redaction_invalid_encoding.md",
+      "language": "swift",
+      "target": "swift",
+      "session": "swift",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
         "fixture_id": "config_document_structure_with_headings",
         "language": "swift"
       },
@@ -15426,6 +16059,18 @@
         "language": "swift"
       },
       "path": "swift/contract/config_llm_structured_extraction.md",
+      "language": "swift",
+      "target": "swift",
+      "session": "swift",
+      "requires": [],
+      "side_effect": "server"
+    },
+    {
+      "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "swift"
+      },
+      "path": "swift/contract/config_ocr_pipeline_nested_types.md",
       "language": "swift",
       "target": "swift",
       "session": "swift",
@@ -16550,6 +17195,42 @@
     },
     {
       "key": {
+        "fixture_id": "api_extract_with_external_redaction",
+        "language": "node"
+      },
+      "path": "typescript/contract/api_extract_with_external_redaction.md",
+      "language": "typescript",
+      "target": "node",
+      "session": "node",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_default_encoding",
+        "language": "node"
+      },
+      "path": "typescript/contract/api_extract_with_external_redaction_default_encoding.md",
+      "language": "typescript",
+      "target": "node",
+      "session": "node",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+        "language": "node"
+      },
+      "path": "typescript/contract/api_extract_with_external_redaction_invalid_encoding.md",
+      "language": "typescript",
+      "target": "node",
+      "session": "node",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
         "fixture_id": "config_document_structure_with_headings",
         "language": "node"
       },
@@ -16626,6 +17307,18 @@
         "language": "node"
       },
       "path": "typescript/contract/config_llm_structured_extraction.md",
+      "language": "typescript",
+      "target": "node",
+      "session": "node",
+      "requires": [],
+      "side_effect": "server"
+    },
+    {
+      "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "node"
+      },
+      "path": "typescript/contract/config_ocr_pipeline_nested_types.md",
       "language": "typescript",
       "target": "node",
       "session": "node",
@@ -17834,6 +18527,18 @@
     },
     {
       "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "wasm"
+      },
+      "path": "wasm/contract/config_ocr_pipeline_nested_types.md",
+      "language": "typescript",
+      "target": "wasm",
+      "session": "wasm",
+      "requires": [],
+      "side_effect": "server"
+    },
+    {
+      "key": {
         "fixture_id": "config_pages",
         "language": "wasm"
       },
@@ -18950,6 +19655,42 @@
     },
     {
       "key": {
+        "fixture_id": "api_extract_with_external_redaction",
+        "language": "zig"
+      },
+      "path": "zig/contract/api_extract_with_external_redaction.md",
+      "language": "zig",
+      "target": "zig",
+      "session": "zig",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_default_encoding",
+        "language": "zig"
+      },
+      "path": "zig/contract/api_extract_with_external_redaction_default_encoding.md",
+      "language": "zig",
+      "target": "zig",
+      "session": "zig",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
+        "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+        "language": "zig"
+      },
+      "path": "zig/contract/api_extract_with_external_redaction_invalid_encoding.md",
+      "language": "zig",
+      "target": "zig",
+      "session": "zig",
+      "requires": [],
+      "side_effect": "safe"
+    },
+    {
+      "key": {
         "fixture_id": "config_document_structure_with_headings",
         "language": "zig"
       },
@@ -19026,6 +19767,18 @@
         "language": "zig"
       },
       "path": "zig/contract/config_llm_structured_extraction.md",
+      "language": "zig",
+      "target": "zig",
+      "session": "zig",
+      "requires": [],
+      "side_effect": "server"
+    },
+    {
+      "key": {
+        "fixture_id": "config_ocr_pipeline_nested_types",
+        "language": "zig"
+      },
+      "path": "zig/contract/config_ocr_pipeline_nested_types.md",
       "language": "zig",
       "target": "zig",
       "session": "zig",
@@ -20247,6 +21000,174 @@
       "language": "zig"
     },
     {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "c"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "csharp"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "dart"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "elixir"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "go"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "java"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "kotlin_android"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "node"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "php"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "python"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "ruby"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "rust"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "swift"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "zig"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "c"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "csharp"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "dart"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "elixir"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "go"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "java"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "kotlin_android"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "node"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "php"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "python"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "ruby"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "rust"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "swift"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "zig"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "c"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "csharp"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "dart"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "elixir"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "go"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "java"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "kotlin_android"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "node"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "php"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "python"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "ruby"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "rust"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "swift"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "zig"
+    },
+    {
       "fixture_id": "chunking_config_and_output",
       "language": "c"
     },
@@ -20964,6 +21885,66 @@
     },
     {
       "fixture_id": "config_llm_structured_extraction",
+      "language": "zig"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "c"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "csharp"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "dart"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "elixir"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "go"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "java"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "kotlin_android"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "node"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "php"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "python"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "ruby"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "rust"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "swift"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "wasm"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
       "language": "zig"
     },
     {
@@ -26297,6 +27278,174 @@
       "language": "zig"
     },
     {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "c"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "csharp"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "dart"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "elixir"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "go"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "java"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "kotlin_android"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "node"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "php"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "python"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "ruby"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "rust"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "swift"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction",
+      "language": "zig"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "c"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "csharp"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "dart"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "elixir"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "go"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "java"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "kotlin_android"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "node"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "php"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "python"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "ruby"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "rust"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "swift"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_default_encoding",
+      "language": "zig"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "c"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "csharp"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "dart"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "elixir"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "go"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "java"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "kotlin_android"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "node"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "php"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "python"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "ruby"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "rust"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "swift"
+    },
+    {
+      "fixture_id": "api_extract_with_external_redaction_invalid_encoding",
+      "language": "zig"
+    },
+    {
       "fixture_id": "chunking_config_and_output",
       "language": "c"
     },
@@ -27014,6 +28163,66 @@
     },
     {
       "fixture_id": "config_llm_structured_extraction",
+      "language": "zig"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "c"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "csharp"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "dart"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "elixir"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "go"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "java"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "kotlin_android"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "node"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "php"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "python"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "ruby"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "rust"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "swift"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
+      "language": "wasm"
+    },
+    {
+      "fixture_id": "config_ocr_pipeline_nested_types",
       "language": "zig"
     },
     {

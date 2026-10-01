@@ -11,6 +11,10 @@
 use std::sync::Arc;
 
 use crate::Result;
+#[cfg(all(feature = "redaction", feature = "tokio-runtime"))]
+use crate::core::config::ExtractInputKind;
+#[cfg(feature = "redaction")]
+use crate::core::config::{ExternalRedactionFinding, RedactionOffsetEncoding};
 use crate::core::config::{ExtractInput, ExtractionConfig, ExtractionResult};
 
 #[cfg(all(feature = "url-ingestion", feature = "tokio-runtime", not(target_arch = "wasm32")))]
@@ -94,6 +98,79 @@ impl Engine {
 
         #[cfg(not(feature = "tokio-runtime"))]
         extract_impl::extract(&self.inner, input, config).await
+    }
+
+    /// Extract one bytes input and apply request-scoped external redaction findings.
+    ///
+    /// The findings run in the existing Late redaction stage, before an output
+    /// renderer packages DOCX or PDF bytes. Scoped extraction bypasses both
+    /// extraction caches because the findings intentionally do not become part
+    /// of [`ExtractionConfig`]. `max_findings` defaults to 10,000 when omitted.
+    #[cfg(feature = "redaction")]
+    pub async fn extract_with_external_redaction(
+        &self,
+        input: ExtractInput,
+        config: &ExtractionConfig,
+        findings: Vec<ExternalRedactionFinding>,
+        offset_encoding: RedactionOffsetEncoding,
+        max_findings: Option<u32>,
+    ) -> Result<ExtractionResult> {
+        #[cfg(not(feature = "tokio-runtime"))]
+        {
+            let _ = (input, config, findings, offset_encoding, max_findings);
+            return Err(crate::XbergError::validation(
+                "external redaction extraction requires the tokio-runtime feature".to_string(),
+            ));
+        }
+
+        #[cfg(feature = "tokio-runtime")]
+        {
+            let max_findings = max_findings.unwrap_or(crate::text::redaction::external::DEFAULT_MAX_FINDINGS);
+            let default_limits = crate::extractors::security::SecurityLimits::default();
+            let security_max = crate::text::redaction::external::security_finding_limit(
+                config.security_limits.as_ref().unwrap_or(&default_limits),
+            );
+            if input.kind != ExtractInputKind::Bytes {
+                return Err(crate::XbergError::validation(
+                    "external redaction extraction accepts one bytes input; read URI input first".to_string(),
+                ));
+            }
+            if findings.len() > max_findings as usize {
+                return Err(crate::XbergError::validation(format!(
+                    "redaction findings exceed maximum of {max_findings}"
+                )));
+            }
+            if findings.len() > security_max {
+                return Err(crate::XbergError::validation(format!(
+                    "redaction findings exceed the effective redaction finding limit ({security_max})"
+                )));
+            }
+
+            let include_configured_sources = config.redaction.is_some()
+                || input
+                    .config
+                    .as_ref()
+                    .is_some_and(|input_config| input_config.redaction.is_some());
+            let request = crate::text::redaction::external::ExternalRedactionRequest::new(
+                findings,
+                offset_encoding,
+                max_findings,
+                include_configured_sources,
+            );
+            let mut uncached_config = config.clone();
+            uncached_config.use_cache = false;
+            let result = crate::text::redaction::external::scope_external_redaction(
+                request.clone(),
+                self.extract(input, &uncached_config),
+            )
+            .await;
+            if result.is_ok() && !request.was_consumed() {
+                return Err(crate::XbergError::validation(
+                    "external redaction request did not reach the Late processor".to_string(),
+                ));
+            }
+            result
+        }
     }
 
     /// Extract content from multiple bytes or URI inputs.

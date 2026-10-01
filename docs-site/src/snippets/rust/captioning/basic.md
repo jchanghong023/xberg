@@ -11,6 +11,7 @@ async fn main() -> xberg::Result<()> {
             },
             prompt: None,
             min_image_area: 1000,
+            alt_text: Default::default(),
         }),
         ..Default::default()
     };

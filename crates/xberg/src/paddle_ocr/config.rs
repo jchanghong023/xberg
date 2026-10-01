@@ -35,8 +35,8 @@ const DEFAULT_DETECTION_LIMIT_SIDE_LEN: u32 = 1024;
 /// let config = PaddleOcrConfig::new("en")
 ///     .with_table_detection(true);
 /// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct PaddleOcrConfig {
     /// Language code (e.g., "en", "ch", "jpn", "kor", "deu", "fra")
     pub language: String,
@@ -139,6 +139,38 @@ pub struct PaddleOcrConfig {
     pub inference_backend: Option<PaddleInferenceBackend>,
 }
 
+const PADDLE_OCR_CONFIG_FIELD_NAMES: &[&str] = &[
+    "language",
+    "cache_dir",
+    "use_angle_cls",
+    "enable_table_detection",
+    "det_db_thresh",
+    "det_db_box_thresh",
+    "det_db_unclip_ratio",
+    "det_limit_side_len",
+    "rec_batch_num",
+    "padding",
+    "drop_score",
+    "model_tier",
+    "model_version",
+    "inference_backend",
+];
+
+const LEGACY_CAMEL_CASE_FIELD_ALIASES: &[(&str, &str)] = &[
+    ("cacheDir", "cache_dir"),
+    ("useAngleCls", "use_angle_cls"),
+    ("enableTableDetection", "enable_table_detection"),
+    ("detDbThresh", "det_db_thresh"),
+    ("detDbBoxThresh", "det_db_box_thresh"),
+    ("detDbUnclipRatio", "det_db_unclip_ratio"),
+    ("detLimitSideLen", "det_limit_side_len"),
+    ("recBatchNum", "rec_batch_num"),
+    ("dropScore", "drop_score"),
+    ("modelTier", "model_tier"),
+    ("modelVersion", "model_version"),
+    ("inferenceBackend", "inference_backend"),
+];
+
 /// Which concrete ONNX inference engine PaddleOCR model loading uses.
 ///
 /// Mirrors `sceptre::Backend` for the PaddleOCR backend: `Ort` is the native,
@@ -155,6 +187,23 @@ pub enum PaddleInferenceBackend {
 }
 
 impl PaddleOcrConfig {
+    /// Deserialize the deprecated raw JSON field while preserving its unknown-key tolerance and
+    /// the camelCase keys accepted by the former hand-written Node binding. ~keep
+    pub(crate) fn from_legacy_value(value: &serde_json::Value) -> serde_json::Result<Self> {
+        let mut value = value.clone();
+        if let serde_json::Value::Object(fields) = &mut value {
+            for &(alias, canonical) in LEGACY_CAMEL_CASE_FIELD_ALIASES {
+                if fields.contains_key(canonical) {
+                    fields.remove(alias);
+                } else if let Some(value) = fields.remove(alias) {
+                    fields.insert(canonical.to_string(), value);
+                }
+            }
+            fields.retain(|name, _| PADDLE_OCR_CONFIG_FIELD_NAMES.contains(&name.as_str()));
+        }
+        serde_json::from_value(value)
+    }
+
     /// Creates a new PaddleOCR configuration with specified language.
     ///
     /// # Arguments
@@ -210,14 +259,14 @@ impl PaddleOcrConfig {
             return path.clone();
         }
 
-        // `hf_hub` (and model downloading in general) is unavailable on wasm32; PaddleOcrConfig
-        // itself stays available there under `paddle-ocr-types` (config/type definitions only,
-        // no ORT), so fall back to the shared cache-dir resolver instead of the excluded crate. ~keep
-        #[cfg(not(target_arch = "wasm32"))]
+        // `PaddleOcrConfig` compiles in every build because `OcrConfig` holds it, but `hf_hub`
+        // is linked only with the PaddleOCR engine and never on wasm32, so builds without the
+        // engine fall back to the shared cache-dir resolver. ~keep
+        #[cfg(all(paddle_ocr, not(target_arch = "wasm32")))]
         {
             hf_hub::resolve_cache_dir()
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(not(all(paddle_ocr, not(target_arch = "wasm32"))))]
         {
             crate::cache_dir::resolve_cache_dir("paddle-ocr")
         }
@@ -560,12 +609,63 @@ mod tests {
     }
 
     #[test]
+    fn test_deserialize_rejects_camel_case_key() {
+        let err = serde_json::from_value::<PaddleOcrConfig>(serde_json::json!({"enableTableDetection": true}))
+            .expect_err("a camelCase key must not be dropped silently");
+        assert!(err.to_string().contains("enableTableDetection"), "{err}");
+    }
+
+    #[test]
+    fn should_preserve_every_known_field_while_ignoring_legacy_extensions() {
+        let expected = PaddleOcrConfig {
+            language: "deu".to_string(),
+            cache_dir: Some(PathBuf::from("/tmp/paddle-cache")),
+            use_angle_cls: true,
+            enable_table_detection: true,
+            det_db_thresh: 0.4,
+            det_db_box_thresh: 0.6,
+            det_db_unclip_ratio: 1.8,
+            det_limit_side_len: 1536,
+            rec_batch_num: 12,
+            padding: 24,
+            drop_score: 0.7,
+            model_tier: "server".to_string(),
+            model_version: "pp-ocrv5".to_string(),
+            inference_backend: Some(PaddleInferenceBackend::Tract),
+        };
+        let mut legacy = serde_json::to_value(&expected).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .insert("vendor_extension".to_string(), serde_json::json!({"enabled": true}));
+
+        let resolved = PaddleOcrConfig::from_legacy_value(&legacy).unwrap();
+
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn test_deserialize_snake_case_keys() {
+        let config: PaddleOcrConfig = serde_json::from_value(serde_json::json!({
+            "use_angle_cls": true,
+            "enable_table_detection": true,
+            "model_tier": "server",
+        }))
+        .unwrap();
+        assert!(config.use_angle_cls);
+        assert!(config.enable_table_detection);
+        assert_eq!(config.model_tier, "server");
+        assert_eq!(config.language, "en");
+    }
+
+    #[test]
     fn test_resolve_cache_dir_explicit() {
         let cache_path = PathBuf::from("/tmp/explicit");
         let config = PaddleOcrConfig::new("en").with_cache_dir(cache_path.clone());
         assert_eq!(config.resolve_cache_dir(), cache_path);
     }
 
+    #[cfg(all(paddle_ocr, not(target_arch = "wasm32")))]
     #[test]
     fn test_resolve_cache_dir_default() {
         let config = PaddleOcrConfig::new("en");

@@ -4318,8 +4318,9 @@ pub(super) async fn run_ocr_pipeline_for_page(
         if let Some(ref tc) = stage.tesseract_config {
             stage_ocr.tesseract_config = Some(tc.clone());
         }
-        if let Some(ref pc) = stage.paddle_ocr_config {
-            stage_ocr.paddle_ocr_config = Some(pc.clone());
+        if stage.paddle_ocr_config.is_some() || stage.paddle_ocr_settings.is_some() {
+            stage_ocr.paddle_ocr_config = stage.paddle_ocr_config.clone();
+            stage_ocr.paddle_ocr_settings = stage.paddle_ocr_settings.clone();
         }
         stage_ocr.quality_thresholds = Some(pipeline.quality_thresholds.clone());
         stage_ocr.vlm_config = stage.vlm_config.clone();

@@ -1018,7 +1018,7 @@ impl ExtractionConfig {
     /// - `keywords`: the n-gram range contains positive, ordered bounds and `min_score` is a
     ///   finite `[0.0, 1.0]` value.
     /// - `layout`: `confidence_threshold`, when set, is a finite `[0.0, 1.0]` value.
-    /// - `redaction`: custom terms are non-empty and custom patterns compile.
+    /// - `redaction`: custom terms, patterns, and external findings are valid.
     /// - `pdf_options`: hierarchy cluster counts and margin fractions are in their supported ranges.
     /// - every nested LLM config: sampling ranges and target-specific authentication support.
     ///
@@ -1909,6 +1909,7 @@ mod tests {
                 llm,
                 prompt: Some("caption".to_string()),
                 min_image_area: 42,
+                alt_text: Default::default(),
             }),
             qr_codes: Some(true),
             ..Default::default()

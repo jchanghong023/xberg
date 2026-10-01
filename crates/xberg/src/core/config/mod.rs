@@ -82,11 +82,13 @@ pub use sparse_embedding::{SparseEmbeddingConfig, SparseEmbeddingModelType};
 #[cfg(feature = "tree-sitter")]
 pub use tree_sitter::{CodeContentMode, TreeSitterConfig, TreeSitterProcessConfig};
 
-pub use captioning::CaptioningConfig;
+pub use captioning::{CaptionAltTextMode, CaptioningConfig};
 pub use chunk_classification::{ChunkClassificationConfig, ChunkClassificationDefinition};
 pub use classification::PageClassificationConfig;
 pub use ner::{NerBackendKind, NerConfig};
-pub use redaction::{RedactionConfig, RedactionPattern, RedactionTerm};
+pub use redaction::{
+    ExternalRedactionFinding, RedactionConfig, RedactionOffsetEncoding, RedactionPattern, RedactionTerm,
+};
 pub use summarization::SummarizationConfig;
 pub use translation::TranslationConfig;
 

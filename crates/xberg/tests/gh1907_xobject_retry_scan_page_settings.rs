@@ -13,6 +13,7 @@
 //! Every case runs `force_ocr` with one Tesseract pipeline stage, which keeps PaddleOCR out
 //! when it is compiled in.
 
+#![allow(deprecated)]
 #![cfg(all(feature = "pdf", feature = "ocr"))]
 
 mod helpers;
@@ -161,6 +162,7 @@ fn whole_document_config(tesseract_config: Option<TesseractConfig>) -> Extractio
             language: None,
             tesseract_config: None,
             paddle_ocr_config: None,
+            paddle_ocr_settings: None,
             vlm_config: None,
             backend_options: None,
         }],

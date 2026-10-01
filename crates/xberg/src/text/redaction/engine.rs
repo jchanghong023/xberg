@@ -27,13 +27,17 @@
 use std::collections::HashSet;
 
 use crate::Result;
-use crate::core::config::redaction::RedactionConfig;
+use crate::core::config::redaction::{ExternalRedactionFinding, RedactionConfig, RedactionOffsetEncoding};
+use crate::extractors::security::SecurityLimits;
 use crate::types::ExtractedDocument;
 use crate::types::entity::{Entity, EntityCategory};
 use crate::types::metadata::FormatMetadata;
 use crate::types::redaction::{PiiCategory, RedactionFinding, RedactionReport};
 use crate::types::revisions::{DiffLine, RevisionAnchor};
 
+#[cfg(feature = "tokio-runtime")]
+use super::external::compile_configured_findings_async;
+use super::external::{ExternalRedactionRequest, compile_configured_findings, compile_external_findings};
 use super::patterns::{PatternMatch, scan_text};
 use super::strategy::{TokenCounter, apply_strategy};
 
@@ -50,7 +54,112 @@ const MAX_BLOCK_NESTING_DEPTH: usize = 32;
 /// Run pattern redaction (and optional NER-driven redaction) over `result` and
 /// rewrite every textual field. Populates `result.redaction_report`.
 pub async fn redact(result: &mut ExtractedDocument, config: &RedactionConfig) -> Result<()> {
-    redact_counted(result, config).await.map(|_counter| ())
+    redact_with_security_limits(result, config, &SecurityLimits::default()).await
+}
+
+/// Redact an owned document using a JSON array or JSON Lines payload from an external inspection engine.
+///
+/// The payload is parsed in Rust so vendor aliases and nested fields remain intact across language bindings.
+/// `offset_encoding` defaults to `unicode_code_points` and `max_findings` defaults to 10,000 when omitted.
+/// Unknown encodings return a validation error.
+#[cfg_attr(feature = "alef-meta", alef(since = "1.3.1"))]
+pub async fn redact_external(
+    document: ExtractedDocument,
+    config: RedactionConfig,
+    findings_json: &str,
+    offset_encoding: Option<&str>,
+    max_findings: Option<u32>,
+) -> Result<ExtractedDocument> {
+    let offset_encoding = offset_encoding.unwrap_or("unicode_code_points").parse()?;
+    let requested_limit = max_findings.unwrap_or(super::external::DEFAULT_MAX_FINDINGS);
+    let default_limits = SecurityLimits::default();
+    let security_limit = super::external::security_finding_limit(&default_limits);
+    let effective_limit = u32::try_from(security_limit.min(requested_limit as usize)).map_err(|_| {
+        crate::XbergError::validation("effective redaction finding limit exceeds the supported u32 range".to_string())
+    })?;
+    let findings = super::external::parse_external_findings_bounded(findings_json, effective_limit)?;
+    redact_external_with_findings(document, config, findings, offset_encoding, max_findings).await
+}
+
+pub(crate) async fn redact_external_with_findings(
+    mut document: ExtractedDocument,
+    config: RedactionConfig,
+    findings: Vec<ExternalRedactionFinding>,
+    offset_encoding: RedactionOffsetEncoding,
+    max_findings: Option<u32>,
+) -> Result<ExtractedDocument> {
+    let requested_limit = max_findings.unwrap_or(super::external::DEFAULT_MAX_FINDINGS);
+    let default_limits = SecurityLimits::default();
+    let security_limit = super::external::security_finding_limit(&default_limits);
+    let effective_limit = security_limit.min(requested_limit as usize);
+    if findings.len() > effective_limit {
+        let message = if requested_limit as usize <= security_limit {
+            format!("redaction findings exceed maximum of {requested_limit}")
+        } else {
+            format!("redaction findings exceed the effective redaction finding limit ({effective_limit})")
+        };
+        return Err(crate::XbergError::validation(message));
+    }
+    config.validate()?;
+    let external_terms = compile_external_findings(
+        &document.content,
+        &findings,
+        offset_encoding,
+        effective_limit as u32,
+        config.min_score,
+    )?;
+    redact_counted(
+        &mut document,
+        &config,
+        CompiledExternalFindings {
+            terms: &external_terms,
+            count: findings.len(),
+            limit: Some(effective_limit),
+        },
+        true,
+        &default_limits,
+    )
+    .await?;
+    Ok(document)
+}
+
+pub(crate) async fn redact_with_security_limits(
+    result: &mut ExtractedDocument,
+    config: &RedactionConfig,
+    limits: &SecurityLimits,
+) -> Result<()> {
+    redact_counted(result, config, CompiledExternalFindings::default(), true, limits)
+        .await
+        .map(|_counter| ())
+}
+
+pub(crate) async fn redact_with_external_findings(
+    result: &mut ExtractedDocument,
+    config: &RedactionConfig,
+    request: &ExternalRedactionRequest,
+    limits: &SecurityLimits,
+) -> Result<()> {
+    config.validate()?;
+    let external_terms = compile_external_findings(
+        &result.content,
+        &request.findings,
+        request.offset_encoding,
+        request.max_findings,
+        config.min_score,
+    )?;
+    redact_counted(
+        result,
+        config,
+        CompiledExternalFindings {
+            terms: &external_terms,
+            count: request.findings.len(),
+            limit: Some(request.max_findings as usize),
+        },
+        request.include_configured_sources,
+        limits,
+    )
+    .await
+    .map(|_counter| ())
 }
 
 /// Like [`redact`], additionally returning the token to original-text map for
@@ -64,7 +173,14 @@ pub async fn redact_capturing_rehydration_map(
     result: &mut ExtractedDocument,
     config: &RedactionConfig,
 ) -> Result<super::rehydration::RehydrationMap> {
-    let counter = redact_counted(result, config).await?;
+    let counter = redact_counted(
+        result,
+        config,
+        CompiledExternalFindings::default(),
+        true,
+        &SecurityLimits::default(),
+    )
+    .await?;
     Ok(counter.rehydration_map())
 }
 
@@ -84,38 +200,96 @@ pub fn redact_with_entities(
     entities: &[Entity],
 ) -> Result<()> {
     config.validate()?;
-    redact_pass(result, config, entities);
+    let configured = compile_configured_findings(&result.content, config, &SecurityLimits::default())?;
+    redact_pass(result, config, entities, &configured.terms, true);
     Ok(())
 }
 
 /// Shared body for [`redact`] and the map-capturing variant: runs the full
 /// pass and hands back the token counter it used.
-async fn redact_counted(result: &mut ExtractedDocument, config: &RedactionConfig) -> Result<TokenCounter> {
+#[derive(Default)]
+struct CompiledExternalFindings<'a> {
+    terms: &'a [(PiiCategory, regex::Regex)],
+    count: usize,
+    limit: Option<usize>,
+}
+
+async fn redact_counted(
+    result: &mut ExtractedDocument,
+    config: &RedactionConfig,
+    external: CompiledExternalFindings<'_>,
+    include_configured_sources: bool,
+    limits: &SecurityLimits,
+) -> Result<TokenCounter> {
     config.validate()?;
+    #[cfg(feature = "tokio-runtime")]
+    let configured = compile_configured_findings_async(&result.content, config, limits).await?;
+    #[cfg(not(feature = "tokio-runtime"))]
+    let configured = compile_configured_findings(&result.content, config, limits)?;
+    let total_findings = configured.count.saturating_add(external.count);
+    let security_limit = super::external::security_finding_limit(limits);
+    let limit = external
+        .limit
+        .map_or(security_limit, |request_limit| security_limit.min(request_limit));
+    if total_findings > limit {
+        return Err(crate::XbergError::validation(format!(
+            "RedactionConfig: {total_findings} findings exceed the effective redaction finding limit ({limit})"
+        )));
+    }
+    let mut all_external_terms = configured.terms;
+    all_external_terms.extend_from_slice(external.terms);
 
     #[cfg(feature = "ner")]
-    let entities: Vec<Entity> = match &config.ner {
-        Some(ner_config) => collect_ner_entities(&result.content, ner_config, &active_categories(config)).await?,
-        None => Vec::new(),
+    let entities: Vec<Entity> = match (include_configured_sources, &config.ner) {
+        (true, Some(ner_config)) => {
+            collect_ner_entities(&result.content, ner_config, &active_categories(config)).await?
+        }
+        _ => Vec::new(),
     };
     #[cfg(not(feature = "ner"))]
     let entities: Vec<Entity> = Vec::new();
 
-    Ok(redact_pass(result, config, &entities))
+    Ok(redact_pass(
+        result,
+        config,
+        &entities,
+        &all_external_terms,
+        include_configured_sources,
+    ))
 }
 
 /// Rewrite every text-bearing field on `result` and populate its audit report.
-fn redact_pass(result: &mut ExtractedDocument, config: &RedactionConfig, entities: &[Entity]) -> TokenCounter {
-    let active = active_categories(config);
+fn redact_pass(
+    result: &mut ExtractedDocument,
+    config: &RedactionConfig,
+    entities: &[Entity],
+    external_terms: &[(PiiCategory, regex::Regex)],
+    include_configured_sources: bool,
+) -> TokenCounter {
+    let active = if include_configured_sources {
+        active_categories(config)
+    } else {
+        HashSet::new()
+    };
     let categories: Vec<PiiCategory> = active.iter().cloned().collect();
-    let custom_regexes = compile_custom(config);
-    let ner_terms = compile_ner_terms(entities, config);
+    let custom_regexes = if include_configured_sources {
+        compile_custom(config)
+    } else {
+        Vec::new()
+    };
+    let ner_terms = if include_configured_sources {
+        compile_ner_terms(entities, config)
+    } else {
+        Vec::new()
+    };
 
     let mut pass = RedactionPass {
         categories: &categories,
         config,
         custom_regexes: &custom_regexes,
         ner_terms: &ner_terms,
+        external_terms,
+        include_configured_sources,
         counter: TokenCounter::new(),
         findings: Vec::new(),
     };
@@ -143,6 +317,8 @@ struct RedactionPass<'a> {
     config: &'a RedactionConfig,
     custom_regexes: &'a [(String, regex::Regex)],
     ner_terms: &'a [(PiiCategory, regex::Regex)],
+    external_terms: &'a [(PiiCategory, regex::Regex)],
+    include_configured_sources: bool,
     counter: TokenCounter,
     findings: Vec<RedactionFinding>,
 }
@@ -150,7 +326,11 @@ struct RedactionPass<'a> {
 impl RedactionPass<'_> {
     /// Every match in `text`, deduped and in ascending byte order.
     fn matches_for(&self, text: &str) -> Vec<PatternMatch> {
-        let mut matches = scan_text(text, self.categories);
+        let mut matches = if self.include_configured_sources {
+            scan_text(text, self.categories)
+        } else {
+            Vec::new()
+        };
 
         let custom = self
             .custom_regexes
@@ -160,6 +340,12 @@ impl RedactionPass<'_> {
 
         let detected = self.ner_terms.iter().map(|(category, regex)| (category.clone(), regex));
         matches.extend(scan_regexes(text, detected));
+
+        let external = self
+            .external_terms
+            .iter()
+            .map(|(category, regex)| (category.clone(), regex));
+        matches.extend(scan_regexes(text, external));
 
         if !self.config.categories.is_empty() {
             let requested = &self.config.categories;
@@ -350,6 +536,11 @@ impl RedactionPass<'_> {
                     self.redact_in_place(cell);
                 }
             }
+            if let Some(columns) = table.columns.as_mut() {
+                for column in columns.iter_mut() {
+                    self.redact_in_place(column);
+                }
+            }
             self.redact_in_place(&mut table.markdown);
         }
     }
@@ -374,6 +565,11 @@ impl RedactionPass<'_> {
                 for row in table.cells.iter_mut() {
                     for cell in row.iter_mut() {
                         self.redact_in_place(cell);
+                    }
+                }
+                if let Some(columns) = table.columns.as_mut() {
+                    for column in columns.iter_mut() {
+                        self.redact_in_place(column);
                     }
                 }
                 self.redact_in_place(&mut table.markdown);
@@ -960,7 +1156,7 @@ fn redactable_category(category: &EntityCategory, allowed_custom: &HashSet<Strin
 /// case-sensitive on purpose: a case-insensitive match on a short name would
 /// redact ordinary words ("Bill" would eat every "bill"), and destroying the
 /// document is not an acceptable price for redacting it.
-fn literal_regex(mention: &str) -> Option<regex::Regex> {
+pub(super) fn literal_regex(mention: &str) -> Option<regex::Regex> {
     let escaped = regex::escape(mention);
     let prefix = if mention.chars().next().is_some_and(is_word_char) {
         r"\b"
@@ -1236,6 +1432,7 @@ mod tests {
             tables: vec![crate::types::tables::Table {
                 cells: vec![vec!["Name".into(), email.into()]],
                 markdown: format!("| Name | {email} |"),
+                columns: Some(vec!["Name".into(), email.into()]),
                 page_number: 1,
                 bounding_box: None,
                 ..Default::default()
@@ -1243,7 +1440,12 @@ mod tests {
             pages: Some(vec![crate::types::PageContent {
                 page_number: 1,
                 content: format!("Page mentions {email}."),
-                tables: Vec::new(),
+                tables: vec![std::sync::Arc::new(crate::types::tables::Table {
+                    cells: vec![vec!["Name".into(), email.into()]],
+                    markdown: format!("| Name | {email} |"),
+                    columns: Some(vec!["Name".into(), email.into()]),
+                    ..Default::default()
+                })],
                 image_indices: Vec::new(),
                 image_preprocessing: None,
                 hierarchy: None,
@@ -1285,11 +1487,25 @@ mod tests {
         if doc.content.contains(email) {
             leaks.push("content");
         }
-        if doc.tables[0].cells.iter().flatten().any(|c| c.contains(email)) || doc.tables[0].markdown.contains(email) {
+        if doc.tables[0].cells.iter().flatten().any(|c| c.contains(email))
+            || doc.tables[0].markdown.contains(email)
+            || doc.tables[0]
+                .columns
+                .as_ref()
+                .is_some_and(|columns| columns.iter().any(|column| column.contains(email)))
+        {
             leaks.push("tables");
         }
-        if doc.pages.as_ref().unwrap()[0].content.contains(email) {
+        let page = &doc.pages.as_ref().unwrap()[0];
+        if page.content.contains(email) {
             leaks.push("pages");
+        }
+        if page.tables[0]
+            .columns
+            .as_ref()
+            .is_some_and(|columns| columns.iter().any(|column| column.contains(email)))
+        {
+            leaks.push("page.tables");
         }
         let uri = &doc.uris.as_ref().unwrap()[0];
         if uri.url.contains(email) || uri.label.as_deref().unwrap_or("").contains(email) {

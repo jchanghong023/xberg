@@ -8,15 +8,34 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:freezed_annotation/freezed_annotation.dart' hide protected;
 part 'lib.freezed.dart';
 
-// These functions are ignored because they are not marked as `pub`: `try_convert_annotation_kind_from_core`, `try_convert_asset_category_from_core`, `try_convert_auth_config_from_core`, `try_convert_block_type_from_core`, `try_convert_boundary_reason_from_core`, `try_convert_browser_backend_from_core`, `try_convert_browser_mode_from_core`, `try_convert_browser_wait_from_core`, `try_convert_call_mode_from_core`, `try_convert_candle_deepseek_ocr_dtype_from_core`, `try_convert_candle_device_preference_from_core`, `try_convert_candle_trocr_variant_from_core`, `try_convert_chunk_sizing_from_core`, `try_convert_chunk_type_from_core`, `try_convert_chunker_type_from_core`, `try_convert_chunking_reason_from_core`, `try_convert_code_content_mode_from_core`, `try_convert_code_data_node_kind_from_core`, `try_convert_confidence_semantics_from_core`, `try_convert_content_filter_kind_from_core`, `try_convert_content_layer_from_core`, `try_convert_crawl_strategy_kind_from_core`, `try_convert_credential_provider_config_from_core`, `try_convert_diff_line_from_core`, `try_convert_document_content_encoding_from_core`, `try_convert_element_type_from_core`, `try_convert_embedding_model_type_from_core`, `try_convert_embeddings_embedding_backend_from_core`, `try_convert_entity_category_from_core`, `try_convert_execution_provider_type_from_core`, `try_convert_extract_input_kind_from_core`, `try_convert_extraction_method_from_core`, `try_convert_form_field_type_from_core`, `try_convert_format_metadata_from_core`, `try_convert_formula_model_from_core`, `try_convert_glm_ocr_layout_mode_from_core`, `try_convert_glm_ocr_task_kind_from_core`, `try_convert_host_matcher_from_core`, `try_convert_html_theme_from_core`, `try_convert_image_kind_from_core`, `try_convert_image_output_format_from_core`, `try_convert_image_type_from_core`, `try_convert_inline_type_from_core`, `try_convert_jupyter_cell_rendering_from_core`, `try_convert_keyword_algorithm_from_core`, `try_convert_late_interaction_model_type_from_core`, `try_convert_layout_class_from_core`, `try_convert_layout_strategy_from_core`, `try_convert_link_type_from_core`, `try_convert_merge_mode_from_core`, `try_convert_mime_detection_policy_from_core`, `try_convert_ner_backend_kind_from_core`, `try_convert_no_chunking_reason_from_core`, `try_convert_node_content_from_core`, `try_convert_ocr_backend_type_from_core`, `try_convert_ocr_bounding_geometry_from_core`, `try_convert_ocr_element_level_from_core`, `try_convert_ocr_strategy_from_core`, `try_convert_output_format_from_core`, `try_convert_paddle_inference_backend_from_core`, `try_convert_paddle_language_from_core`, `try_convert_paddle_ocr_vl_task_kind_from_core`, `try_convert_page_orientation_handling_from_core`, `try_convert_page_unit_type_from_core`, `try_convert_pdf_annotation_type_from_core`, `try_convert_pdf_backend_from_core`, `try_convert_pii_category_from_core`, `try_convert_preset_category_from_core`, `try_convert_probe_status_from_core`, `try_convert_processing_stage_from_core`, `try_convert_psm_mode_from_core`, `try_convert_redaction_strategy_from_core`, `try_convert_reduction_level_from_core`, `try_convert_region_kind_from_core`, `try_convert_relationship_kind_from_core`, `try_convert_reranker_head_from_core`, `try_convert_reranker_model_type_from_core`, `try_convert_result_format_from_core`, `try_convert_revision_anchor_from_core`, `try_convert_revision_kind_from_core`, `try_convert_schema_compliance_from_core`, `try_convert_sparse_embedding_model_type_from_core`, `try_convert_structured_data_type_from_core`, `try_convert_summary_strategy_from_core`, `try_convert_table_chunking_mode_from_core`, `try_convert_table_model_from_core`, `try_convert_table_overlap_preference_from_core`, `try_convert_text_direction_from_core`, `try_convert_tier_strategy_from_core`, `try_convert_uri_kind_from_core`, `try_convert_url_extraction_mode_from_core`, `try_convert_vlm_fallback_policy_from_core`, `try_convert_whisper_model_from_core`
+// These functions are ignored because they are not marked as `pub`: `try_convert_annotation_kind_from_core`, `try_convert_asset_category_from_core`, `try_convert_auth_config_from_core`, `try_convert_block_type_from_core`, `try_convert_boundary_reason_from_core`, `try_convert_browser_backend_from_core`, `try_convert_browser_mode_from_core`, `try_convert_browser_wait_from_core`, `try_convert_call_mode_from_core`, `try_convert_candle_deepseek_ocr_dtype_from_core`, `try_convert_candle_device_preference_from_core`, `try_convert_candle_trocr_variant_from_core`, `try_convert_caption_alt_text_mode_from_core`, `try_convert_chunk_sizing_from_core`, `try_convert_chunk_type_from_core`, `try_convert_chunker_type_from_core`, `try_convert_chunking_reason_from_core`, `try_convert_code_content_mode_from_core`, `try_convert_code_data_node_kind_from_core`, `try_convert_confidence_semantics_from_core`, `try_convert_content_filter_kind_from_core`, `try_convert_content_layer_from_core`, `try_convert_crawl_strategy_kind_from_core`, `try_convert_credential_provider_config_from_core`, `try_convert_diff_line_from_core`, `try_convert_document_content_encoding_from_core`, `try_convert_element_type_from_core`, `try_convert_embedding_model_type_from_core`, `try_convert_embeddings_embedding_backend_from_core`, `try_convert_entity_category_from_core`, `try_convert_execution_provider_type_from_core`, `try_convert_extract_input_kind_from_core`, `try_convert_extraction_method_from_core`, `try_convert_form_field_type_from_core`, `try_convert_format_metadata_from_core`, `try_convert_formula_model_from_core`, `try_convert_glm_ocr_layout_mode_from_core`, `try_convert_glm_ocr_task_kind_from_core`, `try_convert_host_matcher_from_core`, `try_convert_html_theme_from_core`, `try_convert_image_kind_from_core`, `try_convert_image_output_format_from_core`, `try_convert_image_type_from_core`, `try_convert_inline_type_from_core`, `try_convert_jupyter_cell_rendering_from_core`, `try_convert_keyword_algorithm_from_core`, `try_convert_late_interaction_model_type_from_core`, `try_convert_layout_class_from_core`, `try_convert_layout_strategy_from_core`, `try_convert_link_type_from_core`, `try_convert_merge_mode_from_core`, `try_convert_mime_detection_policy_from_core`, `try_convert_ner_backend_kind_from_core`, `try_convert_no_chunking_reason_from_core`, `try_convert_node_content_from_core`, `try_convert_ocr_backend_type_from_core`, `try_convert_ocr_bounding_geometry_from_core`, `try_convert_ocr_element_level_from_core`, `try_convert_ocr_strategy_from_core`, `try_convert_output_format_from_core`, `try_convert_paddle_inference_backend_from_core`, `try_convert_paddle_language_from_core`, `try_convert_paddle_ocr_vl_task_kind_from_core`, `try_convert_page_orientation_handling_from_core`, `try_convert_page_unit_type_from_core`, `try_convert_pdf_annotation_type_from_core`, `try_convert_pdf_backend_from_core`, `try_convert_pii_category_from_core`, `try_convert_preset_category_from_core`, `try_convert_probe_status_from_core`, `try_convert_processing_stage_from_core`, `try_convert_psm_mode_from_core`, `try_convert_redaction_offset_encoding_from_core`, `try_convert_redaction_strategy_from_core`, `try_convert_reduction_level_from_core`, `try_convert_region_kind_from_core`, `try_convert_relationship_kind_from_core`, `try_convert_reranker_head_from_core`, `try_convert_reranker_model_type_from_core`, `try_convert_result_format_from_core`, `try_convert_revision_anchor_from_core`, `try_convert_revision_kind_from_core`, `try_convert_schema_compliance_from_core`, `try_convert_sparse_embedding_model_type_from_core`, `try_convert_structured_data_type_from_core`, `try_convert_summary_strategy_from_core`, `try_convert_table_chunking_mode_from_core`, `try_convert_table_model_from_core`, `try_convert_table_overlap_preference_from_core`, `try_convert_text_direction_from_core`, `try_convert_tier_strategy_from_core`, `try_convert_uri_kind_from_core`, `try_convert_url_extraction_mode_from_core`, `try_convert_vlm_fallback_policy_from_core`, `try_convert_whisper_model_from_core`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ChunkClassificationEnrichmentConfig`, `DocumentExtractorDartCallbacks`, `EmbeddingBackendDartCallbacks`, `OcrBackendDartCallbacks`, `PostProcessorDartCallbacks`, `RendererDartCallbacks`, `RerankerBackendDartCallbacks`, `TokenizerBackendDartCallbacks`, `ValidatorDartCallbacks`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `backend_type`, `can_handle`, `confidence_semantics`, `count_tokens`, `dimensions`, `embed`, `emits_structured_markdown`, `estimated_duration_ms`, `extract`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `page_orientation_handling`, `priority`, `priority`, `priority`, `process_document`, `process_image_file`, `process_image`, `process`, `processing_stage`, `render_result`, `rerank`, `should_process`, `should_validate`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `supported_languages_for`, `supported_languages`, `supported_mime_types`, `supports_document_processing`, `supports_language_for`, `supports_language`, `supports_table_detection`, `validate`, `version`, `version`, `version`, `version`, `version`, `version`, `version`, `version`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `backend_type`, `can_handle`, `confidence_semantics`, `count_tokens`, `dimensions`, `embed`, `emits_structured_markdown`, `estimated_duration_ms`, `extract`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `initialize`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `name`, `page_orientation_handling`, `priority`, `priority`, `priority`, `process_document`, `process_image_file`, `process_image`, `process`, `processing_stage`, `render_result`, `rerank`, `should_process`, `should_validate`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `shutdown`, `supported_languages_for`, `supported_languages`, `supported_mime_types`, `supports_document_processing`, `supports_language_for`, `supports_language`, `supports_table_detection`, `validate`, `version`, `version`, `version`, `version`, `version`, `version`, `version`, `version`
 
 /// Extract content from a single bytes or URI input.
 Future<ExtractionResult> extract({
   required ExtractInput input,
   required ExtractionConfig config,
 }) => RustLib.instance.api.crateExtract(input: input, config: config);
+
+/// Extract one bytes input and redact a JSON array or JSON Lines payload from an external inspection engine.
+///
+/// The payload is parsed in Rust so vendor aliases and nested fields remain intact across language bindings.
+/// `offset_encoding` defaults to `unicode_code_points` and `max_findings` defaults to 10,000 when omitted.
+/// Unknown encodings return a validation error.
+Future<ExtractionResult> extractWithExternalRedaction({
+  required ExtractInput input,
+  required ExtractionConfig config,
+  required String findingsJson,
+  String? offsetEncoding,
+  PlatformInt64? maxFindings,
+}) => RustLib.instance.api.crateExtractWithExternalRedaction(
+  input: input,
+  config: config,
+  findingsJson: findingsJson,
+  offsetEncoding: offsetEncoding,
+  maxFindings: maxFindings,
+);
 
 /// Extract content from multiple bytes or URI inputs.
 Future<ExtractionResult> extractBatch({
@@ -211,6 +230,25 @@ Future<ExtractedDocument> classifyChunksOwned({
 }) => RustLib.instance.api.crateClassifyChunksOwned(
   result: result,
   config: config,
+);
+
+/// Redact an owned document using a JSON array or JSON Lines payload from an external inspection engine.
+///
+/// The payload is parsed in Rust so vendor aliases and nested fields remain intact across language bindings.
+/// `offset_encoding` defaults to `unicode_code_points` and `max_findings` defaults to 10,000 when omitted.
+/// Unknown encodings return a validation error.
+Future<ExtractedDocument> redactExternal({
+  required ExtractedDocument document,
+  required RedactionConfig config,
+  required String findingsJson,
+  String? offsetEncoding,
+  PlatformInt64? maxFindings,
+}) => RustLib.instance.api.crateRedactExternal(
+  document: document,
+  config: config,
+  findingsJson: findingsJson,
+  offsetEncoding: offsetEncoding,
+  maxFindings: maxFindings,
 );
 
 /// Find unmarked claims in markdown text.
@@ -465,6 +503,12 @@ Future<EmbeddingConfig> createEmbeddingConfigFromJson({required String json}) =>
 
 Future<RedactionConfig> createRedactionConfigFromJson({required String json}) =>
     RustLib.instance.api.crateCreateRedactionConfigFromJson(json: json);
+
+Future<ExternalRedactionFinding> createExternalRedactionFindingFromJson({
+  required String json,
+}) => RustLib.instance.api.crateCreateExternalRedactionFindingFromJson(
+  json: json,
+);
 
 Future<RedactionTerm> createRedactionTermFromJson({required String json}) =>
     RustLib.instance.api.crateCreateRedactionTermFromJson(json: json);
@@ -1129,6 +1173,10 @@ Future<ExecutionProviderType> createExecutionProviderTypeFromJson({
   required String json,
 }) => RustLib.instance.api.crateCreateExecutionProviderTypeFromJson(json: json);
 
+Future<CaptionAltTextMode> createCaptionAltTextModeFromJson({
+  required String json,
+}) => RustLib.instance.api.crateCreateCaptionAltTextModeFromJson(json: json);
+
 Future<MimeDetectionPolicy> createMimeDetectionPolicyFromJson({
   required String json,
 }) => RustLib.instance.api.crateCreateMimeDetectionPolicyFromJson(json: json);
@@ -1213,6 +1261,11 @@ Future<ChunkSizing> createChunkSizingFromJson({required String json}) =>
 Future<EmbeddingModelType> createEmbeddingModelTypeFromJson({
   required String json,
 }) => RustLib.instance.api.crateCreateEmbeddingModelTypeFromJson(json: json);
+
+Future<RedactionOffsetEncoding> createRedactionOffsetEncodingFromJson({
+  required String json,
+}) =>
+    RustLib.instance.api.crateCreateRedactionOffsetEncodingFromJson(json: json);
 
 Future<RerankerHead> createRerankerHeadFromJson({required String json}) =>
     RustLib.instance.api.crateCreateRerankerHeadFromJson(json: json);
@@ -1513,7 +1566,7 @@ Future<void> unregisterOcrBackend({required String name}) =>
     RustLib.instance.api.crateUnregisterOcrBackend(name: name);
 
 /// Clear all registered `OcrBackend` plugins.
-/// Removes every plugin from `xberg::plugins::registry::get_ocr_backend_registry()` and stringifies any host error.
+/// Calls the host crate's configured clear function and stringifies any error.
 Future<void> clearOcrBackends() => RustLib.instance.api.crateClearOcrBackends();
 
 /// Construct a `PostProcessorDartImpl` from Dart callback closures.
@@ -1558,7 +1611,7 @@ Future<void> unregisterPostProcessor({required String name}) =>
     RustLib.instance.api.crateUnregisterPostProcessor(name: name);
 
 /// Clear all registered `PostProcessor` plugins.
-/// Removes every plugin from `xberg::plugins::registry::get_post_processor_registry()` and stringifies any host error.
+/// Calls the host crate's configured clear function and stringifies any error.
 Future<void> clearPostProcessors() =>
     RustLib.instance.api.crateClearPostProcessors();
 
@@ -1600,7 +1653,7 @@ Future<void> unregisterValidator({required String name}) =>
     RustLib.instance.api.crateUnregisterValidator(name: name);
 
 /// Clear all registered `Validator` plugins.
-/// Removes every plugin from `xberg::plugins::registry::get_validator_registry()` and stringifies any host error.
+/// Calls the host crate's configured clear function and stringifies any error.
 Future<void> clearValidators() => RustLib.instance.api.crateClearValidators();
 
 /// Construct a `DocumentExtractorDartImpl` from Dart callback closures.
@@ -1643,7 +1696,7 @@ Future<void> unregisterDocumentExtractor({required String name}) =>
     RustLib.instance.api.crateUnregisterDocumentExtractor(name: name);
 
 /// Clear all registered `DocumentExtractor` plugins.
-/// Removes every plugin from `xberg::plugins::registry::get_document_extractor_registry()` and stringifies any host error.
+/// Calls the host crate's configured clear function and stringifies any error.
 Future<void> clearDocumentExtractors() =>
     RustLib.instance.api.crateClearDocumentExtractors();
 
@@ -1682,7 +1735,7 @@ Future<void> unregisterEmbeddingBackend({required String name}) =>
     RustLib.instance.api.crateUnregisterEmbeddingBackend(name: name);
 
 /// Clear all registered `EmbeddingBackend` plugins.
-/// Removes every plugin from `xberg::plugins::registry::get_embedding_backend_registry()` and stringifies any host error.
+/// Calls the host crate's configured clear function and stringifies any error.
 Future<void> clearEmbeddingBackends() =>
     RustLib.instance.api.crateClearEmbeddingBackends();
 
@@ -1718,7 +1771,7 @@ Future<void> unregisterRenderer({required String name}) =>
     RustLib.instance.api.crateUnregisterRenderer(name: name);
 
 /// Clear all registered `Renderer` plugins.
-/// Removes every plugin from `xberg::plugins::registry::get_renderer_registry()` and stringifies any host error.
+/// Calls the host crate's configured clear function and stringifies any error.
 Future<void> clearRenderers() => RustLib.instance.api.crateClearRenderers();
 
 /// Construct a `RerankerBackendDartImpl` from Dart callback closures.
@@ -1753,7 +1806,7 @@ Future<void> unregisterRerankerBackend({required String name}) =>
     RustLib.instance.api.crateUnregisterRerankerBackend(name: name);
 
 /// Clear all registered `RerankerBackend` plugins.
-/// Removes every plugin from `xberg::plugins::registry::get_reranker_backend_registry()` and stringifies any host error.
+/// Calls the host crate's configured clear function and stringifies any error.
 Future<void> clearRerankerBackends() =>
     RustLib.instance.api.crateClearRerankerBackends();
 
@@ -1790,7 +1843,7 @@ Future<void> unregisterTokenizerBackend({required String name}) =>
     RustLib.instance.api.crateUnregisterTokenizerBackend(name: name);
 
 /// Clear all registered `TokenizerBackend` plugins.
-/// Removes every plugin from `xberg::plugins::registry::get_tokenizer_backend_registry()` and stringifies any host error.
+/// Calls the host crate's configured clear function and stringifies any error.
 Future<void> clearTokenizerBackends() =>
     RustLib.instance.api.crateClearTokenizerBackends();
 
@@ -2742,6 +2795,18 @@ enum CandleTrocrVariant {
   largeHandwritten,
 }
 
+/// How a generated image caption interacts with existing alternate text.
+enum CaptionAltTextMode {
+  /// Keep existing alternate text, using the caption only when it is absent.
+  preserve,
+
+  /// Join existing alternate text and the generated caption with `: `.
+  combine,
+
+  /// Use the generated caption even when alternate text is present.
+  replace,
+}
+
 /// Configuration for the VLM captioning post-processor.
 class CaptioningConfig {
   /// LLM configuration used for the VLM call.
@@ -2755,14 +2820,20 @@ class CaptioningConfig {
   /// Default `1_000` filters out icons and decorations.
   final PlatformInt64 minImageArea;
 
+  /// Controls whether generated captions preserve, combine with, or replace
+  /// existing image alternate text.
+  final CaptionAltTextMode altText;
+
   const CaptioningConfig({
     required this.llm,
     this.prompt,
     required this.minImageArea,
+    required this.altText,
   });
 
   @override
-  int get hashCode => llm.hashCode ^ prompt.hashCode ^ minImageArea.hashCode;
+  int get hashCode =>
+      llm.hashCode ^ prompt.hashCode ^ minImageArea.hashCode ^ altText.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -2771,7 +2842,8 @@ class CaptioningConfig {
           runtimeType == other.runtimeType &&
           llm == other.llm &&
           prompt == other.prompt &&
-          minImageArea == other.minImageArea;
+          minImageArea == other.minImageArea &&
+          altText == other.altText;
 }
 
 /// A single changed cell within a table.
@@ -7237,6 +7309,58 @@ enum ExecutionProviderType {
 
   /// NVIDIA TensorRT (optimized CUDA inference).
   tensorRt,
+}
+
+/// One finding reported by an external content-inspection engine.
+///
+/// Unknown fields are ignored, so an engine's raw output can be passed as is.
+/// Presidio, AWS Comprehend, Azure Language, and GCP DLP payload fields are
+/// accepted as aliases. GCP's ordered likelihood buckets are normalized to
+/// evenly spaced scores from `0.0` through `1.0`; `LIKELIHOOD_UNSPECIFIED`
+/// maps to `0.5`, matching GCP's documented `POSSIBLE` default.
+class ExternalRedactionFinding {
+  /// Engine category, surfaced as `PiiCategory::Custom(label)`.
+  final String label;
+
+  /// Literal value to redact. When absent, it is read from `content` at
+  /// `start..end` under the requested [`RedactionOffsetEncoding`].
+  final String? text;
+
+  /// Start offset (inclusive) into `content`.
+  final PlatformInt64? start;
+
+  /// End offset (exclusive) into `content`.
+  final PlatformInt64? end;
+
+  /// Engine confidence in `[0.0, 1.0]`; filtered by [`RedactionConfig::min_score`] when set.
+  final double? score;
+
+  const ExternalRedactionFinding({
+    required this.label,
+    this.text,
+    this.start,
+    this.end,
+    this.score,
+  });
+
+  @override
+  int get hashCode =>
+      label.hashCode ^
+      text.hashCode ^
+      start.hashCode ^
+      end.hashCode ^
+      score.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ExternalRedactionFinding &&
+          runtimeType == other.runtimeType &&
+          label == other.label &&
+          text == other.text &&
+          start == other.start &&
+          end == other.end &&
+          score == other.score;
 }
 
 /// Unified extraction input for all public extraction entry points.
@@ -13066,21 +13190,29 @@ class OcrConfig {
   /// Output format for OCR results (optional, for format conversion)
   final OutputFormat? outputFormat;
 
-  /// PaddleOCR-specific configuration (optional, JSON passthrough).
+  /// Legacy PaddleOCR configuration JSON.
   ///
-  /// Deserialized into a `PaddleOcrConfig`, so any of its fields can be
-  /// overridden here — most notably `model_version` (`"pp-ocrv6"` default / `"pp-ocrv5"`) and
-  /// `model_tier`. In TOML:
+  /// Deprecated since 1.3.2 and planned for removal in 2.0. Use
+  /// [`Self::paddle_ocr_settings`] for typed access.
+  final String? paddleOcrConfig;
+
+  /// Typed PaddleOCR-specific configuration (optional).
+  ///
+  /// Any `PaddleOcrConfig` field can be set here; unset fields keep their defaults. In a config
+  /// file, a JSON config, or a REST or MCP request body, an unknown key is a configuration error.
+  /// A typed object built in a binding has only the fields it declares, so it ignores any other
+  /// property, as every other typed config does. The most common overrides are `model_version`
+  /// (`"pp-ocrv6"` default / `"pp-ocrv5"`) and `model_tier`. In TOML:
   ///
   /// ```toml
-  /// [ocr.paddle_ocr_config]
+  /// [ocr.paddle_ocr_settings]
   /// model_version = "pp-ocrv5"
   /// model_tier = "server"
   /// ```
   ///
   /// The `XBERG_OCR_MODEL_VERSION` / `XBERG_OCR_MODEL_TIER` environment variables set the same two
   /// keys for env-configured servers (issue #1279).
-  final String? paddleOcrConfig;
+  final PaddleOcrConfig? paddleOcrSettings;
 
   /// Arbitrary per-call options passed through to the backend unchanged.
   ///
@@ -13232,6 +13364,7 @@ class OcrConfig {
     this.tesseractConfig,
     this.outputFormat,
     this.paddleOcrConfig,
+    this.paddleOcrSettings,
     this.backendOptions,
     this.elementConfig,
     this.qualityThresholds,
@@ -13255,6 +13388,7 @@ class OcrConfig {
       tesseractConfig.hashCode ^
       outputFormat.hashCode ^
       paddleOcrConfig.hashCode ^
+      paddleOcrSettings.hashCode ^
       backendOptions.hashCode ^
       elementConfig.hashCode ^
       qualityThresholds.hashCode ^
@@ -13280,6 +13414,7 @@ class OcrConfig {
           tesseractConfig == other.tesseractConfig &&
           outputFormat == other.outputFormat &&
           paddleOcrConfig == other.paddleOcrConfig &&
+          paddleOcrSettings == other.paddleOcrSettings &&
           backendOptions == other.backendOptions &&
           elementConfig == other.elementConfig &&
           qualityThresholds == other.qualityThresholds &&
@@ -13587,8 +13722,16 @@ class OcrPipelineStage {
   /// Tesseract-specific config override for this stage.
   final TesseractConfig? tesseractConfig;
 
-  /// PaddleOCR-specific config for this stage.
+  /// Legacy PaddleOCR config JSON for this stage.
+  ///
+  /// Deprecated since 1.3.2 and planned for removal in 2.0. Use
+  /// [`Self::paddle_ocr_settings`] for typed access.
   final String? paddleOcrConfig;
+
+  /// Typed PaddleOCR config for this stage.
+  ///
+  /// When both PaddleOCR fields are set, this typed field takes precedence.
+  final PaddleOcrConfig? paddleOcrSettings;
 
   /// VLM config override for this pipeline stage.
   final LlmConfig? vlmConfig;
@@ -13613,6 +13756,7 @@ class OcrPipelineStage {
     this.language,
     this.tesseractConfig,
     this.paddleOcrConfig,
+    this.paddleOcrSettings,
     this.vlmConfig,
     this.backendOptions,
   });
@@ -13624,6 +13768,7 @@ class OcrPipelineStage {
       language.hashCode ^
       tesseractConfig.hashCode ^
       paddleOcrConfig.hashCode ^
+      paddleOcrSettings.hashCode ^
       vlmConfig.hashCode ^
       backendOptions.hashCode;
 
@@ -13637,6 +13782,7 @@ class OcrPipelineStage {
           language == other.language &&
           tesseractConfig == other.tesseractConfig &&
           paddleOcrConfig == other.paddleOcrConfig &&
+          paddleOcrSettings == other.paddleOcrSettings &&
           vlmConfig == other.vlmConfig &&
           backendOptions == other.backendOptions;
 }
@@ -16614,6 +16760,18 @@ class RedactionConfig {
   /// at config-construction time via [`RedactionConfig::validate`].
   final List<RedactionPattern> customPatterns;
 
+  /// Findings supplied inline by an external inspection engine.
+  final List<ExternalRedactionFinding> findings;
+
+  /// Minimum accepted confidence for scored external findings. Findings without a score remain eligible.
+  final double? minScore;
+
+  /// JSON array or JSON Lines file containing external findings.
+  final String? findingsPath;
+
+  /// Unit used by configured findings that derive their text from offsets.
+  final RedactionOffsetEncoding findingsOffsetEncoding;
+
   const RedactionConfig({
     required this.categories,
     required this.strategy,
@@ -16621,6 +16779,10 @@ class RedactionConfig {
     required this.preserveOffsets,
     required this.customTerms,
     required this.customPatterns,
+    required this.findings,
+    this.minScore,
+    this.findingsPath,
+    required this.findingsOffsetEncoding,
   });
 
   @override
@@ -16630,7 +16792,11 @@ class RedactionConfig {
       ner.hashCode ^
       preserveOffsets.hashCode ^
       customTerms.hashCode ^
-      customPatterns.hashCode;
+      customPatterns.hashCode ^
+      findings.hashCode ^
+      minScore.hashCode ^
+      findingsPath.hashCode ^
+      findingsOffsetEncoding.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -16642,7 +16808,11 @@ class RedactionConfig {
           ner == other.ner &&
           preserveOffsets == other.preserveOffsets &&
           customTerms == other.customTerms &&
-          customPatterns == other.customPatterns;
+          customPatterns == other.customPatterns &&
+          findings == other.findings &&
+          minScore == other.minScore &&
+          findingsPath == other.findingsPath &&
+          findingsOffsetEncoding == other.findingsOffsetEncoding;
 }
 
 /// One redaction event: which span was rewritten, why, and with what.
@@ -16689,6 +16859,18 @@ class RedactionFinding {
           category == other.category &&
           strategy == other.strategy &&
           replacementToken == other.replacementToken;
+}
+
+/// Unit that an external finding's `start` / `end` offsets count in.
+enum RedactionOffsetEncoding {
+  /// UTF-8 byte offsets.
+  utf8Bytes,
+
+  /// Unicode scalar value (code point) offsets, as Presidio reports them.
+  unicodeCodePoints,
+
+  /// UTF-16 code unit offsets.
+  utf16CodeUnits,
 }
 
 /// One user-supplied regex pattern to redact.
@@ -17298,7 +17480,10 @@ class SecurityLimits {
   /// document (GH#1721).
   final PlatformInt64 maxContentSize;
 
-  /// Maximum iterations per operation
+  /// Maximum iterations per operation.
+  ///
+  /// For external redaction findings, this may lower but cannot raise the
+  /// fixed 10,000-finding ceiling.
   final PlatformInt64 maxIterations;
 
   /// Maximum XML depth (1024 levels)

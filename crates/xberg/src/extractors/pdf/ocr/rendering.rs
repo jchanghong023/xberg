@@ -827,6 +827,11 @@ fn xobject_text_outside_tables(result: &crate::types::ExtractedDocument) -> std:
 }
 /// The text elements of an OCR page document as flat text: lines of one block on consecutive
 /// lines, blocks apart by a blank line, the grouping the PDF paragraph builder merges on. ~keep
+// ~keep hOCR, PaddleOCR, and Sceptre all emit this internal key, while the hOCR parser module is
+// ~keep unavailable to the `ocr-wasm` feature that also compiles this renderer.
+#[cfg(all(any(feature = "ocr", feature = "ocr-wasm"), feature = "pdf"))]
+const OCR_BLOCK_ID_ATTRIBUTE: &str = "hocr_block_id";
+
 #[cfg(all(any(feature = "ocr", feature = "ocr-wasm"), feature = "pdf"))]
 fn ocr_document_text(document: &crate::types::internal::InternalDocument) -> String {
     let mut text = String::new();
@@ -838,7 +843,7 @@ fn ocr_document_text(document: &crate::types::internal::InternalDocument) -> Str
         let block = element
             .attributes
             .as_ref()
-            .and_then(|attributes| attributes.get(crate::ocr::hocr_parser::HOCR_BLOCK_ID_ATTRIBUTE))
+            .and_then(|attributes| attributes.get(OCR_BLOCK_ID_ATTRIBUTE))
             .map(String::as_str);
         if !text.is_empty() {
             text.push_str(if block.is_some() && block == previous_block {

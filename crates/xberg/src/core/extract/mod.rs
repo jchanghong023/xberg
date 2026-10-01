@@ -24,6 +24,35 @@ pub async fn extract(input: ExtractInput, config: &ExtractionConfig) -> Result<E
     DEFAULT_ENGINE.extract(input, config).await
 }
 
+/// Extract one bytes input and redact a JSON array or JSON Lines payload from an external inspection engine.
+///
+/// The payload is parsed in Rust so vendor aliases and nested fields remain intact across language bindings.
+/// `offset_encoding` defaults to `unicode_code_points` and `max_findings` defaults to 10,000 when omitted.
+/// Unknown encodings return a validation error.
+#[cfg(feature = "redaction")]
+#[cfg_attr(feature = "alef-meta", alef(since = "1.3.1"))]
+pub async fn extract_with_external_redaction(
+    input: ExtractInput,
+    config: &ExtractionConfig,
+    findings_json: &str,
+    offset_encoding: Option<&str>,
+    max_findings: Option<u32>,
+) -> Result<ExtractionResult> {
+    let offset_encoding = offset_encoding.unwrap_or("unicode_code_points").parse()?;
+    let requested_limit = max_findings.unwrap_or(crate::text::redaction::external::DEFAULT_MAX_FINDINGS);
+    let default_limits = crate::extractors::security::SecurityLimits::default();
+    let security_limit = crate::text::redaction::external::security_finding_limit(
+        config.security_limits.as_ref().unwrap_or(&default_limits),
+    );
+    let effective_limit = u32::try_from(security_limit.min(requested_limit as usize)).map_err(|_| {
+        crate::XbergError::validation("effective redaction finding limit exceeds the supported u32 range".to_string())
+    })?;
+    let findings = crate::text::redaction::parse_external_findings_bounded(findings_json, effective_limit)?;
+    DEFAULT_ENGINE
+        .extract_with_external_redaction(input, config, findings, offset_encoding, max_findings)
+        .await
+}
+
 /// Extract content from multiple bytes or URI inputs.
 pub async fn extract_batch(inputs: Vec<ExtractInput>, config: &ExtractionConfig) -> Result<ExtractionResult> {
     DEFAULT_ENGINE.extract_batch(inputs, config).await

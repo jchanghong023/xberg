@@ -71,7 +71,7 @@
       "enabled": true,
       "backend": "paddleocr",
       "language": ["en"],
-      "paddle_ocr_config": {
+      "paddle_ocr_settings": {
         "language": "en",
         "model_tier": "mobile",
         "model_version": "pp-ocrv6"

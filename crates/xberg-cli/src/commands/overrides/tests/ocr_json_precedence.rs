@@ -71,6 +71,7 @@ fn ocr_config_with_every_non_flag_field_set() -> OcrConfig {
                 language: Some(vec!["eng".to_string()]),
                 tesseract_config: None,
                 paddle_ocr_config: None,
+                paddle_ocr_settings: None,
                 vlm_config: None,
                 backend_options: None,
             }],
@@ -82,7 +83,7 @@ fn ocr_config_with_every_non_flag_field_set() -> OcrConfig {
         }),
         vlm_fallback: xberg::VlmFallbackPolicy::OnLowQuality { quality_threshold: 0.5 },
         vlm_prompt: Some("custom prompt".to_string()),
-        paddle_ocr_config: Some(serde_json::json!({"model_version": "pp-ocrv5"})),
+        paddle_ocr_settings: Some(xberg::PaddleOcrConfig::new("en").with_model_version("pp-ocrv5")),
         backend_options: Some(serde_json::json!({"mode": "fast"})),
         tessdata_path: Some(std::path::PathBuf::from("/opt/tessdata")),
         ..OcrConfig::default()
@@ -134,8 +135,10 @@ fn should_keep_every_non_flag_ocr_field_when_ocr_flags_are_also_given() {
     );
     assert_eq!(ocr.vlm_prompt.as_deref(), Some("custom prompt"));
     assert_eq!(
-        ocr.paddle_ocr_config,
-        Some(serde_json::json!({"model_version": "pp-ocrv5"}))
+        ocr.paddle_ocr_settings
+            .as_ref()
+            .map(|paddle| paddle.model_version.as_str()),
+        Some("pp-ocrv5")
     );
     assert_eq!(ocr.backend_options, Some(serde_json::json!({"mode": "fast"})));
     assert_eq!(ocr.tessdata_path, Some(std::path::PathBuf::from("/opt/tessdata")));

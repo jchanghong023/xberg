@@ -1601,6 +1601,7 @@ async fn captioning_prepass_keeps_redaction_and_chunks_consistent() {
             llm: LlmConfig::default(),
             prompt: None,
             min_image_area: 1,
+            alt_text: Default::default(),
         }),
         redaction: Some(RedactionConfig::default()),
         chunking: Some(crate::ChunkingConfig {
@@ -1765,6 +1766,7 @@ async fn captioning_prepass_preserves_full_code_intelligence_scratch_payload() {
             llm: LlmConfig::default(),
             prompt: None,
             min_image_area: 1,
+            alt_text: Default::default(),
         }),
         ..Default::default()
     };

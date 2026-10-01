@@ -263,85 +263,42 @@ fn should_round_trip_through_serde_json() {
 /// or mis-tagged variant surfaces immediately.
 #[test]
 fn should_cover_all_element_kind_variants() {
+    let doc = document_with_all_element_kinds();
+    assert_all_element_kinds_round_trip(&doc);
+}
+
+fn push_element_and_assert_kind(doc: &mut InternalDocument, kind: ElementKind, text: &str, depth: u16) {
+    doc.push_element(InternalElement::text(kind, text, depth));
+    assert_eq!(doc.elements.last().unwrap().kind, kind);
+}
+
+fn document_with_all_element_kinds() -> InternalDocument {
     let mut doc = InternalDocument::new("test");
 
-    doc.push_element(InternalElement::text(ElementKind::Title, "T", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Title);
-
-    doc.push_element(InternalElement::text(ElementKind::Heading { level: 1 }, "H1", 1));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Heading { level: 1 });
-
-    doc.push_element(InternalElement::text(ElementKind::Paragraph, "P", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Paragraph);
-
-    doc.push_element(InternalElement::text(ElementKind::ListItem { ordered: false }, "li", 2));
-    assert_eq!(
-        doc.elements.last().unwrap().kind,
-        ElementKind::ListItem { ordered: false }
-    );
-
-    doc.push_element(InternalElement::text(ElementKind::Code, "x=1", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Code);
-
-    doc.push_element(InternalElement::text(ElementKind::Formula, "E=mc^2", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Formula);
-
-    doc.push_element(InternalElement::text(ElementKind::FootnoteDefinition, "note text", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::FootnoteDefinition);
-
-    doc.push_element(InternalElement::text(ElementKind::FootnoteRef, "1", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::FootnoteRef);
-
-    doc.push_element(InternalElement::text(ElementKind::Citation, "Smith 2020", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Citation);
-
-    doc.push_element(InternalElement::text(ElementKind::Slide { number: 3 }, "slide 3", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Slide { number: 3 });
-
-    doc.push_element(InternalElement::text(ElementKind::DefinitionTerm, "term", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::DefinitionTerm);
-
-    doc.push_element(InternalElement::text(ElementKind::DefinitionDescription, "desc", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::DefinitionDescription);
-
-    doc.push_element(InternalElement::text(ElementKind::Admonition, "Note:", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Admonition);
-
-    doc.push_element(InternalElement::text(ElementKind::RawBlock, "<raw/>", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::RawBlock);
-
-    doc.push_element(InternalElement::text(ElementKind::MetadataBlock, "---", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::MetadataBlock);
-
-    doc.push_element(InternalElement::text(ElementKind::ListStart { ordered: true }, "", 0));
-    assert_eq!(
-        doc.elements.last().unwrap().kind,
-        ElementKind::ListStart { ordered: true }
-    );
-
-    doc.push_element(InternalElement::text(ElementKind::ListEnd, "", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::ListEnd);
-
-    doc.push_element(InternalElement::text(ElementKind::QuoteStart, "", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::QuoteStart);
-
-    doc.push_element(InternalElement::text(ElementKind::QuoteEnd, "", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::QuoteEnd);
-
-    doc.push_element(InternalElement::text(ElementKind::GroupStart, "", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::GroupStart);
-
-    doc.push_element(InternalElement::text(ElementKind::GroupEnd, "", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::GroupEnd);
-
-    doc.push_element(InternalElement::text(ElementKind::Table { table_index: 0 }, "", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Table { table_index: 0 });
-
-    doc.push_element(InternalElement::text(ElementKind::Image { image_index: 1 }, "", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::Image { image_index: 1 });
-
-    doc.push_element(InternalElement::text(ElementKind::PageBreak, "", 0));
-    assert_eq!(doc.elements.last().unwrap().kind, ElementKind::PageBreak);
+    push_element_and_assert_kind(&mut doc, ElementKind::Title, "T", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::Heading { level: 1 }, "H1", 1);
+    push_element_and_assert_kind(&mut doc, ElementKind::Paragraph, "P", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::ListItem { ordered: false }, "li", 2);
+    push_element_and_assert_kind(&mut doc, ElementKind::Code, "x=1", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::Formula, "E=mc^2", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::FootnoteDefinition, "note text", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::FootnoteRef, "1", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::Citation, "Smith 2020", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::Slide { number: 3 }, "slide 3", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::DefinitionTerm, "term", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::DefinitionDescription, "desc", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::Admonition, "Note:", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::RawBlock, "<raw/>", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::MetadataBlock, "---", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::ListStart { ordered: true }, "", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::ListEnd, "", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::QuoteStart, "", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::QuoteEnd, "", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::GroupStart, "", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::GroupEnd, "", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::Table { table_index: 0 }, "", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::Image { image_index: 1 }, "", 0);
+    push_element_and_assert_kind(&mut doc, ElementKind::PageBreak, "", 0);
 
     for level in [
         OcrElementLevel::Word,
@@ -349,10 +306,13 @@ fn should_cover_all_element_kind_variants() {
         OcrElementLevel::Block,
         OcrElementLevel::Page,
     ] {
-        doc.push_element(InternalElement::text(ElementKind::OcrText { level }, "ocr", 0));
-        assert_eq!(doc.elements.last().unwrap().kind, ElementKind::OcrText { level });
+        push_element_and_assert_kind(&mut doc, ElementKind::OcrText { level }, "ocr", 0);
     }
 
+    doc
+}
+
+fn assert_all_element_kinds_round_trip(doc: &InternalDocument) {
     let json = serde_json::to_string(&doc).expect("serialize all-variant InternalDocument");
     let restored: InternalDocument = serde_json::from_str(&json).expect("deserialize all-variant InternalDocument");
 

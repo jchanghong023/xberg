@@ -177,87 +177,88 @@ fn test_node_id_deterministic() {
 
 #[test]
 fn test_node_content_text() {
-    assert_eq!(
+    assert_text_content_variants();
+    assert_non_text_content_variants();
+}
+
+fn assert_content_text(content: NodeContent, expected: Option<&str>) {
+    assert_eq!(content.text(), expected);
+}
+
+fn assert_text_content_variants() {
+    assert_content_text(
         NodeContent::Paragraph {
-            text: "Hello".to_string()
-        }
-        .text(),
-        Some("Hello")
+            text: "Hello".to_string(),
+        },
+        Some("Hello"),
     );
-    assert_eq!(
+    assert_content_text(
         NodeContent::Title {
-            text: "Title".to_string()
-        }
-        .text(),
-        Some("Title")
+            text: "Title".to_string(),
+        },
+        Some("Title"),
     );
-    assert_eq!(
+    assert_content_text(
         NodeContent::Heading {
             level: 1,
-            text: "H1".to_string()
-        }
-        .text(),
-        Some("H1")
+            text: "H1".to_string(),
+        },
+        Some("H1"),
     );
-    assert_eq!(NodeContent::PageBreak.text(), None);
-    assert_eq!(NodeContent::Quote.text(), None);
-    assert_eq!(
+    assert_content_text(
+        NodeContent::DefinitionItem {
+            term: "Term".to_string(),
+            definition: "Def".to_string(),
+        },
+        Some("Term"),
+    );
+    assert_content_text(
+        NodeContent::Citation {
+            key: "k".to_string(),
+            text: "Text".to_string(),
+        },
+        Some("Text"),
+    );
+    assert_content_text(
+        NodeContent::RawBlock {
+            format: "html".to_string(),
+            content: "<b>hi</b>".to_string(),
+        },
+        Some("<b>hi</b>"),
+    );
+}
+
+fn assert_non_text_content_variants() {
+    assert_content_text(NodeContent::PageBreak, None);
+    assert_content_text(NodeContent::Quote, None);
+    assert_content_text(
         NodeContent::Group {
             label: None,
             heading_level: None,
-            heading_text: None
-        }
-        .text(),
-        None
+            heading_text: None,
+        },
+        None,
     );
-
-    assert_eq!(
+    assert_content_text(
         NodeContent::Slide {
             number: 1,
-            title: Some("Slide".to_string())
-        }
-        .text(),
-        None
+            title: Some("Slide".to_string()),
+        },
+        None,
     );
-    assert_eq!(NodeContent::DefinitionList.text(), None);
-    assert_eq!(
-        NodeContent::DefinitionItem {
-            term: "Term".to_string(),
-            definition: "Def".to_string()
-        }
-        .text(),
-        Some("Term")
-    );
-    assert_eq!(
-        NodeContent::Citation {
-            key: "k".to_string(),
-            text: "Text".to_string()
-        }
-        .text(),
-        Some("Text")
-    );
-    assert_eq!(
+    assert_content_text(NodeContent::DefinitionList, None);
+    assert_content_text(
         NodeContent::Admonition {
             kind: "note".to_string(),
-            title: None
-        }
-        .text(),
-        None
+            title: None,
+        },
+        None,
     );
-    assert_eq!(
-        NodeContent::RawBlock {
-            format: "html".to_string(),
-            content: "<b>hi</b>".to_string()
-        }
-        .text(),
-        Some("<b>hi</b>")
-    );
-    assert_eq!(
+    assert_content_text(
         NodeContent::MetadataBlock {
-            entries: vec![("k".to_string(), "v".to_string()).into()]
-        }
-        .text(),
-        None
+            entries: vec![("k".to_string(), "v".to_string()).into()],
+        },
+        None,
     );
 }
 

@@ -33,6 +33,8 @@
 
 #![deny(clippy::print_stdout, clippy::print_stderr)]
 #![cfg_attr(test, allow(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro))]
+// Deprecated public compatibility fields remain wired internally until their planned 2.0 removal. ~keep
+#![allow(deprecated)]
 #![deny(unsafe_code)]
 
 #[cfg(all(
@@ -197,7 +199,6 @@ pub(crate) mod model_download;
 #[cfg(any(layout_detection, auto_rotate))]
 pub(crate) mod inference;
 
-#[cfg(any(paddle_ocr, feature = "paddle-ocr-types"))]
 pub mod paddle_ocr;
 
 #[cfg(all(sceptre_ocr, not(target_arch = "wasm32")))]
@@ -239,25 +240,29 @@ pub use types::*;
 #[cfg(feature = "office")]
 pub use extraction::office_metadata::{CoreProperties, DocxAppProperties};
 
+#[cfg(feature = "redaction")]
+pub use core::extract::extract_with_external_redaction;
 #[cfg(feature = "url-ingestion")]
 pub use core::extract::map_url;
 pub use core::extract::{extract, extract_batch};
 #[cfg(feature = "pdf")]
 pub use core::split::{SplitConfig, SplitSegment, SplitStrategy, split_and_extract};
+#[cfg(feature = "redaction")]
+pub use text::redaction::redact_external;
 
 #[cfg(feature = "transcription-types")]
 pub use core::config::TranscriptionConfig;
 pub use core::config::{
-    AccelerationConfig, BedrockConfig, CallMode, CaptioningConfig, ChunkClassificationConfig,
+    AccelerationConfig, BedrockConfig, CallMode, CaptionAltTextMode, CaptioningConfig, ChunkClassificationConfig,
     ChunkClassificationDefinition, ChunkSizing, ChunkerType, ChunkingConfig, ConcurrencyConfig, ContentFilterConfig,
     CredentialProviderConfig, CsvConfig, EmailConfig, EmbeddingConfig, EmbeddingModelType, ExecutionProviderType,
-    ExtractInput, ExtractInputKind, ExtractionConfig, ExtractionErrorItem, ExtractionResult, ExtractionSummary,
-    FileExtractionConfig, GeoJsonExtractionConfig, ImageExtractionConfig, JupyterCellRendering,
+    ExternalRedactionFinding, ExtractInput, ExtractInputKind, ExtractionConfig, ExtractionErrorItem, ExtractionResult,
+    ExtractionSummary, FileExtractionConfig, GeoJsonExtractionConfig, ImageExtractionConfig, JupyterCellRendering,
     LanguageDetectionConfig, LlmBudgetConfig, LlmCacheConfig, LlmConfig, LlmProviderConfig, LlmRateLimitConfig,
     MergeMode, MimeDetectionPolicy, NerBackendKind, NerConfig, OcrConfig, OutputFormat, PageClassificationConfig,
-    PageConfig, PostProcessorConfig, RedactionConfig, RedactionPattern, RedactionTerm, RerankerConfig, RerankerHead,
-    RerankerModelType, StructuredExtractionConfig, SummarizationConfig, TableChunkingMode, TokenReductionOptions,
-    TranslationConfig, UrlExtractionConfig, UrlExtractionMode,
+    PageConfig, PostProcessorConfig, RedactionConfig, RedactionOffsetEncoding, RedactionPattern, RedactionTerm,
+    RerankerConfig, RerankerHead, RerankerModelType, StructuredExtractionConfig, SummarizationConfig,
+    TableChunkingMode, TokenReductionOptions, TranslationConfig, UrlExtractionConfig, UrlExtractionMode,
 };
 pub use core::config::{
     LateInteractionConfig, LateInteractionModelType, SparseEmbeddingConfig, SparseEmbeddingModelType,
@@ -323,7 +328,6 @@ pub use html_to_markdown_rs::ConversionOptions;
 #[cfg(feature = "html")]
 pub use rendering::StyledHtmlRenderer;
 
-#[cfg(feature = "paddle-ocr-types")]
 pub use paddle_ocr::{ModelPaths, PaddleInferenceBackend, PaddleLanguage, PaddleOcrConfig};
 
 #[cfg(paddle_ocr)]

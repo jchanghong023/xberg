@@ -31,13 +31,42 @@ def fail(message: str) -> None:
 
 async def run(fixture_path: str, expected_substring: str) -> None:
     try:
-        from xberg import ExtractInput, extract
+        from xberg import (
+            ExtractInput,
+            ExtractionConfig,
+            OcrConfig,
+            OcrPipelineConfig,
+            OcrPipelineStage,
+            OcrQualityThresholds,
+            PaddleOcrConfig,
+            TesseractConfig,
+            extract,
+        )
     except Exception as exc:  # report and fail loud, not silently
         fail(f"could not import the xberg native extension: {exc!r}")
         return
 
     try:
-        output = await extract(ExtractInput(kind="uri", uri=fixture_path))
+        pipeline = OcrPipelineConfig(
+            stages=[
+                OcrPipelineStage(
+                    backend="tesseract",
+                    tesseract_config=TesseractConfig(psm=6, enable_table_detection=False),
+                ),
+                OcrPipelineStage(
+                    backend="paddleocr",
+                    priority=90,
+                    paddle_ocr_settings=PaddleOcrConfig(
+                        use_angle_cls=True,
+                        enable_table_detection=True,
+                        model_tier="server",
+                    ),
+                ),
+            ],
+            quality_thresholds=OcrQualityThresholds(),
+        )
+        config = ExtractionConfig(ocr=OcrConfig(enabled=False, pipeline=pipeline))
+        output = await extract(ExtractInput(kind="uri", uri=fixture_path), config)
     except Exception as exc:  # report and fail loud, not silently
         fail(f"extract() raised for fixture {fixture_path!r}: {exc!r}")
         return

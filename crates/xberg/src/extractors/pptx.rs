@@ -24,6 +24,12 @@ pub struct PptxExtractor;
 /// indentation. 64 bytes covers the element struct plus its hash id.
 const LIST_CONTAINER_BUDGET_BYTES: usize = 64;
 
+struct PptxMarkdownContext<'a> {
+    forms: &'a [(String, String)],
+    formulas: &'a [(String, bool)],
+    plain_output: bool,
+}
+
 impl Default for PptxExtractor {
     fn default() -> Self {
         Self::new()
@@ -147,7 +153,7 @@ impl PptxExtractor {
     }
 
     fn build_internal_document(
-        slide_contents: &[(u32, String)],
+        slide_contents: &[crate::extraction::pptx::PptxInternalSlide],
         slide_count: u32,
         formulas: &[(String, bool)],
         plain_output: bool,
@@ -156,181 +162,48 @@ impl PptxExtractor {
         let mut builder = InternalDocumentBuilder::new("pptx");
         let mut saw_title = false;
         let forms = Self::math_forms(formulas);
+        let markdown_context = PptxMarkdownContext {
+            forms: &forms,
+            formulas,
+            plain_output,
+        };
 
-        for (slide_num, content) in slide_contents {
-            // add_notes writes a slide's notes last, as one string — so a blank
-            // line inside the notes splits them across blocks, and only the
-            // first carries the marker. Once notes start, every later block of
-            // the same slide is note text and none of it can be the title.
-            let mut in_notes = false;
-            for block in content.split("\n\n") {
-                budget.step()?;
-                let mut trimmed = block.trim();
-                if trimmed.is_empty() {
-                    continue;
-                }
-
-                // The notes marker is written directly above the notes text, so the two
-                // share a blank-line-separated block (`### Notes:\n<text>`) whenever the
-                // note has no blank line of its own. Dropping the whole block therefore
-                // dropped the note's first paragraph — every note for a one-paragraph
-                // note, since that paragraph is the block. Strip the marker and keep
-                // whatever follows it. What follows is the note's content, so it never
-                // counts as the slide's title: a note opening with `# ` is prose, and
-                // taking it as a heading folded the whole note into one element.
-                if let Some(rest) = Self::strip_notes_marker(trimmed) {
-                    trimmed = rest.trim();
-                    in_notes = true;
-                    if trimmed.is_empty() {
-                        continue;
+        for slide in slide_contents {
+            for element in &slide.elements {
+                match element {
+                    crate::extraction::pptx::PptxInternalSlideElement::Markdown(content) => {
+                        Self::push_markdown_content(
+                            &mut builder,
+                            content,
+                            slide.slide_number,
+                            &markdown_context,
+                            &mut saw_title,
+                            budget,
+                        )?;
                     }
-                }
-
-                if !in_notes && let Some(title_text) = trimmed.strip_prefix("# ") {
-                    saw_title = true;
-                    let (title_text, title_formulas) =
-                        Self::split_line_math(title_text, &forms, formulas, plain_output);
-                    Self::push_line_formulas(&mut builder, &title_formulas, *slide_num, budget)?;
-                    let title = title_text.trim();
-                    if !title.is_empty() {
-                        budget.account_text(title.len())?;
-                        builder.push_heading(2, title, Some(*slide_num), None);
-                    }
-                    continue;
-                }
-
-                if trimmed.starts_with('|') {
-                    // A block that opens with a table row can still carry picture placeholders:
-                    // the content builder appends one for every picture, and a picture that sits
-                    // inside the table's area lands in the same blank-line-separated block.
-                    // Handing those lines to the table parser turned them into cells, where the
-                    // image promotion — which walks paragraphs — never saw them, so the picture
-                    // disappeared from the output. Split them back out and let each keep its
-                    // place around the table.
-                    let lines: Vec<&str> = trimmed.lines().collect();
-                    let first_table = lines.iter().position(|line| line.trim_start().starts_with('|'));
-                    let (leading, rest) = lines.split_at(first_table.unwrap_or(lines.len()));
-                    let (table_lines, trailing): (Vec<&str>, Vec<&str>) =
-                        rest.iter().partition(|line| line.trim_start().starts_with('|'));
-
-                    let push_lines = |builder: &mut InternalDocumentBuilder,
-                                      lines: &[&str],
-                                      budget: &mut SecurityBudget|
-                     -> Result<()> {
-                        for line in lines {
-                            let line = line.trim();
-                            if line.is_empty() {
-                                continue;
-                            }
-                            let (line_text, line_formulas) =
-                                Self::split_line_math(line, &forms, formulas, plain_output);
-                            Self::push_line_formulas(builder, &line_formulas, *slide_num, budget)?;
-                            let text = line_text.trim();
-                            if !text.is_empty() {
-                                budget.account_text(text.len())?;
-                                builder.push_paragraph(text, Vec::new(), Some(*slide_num), None);
-                            }
-                        }
-                        Ok(())
-                    };
-
-                    push_lines(&mut builder, leading, budget)?;
-                    let table_text = table_lines.join("\n");
-                    let cells = Self::parse_markdown_table(&table_text);
-                    if !cells.is_empty() {
-                        builder.push_table_from_cells(&cells, Some(*slide_num), None);
-                    }
-                    push_lines(&mut builder, &trailing, budget)?;
-                    continue;
-                }
-
-                // One entry per open list, outermost first: the deck's own outline is
-                // expressed as indentation in the Markdown (`add_list_item` indents two
-                // spaces per level), and the renderer only indents nested lists. Keeping
-                // the items in a single flat list lost every level.
-                let mut open_lists: Vec<bool> = Vec::new();
-
-                for line in trimmed.lines() {
-                    // Marker and indentation are read off the raw line: split_line_math
-                    // collapses whitespace, which would flatten a nested item whose text
-                    // carries a formula back to depth 0. The depth is clamped to the
-                    // same ceiling the write side applies to `a:pPr/@lvl`: the reader
-                    // sees arbitrary text, and a multi-megabyte indent would otherwise
-                    // open millions of list containers.
-                    let depth = ((line.len() - line.trim_start().len()) / crate::extraction::pptx::LIST_INDENT.len())
-                        .min(crate::extraction::pptx::MAX_LIST_NESTING_LEVEL as usize);
-                    let raw = line.trim_start();
-                    let list_match = if let Some(item_text) = raw.strip_prefix("- ") {
-                        Some((false, item_text))
-                    } else {
-                        Self::strip_ordered_prefix(raw).map(|item_text| (true, item_text))
-                    };
-
-                    if let Some((ordered, item_text)) = list_match {
-                        // The item's text is what follows the marker; its math is split
-                        // out of that, so an item that is only a formula keeps its place
-                        // in the list instead of falling out of it.
-                        let (item_text, item_formulas) =
-                            Self::split_line_math(item_text, &forms, formulas, plain_output);
-                        let item_text = item_text.trim();
-                        if item_text.is_empty() && item_formulas.is_empty() {
-                            continue;
-                        }
-                        while open_lists.len() > depth + 1 {
-                            builder.end_list();
-                            open_lists.pop();
-                        }
-                        while open_lists.len() < depth + 1 {
-                            // List containers carry no text of their own, so the
-                            // per-line text accounting below would let a hostile
-                            // deck buy ~9 elements per byte of marker. Charge each
-                            // container a flat share of the content budget.
-                            budget.account_text(LIST_CONTAINER_BUDGET_BYTES)?;
-                            builder.push_list(ordered);
-                            open_lists.push(ordered);
-                        }
-                        if let Some(innermost) = open_lists.last_mut()
-                            && *innermost != ordered
-                        {
-                            // A numbered run inside a bulleted one: a Markdown list holds one
-                            // kind, so the innermost list is closed and reopened.
-                            budget.account_text(2 * LIST_CONTAINER_BUDGET_BYTES)?;
-                            builder.end_list();
-                            builder.push_list(ordered);
-                            *innermost = ordered;
-                        }
-                        // A list item's math becomes its own element ahead of the
-                        // item, the order DOCX uses for math runs in a paragraph.
-                        Self::push_line_formulas(&mut builder, &item_formulas, *slide_num, budget)?;
-                        if !item_text.is_empty() {
-                            // The raw line (indentation + marker + text) is the
-                            // budgeted unit: accounting only the post-marker text
-                            // would leave megabytes of leading spaces free.
-                            budget.account_text(line.len())?;
-                            builder.push_list_item(item_text, ordered, vec![], Some(*slide_num), None);
-                        }
-                    } else {
-                        let (line_text, line_formulas) = Self::split_line_math(line, &forms, formulas, plain_output);
-                        let lt = line_text.trim();
-                        if lt.is_empty() && line_formulas.is_empty() {
-                            while open_lists.pop().is_some() {
-                                builder.end_list();
-                            }
-                            continue;
-                        }
-                        while open_lists.pop().is_some() {
-                            builder.end_list();
-                        }
-                        Self::push_line_formulas(&mut builder, &line_formulas, *slide_num, budget)?;
-                        if !lt.is_empty() {
-                            budget.account_text(lt.len())?;
-                            builder.push_paragraph(lt, vec![], Some(*slide_num), None);
+                    crate::extraction::pptx::PptxInternalSlideElement::Image {
+                        alt_text,
+                        target,
+                        image_index,
+                    } => {
+                        budget.step()?;
+                        if let Some(image_index) = image_index {
+                            budget.account_text(alt_text.len())?;
+                            let element = crate::types::internal::InternalElement::text(
+                                crate::types::internal::ElementKind::Image {
+                                    image_index: *image_index,
+                                },
+                                alt_text,
+                                0,
+                            )
+                            .with_page(slide.slide_number);
+                            builder.push_element(element);
+                        } else {
+                            let placeholder = format!("![{alt_text}]({target})");
+                            budget.account_text(placeholder.len())?;
+                            builder.push_paragraph(&placeholder, vec![], Some(slide.slide_number), None);
                         }
                     }
-                }
-
-                while open_lists.pop().is_some() {
-                    builder.end_list();
                 }
             }
         }
@@ -342,6 +215,188 @@ impl PptxExtractor {
         }
 
         Ok(builder.build())
+    }
+
+    fn push_markdown_content(
+        builder: &mut InternalDocumentBuilder,
+        content: &str,
+        slide_num: u32,
+        context: &PptxMarkdownContext<'_>,
+        saw_title: &mut bool,
+        budget: &mut SecurityBudget,
+    ) -> Result<()> {
+        let mut in_notes = false;
+        for block in content.split("\n\n") {
+            budget.step()?;
+            let mut trimmed = block.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // The notes marker is written directly above the notes text, so the two
+            // share a blank-line-separated block (`### Notes:\n<text>`) whenever the
+            // note has no blank line of its own. Dropping the whole block therefore
+            // dropped the note's first paragraph — every note for a one-paragraph
+            // note, since that paragraph is the block. Strip the marker and keep
+            // whatever follows it. What follows is the note's content, so it never
+            // counts as the slide's title: a note opening with `# ` is prose, and
+            // taking it as a heading folded the whole note into one element.
+            if let Some(rest) = Self::strip_notes_marker(trimmed) {
+                trimmed = rest.trim();
+                in_notes = true;
+                if trimmed.is_empty() {
+                    continue;
+                }
+            }
+
+            if !in_notes && let Some(title_text) = trimmed.strip_prefix("# ") {
+                *saw_title = true;
+                let (title_text, title_formulas) =
+                    Self::split_line_math(title_text, context.forms, context.formulas, context.plain_output);
+                Self::push_line_formulas(builder, &title_formulas, slide_num, budget)?;
+                let title = title_text.trim();
+                if !title.is_empty() {
+                    budget.account_text(title.len())?;
+                    builder.push_heading(2, title, Some(slide_num), None);
+                }
+                continue;
+            }
+
+            if trimmed.starts_with('|') {
+                // A block that opens with a table row can still carry picture placeholders:
+                // the content builder appends one for every picture, and a picture that sits
+                // inside the table's area lands in the same blank-line-separated block.
+                // Handing those lines to the table parser turned them into cells, where the
+                // image promotion — which walks paragraphs — never saw them, so the picture
+                // disappeared from the output. Split them back out and let each keep its
+                // place around the table.
+                let lines: Vec<&str> = trimmed.lines().collect();
+                let first_table = lines.iter().position(|line| line.trim_start().starts_with('|'));
+                let (leading, rest) = lines.split_at(first_table.unwrap_or(lines.len()));
+                let (table_lines, trailing): (Vec<&str>, Vec<&str>) =
+                    rest.iter().partition(|line| line.trim_start().starts_with('|'));
+
+                let push_lines = |builder: &mut InternalDocumentBuilder,
+                                  lines: &[&str],
+                                  budget: &mut SecurityBudget|
+                 -> Result<()> {
+                    for line in lines {
+                        let line = line.trim();
+                        if line.is_empty() {
+                            continue;
+                        }
+                        let (line_text, line_formulas) =
+                            Self::split_line_math(line, context.forms, context.formulas, context.plain_output);
+                        Self::push_line_formulas(builder, &line_formulas, slide_num, budget)?;
+                        let text = line_text.trim();
+                        if !text.is_empty() {
+                            budget.account_text(text.len())?;
+                            builder.push_paragraph(text, Vec::new(), Some(slide_num), None);
+                        }
+                    }
+                    Ok(())
+                };
+
+                push_lines(builder, leading, budget)?;
+                let table_text = table_lines.join("\n");
+                let cells = Self::parse_markdown_table(&table_text);
+                if !cells.is_empty() {
+                    builder.push_table_from_cells(&cells, Some(slide_num), None);
+                }
+                push_lines(builder, &trailing, budget)?;
+                continue;
+            }
+
+            // One entry per open list, outermost first: the deck's own outline is
+            // expressed as indentation in the Markdown (`add_list_item` indents two
+            // spaces per level), and the renderer only indents nested lists. Keeping
+            // the items in a single flat list lost every level.
+            let mut open_lists: Vec<bool> = Vec::new();
+
+            for line in trimmed.lines() {
+                // Marker and indentation are read off the raw line: split_line_math
+                // collapses whitespace, which would flatten a nested item whose text
+                // carries a formula back to depth 0. The depth is clamped to the
+                // same ceiling the write side applies to `a:pPr/@lvl`: the reader
+                // sees arbitrary text, and a multi-megabyte indent would otherwise
+                // open millions of list containers.
+                let depth = ((line.len() - line.trim_start().len()) / crate::extraction::pptx::LIST_INDENT.len())
+                    .min(crate::extraction::pptx::MAX_LIST_NESTING_LEVEL as usize);
+                let raw = line.trim_start();
+                let list_match = if let Some(item_text) = raw.strip_prefix("- ") {
+                    Some((false, item_text))
+                } else {
+                    Self::strip_ordered_prefix(raw).map(|item_text| (true, item_text))
+                };
+
+                if let Some((ordered, item_text)) = list_match {
+                    // The item's text is what follows the marker; its math is split
+                    // out of that, so an item that is only a formula keeps its place
+                    // in the list instead of falling out of it.
+                    let (item_text, item_formulas) =
+                        Self::split_line_math(item_text, context.forms, context.formulas, context.plain_output);
+                    let item_text = item_text.trim();
+                    if item_text.is_empty() && item_formulas.is_empty() {
+                        continue;
+                    }
+                    while open_lists.len() > depth + 1 {
+                        builder.end_list();
+                        open_lists.pop();
+                    }
+                    while open_lists.len() < depth + 1 {
+                        // List containers carry no text of their own, so the
+                        // per-line text accounting below would let a hostile
+                        // deck buy ~9 elements per byte of marker. Charge each
+                        // container a flat share of the content budget.
+                        budget.account_text(LIST_CONTAINER_BUDGET_BYTES)?;
+                        builder.push_list(ordered);
+                        open_lists.push(ordered);
+                    }
+                    if let Some(innermost) = open_lists.last_mut()
+                        && *innermost != ordered
+                    {
+                        // A numbered run inside a bulleted one: a Markdown list holds one
+                        // kind, so the innermost list is closed and reopened.
+                        budget.account_text(2 * LIST_CONTAINER_BUDGET_BYTES)?;
+                        builder.end_list();
+                        builder.push_list(ordered);
+                        *innermost = ordered;
+                    }
+                    // A list item's math becomes its own element ahead of the
+                    // item, the order DOCX uses for math runs in a paragraph.
+                    Self::push_line_formulas(builder, &item_formulas, slide_num, budget)?;
+                    if !item_text.is_empty() {
+                        // The raw line (indentation + marker + text) is the
+                        // budgeted unit: accounting only the post-marker text
+                        // would leave megabytes of leading spaces free.
+                        budget.account_text(line.len())?;
+                        builder.push_list_item(item_text, ordered, vec![], Some(slide_num), None);
+                    }
+                } else {
+                    let (line_text, line_formulas) =
+                        Self::split_line_math(line, context.forms, context.formulas, context.plain_output);
+                    let lt = line_text.trim();
+                    if lt.is_empty() && line_formulas.is_empty() {
+                        while open_lists.pop().is_some() {
+                            builder.end_list();
+                        }
+                        continue;
+                    }
+                    while open_lists.pop().is_some() {
+                        builder.end_list();
+                    }
+                    Self::push_line_formulas(builder, &line_formulas, slide_num, budget)?;
+                    if !lt.is_empty() {
+                        budget.account_text(lt.len())?;
+                        builder.push_paragraph(lt, vec![], Some(slide_num), None);
+                    }
+                }
+            }
+            while open_lists.pop().is_some() {
+                builder.end_list();
+            }
+        }
+        Ok(())
     }
 
     /// Strip a speaker-notes marker off a content block, returning the text after it.
@@ -426,14 +481,17 @@ impl PptxExtractor {
     /// `budget` is threaded into the internal document builder to enforce
     /// hostile-input limits on the extracted content.
     fn build_document_from_result(
-        pptx_result: crate::types::PptxExtractionResult,
-        slide_contents: &[(u32, String)],
-        formulas: &[(String, bool)],
-        plain_output: bool,
+        pptx_internal: crate::extraction::pptx::PptxInternalExtraction,
         mime_type: &str,
         extract_images: bool,
         budget: &mut SecurityBudget,
     ) -> Result<InternalDocument> {
+        let crate::extraction::pptx::PptxInternalExtraction {
+            result: pptx_result,
+            slide_contents,
+            formulas,
+            plain_output,
+        } = pptx_internal;
         let mut additional: AHashMap<Cow<'static, str>, serde_json::Value> = AHashMap::new();
 
         let mut pptx_metadata = pptx_result.metadata;
@@ -474,9 +532,9 @@ impl PptxExtractor {
         }
 
         let mut doc = Self::build_internal_document(
-            slide_contents,
+            &slide_contents,
             pptx_result.slide_count as u32,
-            formulas,
+            &formulas,
             plain_output,
             budget,
         )?;
@@ -932,15 +990,7 @@ impl InternalDocumentExtractor for PptxExtractor {
         };
 
         let mut budget = SecurityBudget::from_config(config);
-        let mut doc = Self::build_document_from_result(
-            pptx_internal.result,
-            &pptx_internal.slide_contents,
-            &pptx_internal.formulas,
-            pptx_internal.plain_output,
-            mime_type,
-            extract_images,
-            &mut budget,
-        )?;
+        let mut doc = Self::build_document_from_result(pptx_internal, mime_type, extract_images, &mut budget)?;
         doc.processing_warnings.extend(pptx_warnings);
 
         if config.max_archive_depth > 0 {
@@ -1003,15 +1053,7 @@ impl InternalDocumentExtractor for PptxExtractor {
         )?;
 
         let mut budget = SecurityBudget::from_config(config);
-        let mut doc = Self::build_document_from_result(
-            pptx_internal.result,
-            &pptx_internal.slide_contents,
-            &pptx_internal.formulas,
-            pptx_internal.plain_output,
-            mime_type,
-            extract_images,
-            &mut budget,
-        )?;
+        let mut doc = Self::build_document_from_result(pptx_internal, mime_type, extract_images, &mut budget)?;
         doc.processing_warnings.extend(pptx_warnings);
 
         // `extract_content` extracts `ppt/embeddings/*` children, but the CLI (and any caller
@@ -1074,6 +1116,16 @@ impl InternalDocumentExtractor for PptxExtractor {
 mod tests {
     use super::*;
 
+    fn markdown_slides(contents: Vec<(u32, String)>) -> Vec<crate::extraction::pptx::PptxInternalSlide> {
+        contents
+            .into_iter()
+            .map(|(slide_number, markdown)| crate::extraction::pptx::PptxInternalSlide {
+                slide_number,
+                elements: vec![crate::extraction::pptx::PptxInternalSlideElement::Markdown(markdown)],
+            })
+            .collect()
+    }
+
     /// REV-CB regression for GH#1687 (shares the GH#1662/GH#1686 fix): an OCR-only
     /// `ExtractionConfig` (no `images.extract_images`, no captioning, no QR codes) must
     /// still read a slide's embedded raster image bytes out of the PPTX archive, not
@@ -1115,6 +1167,7 @@ mod tests {
 
         let config = ExtractionConfig {
             ocr: Some(crate::core::config::OcrConfig::default()),
+            output_format: crate::core::config::OutputFormat::Markdown,
             ..Default::default()
         };
 
@@ -1131,6 +1184,85 @@ mod tests {
             payload.as_bytes(),
             "an OCR-only config must still read the real embedded-image bytes, not skip the image entirely"
         );
+        assert!(internal_doc.elements.iter().any(|element| {
+            matches!(
+                element.kind,
+                crate::types::internal::ElementKind::Image { image_index: 0 }
+            )
+        }));
+    }
+
+    #[tokio::test]
+    async fn test_image_placeholders_follow_visual_order_not_xml_order() {
+        use crate::core::config::{ExtractionConfig, ImageExtractionConfig, OutputFormat};
+        use crate::plugins::InternalDocumentExtractor;
+        use crate::types::internal::ElementKind;
+
+        let slide_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <p:cSld><p:spTree>
+        <p:pic>
+            <p:nvPicPr><p:cNvPr id="2" name="Bottom" descr="Bottom alt"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+            <p:blipFill><a:blip r:embed="rId2"/></p:blipFill>
+            <p:spPr><a:xfrm><a:off x="0" y="2000000"/><a:ext cx="1000000" cy="1000000"/></a:xfrm></p:spPr>
+        </p:pic>
+        <p:pic>
+            <p:nvPicPr><p:cNvPr id="3" name="Top" descr="Top alt"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+            <p:blipFill><a:blip r:embed="rId3"/></p:blipFill>
+            <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/></a:xfrm></p:spPr>
+        </p:pic>
+    </p:spTree></p:cSld>
+</p:sld>"#;
+        let slide_rels_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+    <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/bottom.png"/>
+    <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/top.png"/>
+</Relationships>"#;
+        let bottom_bytes = b"bottom image bytes";
+        let top_bytes = b"top image bytes";
+        let pptx = crate::extraction::pptx::tests::build_single_slide_pptx(
+            slide_xml,
+            Some(slide_rels_xml),
+            &[("ppt/media/bottom.png", bottom_bytes), ("ppt/media/top.png", top_bytes)],
+        );
+        let config = ExtractionConfig {
+            images: Some(ImageExtractionConfig::default()),
+            output_format: OutputFormat::Markdown,
+            ..Default::default()
+        };
+
+        let extractor = PptxExtractor::new();
+        let mime = "application/vnd.openxmlformats-officedocument.presentationml.presentation";
+        let mut document = extractor
+            .extract_content(&pptx, mime, &config)
+            .await
+            .expect("two-image PPTX should extract");
+
+        assert_eq!(document.images.len(), 2);
+        assert_eq!(document.images[0].data.as_ref(), top_bytes);
+        assert_eq!(document.images[0].description.as_deref(), Some("Top alt"));
+        assert_eq!(document.images[1].data.as_ref(), bottom_bytes);
+        assert_eq!(document.images[1].description.as_deref(), Some("Bottom alt"));
+        let image_indices: Vec<u32> = document
+            .elements
+            .iter()
+            .filter_map(|element| match element.kind {
+                ElementKind::Image { image_index } => Some(image_index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(image_indices, vec![0, 1]);
+
+        document.images[0].description = Some("Top caption".to_string());
+        document.images[1].description = Some("Bottom caption".to_string());
+        let markdown = crate::rendering::render_markdown(&document);
+        let top = markdown.find("Top caption").expect("top image caption should render");
+        let bottom = markdown
+            .find("Bottom caption")
+            .expect("bottom image caption should render");
+        assert!(top < bottom, "captions must stay attached in visual order: {markdown}");
     }
 
     /// A slide with math: the LaTeX must reach `ExtractedDocument.formulas`, not
@@ -1424,8 +1556,8 @@ mod tests {
         let content = "# Growth is $$g^{2}$$\n\n- Rate $r$ per year\n- Plain bullet\n";
         let formulas = vec![("g^{2}".to_string(), true), ("r".to_string(), false)];
         let mut budget = SecurityBudget::with_defaults();
-        let doc = PptxExtractor::build_internal_document(&[(1, content.to_string())], 1, &formulas, false, &mut budget)
-            .unwrap();
+        let slides = markdown_slides(vec![(1, content.to_string())]);
+        let doc = PptxExtractor::build_internal_document(&slides, 1, &formulas, false, &mut budget).unwrap();
 
         let math: Vec<&str> = doc
             .elements
@@ -1597,6 +1729,161 @@ mod tests {
     }
 
     #[test]
+    fn test_build_internal_document_keeps_image_placeholder_linked_to_extracted_image() {
+        use crate::types::internal::ElementKind;
+
+        let slide_contents = vec![crate::extraction::pptx::PptxInternalSlide {
+            slide_number: 1,
+            elements: vec![
+                crate::extraction::pptx::PptxInternalSlideElement::Markdown("Text before.".to_string()),
+                crate::extraction::pptx::PptxInternalSlideElement::Image {
+                    alt_text: "chart.png".to_string(),
+                    target: "../media/image1.png".to_string(),
+                    image_index: Some(0),
+                },
+            ],
+        }];
+        let mut budget = SecurityBudget::with_defaults();
+
+        let mut document = PptxExtractor::build_internal_document(&slide_contents, 1, &[], false, &mut budget)
+            .expect("internal PPTX document should build");
+
+        let image = document
+            .elements
+            .iter()
+            .find(|element| matches!(element.kind, ElementKind::Image { .. }))
+            .expect("PPTX placeholder should become an image element");
+        assert_eq!(image.text, "chart.png");
+        assert!(matches!(image.kind, ElementKind::Image { image_index: 0 }));
+        assert!(
+            !document
+                .elements
+                .iter()
+                .any(|element| { matches!(element.kind, ElementKind::Paragraph) && element.text.starts_with("![") })
+        );
+
+        document.images.push(crate::types::ExtractedImage {
+            format: Cow::Borrowed("png"),
+            description: Some("chart.png".to_string()),
+            ..Default::default()
+        });
+        assert!(crate::rendering::render_markdown(&document).contains("![chart.png](image_0.bin)"));
+
+        document.images[0].description = Some("Quarterly revenue chart".to_string());
+        assert!(crate::rendering::render_markdown(&document).contains("![Quarterly revenue chart](image_0.bin)"));
+    }
+
+    #[tokio::test]
+    async fn test_authored_markdown_cannot_consume_a_structural_image() {
+        use crate::core::config::{ExtractionConfig, ImageExtractionConfig, OutputFormat};
+        use crate::plugins::InternalDocumentExtractor;
+        use crate::types::internal::ElementKind;
+
+        let slide_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <p:cSld><p:spTree>
+        <p:sp>
+            <p:nvSpPr><p:cNvPr id="1" name="Title"/><p:cNvSpPr/><p:nvPr><p:ph type="title"/></p:nvPr></p:nvSpPr>
+            <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/></a:xfrm></p:spPr>
+            <p:txBody><a:p><a:r><a:t>Title</a:t></a:r></a:p></p:txBody>
+        </p:sp>
+        <p:sp><p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/></a:xfrm></p:spPr>
+            <p:txBody><a:p><a:r><a:t>![forged](../media/image1.png)</a:t></a:r></a:p></p:txBody>
+        </p:sp>
+        <p:pic>
+            <p:nvPicPr><p:cNvPr id="2" name="Picture" descr="real"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+            <p:blipFill><a:blip r:embed="rId2"/></p:blipFill>
+            <p:spPr><a:xfrm><a:off x="0" y="2000000"/><a:ext cx="1000000" cy="1000000"/></a:xfrm></p:spPr>
+        </p:pic>
+    </p:spTree></p:cSld>
+</p:sld>"#;
+        let slide_rels_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+    <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+</Relationships>"#;
+        let pptx = crate::extraction::pptx::tests::build_single_slide_pptx(
+            slide_xml,
+            Some(slide_rels_xml),
+            &[("ppt/media/image1.png", b"image bytes")],
+        );
+        let config = ExtractionConfig {
+            images: Some(ImageExtractionConfig::default()),
+            output_format: OutputFormat::Markdown,
+            ..Default::default()
+        };
+        let document = PptxExtractor::new()
+            .extract_content(
+                &pptx,
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                &config,
+            )
+            .await
+            .expect("PPTX should extract");
+
+        assert!(document.elements.iter().any(|element| {
+            matches!(element.kind, ElementKind::Paragraph) && element.text == "![forged](../media/image1.png)"
+        }));
+        let images: Vec<_> = document
+            .elements
+            .iter()
+            .filter(|element| matches!(element.kind, ElementKind::Image { .. }))
+            .collect();
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].text, "real");
+        assert!(matches!(images[0].kind, ElementKind::Image { image_index: 0 }));
+    }
+
+    #[tokio::test]
+    async fn test_structural_image_alt_text_may_contain_markdown_delimiters() {
+        use crate::core::config::{ExtractionConfig, ImageExtractionConfig, OutputFormat};
+        use crate::plugins::InternalDocumentExtractor;
+        use crate::types::internal::ElementKind;
+
+        let slide_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+       xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+       xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+    <p:cSld><p:spTree><p:pic>
+        <p:nvPicPr><p:cNvPr id="2" name="Picture" descr="sales ](2026"/><p:cNvPicPr/><p:nvPr/></p:nvPicPr>
+        <p:blipFill><a:blip r:embed="rId2"/></p:blipFill>
+        <p:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="1000000" cy="1000000"/></a:xfrm></p:spPr>
+    </p:pic></p:spTree></p:cSld>
+</p:sld>"#;
+        let slide_rels_xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+    <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="../media/image1.png"/>
+</Relationships>"#;
+        let pptx = crate::extraction::pptx::tests::build_single_slide_pptx(
+            slide_xml,
+            Some(slide_rels_xml),
+            &[("ppt/media/image1.png", b"image bytes")],
+        );
+        let config = ExtractionConfig {
+            images: Some(ImageExtractionConfig::default()),
+            output_format: OutputFormat::Markdown,
+            ..Default::default()
+        };
+        let document = PptxExtractor::new()
+            .extract_content(
+                &pptx,
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                &config,
+            )
+            .await
+            .expect("PPTX should extract");
+
+        let image = document
+            .elements
+            .iter()
+            .find(|element| matches!(element.kind, ElementKind::Image { .. }))
+            .expect("structural image should not depend on parsing its rendered markdown");
+        assert_eq!(image.text, "sales ](2026");
+        assert!(matches!(image.kind, ElementKind::Image { image_index: 0 }));
+    }
+
+    #[test]
     fn test_pptx_extractor_plugin_interface() {
         let extractor = PptxExtractor::new();
         assert_eq!(extractor.name(), "pptx-extractor");
@@ -1639,6 +1926,7 @@ mod tests {
         ];
         let mut budget = SecurityBudget::with_defaults();
 
+        let slide_contents = markdown_slides(slide_contents);
         let document = PptxExtractor::build_internal_document(&slide_contents, 3, &[], false, &mut budget)
             .expect("internal PPTX document should build");
 
@@ -1678,6 +1966,7 @@ mod tests {
         ];
         let mut budget = SecurityBudget::with_defaults();
 
+        let slide_contents = markdown_slides(slide_contents);
         let document = PptxExtractor::build_internal_document(&slide_contents, 2, &[], false, &mut budget)
             .expect("marker-like user text should remain ordinary slide content");
 

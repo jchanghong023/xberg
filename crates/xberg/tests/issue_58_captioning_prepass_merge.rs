@@ -135,6 +135,7 @@ fn captioning_config() -> ExtractionConfig {
             },
             prompt: None,
             min_image_area: 0,
+            alt_text: Default::default(),
         }),
         use_cache: false,
         ..Default::default()

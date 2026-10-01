@@ -1636,18 +1636,8 @@ values = ["function-too-long"]
 
 [[entries]]
 relative_path = "poly.toml"
-key_path = "per-file-ignores.crates/xberg/src/types/document_structure/tests.rs"
-values = ["function-too-long"]
-
-[[entries]]
-relative_path = "poly.toml"
 key_path = "per-file-ignores.crates/xberg/src/types/extraction.rs"
 values = ["file-too-long", "type-too-long"]
-
-[[entries]]
-relative_path = "poly.toml"
-key_path = "per-file-ignores.crates/xberg/src/types/internal/tests.rs"
-values = ["function-too-long"]
 
 [[entries]]
 relative_path = "poly.toml"
@@ -1658,11 +1648,6 @@ values = ["file-too-long", "too-many-parameters"]
 relative_path = "poly.toml"
 key_path = "per-file-ignores.crates/xberg/src/types/metadata.rs"
 values = ["cyclomatic-complexity", "file-too-long", "function-too-long"]
-
-[[entries]]
-relative_path = "poly.toml"
-key_path = "per-file-ignores.crates/xberg/tests/cross_format_parity.rs"
-values = ["file-too-long"]
 
 [[entries]]
 relative_path = "poly.toml"
@@ -1677,16 +1662,6 @@ values = ["file-too-long"]
 [[entries]]
 relative_path = "poly.toml"
 key_path = "per-file-ignores.crates/xberg/tests/pipeline_integration.rs"
-values = ["file-too-long"]
-
-[[entries]]
-relative_path = "poly.toml"
-key_path = "per-file-ignores.crates/xberg/tests/plugin_ocr_backend_test.rs"
-values = ["file-too-long"]
-
-[[entries]]
-relative_path = "poly.toml"
-key_path = "per-file-ignores.crates/xberg/tests/typst_behavioral_tests.rs"
 values = ["file-too-long"]
 
 [[entries]]
