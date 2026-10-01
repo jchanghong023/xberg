@@ -139,25 +139,25 @@ const PDFIUM_GROUND_TRUTH: &[(&str, f64)] = &[
     ("right_to_left_02", 0.43),       // measured 0.507 (RTL text)
     ("right_to_left_03", 0.31),       // measured 0.384 (RTL text)
     // ── pdfplumber vendored PDFs (GT: pdftotext) ──
-    ("2023-06-20-PV", 0.85),                          // measured 0.921
-    ("annotations", 0.0),                             // 5-word GT, volatile
-    ("annotations-rotated-180", 0.0),                 // 5-word GT, volatile
-    ("annotations-rotated-270", 0.0),                 // 5-word GT, volatile
-    ("annotations-rotated-90", 0.0),                  // 5-word GT, volatile
-    ("annotations-unicode-issues", 0.0),              // 11-word GT, volatile
-    ("chelsea_pdta", 0.77),                           // measured 0.846
-    ("cupertino_usd_4-6-16", 0.89),                   // measured 0.961
-    ("extra-attrs-example", 0.0),                     // 1-word GT
-    ("federal-register-2020-17221", 0.82),            // measured 0.899
-    ("figure_structure", 0.93),                       // measured 1.000
-    ("hello_structure", 0.93),                        // measured 1.000
-    ("image_structure", 0.39),                        // measured 0.467
-    ("issue-1054-example", 0.0),                      // sparse GT, xberg extracts more
-    ("issue-1114-dedupe-chars", 0.68),                // measured 0.759
-    ("issue-1147-example", 0.34),                     // measured 0.414
-    ("issue-1181", 0.56),                             // measured 0.889 md, 0.571 plain (24-word GT, volatile)
-    ("issue-1279-example", 0.60),                     // measured 0.678
-    ("issue-140-example", 0.0),                       // image-only PDF
+    ("2023-06-20-PV", 0.85),               // measured 0.921
+    ("annotations", 0.0),                  // 5-word GT, volatile
+    ("annotations-rotated-180", 0.0),      // 5-word GT, volatile
+    ("annotations-rotated-270", 0.0),      // 5-word GT, volatile
+    ("annotations-rotated-90", 0.0),       // 5-word GT, volatile
+    ("annotations-unicode-issues", 0.0),   // 11-word GT, volatile
+    ("chelsea_pdta", 0.77),                // measured 0.846
+    ("cupertino_usd_4-6-16", 0.89),        // measured 0.961
+    ("extra-attrs-example", 0.0),          // 1-word GT
+    ("federal-register-2020-17221", 0.82), // measured 0.899
+    ("figure_structure", 0.93),            // measured 1.000
+    ("hello_structure", 0.93),             // measured 1.000
+    ("image_structure", 0.39),             // measured 0.467
+    ("issue-1054-example", 0.0),           // sparse GT, xberg extracts more
+    ("issue-1114-dedupe-chars", 0.68),     // measured 0.759
+    ("issue-1147-example", 0.34),          // measured 0.414
+    ("issue-1181", 0.56),                  // measured 0.889 md, 0.571 plain (24-word GT, volatile)
+    ("issue-1279-example", 0.60),          // measured 0.678
+    ("issue-140-example", 0.0),            // image-only PDF
     ("issue-192-example", 0.55), // measured 0.567 on macOS-latest (was 0.653 — drift from html-to-markdown-rs/tokenizer dep updates)
     ("issue-316-example", 0.85), // measured 0.927
     ("issue-33-lorem-ipsum", 0.89), // measured 0.964
@@ -175,30 +175,30 @@ const PDFIUM_GROUND_TRUTH: &[(&str, f64)] = &[
     // 精确率。阈值随 fork 实测下调以保留回归探测作用（进一步恶化仍会 FAIL）；
     // 上游校准值 0.58（measured 0.651）对应上游行装配。
     ("issue-842-example", 0.57),
-    ("issue-848", 0.17),         // measured 0.242
-    ("issue-90-example", 0.89),  // measured 0.961
-    ("issue-905", 0.0),          // 1-word GT
-    ("issue-912", 0.91),         // measured 0.984
-    ("issue-982-example", 0.87), // measured 0.947
-    ("issue-987-test", 0.93),    // measured 1.000
-    ("la-precinct-bulletin-2014-p1", 0.90), // measured 0.973
-    ("line-char-render-example", 0.0), // 6-word GT, volatile
-    ("malformed-from-issue-932", 0.0), // 3-word GT, volatile
-    ("mcid_example", 0.93),      // measured 1.000
-    ("nics-background-checks-2015-11", 0.92), // measured 0.996
+    ("issue-848", 0.17),                              // measured 0.242
+    ("issue-90-example", 0.89),                       // measured 0.961
+    ("issue-905", 0.0),                               // 1-word GT
+    ("issue-912", 0.91),                              // measured 0.984
+    ("issue-982-example", 0.87),                      // measured 0.947
+    ("issue-987-test", 0.93),                         // measured 1.000
+    ("la-precinct-bulletin-2014-p1", 0.90),           // measured 0.973
+    ("line-char-render-example", 0.0),                // 6-word GT, volatile
+    ("malformed-from-issue-932", 0.0),                // 3-word GT, volatile
+    ("mcid_example", 0.93),                           // measured 1.000
+    ("nics-background-checks-2015-11", 0.92),         // measured 0.996
     ("nics-background-checks-2015-11-rotated", 0.92), // measured 0.996
-    ("page-boxes-example", 0.93), // measured 1.000
-    ("pdf_structure", 0.86),     // measured 0.931
-    ("pdffill-demo", 0.77),      // measured 0.845
-    ("pr-136-example", 0.36),    // measured 0.436
-    ("pr-138-example", 0.91),    // measured 0.985
-    ("pr-88-example", 0.85),     // measured 0.926
-    ("scotus-transcript-p1", 0.65), // measured 0.723
-    ("senate-expenditures", 0.0), // complex tabular, xberg extracts more
-    ("table-curves-example", 0.86), // measured 0.937
-    ("test-punkt", 0.93),        // measured 1.000
+    ("page-boxes-example", 0.93),                     // measured 1.000
+    ("pdf_structure", 0.86),                          // measured 0.931
+    ("pdffill-demo", 0.77),                           // measured 0.845
+    ("pr-136-example", 0.36),                         // measured 0.436
+    ("pr-138-example", 0.91),                         // measured 0.985
+    ("pr-88-example", 0.85),                          // measured 0.926
+    ("scotus-transcript-p1", 0.65),                   // measured 0.723
+    ("senate-expenditures", 0.0),                     // complex tabular, xberg extracts more
+    ("table-curves-example", 0.86),                   // measured 0.937
+    ("test-punkt", 0.93),                             // measured 1.000
     ("WARN-Report-for-7-1-2015-to-03-25-2016", 0.92), // measured 0.997
-    ("word365_structure", 0.93), // measured 1.000
+    ("word365_structure", 0.93),                      // measured 1.000
     // ── markitdown vendored PDFs (GT: pdftotext) ──
     ("masterformat_partial_numbering", 0.89),         // measured 0.962
     ("RECEIPT-2024-TXN-98765_retail_purchase", 0.89), // measured 0.962
