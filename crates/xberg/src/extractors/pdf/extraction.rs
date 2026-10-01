@@ -325,9 +325,6 @@ fn annotation_text_by_page(annotations: &[PdfAnnotation], page_count: usize) -> 
     (pages, recovered_count)
 }
 
-fn single_string_ocr_is(native_len: usize, ocr: Option<&[String]>) -> bool {
-    native_len > 1 && ocr.is_some_and(|pages| pages.len() == 1)
-}
 #[cfg(feature = "pdf")]
 pub(crate) fn apply_annotation_text_fallback(
     fallback: &AnnotationTextFallback,
