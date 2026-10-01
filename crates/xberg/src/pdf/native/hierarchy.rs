@@ -15,9 +15,6 @@ use super::NativeDocument;
 // coordinates, so it needs the strict page-axis predicate, not the
 // rotation-agnostic writing-mode one.
 use super::span_geometry::is_horizontal_ltr;
-// (fork) The structured path reuses the flat path's numeric-footnote guards so a
-// superscript footnote digit is kept out of its base span (see `rejoin_inline_scripts`).
-use super::text::{needs_numeric_script_boundary, numeric_notes};
 use crate::pdf::error::Result;
 use crate::pdf::hierarchy::SegmentData;
 
@@ -51,6 +48,7 @@ struct SideSupport {
 struct ScriptAttachment {
     script_index: usize,
     insertion_index: usize,
+    separate_numeric_note: bool,
 }
 
 fn is_usable_span(span: &xberg_native_pdf::layout::TextSpan) -> bool {
@@ -334,17 +332,9 @@ fn apply_xy_cut_if_column_aware(
 }
 
 fn rejoin_inline_scripts(spans: Vec<xberg_native_pdf::layout::TextSpan>) -> Vec<xberg_native_pdf::layout::TextSpan> {
-    // (fork) Numeric-footnote guard, mirroring the flat assembly path
-    // (`rebuild_text_from_fragmented_spans` in `text.rs`, upstream #1773/#1792):
-    // a small superscript digit that matches a page-bottom note entry must not be
-    // welded onto the trailing number of its base span ("comma 3" + superscript
-    // "5" would read "comma 35"). Keep it as its own span and prefix a boundary
-    // space; word-level assembly treats an explicitly drawn boundary space as
-    // authoritative (#1566) and emits "comma 3 5", matching the flat path.
-    let numeric_note_index = numeric_notes(&spans);
+    let notes = super::text::numeric_notes(&spans);
     let mut by_base: HashMap<usize, Vec<ScriptAttachment>> = HashMap::new();
     let mut attached = vec![false; spans.len()];
-    let mut note_separated = vec![false; spans.len()];
     for script_index in 0..spans.len() {
         if by_base.contains_key(&script_index) {
             continue;
@@ -352,37 +342,26 @@ fn rejoin_inline_scripts(spans: Vec<xberg_native_pdf::layout::TextSpan>) -> Vec<
         let Some((base_index, insertion_index)) = find_inline_script_base(&spans, &attached, script_index) else {
             continue;
         };
-        if needs_numeric_script_boundary(
-            &spans[base_index],
-            &spans[script_index],
-            &numeric_note_index,
-            spans.get(script_index + 1),
-        ) {
-            note_separated[script_index] = true;
-            continue;
-        }
         attached[script_index] = true;
         by_base.entry(base_index).or_default().push(ScriptAttachment {
             script_index,
             insertion_index,
+            separate_numeric_note: super::text::needs_numeric_script_boundary(
+                &spans[base_index],
+                &spans[script_index],
+                &notes,
+                spans.get(script_index + 1),
+            ),
         });
     }
 
-    if by_base.is_empty() && !note_separated.contains(&true) {
+    if by_base.is_empty() {
         return spans;
     }
 
     let mut repaired = Vec::with_capacity(spans.len());
     for (index, span) in spans.iter().enumerate() {
         if attached[index] {
-            continue;
-        }
-        if note_separated[index] {
-            let mut separated = span.clone();
-            if !separated.text.starts_with(char::is_whitespace) {
-                separated.text.insert(0, ' ');
-            }
-            repaired.push(separated);
             continue;
         }
         match by_base.remove(&index) {
@@ -569,7 +548,15 @@ fn emit_base_with_scripts(
         let fragment = (script.insertion_index > range_start)
             .then(|| split_span(base, range_start, script.insertion_index))
             .flatten();
-        let normalized = normalize_script_span(&spans[script.script_index], base);
+        let mut normalized = normalize_script_span(&spans[script.script_index], base);
+        // Structure assembly rejoins scripts before paragraph spacing sees them.
+        // Carry the plain-text path's confirmed footnote boundary through that join;
+        // normalizing the script first would discard its original font/rise evidence. ~keep
+        if script.separate_numeric_note {
+            normalized.text.insert(0, ' ');
+            normalized.char_x_offsets.clear();
+            normalized.char_widths.clear();
+        }
         if script.insertion_index == char_count {
             if let Some(mut fragment) = fragment {
                 append_span_text(&mut fragment, &normalized);
@@ -660,48 +647,8 @@ fn normalize_script_span(
 /// # Returns
 ///
 /// Vector of `SegmentData` objects with font metrics for hierarchy detection.
-pub(crate) fn extract_segments_from_page(
-    doc: &mut NativeDocument,
-    page_index: usize,
-    excluded_layers: &std::collections::HashSet<String>,
-) -> Result<Vec<SegmentData>> {
-    extract_segments_from_page_inner(doc, page_index, &HashMap::new(), excluded_layers)
-}
-
-/// Page text for segment extraction, honouring default-off optional-content layers.
-///
-/// The heading segments become the document's text (via `pre_rendered_doc` in
-/// `extractors/pdf/extraction.rs`), so text under a `/OCProperties/D/OFF` layer must be
-/// excluded here exactly as it is in the text path (`pdf/native/text.rs`,
-/// `page_text_with_options_excluding_layers`) — otherwise a layered PDF leaks its hidden
-/// copy of the page through the heading-segment path even though the text path filtered it
-/// (issue #67). An empty set is byte-identical to the unfiltered call.
-fn page_text_with_options_excluding_layers(
-    doc: &NativeDocument,
-    page_index: usize,
-    excluded_layers: &std::collections::HashSet<String>,
-) -> xberg_native_pdf::error::Result<xberg_native_pdf::layout::PageText> {
-    let reading_order = xberg_native_pdf::document::ReadingOrder::TopToBottom;
-    if excluded_layers.is_empty() {
-        return doc.doc.extract_page_text_with_options(page_index, reading_order);
-    }
-
-    let spans = doc.doc.extract_spans_filtered_with_reading_order(
-        page_index,
-        reading_order,
-        excluded_layers.clone(),
-        Default::default(),
-    )?;
-    let chars: Vec<xberg_native_pdf::layout::TextChar> = spans.iter().flat_map(|s| s.to_chars()).collect();
-    // GH#1653: the page extent is (urx - llx, ury - lly), not the raw upper-right corner.
-    let (llx, lly, urx, ury) = doc.doc.get_page_media_box(page_index)?;
-
-    Ok(xberg_native_pdf::layout::PageText {
-        spans,
-        chars,
-        page_width: urx - llx,
-        page_height: ury - lly,
-    })
+pub(crate) fn extract_segments_from_page(doc: &mut NativeDocument, page_index: usize) -> Result<Vec<SegmentData>> {
+    extract_segments_from_page_inner(doc, page_index, &HashMap::new())
 }
 
 /// Inner implementation of per-page segment extraction.
@@ -712,9 +659,11 @@ fn extract_segments_from_page_inner(
     doc: &mut NativeDocument,
     page_index: usize,
     mcid_roles: &HashMap<u32, Option<u8>>,
-    excluded_layers: &std::collections::HashSet<String>,
 ) -> Result<Vec<SegmentData>> {
-    let mut page_text_data = match page_text_with_options_excluding_layers(doc, page_index, excluded_layers) {
+    let mut page_text_data = match doc
+        .doc
+        .extract_page_text_with_options(page_index, xberg_native_pdf::document::ReadingOrder::TopToBottom)
+    {
         Ok(data) => data,
         Err(e) => {
             tracing::debug!(
@@ -820,10 +769,7 @@ fn dedupe_redrawn_segments(segments: Vec<SegmentData>) -> Vec<SegmentData> {
 ///
 /// Returns `(segments, used_structure_tree)`. When `used_structure_tree` is true,
 /// the caller should skip font-size clustering and use the pre-assigned roles.
-fn extract_segments_with_structure_tree(
-    doc: &mut NativeDocument,
-    excluded_layers: &std::collections::HashSet<String>,
-) -> Result<(Vec<Vec<SegmentData>>, bool)> {
+fn extract_segments_with_structure_tree(doc: &mut NativeDocument) -> Result<(Vec<Vec<SegmentData>>, bool)> {
     let mark_info = match doc.doc.mark_info() {
         Ok(mi) => mi,
         Err(e) => {
@@ -887,7 +833,7 @@ fn extract_segments_with_structure_tree(
             })
             .unwrap_or_default();
 
-        let segments = extract_segments_from_page_inner(doc, page_idx, &mcid_roles, excluded_layers)?;
+        let segments = extract_segments_from_page_inner(doc, page_idx, &mcid_roles)?;
         total_role_assigned += segments.iter().filter(|s| s.assigned_role.is_some()).count();
         all_pages.push(segments);
     }
@@ -918,10 +864,7 @@ fn extract_segments_with_structure_tree(
 ///
 /// Tuple of (per-page segment vectors, structure-tree-used flag).
 pub(crate) fn extract_all_segments(doc: &mut NativeDocument) -> Result<(Vec<Vec<SegmentData>>, bool)> {
-    // Issue #67: default-off optional-content layers are excluded here too, because these
-    // segments become the document text (see `page_text_with_options_excluding_layers`).
-    let excluded_layers = xberg_native_pdf::optional_content::compute_default_off_ocgs(&doc.doc);
-    let (tree_segments, used_tree) = extract_segments_with_structure_tree(doc, &excluded_layers)?;
+    let (tree_segments, used_tree) = extract_segments_with_structure_tree(doc)?;
     if used_tree && !tree_segments.is_empty() {
         return Ok((tree_segments, true));
     }
@@ -933,7 +876,7 @@ pub(crate) fn extract_all_segments(doc: &mut NativeDocument) -> Result<(Vec<Vec<
     let mut all_pages: Vec<Vec<SegmentData>> = Vec::with_capacity(page_count);
 
     for page_idx in 0..page_count {
-        let segments = extract_segments_from_page(doc, page_idx, &excluded_layers)?;
+        let segments = extract_segments_from_page(doc, page_idx)?;
         all_pages.push(segments);
     }
 
@@ -1626,54 +1569,6 @@ mod tests {
 
         assert_eq!(texts, ["A/cm2", ")"]);
         assert_eq!(repaired[0].font_size, 10.0);
-    }
-
-    /// (fork) A superscript footnote digit with a matching page-bottom note entry
-    /// must stay out of its base span even when the geometry alone would attach
-    /// it as an inline suffix — otherwise "clause 3" + superscript "5" welds into
-    /// "clause 35" on the structured (Markdown-default) path. The separated span
-    /// keeps its own (smaller) font size and carries a leading boundary space so
-    /// word-level assembly emits "clause 3 5" exactly like the flat text path.
-    #[test]
-    fn numeric_footnote_script_stays_separate_with_boundary_space() {
-        let base = positioned_span("A total of 3", 100.0, 700.0, 70.0, 12.0, vec![]);
-        let script = positioned_span("5", 170.5, 700.0, 4.0, 8.0, vec![]);
-        let following = positioned_span(" closes the paragraph.", 175.0, 700.0, 60.0, 12.0, vec![]);
-        let note_marker = positioned_span("5", 50.0, 100.0, 4.0, 6.0, vec![]);
-        let note_body = positioned_span(" A supporting note.", 55.0, 100.0, 90.0, 8.0, vec![]);
-
-        let repaired = super::rejoin_inline_scripts(vec![base, script, following, note_marker, note_body]);
-        let texts: Vec<_> = repaired.iter().map(|span| span.text.as_str()).collect();
-
-        assert_eq!(
-            texts,
-            [
-                "A total of 3",
-                " 5",
-                " closes the paragraph.",
-                "5",
-                " A supporting note."
-            ]
-        );
-        assert_eq!(
-            repaired[1].font_size, 8.0,
-            "the separated digit must keep its superscript font size"
-        );
-    }
-
-    /// (fork) Without a matching note entry the same superscript digit still
-    /// attaches as an inline suffix (an exponent or reference with no footnote
-    /// body keeps the historic join), pinning the guard to the note-matched case.
-    #[test]
-    fn numeric_script_without_matching_note_still_attaches() {
-        let base = positioned_span("A total of 3", 100.0, 700.0, 70.0, 12.0, vec![]);
-        let script = positioned_span("5", 170.5, 700.0, 4.0, 8.0, vec![]);
-        let following = positioned_span(" closes the paragraph.", 175.0, 700.0, 60.0, 12.0, vec![]);
-
-        let repaired = super::rejoin_inline_scripts(vec![base, script, following]);
-        let texts: Vec<_> = repaired.iter().map(|span| span.text.as_str()).collect();
-
-        assert_eq!(texts, ["A total of 35", " closes the paragraph."]);
     }
 
     #[test]

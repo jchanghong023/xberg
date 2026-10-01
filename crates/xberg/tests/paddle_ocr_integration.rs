@@ -17,9 +17,12 @@
 #![allow(clippy::print_stdout, clippy::print_stderr, clippy::dbg_macro)] // ~keep: test/bench binaries print by design; org logging policy exempts tests
 #![cfg(paddle_ocr)]
 
+mod helpers;
+
 use std::path::PathBuf;
 
-use xberg::core::config::OcrConfig;
+use helpers::extract_uri_document;
+use xberg::core::config::{ExtractionConfig, OcrConfig};
 use xberg::paddle_ocr::{ModelManager, PaddleOcrBackend, PaddleOcrConfig};
 use xberg::plugins::OcrBackend;
 use xberg::types::ExtractedDocument;
@@ -588,6 +591,253 @@ async fn test_paddle_ocr_table_reconstruction() {
 
         let non_empty_elements = elements.iter().filter(|e| !e.text.is_empty()).count();
         assert!(non_empty_elements > 0, "Expected at least one element with text");
+    }
+}
+
+/// A detected table must not also appear line by line in the content of a standalone image (#1571).
+#[tokio::test]
+#[ignore = "requires ONNX Runtime and downloaded models"]
+async fn test_paddle_ocr_table_text_not_duplicated_in_content() {
+    let image_path = test_documents_dir().join("images/simple_table.png");
+    assert!(image_path.exists(), "Test image not found: {:?}", image_path);
+
+    let config = ExtractionConfig {
+        ocr: Some(OcrConfig {
+            backend: "paddle-ocr".to_string(),
+            language: vec!["en".to_string()],
+            paddle_ocr_config: Some(serde_json::json!({"enable_table_detection": true})),
+            ..Default::default()
+        }),
+        use_cache: false,
+        ..Default::default()
+    };
+
+    let result = extract_uri_document(&image_path, None, &config)
+        .await
+        .expect("OCR extraction must succeed");
+
+    assert_eq!(result.tables.len(), 1, "table detection must fire on this fixture");
+    assert_eq!(
+        result.content.matches("Banana").count(),
+        1,
+        "the table row must appear once, not also as a standalone line: {}",
+        result.content
+    );
+}
+
+/// A scanned PDF page that is only a table must show the table text once, as the table, on the
+/// force-OCR route (#1571): the page text must not refill the page the table emptied.
+#[cfg(feature = "pdf")]
+#[tokio::test]
+#[ignore = "requires ONNX Runtime and downloaded models"]
+async fn test_paddle_ocr_full_page_table_not_duplicated_in_pdf_content() {
+    use xberg::core::config::OutputFormat;
+
+    let pdf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr/shaded_table_scan.pdf");
+
+    for output_format in [OutputFormat::Plain, OutputFormat::Markdown] {
+        let is_markdown = output_format == OutputFormat::Markdown;
+        let config = ExtractionConfig {
+            ocr: Some(OcrConfig {
+                backend: "paddle-ocr".to_string(),
+                language: vec!["en".to_string()],
+                paddle_ocr_config: Some(serde_json::json!({"enable_table_detection": true})),
+                ..Default::default()
+            }),
+            force_ocr: true,
+            output_format,
+            use_cache: false,
+            ..Default::default()
+        };
+
+        let result = extract_uri_document(&pdf_path, None, &config)
+            .await
+            .expect("OCR extraction must succeed");
+
+        assert_eq!(result.tables.len(), 1, "table detection must fire on this fixture");
+        assert_eq!(
+            result.content.matches("APPLES").count(),
+            1,
+            "the table must appear once, not also as page text: {}",
+            result.content
+        );
+        if is_markdown {
+            assert!(
+                result.tables[0].table_id.is_some(),
+                "the table must stay part of the structured document"
+            );
+            assert!(
+                result.content.starts_with("| Six-Year Summary"),
+                "the page must render as the table: {}",
+                result.content
+            );
+        }
+    }
+}
+
+/// A blank page whose text is recovered from its embedded images keeps that text when the retry
+/// also finds a table, and prints the table once (#2014). The fixture draws corpus objects
+/// `5883a36a12` and `0c1a8b71c1` under a zero-area clip, so the page renders blank and only the
+/// embedded-image retry reads it. `Banana` appears only in the table. ~keep
+#[cfg(feature = "pdf")]
+#[tokio::test]
+#[ignore = "requires ONNX Runtime and downloaded models"]
+async fn test_paddle_ocr_keeps_embedded_image_retry_text_beside_its_table() {
+    use xberg::core::config::OutputFormat;
+
+    let pdf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr/clipped_table_and_receipt.pdf");
+
+    for output_format in [OutputFormat::Plain, OutputFormat::Markdown] {
+        let is_markdown = output_format == OutputFormat::Markdown;
+        let config = ExtractionConfig {
+            ocr: Some(OcrConfig {
+                backend: "paddle-ocr".to_string(),
+                language: vec!["en".to_string()],
+                paddle_ocr_config: Some(serde_json::json!({"enable_table_detection": true})),
+                ..Default::default()
+            }),
+            force_ocr: true,
+            output_format,
+            use_cache: false,
+            ..Default::default()
+        };
+
+        let result = extract_uri_document(&pdf_path, None, &config)
+            .await
+            .expect("OCR extraction must succeed");
+
+        assert_eq!(result.tables.len(), 1, "the retry must find exactly one table");
+        let table_render = if is_markdown {
+            result.tables[0].markdown.clone()
+        } else {
+            result.tables[0]
+                .cells
+                .iter()
+                .map(|row| row.join(" "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let (prose, rendered_table) = result
+            .content
+            .rsplit_once("\n\n")
+            .expect("the recovered prose and table must be separate document blocks");
+        assert_eq!(rendered_table, table_render);
+        assert_eq!(
+            result.content.matches("Banana").count(),
+            1,
+            "the retry's table must appear in the content exactly once: {}",
+            result.content
+        );
+        assert_eq!(
+            prose.matches("CIMB NIAGA").count(),
+            1,
+            "the recovered prose must appear once"
+        );
+    }
+}
+
+/// The mixed route must preserve prose recovered by the embedded-image retry when the same
+/// retry also contributes a table (#2021). ~keep
+#[cfg(feature = "pdf")]
+#[tokio::test]
+#[ignore = "requires ONNX Runtime and downloaded models"]
+async fn test_paddle_ocr_mixed_route_keeps_embedded_image_retry_text_beside_its_table() {
+    use xberg::core::config::OutputFormat;
+
+    let pdf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr/clipped_table_and_receipt.pdf");
+    let config = ExtractionConfig {
+        ocr: Some(OcrConfig {
+            backend: "paddle-ocr".to_string(),
+            language: vec!["en".to_string()],
+            paddle_ocr_config: Some(serde_json::json!({"enable_table_detection": true})),
+            ..Default::default()
+        }),
+        force_ocr_pages: Some(vec![1]),
+        output_format: OutputFormat::Markdown,
+        use_cache: false,
+        ..Default::default()
+    };
+
+    let result = extract_uri_document(&pdf_path, None, &config)
+        .await
+        .expect("OCR extraction must succeed");
+
+    assert_eq!(result.tables.len(), 1, "the retry must find exactly one table");
+    assert_eq!(
+        result.content.matches("CIMB NIAGA").count(),
+        1,
+        "the recovered prose must remain beside the table: {}",
+        result.content
+    );
+    assert_eq!(
+        result.content.matches("Banana").count(),
+        1,
+        "the retry's table must appear exactly once: {}",
+        result.content
+    );
+    let pages = result.pages.as_ref().expect("mixed PDF extraction must expose pages");
+    assert_eq!(pages.len(), 1);
+    assert_eq!(
+        pages[0].content.matches("CIMB NIAGA").count(),
+        1,
+        "the recovered prose must remain in pages[].content: {}",
+        pages[0].content
+    );
+}
+
+/// A blank page whose only embedded image is a table keeps that table, printed once, when the
+/// table holds every line the retry recovered (#2014). The fixture draws corpus object
+/// `5883a36a12` under a zero-area clip, so only the embedded-image retry reads it. ~keep
+#[cfg(feature = "pdf")]
+#[tokio::test]
+#[ignore = "requires ONNX Runtime and downloaded models"]
+async fn test_paddle_ocr_keeps_an_embedded_image_retry_table_that_holds_all_of_its_text() {
+    use xberg::core::config::OutputFormat;
+
+    let pdf_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/ocr/clipped_table.pdf");
+
+    for output_format in [OutputFormat::Plain, OutputFormat::Markdown] {
+        let is_markdown = output_format == OutputFormat::Markdown;
+        let config = ExtractionConfig {
+            ocr: Some(OcrConfig {
+                backend: "paddle-ocr".to_string(),
+                language: vec!["en".to_string()],
+                paddle_ocr_config: Some(serde_json::json!({"enable_table_detection": true})),
+                ..Default::default()
+            }),
+            force_ocr: true,
+            output_format,
+            use_cache: false,
+            ..Default::default()
+        };
+
+        let result = extract_uri_document(&pdf_path, None, &config)
+            .await
+            .expect("OCR extraction must succeed");
+
+        assert_eq!(
+            result.tables.len(),
+            1,
+            "the retry's table must be kept: {}",
+            result.content
+        );
+        assert_eq!(
+            result.content.matches("Banana").count(),
+            1,
+            "the retry's table must appear in the content exactly once: {}",
+            result.content
+        );
+        let expected = if is_markdown {
+            result.tables[0].markdown.clone()
+        } else {
+            result.tables[0]
+                .cells
+                .iter()
+                .map(|row| row.join(" "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(result.content, expected);
     }
 }
 

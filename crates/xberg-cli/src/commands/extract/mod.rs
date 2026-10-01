@@ -11,10 +11,11 @@
 //! - `batch` - the batch extraction command and its result aggregation
 
 use anyhow::{Context, Result};
-use std::io::Read;
+use base64::Engine as _;
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
-use xberg::{ExtractInput, ExtractedDocument, ExtractionConfig, ExtractionErrorItem, ExtractionResult};
+use xberg::{ExtractInput, ExtractedDocument, ExtractionConfig, ExtractionErrorItem, ExtractionResult, OutputFormat};
 
 use crate::{
     WireFormat,
@@ -50,6 +51,23 @@ pub use timing::stage_timing_requested;
 use images::{has_writable_images, prefix_image_refs, write_extracted_images};
 use runtime::block_on_extract;
 use timing::build_stage_timings;
+
+/// The library's DOCX renderer name, and the `metadata.output_format` of a result whose
+/// `content` is a base64-encoded `.docx` package.
+pub(crate) const DOCX_CONTENT_FORMAT: &str = "docx";
+
+/// The library's PDF renderer name, and the `metadata.output_format` of a result whose
+/// `content` is a base64-encoded PDF file.
+pub(crate) const PDF_CONTENT_FORMAT: &str = "pdf";
+
+/// The binary document format `config` asks for, if any. Each produces one binary
+/// document rather than text.
+pub(crate) fn requested_binary_format(config: &ExtractionConfig) -> Option<&str> {
+    match &config.output_format {
+        OutputFormat::Custom(name) if name == DOCX_CONTENT_FORMAT || name == PDF_CONTENT_FORMAT => Some(name),
+        _ => None,
+    }
+}
 
 /// Input source for single-document extraction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +108,8 @@ pub fn extract_command(
 ) -> Result<()> {
     let emit_stage_timing = stage_timing_requested();
 
+    refuse_binary_output_to_terminal(&config, &format)?;
+
     let t0 = Instant::now();
     let mut result = extract_input_sync(input, mime_type.as_deref(), &config)?;
     let elapsed = t0.elapsed();
@@ -129,12 +149,21 @@ pub fn extract_command(
                     content = std::borrow::Cow::Owned(prefix_image_refs(&content, explicit));
                 }
             }
-            print!("{content}");
+            // Binary output (PDF/DOCX) renders from the structured document; the
+            // plain-text path prints the repaired/prefixed `content` view, which
+            // the binary branch ignores.
+            let written = if let Some(binary_format) = requested_binary_format(&config) {
+                write_binary_document(&result, binary_format)
+            } else {
+                print!("{content}");
+                Ok(())
+            };
             // `stdout` stays exactly the extracted content so it remains pipeable; everything
             // else the extraction produced — warnings included — goes to `stderr`.
             let mut diagnostics = std::io::stderr().lock();
             write_text_envelope(&result, extraction_time_ms, &mut diagnostics)
                 .context("Failed to write the extraction envelope summary")?;
+            written?;
         }
         WireFormat::Json => {
             // `getrusage` reports the peak for the process's whole lifetime, so the exact sample
@@ -192,6 +221,45 @@ pub fn extract_command(
     }
 
     Ok(())
+}
+
+/// Refuse binary output to a terminal before extracting anything.
+fn refuse_binary_output_to_terminal(config: &ExtractionConfig, format: &WireFormat) -> Result<()> {
+    if let Some(binary_format) = requested_binary_format(config)
+        && matches!(format, WireFormat::Text)
+        && std::io::stdout().is_terminal()
+    {
+        anyhow::bail!(
+            "--content-format {binary_format} writes a binary document to stdout; redirect it to a file (for \
+             example `> output.{binary_format}`), or use --format json to receive it base64-encoded in `content`"
+        );
+    }
+    Ok(())
+}
+
+/// Write the document a DOCX or PDF extraction carries base64-encoded in `content`.
+///
+/// Fails rather than writing text when the library fell back to plain text (for example
+/// when it was built without the feature that renders `binary_format`), since the caller
+/// is redirecting stdout into a binary file.
+fn write_binary_document(result: &ExtractedDocument, binary_format: &str) -> Result<()> {
+    let label = binary_format.to_uppercase();
+    if result.metadata.output_format.as_deref() != Some(binary_format) {
+        anyhow::bail!(
+            "{label} output was requested but the extraction produced {} text instead; see the warnings above",
+            result.metadata.output_format.as_deref().unwrap_or("plain")
+        );
+    }
+    let document = base64::engine::general_purpose::STANDARD
+        .decode(&result.content)
+        .with_context(|| format!("{label} output was not valid base64"))?;
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(&document)
+        .with_context(|| format!("Failed to write the {label} document to stdout"))?;
+    stdout
+        .flush()
+        .with_context(|| format!("Failed to write the {label} document to stdout"))
 }
 
 fn extract_input_sync(

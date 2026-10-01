@@ -1648,11 +1648,32 @@ mod tests {
         let mut pages = vec![Some(Vec::new())];
         let page_texts = vec!["Recovered embedded image text".to_string()];
 
-        fill_unstructured_ocr_pages(&mut pages, &page_texts);
+        fill_unstructured_ocr_pages(&mut pages, &page_texts, &[false]);
 
         let paragraphs = pages[0].as_ref().expect("recovered page must be represented");
         assert_eq!(paragraphs.len(), 1);
         assert_eq!(paragraphs[0].text, "Recovered embedded image text");
+    }
+
+    #[test]
+    fn test_page_text_claimed_by_tables_is_not_refilled_from_flat_ocr_text() {
+        let mut pages = vec![Some(Vec::new()), Some(Vec::new())];
+        let page_texts = vec!["APPLES 48,210 49,850".to_string(), "TICKET CP 2 60,000".to_string()];
+
+        fill_unstructured_ocr_pages(&mut pages, &page_texts, &[true, false]);
+
+        assert!(
+            pages[0].as_ref().is_some_and(Vec::is_empty),
+            "the tables already carry this text: {:?}",
+            pages[0]
+        );
+        let recovered = pages[1].as_ref().expect("recovered page must be represented");
+        assert_eq!(
+            recovered.len(),
+            1,
+            "a blank pass whose text came from the image retry keeps it"
+        );
+        assert_eq!(recovered[0].text, "TICKET CP 2 60,000");
     }
 
     #[test]
@@ -8040,6 +8061,33 @@ Name: ___
         assert!(hinted.tesseract_config.is_none());
     }
 
+    /// Block mode goes to a page that automatic routing listed only when the page carries no
+    /// scan raster: a listed inset scan keeps the scan's segmentation mode, a listed page without
+    /// a raster takes block mode, an unlisted page never does, and with no document at hand the
+    /// list decides.
+    #[cfg(feature = "pdf")]
+    #[test]
+    fn single_block_for_ocr_page_skips_a_listed_page_that_carries_a_scan() {
+        let listed = std::collections::HashSet::from([1]);
+        let decide = |pdf: Option<&[u8]>, page_number: usize| {
+            let mut fallback_pdf_state = None;
+            single_block_for_ocr_page(Some(&listed), page_number, None, &mut fallback_pdf_state, pdf, 0)
+        };
+        let inset_scan = crate::pdf::render::build_full_page_raster_pdf((100.0, 100.0), (400, 400), 0.64, 0);
+        let no_raster = crate::pdf::render::build_minimal_pdf_with_mediabox(100.0, 100.0);
+
+        assert!(
+            !decide(Some(&inset_scan), 1),
+            "a listed page that carries a scan keeps the scan's segmentation mode"
+        );
+        assert!(
+            decide(Some(&no_raster), 1),
+            "a listed page without a scan raster takes block mode"
+        );
+        assert!(!decide(Some(&no_raster), 2), "an unlisted page never takes block mode");
+        assert!(decide(None, 1), "with no document at hand, the list decides");
+    }
+
     #[cfg(all(feature = "pdf", feature = "ocr"))]
     #[tokio::test]
     #[serial_test::serial]
@@ -10467,6 +10515,102 @@ Name: ___
                 .iter()
                 .any(|w| w.message.contains("OCR of page 1 failed") && w.message.contains(VLM_NO_CONTENT_ERROR)),
             "the backend failure must survive as a warning rather than vanish; got: {warnings:?}"
+        );
+    }
+
+    /// A table is recovered content even when it has no prose outside the table. The failed
+    /// page-raster pass must not make the all-pages-failed guard discard that structured retry
+    /// payload. ~keep
+    #[cfg(all(feature = "pdf", any(feature = "ocr", feature = "ocr-pipeline")))]
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn should_recover_table_only_xobject_when_the_backend_errors_on_the_page_raster() {
+        use crate::core::config::OcrConfig;
+        use crate::plugins::{OcrBackend, OcrBackendType, Plugin};
+        use crate::types::{ExtractedDocument, Table};
+        use std::sync::Arc;
+
+        const BACKEND_NAME: &str = "page-raster-error-table-only-fallback-test-backend";
+
+        struct FailOnPageRasterTableOnlyBackend;
+
+        #[async_trait::async_trait]
+        impl OcrBackend for FailOnPageRasterTableOnlyBackend {
+            fn backend_type(&self) -> OcrBackendType {
+                OcrBackendType::Custom
+            }
+            fn supports_language(&self, _: &str) -> bool {
+                true
+            }
+            async fn process_image(&self, data: &[u8], _: &OcrConfig) -> crate::Result<ExtractedDocument> {
+                if is_embedded_jpeg(data) {
+                    Ok(ExtractedDocument {
+                        tables: vec![Table {
+                            cells: vec![vec!["Item".to_string(), "Amount".to_string()]],
+                            markdown: "| Item | Amount |\n| --- | --- |\n".to_string(),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    })
+                } else {
+                    Err(crate::XbergError::Plugin {
+                        message: VLM_NO_CONTENT_ERROR.to_string(),
+                        plugin_name: "ocr".to_string(),
+                    })
+                }
+            }
+            fn supports_document_processing(&self) -> bool {
+                false
+            }
+        }
+
+        impl Plugin for FailOnPageRasterTableOnlyBackend {
+            fn name(&self) -> &str {
+                BACKEND_NAME
+            }
+            fn version(&self) -> String {
+                "1.0.0".to_string()
+            }
+            fn initialize(&self) -> crate::Result<()> {
+                Ok(())
+            }
+            fn shutdown(&self) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        crate::plugins::register_ocr_backend(Arc::new(FailOnPageRasterTableOnlyBackend)).unwrap();
+
+        let pdf_bytes = single_xobject_fixture_bytes();
+        let config = ExtractionConfig {
+            ocr: Some(OcrConfig {
+                backend: BACKEND_NAME.to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let result = extract_with_ocr(
+            Some(&pdf_bytes),
+            None,
+            #[cfg(feature = "layout-detection")]
+            None,
+            &config,
+            None,
+        )
+        .await;
+
+        crate::plugins::unregister_ocr_backend(BACKEND_NAME).unwrap();
+
+        let (text, _, tables, _, document, _, _, _, _, _, _) =
+            result.expect("a recovered table must prevent an all-pages-failed error");
+        assert!(text.is_empty(), "the backend returned no prose outside the table");
+        assert_eq!(tables.len(), 1, "the recovered table must survive");
+        assert_eq!(tables[0].cells, [["Item", "Amount"]]);
+        assert_eq!(
+            document.expect("the structured retry page must survive").tables.len(),
+            1,
+            "the recovered table must count as structured page content"
         );
     }
 

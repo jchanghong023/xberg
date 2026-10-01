@@ -1928,13 +1928,22 @@ pub(super) fn apply_ocr_text_list_fallback(paragraphs: &mut [crate::pdf::structu
         }
     }
 }
+/// Rebuild paragraphs from the flat OCR text for each page that has none.
+///
+/// A page whose text the backend found entirely claimed by detected tables (#1571) is not
+/// refilled: its flat text holds only lines the tables already carry, so a refill would print the
+/// table a second time ahead of it. Keyed to that backend report rather than to the presence of a
+/// table, because an embedded-image retry can add tables and text to a page whose own pass was
+/// blank. ~keep
 #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
 pub(super) fn fill_unstructured_ocr_pages(
     page_paragraphs: &mut [Option<Vec<crate::pdf::structure::types::PdfParagraph>>],
     page_texts: &[String],
+    pages_text_claimed_by_tables: &[bool],
 ) {
     for (page_index, paragraphs) in page_paragraphs.iter_mut().enumerate() {
-        if paragraphs.as_ref().is_none_or(Vec::is_empty) {
+        let claimed_by_tables = pages_text_claimed_by_tables.get(page_index).copied().unwrap_or(false);
+        if paragraphs.as_ref().is_none_or(Vec::is_empty) && !claimed_by_tables {
             let fallback = crate::pdf::structure::adapters::ocr_text_to_paragraphs(&page_texts[page_index]);
             if !fallback.is_empty() {
                 *paragraphs = Some(fallback);

@@ -54,6 +54,8 @@ const LIST_ITEM_SOURCE_LABEL_ATTRIBUTE: &str = "list_marker";
 /// unusable from a bare `pdf` build.
 const MEASURED_FONT_SIZE_ATTRIBUTE: &str = "xberg:internal:font-size-pt";
 
+pub(crate) const NATIVE_TABLE_GRID_ATTRIBUTE: &str = "xberg:internal:native-table-grid";
+
 #[cfg_attr(alef, alef(skip))]
 /// Deterministic element identifier, generated via blake3 hashing.
 ///
@@ -419,6 +421,13 @@ pub struct InternalDocument {
     #[serde(skip)]
     #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
     pub ocr_coordinate_frame: Option<OcrPageCoordinateFrame>,
+
+    /// Set by an OCR backend when detected tables claimed every text element of this page
+    /// (#1571), so the page text holds only lines the tables already carry. Never crosses the
+    /// plugin-bridge JSON wire format.
+    #[serde(skip)]
+    #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+    pub ocr_text_claimed_by_tables: bool,
 }
 
 impl From<crate::types::extraction::ExtractedDocument> for InternalDocument {
@@ -507,6 +516,8 @@ impl InternalDocument {
             recorded_formulas: Vec::new(),
             #[cfg(all(any(feature = "ocr", feature = "ocr-pipeline"), feature = "pdf"))]
             ocr_coordinate_frame: None,
+            #[cfg(any(feature = "ocr", feature = "ocr-pipeline"))]
+            ocr_text_claimed_by_tables: false,
         }
     }
 
@@ -737,12 +748,8 @@ impl InternalElement {
     /// Attach a `ListItem` element's literal source marker text (e.g. `"B."`,
     /// `"(a)"`, `"iv."`).
     ///
-    /// Real caller: `pdf::structure::assembly::push_paragraph_element`, which
-    /// attaches the prefix `normalize_list_text` strips off the paragraph text,
-    /// via `InternalDocumentBuilder::set_list_item_source_label`. Non-PDF
-    /// extractors never call it, so the attribute is absent there and renderers
-    /// fall back to a synthesized position.
-    #[cfg(feature = "pdf")]
+    /// PDF structure assembly and image layout extraction attach the marker through
+    /// `InternalDocumentBuilder::set_list_item_source_label` after removing it from text.
     pub(crate) fn set_list_item_source_label(&mut self, label: impl Into<String>) {
         let label = label.into();
         if label.is_empty() {
@@ -756,8 +763,7 @@ impl InternalElement {
     /// The literal source list-marker text, if one was captured (see
     /// [`set_list_item_source_label`](Self::set_list_item_source_label)).
     ///
-    /// `None` for every non-PDF extractor and for PDF list items whose marker
-    /// text was not confidently recovered -- renderers must fall back to
+    /// `None` for list items whose marker text was not confidently recovered -- renderers fall back to
     /// `ElementKind::ListItem::ordered`'s synthesized sequence position in
     /// that case, exactly as they did before this attribute existed.
     pub(crate) fn list_item_source_label(&self) -> Option<&str> {
@@ -811,7 +817,9 @@ impl InternalElement {
 /// Attribute keys that are internal plumbing and must never reach the public
 /// `DocumentNode::attributes` surface.
 fn is_internal_only_attribute(key: &str) -> bool {
-    key == SUPPRESS_IMAGE_OCR_RENDER_ATTRIBUTE || key == MEASURED_FONT_SIZE_ATTRIBUTE
+    key == SUPPRESS_IMAGE_OCR_RENDER_ATTRIBUTE
+        || key == MEASURED_FONT_SIZE_ATTRIBUTE
+        || key == NATIVE_TABLE_GRID_ATTRIBUTE
 }
 
 /// [`InternalElement::list_item_source_label`], for renderers that flatten an

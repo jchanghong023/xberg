@@ -4,6 +4,233 @@
 
 use super::*;
 
+#[cfg(any(feature = "excel", feature = "excel-wasm"))]
+fn is_row_only_dimension_ref(value: &[u8]) -> bool {
+    let mut parts = value.split(|byte| *byte == b':');
+    let Some(start) = parts.next() else { return false };
+    let Some(end) = parts.next() else { return false };
+    parts.next().is_none()
+        && [start, end]
+            .iter()
+            .all(|part| !part.is_empty() && part.iter().all(|byte| byte.is_ascii_digit() || *byte == b'$'))
+}
+
+#[cfg(any(feature = "excel", feature = "excel-wasm"))]
+fn row_only_dimension(event: &quick_xml::events::BytesStart<'_>) -> Result<bool> {
+    if event.local_name().as_ref() != "dimension" {
+        return Ok(false);
+    }
+    for attribute in event.attributes().with_checks(false) {
+        let attribute = attribute.map_err(|error| XbergError::parsing(format!("Invalid worksheet XML: {error}")))?;
+        if attribute.key.as_ref() == "ref" {
+            return Ok(is_row_only_dimension_ref(attribute.value.as_ref().as_bytes()));
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(any(feature = "excel", feature = "excel-wasm"))]
+fn remove_row_only_xlsx_dimensions(xml: &[u8]) -> Result<(Vec<u8>, bool)> {
+    use quick_xml::events::Event;
+
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    let mut writer = quick_xml::Writer::new(Vec::with_capacity(xml.len()));
+    let mut buffer = Vec::new();
+    let mut changed = false;
+
+    loop {
+        buffer.clear();
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| XbergError::parsing(format!("Invalid worksheet XML: {error}")))?;
+        match event {
+            Event::Empty(ref start) if row_only_dimension(start)? => changed = true,
+            Event::Start(ref start) if row_only_dimension(start)? => {
+                let name = start.name().into_inner().to_owned();
+                reader
+                    .read_to_end(quick_xml::name::QName(&name))
+                    .map_err(|error| XbergError::parsing(format!("Invalid worksheet XML: {error}")))?;
+                changed = true;
+            }
+            Event::Eof => break,
+            event => writer
+                .write_event(event.into_owned())
+                .map_err(|error| XbergError::parsing(format!("Failed to normalize worksheet XML: {error}")))?,
+        }
+    }
+
+    Ok((writer.into_inner(), changed))
+}
+
+#[cfg(any(feature = "excel", feature = "excel-wasm"))]
+fn remove_ods_row_whitespace(xml: &[u8]) -> Result<(Vec<u8>, bool)> {
+    use quick_xml::events::Event;
+
+    let mut reader = quick_xml::Reader::from_reader(xml);
+    let mut writer = quick_xml::Writer::new(Vec::with_capacity(xml.len()));
+    let mut buffer = Vec::new();
+    let mut depth = 0usize;
+    let mut row_depth = None;
+    let mut changed = false;
+
+    loop {
+        buffer.clear();
+        let event = reader
+            .read_event_into(&mut buffer)
+            .map_err(|error| XbergError::parsing(format!("Invalid ODS content XML: {error}")))?;
+        match &event {
+            Event::Start(start) => {
+                depth += 1;
+                if start.local_name().as_ref() == "table-row" {
+                    row_depth = Some(depth);
+                }
+            }
+            Event::End(end) => {
+                if end.local_name().as_ref() == "table-row" && row_depth == Some(depth) {
+                    row_depth = None;
+                }
+                depth = depth.saturating_sub(1);
+            }
+            Event::Text(text)
+                if row_depth == Some(depth) && text.as_ref().bytes().all(|byte| byte.is_ascii_whitespace()) =>
+            {
+                changed = true;
+                continue;
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        writer
+            .write_event(event.into_owned())
+            .map_err(|error| XbergError::parsing(format!("Failed to normalize ODS content XML: {error}")))?;
+    }
+
+    Ok((writer.into_inner(), changed))
+}
+
+#[cfg(any(feature = "excel", feature = "excel-wasm"))]
+fn read_zip_member_bounded<R: Read>(reader: R, limit: usize, member_name: &str) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.take(limit.saturating_add(1) as u64).read_to_end(&mut bytes)?;
+    if bytes.len() > limit {
+        return Err(XbergError::validation(format!(
+            "Spreadsheet ZIP member '{member_name}' exceeds the configured {limit}-byte archive limit"
+        )));
+    }
+    Ok(bytes)
+}
+
+#[cfg(any(feature = "excel", feature = "excel-wasm"))]
+fn rewrite_spreadsheet_zip(
+    data: &[u8],
+    limits: &SecurityLimits,
+    mut transform: impl FnMut(&str, &[u8]) -> Result<(Vec<u8>, bool)>,
+) -> Result<Option<Vec<u8>>> {
+    use std::io::Write as _;
+
+    let mut archive = zip::ZipArchive::new(Cursor::new(data))
+        .map_err(|error| XbergError::parsing(format!("Invalid spreadsheet ZIP: {error}")))?;
+    let mut entries = Vec::with_capacity(archive.len());
+    let mut actual_contents_size = 0usize;
+    let mut changed = false;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| XbergError::parsing(format!("Invalid spreadsheet ZIP entry: {error}")))?;
+        let name = entry.name().to_owned();
+        if entry.is_dir() {
+            entries.push((name, None));
+            continue;
+        }
+        let contents = read_zip_member_bounded(&mut entry, limits.max_archive_size, &name)?;
+        actual_contents_size = actual_contents_size
+            .checked_add(contents.len())
+            .ok_or_else(|| XbergError::validation("Spreadsheet ZIP aggregate size overflow".to_owned()))?;
+        if actual_contents_size > limits.max_archive_size {
+            return Err(XbergError::validation(format!(
+                "Spreadsheet ZIP actual contents total {actual_contents_size} bytes, which exceeds the configured \
+                 aggregate limit of {} bytes (SecurityLimits::max_archive_size)",
+                limits.max_archive_size
+            )));
+        }
+        let (contents, entry_changed) = transform(&name, &contents)?;
+        changed |= entry_changed;
+        entries.push((name, Some(contents)));
+    }
+    if !changed {
+        return Ok(None);
+    }
+
+    let mut rewritten = Vec::with_capacity(data.len());
+    {
+        let mut writer = zip::ZipWriter::new(Cursor::new(&mut rewritten));
+        for (name, contents) in entries {
+            let options = zip::write::SimpleFileOptions::default().compression_method(if name == "mimetype" {
+                zip::CompressionMethod::Stored
+            } else {
+                zip::CompressionMethod::Deflated
+            });
+            match contents {
+                Some(contents) => {
+                    writer.start_file(name, options).map_err(|error| {
+                        XbergError::parsing(format!("Failed to rewrite spreadsheet ZIP entry: {error}"))
+                    })?;
+                    writer.write_all(&contents)?;
+                }
+                None => writer.add_directory(name, options).map_err(|error| {
+                    XbergError::parsing(format!("Failed to rewrite spreadsheet ZIP directory: {error}"))
+                })?,
+            }
+        }
+        writer
+            .finish()
+            .map_err(|error| XbergError::parsing(format!("Failed to finish spreadsheet ZIP: {error}")))?;
+    }
+    Ok(Some(rewritten))
+}
+
+#[cfg(any(feature = "excel", feature = "excel-wasm"))]
+fn normalize_xlsx_dimensions(data: &[u8], limits: &SecurityLimits) -> Result<Option<Vec<u8>>> {
+    rewrite_spreadsheet_zip(data, limits, |name, contents| {
+        if name.starts_with("xl/worksheets/") && name.ends_with(".xml") {
+            remove_row_only_xlsx_dimensions(contents)
+        } else {
+            Ok((contents.to_vec(), false))
+        }
+    })
+}
+
+#[cfg(any(feature = "excel", feature = "excel-wasm"))]
+fn has_row_only_xlsx_dimensions<R: Read + Seek>(reader: R, limits: &SecurityLimits) -> Result<bool> {
+    let mut archive =
+        zip::ZipArchive::new(reader).map_err(|error| XbergError::parsing(format!("Invalid XLSX ZIP: {error}")))?;
+    for index in 0..archive.len() {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| XbergError::parsing(format!("Invalid XLSX ZIP entry: {error}")))?;
+        let name = entry.name().to_owned();
+        if !name.starts_with("xl/worksheets/") || !name.ends_with(".xml") {
+            continue;
+        }
+        let contents = read_zip_member_bounded(&mut entry, limits.max_archive_size, &name)?;
+        if remove_row_only_xlsx_dimensions(&contents)?.1 {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(any(feature = "excel", feature = "excel-wasm"))]
+fn normalize_ods_row_whitespace(data: &[u8], limits: &SecurityLimits) -> Result<Option<Vec<u8>>> {
+    rewrite_spreadsheet_zip(data, limits, |name, contents| {
+        if name == "content.xml" {
+            remove_ods_row_whitespace(contents)
+        } else {
+            Ok((contents.to_vec(), false))
+        }
+    })
+}
+
 /// Reject a ZIP-backed spreadsheet (XLSX/XLSM/XLTM/XLAM/XLSB/ODS) whose ZIP central
 /// directory declares more entries than the caller's configured
 /// `SecurityLimits::max_files_in_archive`, or whose declared aggregate uncompressed
@@ -76,7 +303,7 @@ pub(crate) fn read_excel_file(file_path: &str, limits: &SecurityLimits) -> Resul
     let lower_path = file_path.to_lowercase();
     let mut warnings: Vec<ProcessingWarning> = Vec::new();
 
-    #[cfg(feature = "excel")]
+    #[cfg(any(feature = "excel", feature = "excel-wasm"))]
     {
         // `.xls`/`.xla`（任意大小写）由下方显式派发到 calamine 的 CFB `Xls`
         // reader（扩展名决定，无内容嗅探），所以 OLE 容器携带的杂散 central
@@ -89,7 +316,7 @@ pub(crate) fn read_excel_file(file_path: &str, limits: &SecurityLimits) -> Resul
         let check_file = std::fs::File::open(file_path)?;
         validate_zip_container(std::io::BufReader::new(check_file), limits, declared_legacy)?;
     }
-    #[cfg(not(feature = "excel"))]
+    #[cfg(not(any(feature = "excel", feature = "excel-wasm")))]
     let _ = limits;
 
     #[cfg(feature = "office")]
@@ -109,7 +336,7 @@ pub(crate) fn read_excel_file(file_path: &str, limits: &SecurityLimits) -> Resul
     let office_metadata: Option<HashMap<String, String>> = None;
 
     if lower_path.ends_with(".xlsx") || lower_path.ends_with(".xlsm") || lower_path.ends_with(".xltm") {
-        return read_xlsx_family_file(file_path, office_metadata, warnings);
+        return read_xlsx_family_file(file_path, office_metadata, warnings, limits);
     }
     if lower_path.ends_with(".xlam") {
         return read_xlam_file(file_path, office_metadata, warnings);
@@ -122,6 +349,9 @@ pub(crate) fn read_excel_file(file_path: &str, limits: &SecurityLimits) -> Resul
     }
     if lower_path.ends_with(".xls") {
         return read_xls_file(file_path, office_metadata, warnings);
+    }
+    if lower_path.ends_with(".ods") {
+        return read_ods_file(file_path, office_metadata, warnings, limits);
     }
 
     let workbook = match open_workbook_auto(Path::new(file_path)) {
@@ -150,7 +380,22 @@ fn read_xlsx_family_file(
     file_path: &str,
     office_metadata: Option<HashMap<String, String>>,
     mut warnings: Vec<ProcessingWarning>,
+    limits: &SecurityLimits,
 ) -> Result<ExcelReadResult> {
+    let check_file = std::fs::File::open(file_path)?;
+    if has_row_only_xlsx_dimensions(std::io::BufReader::new(check_file), limits)? {
+        let bytes = std::fs::read(file_path)?;
+        let normalized = normalize_xlsx_dimensions(&bytes, limits)?
+            .ok_or_else(|| XbergError::parsing("Failed to normalize row-only XLSX worksheet dimensions".to_owned()))?;
+        let workbook = calamine::Xlsx::new(Cursor::new(normalized))
+            .map_err(|e| XbergError::parsing(format!("Failed to parse XLSX: {}", e)))?;
+        let mut result = process_xlsx_workbook(workbook, office_metadata, &mut warnings)?;
+        result.revisions = extract_xlsx_revisions_from_file(file_path);
+        if let Some(comments) = extract_xlsx_comments_from_file(file_path) {
+            result.metadata.insert("comments".to_owned(), comments);
+        }
+        return Ok((result, warnings));
+    }
     let file = std::fs::File::open(file_path)?;
     let workbook = calamine::Xlsx::new(std::io::BufReader::new(file))
         .map_err(|e| XbergError::parsing(format!("Failed to parse XLSX: {}", e)))?;
@@ -307,12 +552,12 @@ pub(crate) fn read_excel_bytes(data: &[u8], file_extension: &str, limits: &Secur
     let office_metadata: Option<HashMap<String, String>> = None;
 
     match file_extension.to_lowercase().as_str() {
-        ".xlsx" | ".xlsm" | ".xltm" => read_xlsx_family_bytes(data, office_metadata, warnings),
+        ".xlsx" | ".xlsm" | ".xltm" => read_xlsx_family_bytes(data, office_metadata, warnings, limits),
         ".xlam" => read_xlam_bytes(data, office_metadata, warnings),
         ".xls" => read_xls_bytes(data, office_metadata, warnings),
         ".xla" => read_xla_bytes(data, office_metadata, warnings),
         ".xlsb" => read_xlsb_bytes(data, office_metadata, warnings),
-        ".ods" => read_ods_bytes(data, office_metadata, warnings),
+        ".ods" => read_ods_bytes(data, office_metadata, warnings, limits),
         _ => Err(XbergError::parsing(format!(
             "Unsupported file extension: {}",
             file_extension
@@ -325,8 +570,14 @@ fn read_xlsx_family_bytes(
     data: &[u8],
     office_metadata: Option<HashMap<String, String>>,
     mut warnings: Vec<ProcessingWarning>,
+    limits: &SecurityLimits,
 ) -> Result<ExcelReadResult> {
-    let cursor = Cursor::new(data);
+    let normalized = if has_row_only_xlsx_dimensions(Cursor::new(data), limits)? {
+        normalize_xlsx_dimensions(data, limits)?
+    } else {
+        None
+    };
+    let cursor = Cursor::new(normalized.as_deref().unwrap_or(data));
     let workbook =
         calamine::Xlsx::new(cursor).map_err(|e| XbergError::parsing(format!("Failed to parse XLSX: {}", e)))?;
     let mut result = process_xlsx_workbook(workbook, office_metadata, &mut warnings)?;
@@ -421,12 +672,51 @@ fn read_xlsb_bytes(
     )
 }
 
-/// Read `.ods` bytes. `read_excel_file` has no direct counterpart — an on-disk `.ods` falls
-/// through to `open_workbook_auto`, which dispatches to the same `calamine::Ods` reader.
 fn read_ods_bytes(
     data: &[u8],
     office_metadata: Option<HashMap<String, String>>,
-    warnings: Vec<ProcessingWarning>,
+    mut warnings: Vec<ProcessingWarning>,
+    limits: &SecurityLimits,
 ) -> Result<ExcelReadResult> {
-    read_binary_workbook(calamine::Ods::new, "ODS", Cursor::new(data), office_metadata, warnings)
+    let cursor = Cursor::new(data);
+    match calamine::Ods::new(cursor) {
+        Ok(workbook) => {
+            let result = process_workbook(workbook, office_metadata, &mut warnings)?;
+            Ok((result, warnings))
+        }
+        Err(original_error) => {
+            let Some(normalized) = normalize_ods_row_whitespace(data, limits)? else {
+                return Err(XbergError::parsing(format!("Failed to parse ODS: {original_error}")));
+            };
+            let workbook = calamine::Ods::new(Cursor::new(normalized))
+                .map_err(|error| XbergError::parsing(format!("Failed to parse ODS: {error}")))?;
+            let result = process_workbook(workbook, office_metadata, &mut warnings)?;
+            Ok((result, warnings))
+        }
+    }
+}
+
+fn read_ods_file(
+    file_path: &str,
+    office_metadata: Option<HashMap<String, String>>,
+    mut warnings: Vec<ProcessingWarning>,
+    limits: &SecurityLimits,
+) -> Result<ExcelReadResult> {
+    let file = std::fs::File::open(file_path)?;
+    match calamine::Ods::new(std::io::BufReader::new(file)) {
+        Ok(workbook) => {
+            let result = process_workbook(workbook, office_metadata, &mut warnings)?;
+            Ok((result, warnings))
+        }
+        Err(original_error) => {
+            let bytes = std::fs::read(file_path)?;
+            let Some(normalized) = normalize_ods_row_whitespace(&bytes, limits)? else {
+                return Err(XbergError::parsing(format!("Failed to parse ODS: {original_error}")));
+            };
+            let workbook = calamine::Ods::new(Cursor::new(normalized))
+                .map_err(|error| XbergError::parsing(format!("Failed to parse ODS: {error}")))?;
+            let result = process_workbook(workbook, office_metadata, &mut warnings)?;
+            Ok((result, warnings))
+        }
+    }
 }

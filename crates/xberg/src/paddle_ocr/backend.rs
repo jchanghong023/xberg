@@ -35,6 +35,7 @@ fn paddle_accel_builder_fn(
 use crate::Result;
 use crate::core::config::OcrConfig;
 use crate::ocr::conversion::{detailed_text_block_to_elements, elements_to_hocr_words};
+use crate::ocr::table::drop_document_elements_claimed_by_tables;
 use crate::plugins::{OcrBackend, OcrBackendType, Plugin};
 use crate::table_core::{reconstruct_table, table_to_markdown};
 #[cfg(test)]
@@ -509,6 +510,7 @@ struct BuiltOcrTables {
     table_count: u32,
     table_rows: Option<u32>,
     table_cols: Option<u32>,
+    rejected_candidates: u32,
 }
 
 impl PaddleOcrBackend {
@@ -1379,6 +1381,7 @@ impl PaddleOcrBackend {
         let mut table_count = 0u32;
         let mut table_rows: Option<u32> = None;
         let mut table_cols: Option<u32> = None;
+        let mut rejected_candidates = 0u32;
 
         for region_words in crate::table_core::cluster_words_into_table_regions(words) {
             if region_words.len() < crate::table_core::MIN_TABLE_CANDIDATE_WORDS {
@@ -1422,6 +1425,7 @@ impl PaddleOcrBackend {
             #[cfg(not(feature = "pdf"))]
             let cleaned = Some(cells);
             let Some(cells) = cleaned else {
+                rejected_candidates += 1;
                 continue;
             };
 
@@ -1457,7 +1461,66 @@ impl PaddleOcrBackend {
             table_count,
             table_rows,
             table_cols,
+            rejected_candidates,
         }
+    }
+
+    fn table_rejection_warning(count: u32) -> Option<crate::types::ProcessingWarning> {
+        (count > 0).then(|| crate::types::ProcessingWarning {
+            source: Cow::Borrowed("paddle-ocr-table-detection"),
+            message: Cow::Owned(format!(
+                "PaddleOCR rejected {count} table candidate region(s) during structural validation"
+            )),
+        })
+    }
+
+    /// The page document `process_image` returns: one `OcrText` element per recognised line, less the
+    /// lines a detected table carries. Line and table bboxes are both `to_aabb` of the same
+    /// recognition pass, so they share one pixel space here.
+    fn build_ocr_document(line_elements: &[OcrElement], tables: &[Table]) -> crate::types::internal::InternalDocument {
+        use crate::types::extraction::BoundingBox;
+        use crate::types::internal::{ElementKind, InternalDocument, InternalElement};
+        use crate::types::ocr_elements::OcrElementLevel;
+
+        // PaddleOCR has no paragraph concept of its own (only per-line
+        // geometry), so lines are grouped into blocks here and tagged with
+        // the same `hocr_block_id` attribute Tesseract's hOCR parser writes,
+        // letting `pdf::structure::adapters::ocr_doc_to_paragraphs` merge
+        // them with zero changes to its merge logic (#631).
+        let block_ids = crate::ocr::conversion::assign_line_block_ids(line_elements);
+
+        let mut doc = InternalDocument::new("pdf");
+        for (elem, block_id) in line_elements.iter().zip(block_ids) {
+            let (left, top, width, height) = elem.geometry.to_aabb();
+            let bbox = BoundingBox {
+                x0: left as f64,
+                y0: top as f64,
+                x1: (left + width) as f64,
+                y1: (top + height) as f64,
+            };
+            let mut ie = InternalElement::text(
+                ElementKind::OcrText {
+                    level: OcrElementLevel::Line,
+                },
+                &elem.text,
+                0,
+            )
+            .with_page(elem.page_number);
+            ie.bbox = Some(bbox);
+            ie.ocr_confidence = Some(elem.confidence.clone());
+            ie.ocr_geometry = Some(elem.geometry.clone());
+            ie.attributes = Some(
+                [(crate::ocr::hocr_parser::HOCR_BLOCK_ID_ATTRIBUTE.to_string(), block_id)]
+                    .into_iter()
+                    .collect(),
+            );
+            doc.push_element(ie);
+        }
+        let claiming_tables = tables
+            .iter()
+            .filter_map(|table| Some((table.bounding_box?, table.cells.as_slice())));
+        drop_document_elements_claimed_by_tables(&mut doc, claiming_tables);
+        doc
     }
 
     fn select_output_elements(
@@ -1521,7 +1584,7 @@ impl OcrBackend for PaddleOcrBackend {
         let security_limits = Self::resolve_security_limits(config);
 
         let languages = config.effective_languages();
-        let (paddle_lang, language_warnings) = super::select_paddle_language(&languages);
+        let (paddle_lang, mut processing_warnings) = super::select_paddle_language(&languages);
 
         let mut rotation_outcome = None;
         let ocr_image_bytes: Cow<'_, [u8]> = if config.auto_rotate {
@@ -1619,56 +1682,6 @@ impl OcrBackend for PaddleOcrBackend {
 
         let text_blocks_count = line_elements.len();
 
-        let ocr_doc = {
-            use crate::types::extraction::BoundingBox;
-            use crate::types::internal::{ElementKind, InternalDocument, InternalElement};
-            use crate::types::ocr_elements::OcrElementLevel;
-
-            // PaddleOCR has no paragraph concept of its own (only per-line
-            // geometry), so lines are grouped into blocks here and tagged with
-            // the same `hocr_block_id` attribute Tesseract's hOCR parser writes,
-            // letting `pdf::structure::adapters::ocr_doc_to_paragraphs` merge
-            // them with zero changes to its merge logic (#631).
-            let block_ids = crate::ocr::conversion::assign_line_block_ids(&line_elements);
-
-            let mut doc = InternalDocument::new("pdf");
-            for (elem, block_id) in line_elements.iter().zip(block_ids) {
-                let (left, top, width, height) = elem.geometry.to_aabb();
-                let bbox = BoundingBox {
-                    x0: left as f64,
-                    y0: top as f64,
-                    x1: (left + width) as f64,
-                    y1: (top + height) as f64,
-                };
-                let mut ie = InternalElement::text(
-                    ElementKind::OcrText {
-                        level: OcrElementLevel::Line,
-                    },
-                    &elem.text,
-                    0,
-                )
-                .with_page(elem.page_number);
-                ie.bbox = Some(bbox);
-                ie.ocr_confidence = Some(elem.confidence.clone());
-                ie.ocr_geometry = Some(elem.geometry.clone());
-                ie.attributes = Some(
-                    [(crate::ocr::hocr_parser::HOCR_BLOCK_ID_ATTRIBUTE.to_string(), block_id)]
-                        .into_iter()
-                        .collect(),
-                );
-                doc.push_element(ie);
-            }
-            doc
-        };
-
-        tracing::debug!(
-            text_blocks = text_blocks_count,
-            line_elements = line_elements.len(),
-            word_elements = word_elements.len(),
-            internal_doc_elements = ocr_doc.elements.len(),
-            "PaddleOCR InternalDocument built"
-        );
-
         let mut tables: Vec<Table> = vec![];
         let mut table_count = 0;
         let mut table_rows: Option<u32> = None;
@@ -1682,7 +1695,20 @@ impl OcrBackend for PaddleOcrBackend {
             table_count = built.table_count;
             table_rows = built.table_rows;
             table_cols = built.table_cols;
+            if let Some(warning) = Self::table_rejection_warning(built.rejected_candidates) {
+                processing_warnings.push(warning);
+            }
         }
+
+        let ocr_doc = Self::build_ocr_document(&line_elements, &tables);
+
+        tracing::debug!(
+            text_blocks = text_blocks_count,
+            line_elements = line_elements.len(),
+            word_elements = word_elements.len(),
+            internal_doc_elements = ocr_doc.elements.len(),
+            "PaddleOCR InternalDocument built"
+        );
 
         let metadata = Metadata {
             format: Some(FormatMetadata::Ocr(OcrMetadata {
@@ -1713,7 +1739,7 @@ impl OcrBackend for PaddleOcrBackend {
             detected_languages: Some(languages),
             ocr_elements: ocr_elements_opt,
             ocr_internal_document: Some(ocr_doc),
-            processing_warnings: language_warnings,
+            processing_warnings,
             ..Default::default()
         })
     }
@@ -2959,6 +2985,69 @@ mod tests {
             }),
             "bounding_box must be derived from the region's word extents, not left None"
         );
+    }
+
+    #[test]
+    fn table_rejection_warning_reports_structurally_rejected_candidates() {
+        assert!(PaddleOcrBackend::table_rejection_warning(0).is_none());
+
+        let warning = PaddleOcrBackend::table_rejection_warning(2).expect("rejected candidates must be reported");
+        assert_eq!(warning.source, "paddle-ocr-table-detection");
+        assert_eq!(
+            warning.message,
+            "PaddleOCR rejected 2 table candidate region(s) during structural validation"
+        );
+    }
+
+    fn paddle_element_at(text: &str, level: OcrElementLevel, left: u32, top: u32, width: u32) -> OcrElement {
+        OcrElement::new(
+            text,
+            crate::types::OcrBoundingGeometry::Rectangle {
+                left,
+                top,
+                width,
+                height: 15,
+            },
+            crate::types::OcrConfidence::from_paddle(0.9, 0.9),
+        )
+        .with_level(level)
+    }
+
+    /// The lines a detected table carries must not also stay in the page document (#1571), or the
+    /// standalone-image route renders every row twice: once per line, then as the table.
+    #[test]
+    fn build_ocr_document_drops_lines_a_detected_table_carries() {
+        let rows = [
+            ("Energy", "186", "372"),
+            ("Fat", "1,5", "3,0"),
+            ("Protein", "3,0", "6,0"),
+            ("Salt", "0,1", "0,2"),
+        ];
+        let mut lines = vec![paddle_element_at("Nutrition facts", OcrElementLevel::Line, 0, 0, 150)];
+        let mut words = vec![
+            paddle_element_at("Nutrition", OcrElementLevel::Word, 0, 0, 90),
+            paddle_element_at("facts", OcrElementLevel::Word, 100, 0, 50),
+        ];
+        for (row, (label, per_100, per_serving)) in rows.iter().enumerate() {
+            let top = 200 + row as u32 * 25;
+            let line = format!("{label} {per_100} {per_serving}");
+            lines.push(paddle_element_at(&line, OcrElementLevel::Line, 0, top, 340));
+            words.push(paddle_element_at(label, OcrElementLevel::Word, 0, top, 80));
+            words.push(paddle_element_at(per_100, OcrElementLevel::Word, 200, top, 40));
+            words.push(paddle_element_at(per_serving, OcrElementLevel::Word, 300, top, 40));
+        }
+        let table_elements = lines.iter().chain(&words).cloned().collect::<Vec<_>>();
+        let built = PaddleOcrBackend::build_ocr_tables_from_words(&elements_to_hocr_words(&table_elements, 0.3));
+        assert_eq!(
+            built.tables.len(),
+            1,
+            "the nutrition grid must be detected as one table"
+        );
+
+        let doc = PaddleOcrBackend::build_ocr_document(&lines, &built.tables);
+
+        let texts: Vec<&str> = doc.elements.iter().map(|element| element.text.as_str()).collect();
+        assert_eq!(texts, ["Nutrition facts"], "only the line outside the table may remain");
     }
 
     /// Two tables stacked vertically with a large blank gap between them must become two

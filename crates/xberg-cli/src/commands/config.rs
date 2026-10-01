@@ -39,7 +39,7 @@ pub fn load_config(config_path: Option<PathBuf>, discover: bool) -> Result<Extra
         match ExtractionConfig::discover_over(&base) {
             Ok(Some(config)) => Ok(config),
             Ok(None) => Ok(base),
-            Err(e) => Err(e).context("Failed to auto-discover configuration file. Searched for xberg.{toml,yaml,json} in current and parent directories. Use --config to specify an explicit path."),
+            Err(e) => Err(e).context("Failed to auto-discover configuration file. Searched for xberg.{toml,yaml,yml,json} in current and parent directories. Use --config to specify an explicit path."),
         }
     } else {
         Ok(base)
