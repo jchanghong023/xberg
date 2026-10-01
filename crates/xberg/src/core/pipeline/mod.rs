@@ -8,6 +8,7 @@ mod execution;
 pub(crate) mod features;
 mod format;
 mod initialization;
+mod ocr_dedup;
 mod page_markers;
 
 #[cfg(test)]
@@ -81,6 +82,19 @@ fn image_ocr_positions(doc: &InternalDocument) -> Vec<usize> {
 #[cfg(all(feature = "ocr", feature = "tokio-runtime"))]
 fn should_skip_pdf_image_ocr(doc: &InternalDocument, image: &crate::types::ExtractedImage) -> bool {
     if image.image_kind == Some(crate::types::ImageKind::PageRaster) {
+        return true;
+    }
+    // The PDF's embedded-image retry already OCR'd this page's XObjects: a second pass over
+    // the same bytes prints the recovered tables twice (#2014).
+    if doc.source_format == "pdf"
+        && let Some(page_number) = image.page_number
+        && let Some(recovered) = doc
+            .metadata
+            .additional
+            .get(crate::ocr_metadata_keys::OCR_XOBJECT_RETRY_RECOVERED_PAGES_METADATA_KEY)
+            .and_then(serde_json::Value::as_array)
+        && recovered.iter().any(|page| page == &serde_json::json!(page_number))
+    {
         return true;
     }
     // A page-sized PDF XObject repeats content already supplied by native text or
@@ -490,6 +504,10 @@ async fn run_pipeline_impl(
         }
     }
 
+    // Duplicate-copy resolution before the OCR text is appended/spoken for:
+    // the passes decide against element text that does not yet contain any
+    // pipeline-OCR copy (see `ocr_dedup` for the two shapes and the order).
+    ocr_dedup::resolve_duplicate_ocr_copies(&mut doc);
     replace_embedded_image_markdown_with_ocr(&mut doc);
     append_embedded_image_ocr_text(&mut doc);
 
@@ -844,6 +862,7 @@ pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -
     // Mirror `run_pipeline`'s embedded-image OCR text handling (#219): without these,
     // `images.ocr_text_only` / `images.append_ocr_text` are silently ignored on the
     // sync (non-tokio, WASM) path even though the fields above are now set.
+    ocr_dedup::resolve_duplicate_ocr_copies(&mut doc);
     replace_embedded_image_markdown_with_ocr(&mut doc);
     append_embedded_image_ocr_text(&mut doc);
 

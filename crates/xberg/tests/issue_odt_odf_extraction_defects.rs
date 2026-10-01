@@ -407,7 +407,12 @@ async fn should_allow_nested_inline_wrappers_at_configured_depth() {
         .await
         .expect("inline wrappers at the configured depth limit should succeed");
 
-    assert_eq!(result.content.trim(), "At limit. / Sibling.");
+    // fork 默认 Markdown 渲染：超链接以 `[label](url)` 输出（fork.md）；断言的
+    // 重点不变——达到深度上限的嵌套内联包装仍完整抽取文本，不被截断。
+    assert_eq!(
+        result.content.trim(),
+        "[At limit.](https://example.com) / [Sibling.](https://example.org)"
+    );
 }
 
 #[tokio::test]

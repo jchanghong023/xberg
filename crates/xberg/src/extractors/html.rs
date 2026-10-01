@@ -575,15 +575,13 @@ fn has_url_scheme(dest: &str) -> bool {
     if !first.is_ascii_alphabetic() {
         return false;
     }
-    let mut len = 1usize;
-    for c in chars {
+    for (len, c) in (1usize..).zip(chars) {
         if c == ':' {
             return true;
         }
         if !(c.is_ascii_alphanumeric() || c == '+' || c == '.' || c == '-') || len > 32 {
             return false;
         }
-        len += 1;
     }
     false
 }
@@ -659,6 +657,15 @@ enum RefAction {
 ///    not content. Only decidable when the source directory is known; without
 ///    it (byte-stream extraction) local refs pass through untouched.
 ///
+/// The outcome of [`rewrite_inline_image_refs`]: the rewritten content, the
+/// text-replacement list (`old -> new`) covering both ref swaps and token
+/// drops, and the extracted `(new token, image index)` pairs.
+struct InlineImageRewrite {
+    content: String,
+    replacements: Vec<(String, String)>,
+    extracted_refs: Vec<(String, u32)>,
+}
+
 /// Returns the rewritten content, the decoded images (already indexed), and a
 /// text-replacement list (`old -> new`) covering both ref swaps and token
 /// drops so callers can apply the same edits to already-mapped element texts.
@@ -666,7 +673,7 @@ fn rewrite_inline_image_refs(
     content: &str,
     source_dir: Option<&Path>,
     images: &mut Vec<ExtractedImage>,
-) -> (String, Vec<(String, String)>) {
+) -> InlineImageRewrite {
     static IMG_REF_RE: OnceLock<regex::Regex> = OnceLock::new();
     let re = IMG_REF_RE.get_or_init(|| {
         regex::Regex::new(r#"!\[(?P<alt>[^\]]*)\]\(\s*(?P<dest><[^>]*>|[^)\s]+)(?P<title>\s+"[^"]*")?\s*\)"#)
@@ -674,6 +681,7 @@ fn rewrite_inline_image_refs(
     });
 
     let mut replacements: Vec<(String, String)> = Vec::new();
+    let mut extracted_refs: Vec<(String, u32)> = Vec::new();
     let mut out = String::with_capacity(content.len());
     let mut fence = crate::extraction::markdown_utils::FenceTracker::default();
 
@@ -724,6 +732,7 @@ fn rewrite_inline_image_refs(
             match action {
                 RefAction::Extracted(new_token) => {
                     replacements.push((whole.to_string(), new_token.clone()));
+                    extracted_refs.push((new_token.clone(), images.len() as u32 - 1));
                     Cow::Owned(new_token)
                 }
                 RefAction::Dropped => {
@@ -743,7 +752,11 @@ fn rewrite_inline_image_refs(
         }
     }
 
-    (out, replacements)
+    InlineImageRewrite {
+        content: out,
+        replacements,
+        extracted_refs,
+    }
 }
 
 impl Plugin for HtmlExtractor {
@@ -833,10 +846,12 @@ impl HtmlExtractor {
         // caller that opted out of images gets the raw refs, not half of them.
         let mut rewrite_images: Vec<ExtractedImage> = Vec::new();
         let mut ref_replacements: Vec<(String, String)> = Vec::new();
+        let mut extracted_image_refs: Vec<(String, u32)> = Vec::new();
         let content_text = if should_extract_images {
-            let (rewritten, replacements) = rewrite_inline_image_refs(&content_text, source_dir, &mut rewrite_images);
-            ref_replacements = replacements;
-            rewritten
+            let rewrite = rewrite_inline_image_refs(&content_text, source_dir, &mut rewrite_images);
+            ref_replacements = rewrite.replacements;
+            extracted_image_refs = rewrite.extracted_refs;
+            rewrite.content
         } else {
             content_text
         };
@@ -893,6 +908,30 @@ impl HtmlExtractor {
         // indexes; the inline-image pass below continues the numbering.
         for image in rewrite_images {
             doc.push_image(image);
+        }
+
+        // A paragraph whose whole text is one rewritten image ref *is* that
+        // image: promote it to an Image element so element-walking renderers
+        // resolve the bytes and any later OCR exactly as they do for
+        // extractor-appended images, while the rendered marker line stays
+        // what the rewrite wrote.
+        if !extracted_image_refs.is_empty() {
+            let refs: std::collections::HashMap<&str, u32> = extracted_image_refs
+                .iter()
+                .map(|(token, index)| (token.as_str(), *index))
+                .collect();
+            for element in doc.elements.iter_mut() {
+                if matches!(element.kind, crate::types::internal::ElementKind::Paragraph)
+                    && let Some(&image_index) = refs.get(element.text.trim())
+                {
+                    element.kind = crate::types::internal::ElementKind::Image { image_index };
+                    element.text = doc
+                        .images
+                        .get(image_index as usize)
+                        .and_then(|image| image.description.clone())
+                        .unwrap_or_default();
+                }
+            }
         }
 
         if decoded_lossily {

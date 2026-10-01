@@ -293,11 +293,23 @@ fn unescape_midline_hash_escapes(input: &str) -> String {
         .lines()
         .map(|line| {
             let leading = line.len() - line.trim_start_matches(' ').len();
+            // Contiguous `\#` pairs opening the line (right after the indent) are
+            // one leading run whose fate `rewrite_leading_marker_escapes` already
+            // decided — a blank-followed `##` marker keeps all of its escapes, so
+            // the midline pass must not peel them off the run's later pairs.
+            let bytes_all = line.as_bytes();
+            let mut leading_run_end = leading.min(bytes_all.len());
+            while leading_run_end + 1 < bytes_all.len()
+                && bytes_all[leading_run_end] == b'\\'
+                && bytes_all[leading_run_end + 1] == b'#'
+            {
+                leading_run_end += 2;
+            }
             let mut out = String::with_capacity(line.len());
             let bytes = line.as_bytes();
             let mut i = 0usize;
             while i < bytes.len() {
-                if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'#' && i > leading {
+                if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'#' && i >= leading_run_end {
                     out.push('#');
                     i += 2;
                     continue;

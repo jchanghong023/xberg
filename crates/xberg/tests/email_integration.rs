@@ -388,10 +388,27 @@ async fn test_msg_basic_extraction() {
         return;
     }
 
-    let config = ExtractionConfig::default();
-    let data = std::fs::read(helpers::get_test_file_path("email/test_email.msg")).unwrap();
-    let result = extract_bytes_document(&data, "application/vnd.ms-outlook", &config)
-        .await
+    // test_email.msg 内嵌同名 .msg：`extract_attachment_children` 的三层嵌套
+    // 提取在 libtest 默认 2 MiB 测试线程栈上溢出（真实 CLI 在 8 MiB 主线程上
+    // 实测正常）。提取放到显式 16 MiB 栈的工作线程上执行，断言保留原覆盖。
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime should build");
+            let config = ExtractionConfig::default();
+            let data = std::fs::read(helpers::get_test_file_path("email/test_email.msg")).unwrap();
+            let result = runtime.block_on(extract_bytes_document(&data, "application/vnd.ms-outlook", &config));
+            sender.send(result).expect("result channel should send");
+        })
+        .expect("extraction worker thread should spawn");
+    worker.join().expect("extraction worker should not panic");
+    let result = receiver
+        .recv()
+        .expect("result channel should receive")
         .expect("Should extract MSG successfully");
 
     // fork 默认 Markdown 渲染（fork.md）：邮件头字段渲染为 `**字段**: 值`；上游断言按 Plain 写

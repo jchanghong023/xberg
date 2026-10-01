@@ -3567,7 +3567,7 @@ fn outline_recovery_is_page_scoped_and_uses_root_h2() {
 }
 
 #[test]
-fn outline_recovery_calibrates_from_two_consistent_anchors() {
+fn outline_recovery_calibrates_the_offset_from_existing_levels() {
     let mut first = outline_para("First anchor");
     first.heading_level = Some(1);
     let mut second = outline_para("Second anchor");
@@ -3581,11 +3581,16 @@ fn outline_recovery_calibrates_from_two_consistent_anchors() {
 
     recover_headings_from_outline(&mut pages, &[], &entries);
 
+    // 两个锚点的 level - depth 一致为 1：书签与文档自身标题层级互相印证时，
+    // 按文档既有层级校准偏移（round-trip PDF 重读回自己的 #/## 结构），而不是
+    // 强套 root-## 约定。
+    assert_eq!(pages[0][0].heading_level, Some(1));
+    assert_eq!(pages[0][1].heading_level, Some(2));
     assert_eq!(pages[0][2].heading_level, Some(3));
 }
 
 #[test]
-fn outline_recovery_ignores_singleton_bad_calibration_anchor() {
+fn outline_recovery_relevels_a_misclassified_heading() {
     let mut anchor = outline_para("Bad anchor");
     anchor.heading_level = Some(5);
     let mut pages = vec![vec![anchor, outline_para("Recovered")]];
@@ -3596,6 +3601,7 @@ fn outline_recovery_ignores_singleton_bad_calibration_anchor() {
 
     recover_headings_from_outline(&mut pages, &[], &entries);
 
+    assert_eq!(pages[0][0].heading_level, Some(2), "depth 0 -> root h2");
     assert_eq!(pages[0][1].heading_level, Some(3));
 }
 
@@ -3620,9 +3626,8 @@ fn outline_recovery_rejects_ambiguous_titles() {
 #[test]
 fn outline_recovery_disambiguates_margin_tab_from_body_sidehead() {
     // Tessent 开题页形：节名既出现在顶部边带的运行页签上，又以正文区
-    // sidehead 出现在同一页——旧的 count==1 门控把这类书签整条跳过，
-    // sidehead 于是滞留为粗体正文行（TOC_HEADING_GAP 22/102 缺口的主因）。
-    // 消歧后：几何落在正文区且非家具的唯一副本胜出，边带页签不恢复。
+    // sidehead 出现在同一页。消歧后：sidehead 胜出并升为标题，边带页签
+    // 作为运行页签被剥离（它复述的正是刚被晋升的同名节标题）。
     let mut tab = outline_para("How to Debug Models");
     tab.block_bbox = Some((72.0, 45.6, 144.2, 56.8));
     let mut sidehead = outline_para("How to Debug Models");
@@ -3633,10 +3638,97 @@ fn outline_recovery_disambiguates_margin_tab_from_body_sidehead() {
     recover_headings_from_outline(&mut pages, &[], &entries);
 
     assert_eq!(
-        pages[0][0].heading_level, None,
-        "margin running-head copy stays body text"
+        pages[0].len(),
+        1,
+        "the margin running tab is stripped once the sidehead is promoted"
     );
-    assert_eq!(pages[0][1].heading_level, Some(3), "depth 1 + default offset 2");
+    assert_eq!(pages[0][0].heading_level, Some(3), "depth 1 + root-h2 offset 2");
+}
+
+/// 真实 Tessent 版面：开题页的页签（10pt）与 sidehead（21pt）都落在顶部
+/// 10% 边带内，边带过滤两手空空——字号决胜接管：更大的字号是真正的节
+/// 标题，页签照旧剥离。
+#[test]
+fn outline_recovery_disambiguates_in_band_copies_by_font_size() {
+    let mut tab = outline_para("How to Generate Simulation Models");
+    tab.block_bbox = Some((72.0, 735.0, 220.0, 746.4));
+    tab.dominant_font_size = 10.0;
+    let mut sidehead = outline_para("How to Generate Simulation Models");
+    sidehead.block_bbox = Some((72.0, 698.0, 430.0, 721.4));
+    sidehead.dominant_font_size = 21.0;
+    let mut pages = vec![vec![tab, sidehead]];
+    let entries = vec![PdfOutlineEntry::test_entry("How to Generate Simulation Models", 1, 1)];
+
+    recover_headings_from_outline(&mut pages, &[], &entries);
+
+    assert_eq!(pages[0].len(), 1, "the tab is stripped, the sidehead survives");
+    assert_eq!(pages[0][0].heading_level, Some(3));
+    assert!((pages[0][0].dominant_font_size - 21.0).abs() < f32::EPSILON);
+}
+
+/// 跨行章节标题：书签全题分布在两个连续段落里（"Chapter 4 … Using" +
+/// "Liberty"），晋升时焊接为一个完整标题，尾段不再独立存在。
+#[test]
+fn outline_recovery_welds_a_title_wrapped_across_paragraphs() {
+    let head = outline_para("Chapter 4 Create Tessent Insertion Attributes Using");
+    let tail = outline_para("Liberty");
+    let mut pages = vec![vec![head, tail, outline_para("This chapter describes the extraction.")]];
+    let entries = vec![PdfOutlineEntry::test_entry(
+        "Chapter 4 Create Tessent Insertion Attributes Using Liberty",
+        0,
+        1,
+    )];
+
+    recover_headings_from_outline(&mut pages, &[], &entries);
+
+    assert_eq!(pages[0].len(), 2, "the wrap tail is welded into its heading");
+    assert_eq!(pages[0][0].heading_level, Some(2));
+    assert_eq!(
+        paragraph_text_raw(&pages[0][0]),
+        "Chapter 4 Create Tessent Insertion Attributes Using Liberty"
+    );
+    assert_eq!(
+        pages[0][1].text, "This chapter describes the extraction.",
+        "body after the title keeps its place"
+    );
+}
+
+/// 运行页签出现在节开题页之外的页上：几何在边带、文本恰为书签标题的
+/// 独立短行——剥离；正文中的同名提及（几何在正文区）不动。
+#[test]
+fn outline_recovery_strips_running_tabs_on_non_target_pages() {
+    let mut tab = outline_para("Hardware Definitions");
+    tab.block_bbox = Some((72.0, 45.0, 160.0, 56.0));
+    let mut body = outline_para("See Hardware Definitions for the cell list.");
+    body.block_bbox = Some((72.0, 300.0, 430.0, 312.0));
+    let mut pages = vec![vec![tab, body], vec![outline_para("Opening page prose")]];
+    let entries = vec![PdfOutlineEntry::test_entry("Hardware Definitions", 0, 2)];
+
+    recover_headings_from_outline(&mut pages, &[], &entries);
+
+    assert_eq!(pages[0].len(), 1, "the margin tab copy is dropped");
+    assert_eq!(pages[0][0].text, "See Hardware Definitions for the cell list.");
+}
+
+/// 晋升失败时（此处：目标页两个同名页签副本同处顶边带、字号无从决胜），
+/// 开题页上的副本必须保留——剥掉它就删掉了该节唯一的标题文本。
+#[test]
+fn outline_recovery_keeps_unpromoted_title_copies_on_the_target_page() {
+    let mut first = outline_para("Ambiguous Sidehead");
+    first.block_bbox = Some((72.0, 735.0, 236.0, 746.0));
+    let mut second = outline_para("Ambiguous Sidehead");
+    second.block_bbox = Some((72.0, 752.0, 236.0, 763.0));
+    let mut pages = vec![vec![first, second]];
+    let entries = vec![PdfOutlineEntry::test_entry("Ambiguous Sidehead", 1, 1)];
+
+    recover_headings_from_outline(&mut pages, &[], &entries);
+
+    assert_eq!(
+        pages[0].len(),
+        2,
+        "promotion refused; the title's own opening page keeps both copies"
+    );
+    assert!(pages[0].iter().all(|paragraph| paragraph.heading_level.is_none()));
 }
 
 #[test]

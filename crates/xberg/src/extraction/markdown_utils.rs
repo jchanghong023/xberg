@@ -330,6 +330,74 @@ fn looks_like_filesystem_path(value: &str) -> bool {
     )
 }
 
+/// Shingle width for near-duplicate containment, in normalized characters.
+/// Mirrors the acceptance gate's duplicate-block judgment (8-character shingles
+/// over whitespace-stripped text), so an engine-side dedup decision and the
+/// gate's verdict reason about the same units.
+const DUP_GRAM_CHARS: usize = 8;
+
+/// Hashed character shingles of a text, for near-duplicate containment ratios.
+///
+/// Normalization matches the acceptance gate as well: whitespace is dropped
+/// before shingling, so line wrapping and the grid fence's column padding do
+/// not count as differences. Shingles are FNV-1a hashed rather than stored as
+/// strings — containment is a set-intersection ratio, and moving it would take
+/// two colliding shingles inside one document pair, which a threshold
+/// heuristic does not need to care about.
+#[derive(Debug, Default, Clone)]
+pub struct TextGrams {
+    keys: std::collections::HashSet<u64>,
+    normalized_len: usize,
+}
+
+impl TextGrams {
+    /// Minimum normalized length for a text to take part in duplicate
+    /// containment decisions: shorter texts cannot trip the acceptance gate's
+    /// duplicate-block judgment, so dedup passes skip them.
+    pub const MIN_LEN: usize = 200;
+
+    pub fn new(text: &str) -> Self {
+        let normalized: Vec<char> = text.chars().filter(|c| !c.is_whitespace()).collect();
+        let keys = normalized
+            .windows(DUP_GRAM_CHARS)
+            .map(|shingle| {
+                let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+                for &character in shingle {
+                    hash ^= character as u64;
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+                hash
+            })
+            .collect();
+        Self {
+            keys,
+            normalized_len: normalized.len(),
+        }
+    }
+
+    /// Whether the source text is long enough for containment decisions.
+    pub fn is_meaningful(&self) -> bool {
+        self.normalized_len >= Self::MIN_LEN
+    }
+
+    /// The hashed shingle set itself, for exact-duplicate checks.
+    pub fn keys(&self) -> impl Iterator<Item = u64> + '_ {
+        self.keys.iter().copied()
+    }
+
+    /// Fraction of this text's shingles that also occur in `other`:
+    /// `|self ∩ other| / |self|`. A ratio near 1.0 means this text is (almost)
+    /// fully spelled out inside `other`; a short `other` cannot push the ratio
+    /// up, only down.
+    pub fn containment_in(&self, other: &TextGrams) -> f64 {
+        if self.keys.is_empty() {
+            return 0.0;
+        }
+        let hits = self.keys.iter().filter(|key| other.keys.contains(*key)).count();
+        hits as f64 / self.keys.len() as f64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -508,5 +576,30 @@ mod tests {
         assert!(tracker.fenced("~~ a shorter run does not close"));
         assert!(tracker.fenced("~~~~"));
         assert!(!tracker.fenced("plain paragraph"));
+    }
+
+    /// Whitespace stripping means the same words wrapped differently shingle
+    /// identically: containment is 1.0 for a re-wrapped copy and stays low for
+    /// unrelated text of the same length.
+    #[test]
+    fn text_grams_ignore_whitespace_and_measure_containment() {
+        let repeated = "set drc handling warning ".repeat(30);
+        let flat = TextGrams::new(&repeated);
+        let rewrapped = TextGrams::new(&repeated.replace(' ', "\n\n  "));
+        assert_eq!(flat.containment_in(&rewrapped), 1.0);
+
+        let other = TextGrams::new(&"an entirely unrelated sentence, length matched ".repeat(20));
+        assert!(flat.containment_in(&other) < 0.35);
+    }
+
+    /// The gate's duplicate judgment only engages past a floor, and so does the
+    /// helper: short texts are not meaningful regardless of overlap.
+    #[test]
+    fn text_grams_min_len_marks_short_texts_not_meaningful() {
+        assert!(TextGrams::new(&"x".repeat(200)).is_meaningful());
+        assert!(!TextGrams::new(&"x".repeat(199)).is_meaningful());
+        assert!(!TextGrams::new("").is_meaningful());
+        // Empty text defines no ratio rather than 0/0.
+        assert_eq!(TextGrams::new("").containment_in(&TextGrams::new("y")), 0.0);
     }
 }

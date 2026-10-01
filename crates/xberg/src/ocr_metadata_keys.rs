@@ -39,3 +39,9 @@ pub(crate) const OCR_IMAGE_PREPROCESSING_METADATA_KEY: &str = "image_preprocessi
 /// array to an `OcrElement` through the element's own `page_number` instead.
 pub(crate) const OCR_PAGE_COORDINATE_FRAMES_METADATA_KEY: &str = "ocr_page_coordinate_frames";
 pub(crate) const OCR_PAGE_SEGMENTATION_MODES_METADATA_KEY: &str = "ocr_page_segmentation_modes";
+
+/// Pages (1-based document numbers) whose text the embedded-image retry recovered, stamped by
+/// the whole-document OCR route. The pipeline's own embedded-image OCR must skip these pages'
+/// images: the retry already read the very same XObject bytes, and a second pass prints the
+/// recovered tables twice (#2014).
+pub(crate) const OCR_XOBJECT_RETRY_RECOVERED_PAGES_METADATA_KEY: &str = "ocr_xobject_retry_recovered_pages";

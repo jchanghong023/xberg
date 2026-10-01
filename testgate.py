@@ -252,12 +252,18 @@ def _corpus_missing_paths():
 # 故用环境变量在门内覆盖，而不是改全局配置。
 TEST_BUILD_JOBS = "8"
 TEST_STAGE_PREFIX = "test-"
+# 深递归解析/OCR 路径在 libtest 默认 2 MiB 测试线程栈上溢出（email_integration
+# 嵌套 msg、gh1907 扫描页重试均有实测）。CLI 自身把管线跑在 16 MiB 工作线程栈
+# 上（main.rs RUNTIME_WORKER_STACK_SIZE_BYTES），测试线程给同样预算，栈按需提交
+# 不虚占内存。
+RUST_MIN_STACK_BYTES = "16777216"
 
 
 def _stage_env(name):
     if name.startswith(TEST_STAGE_PREFIX):
         merged = dict(os.environ)
         merged["CARGO_BUILD_JOBS"] = TEST_BUILD_JOBS
+        merged["RUST_MIN_STACK"] = RUST_MIN_STACK_BYTES
         return merged
     return None
 

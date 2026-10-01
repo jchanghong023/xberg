@@ -36,15 +36,16 @@ pub(super) fn extract_doc_images(comp: &mut cfb::CompoundFile<std::io::Cursor<&[
     }
 
     for path in object_pool_preview_paths(comp) {
-        if let Ok(preview) = super::read_stream(comp, &path) {
-            if preview.len() >= 8 && preview[0..4] == [0x01, 0x00, 0x00, 0x00] {
-                // EMF record header: type 1 (EMR_HEADER), then the record's own
-                // declared size. A preview that fails this shape is skipped, not
-                // guessed at -- a wrong `emf` label would surface as a dead ref.
-                let declared = u32::from_le_bytes([preview[4], preview[5], preview[6], preview[7]]) as usize;
-                if declared >= 8 && declared <= preview.len().min(MAX_BLOB_BYTES) {
-                    images.push(build_image(preview, "emf"));
-                }
+        if let Ok(preview) = super::read_stream(comp, &path)
+            && preview.len() >= 8
+            && preview[0..4] == [0x01, 0x00, 0x00, 0x00]
+        {
+            // EMF record header: type 1 (EMR_HEADER), then the record's own
+            // declared size. A preview that fails this shape is skipped, not
+            // guessed at -- a wrong `emf` label would surface as a dead ref.
+            let declared = u32::from_le_bytes([preview[4], preview[5], preview[6], preview[7]]) as usize;
+            if declared >= 8 && declared <= preview.len().min(MAX_BLOB_BYTES) {
+                images.push(build_image(preview, "emf"));
             }
         }
     }
@@ -118,10 +119,11 @@ fn object_pool_preview_paths(comp: &cfb::CompoundFile<std::io::Cursor<&[u8]>>) -
         // normalize to `/` for the component walk below.
         let path = entry.path().to_string_lossy().replace('\\', "/");
         let mut parts = path.split('/').filter(|p| !p.is_empty());
-        if let (Some(pool), Some(_storage), Some(stream)) = (parts.next(), parts.next(), parts.next()) {
-            if pool == "ObjectPool" && stream.ends_with("EPRINT") {
-                paths.push(path);
-            }
+        if let (Some(pool), Some(_storage), Some(stream)) = (parts.next(), parts.next(), parts.next())
+            && pool == "ObjectPool"
+            && stream.ends_with("EPRINT")
+        {
+            paths.push(path);
         }
     }
     paths
@@ -136,19 +138,23 @@ fn scan_raster_blobs(data: &[u8]) -> Vec<(&'static str, Vec<u8>)> {
             Some(rel) => i += rel,
             None => break,
         }
-        if data[i..].len() >= PNG_SIG.len() && &data[i..i + PNG_SIG.len()] == PNG_SIG {
-            if let Some(end) = png_end(data, i) {
-                blobs.push(("png", data[i..end].to_vec()));
-                i = end;
-                continue;
-            }
+        if data[i..].len() >= PNG_SIG.len()
+            && &data[i..i + PNG_SIG.len()] == PNG_SIG
+            && let Some(end) = png_end(data, i)
+        {
+            blobs.push(("png", data[i..end].to_vec()));
+            i = end;
+            continue;
         }
-        if data[i..].len() >= 3 && data[i] == 0xFF && data[i + 1] == 0xD8 && data[i + 2] == 0xFF {
-            if let Some(end) = jpeg_end(data, i) {
-                blobs.push(("jpeg", data[i..end].to_vec()));
-                i = end;
-                continue;
-            }
+        if data[i..].len() >= 3
+            && data[i] == 0xFF
+            && data[i + 1] == 0xD8
+            && data[i + 2] == 0xFF
+            && let Some(end) = jpeg_end(data, i)
+        {
+            blobs.push(("jpeg", data[i..end].to_vec()));
+            i = end;
+            continue;
         }
         i += 1;
     }

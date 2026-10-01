@@ -87,12 +87,23 @@ async fn an_entry_written_by_a_different_build_must_not_be_served() {
         ..Default::default()
     };
 
-    // 1. Populate the cache.
+    // ~keep The first extraction may register lifecycle hooks, which deliberately suppresses
+    // ~keep that run's cache write; the second stable run must populate exactly one entry.
     let first = xberg::extract(ExtractInput::from_uri(source.to_string_lossy()), &config)
         .await
         .expect("first extraction");
     assert_eq!(first.results.len(), 1);
     assert_eq!(first.results[0].content.trim(), DOCUMENT_TEXT);
+
+    let second = xberg::extract(ExtractInput::from_uri(source.to_string_lossy()), &config)
+        .await
+        .expect("second extraction");
+    assert_eq!(
+        second.results.len(),
+        1,
+        "the cache-populating call must extract one document"
+    );
+    assert_eq!(second.results[0].content.trim(), DOCUMENT_TEXT);
 
     let cache_dir = cache_root.join("extraction");
     let blobs = blobs_in(&cache_dir);
@@ -126,12 +137,12 @@ async fn an_entry_written_by_a_different_build_must_not_be_served() {
 
     // 4. Extracting again must miss, re-extract, and write a fresh entry under
     //    the real fingerprint.
-    let second = xberg::extract(ExtractInput::from_uri(source.to_string_lossy()), &config)
+    let third = xberg::extract(ExtractInput::from_uri(source.to_string_lossy()), &config)
         .await
-        .expect("second extraction");
-    assert_eq!(second.results.len(), 1);
+        .expect("third extraction");
+    assert_eq!(third.results.len(), 1);
     assert_eq!(
-        second.results[0].content.trim(),
+        third.results[0].content.trim(),
         DOCUMENT_TEXT,
         "the re-extracted content must match the original"
     );

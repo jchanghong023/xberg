@@ -332,6 +332,15 @@ use piece_table::extract_text_word97;
 /// chunking `content` consumers use. ~keep
 const PARAGRAPH_MARK: char = '\r';
 
+/// Word's table cell/row mark (`0x07`): the paragraph mark that ends a cell
+/// (or, with `sprmPFTtp`, a row). A table whose every cell is a single
+/// paragraph contains no `\r` between the table's start and its end, so a
+/// split that only recognizes [`PARAGRAPH_MARK`] welded the whole table into
+/// one tab-joined paragraph. Splitting on the cell mark too gives every cell
+/// its own paragraph, keyed on the FC one past the mark — exactly the FC the
+/// PAPX FKP index stores for cell paragraphs.
+const CELL_MARK: char = '\x07';
+
 /// Split the raw main text into paragraphs and attach each one's list binding.
 ///
 /// Operates on the *raw* text so that character positions still line up with
@@ -348,7 +357,7 @@ fn split_main_paragraphs(main: &str, main_fc_ends: &[u32], list_tables: &papx::L
     let mut start = 0usize;
 
     for (i, c) in main.chars().enumerate() {
-        if c != PARAGRAPH_MARK {
+        if c != PARAGRAPH_MARK && c != CELL_MARK {
             continue;
         }
         push_paragraph(
@@ -358,6 +367,7 @@ fn split_main_paragraphs(main: &str, main_fc_ends: &[u32], list_tables: &papx::L
             i,
             main_fc_ends.get(i).copied(),
             list_tables,
+            c == CELL_MARK,
         );
         start = i + 1;
     }
@@ -367,13 +377,19 @@ fn split_main_paragraphs(main: &str, main_fc_ends: &[u32], list_tables: &papx::L
         // A final run with no paragraph mark still has properties keyed on the
         // FC one past its last character.
         let last_fc = main_fc_ends.get(char_count.saturating_sub(1)).copied();
-        push_paragraph(&mut paragraphs, main, start, char_count, last_fc, list_tables);
+        push_paragraph(&mut paragraphs, main, start, char_count, last_fc, list_tables, false);
     }
 
     paragraphs
 }
 
 /// Normalize one paragraph's raw text and record it when it survives.
+///
+/// `cell_terminated` says the paragraph ended on a [`CELL_MARK`] rather than a
+/// paragraph mark. The mark itself is kept in the content as a trailing tab:
+/// that tab is the cell boundary the table assembly downstream splits on, and
+/// dropping it would weld a row's cells together. A row-mark paragraph is the
+/// one cell-mark paragraph that carries no cell, so it keeps no tab.
 fn push_paragraph(
     out: &mut Vec<DocParagraph>,
     main: &str,
@@ -381,8 +397,9 @@ fn push_paragraph(
     end: usize,
     mark_fc_end: Option<u32>,
     list_tables: &papx::ListTables,
+    cell_terminated: bool,
 ) {
-    let raw: String = main.chars().skip(start).take(end.saturating_sub(start)).collect();
+    let mut raw: String = main.chars().skip(start).take(end.saturating_sub(start)).collect();
     // Word keys a paragraph's PAPX on the FC one past its paragraph mark,
     // which is exactly what `fc_ends` recorded for that character.
     let list = mark_fc_end
@@ -391,8 +408,11 @@ fn push_paragraph(
     let heading_level = mark_fc_end.and_then(|fc_end| list_tables.heading_level_for_paragraph_end(fc_end));
     let in_table = mark_fc_end.is_some_and(|fc_end| list_tables.in_table_for_paragraph_end(fc_end));
     let row_mark = mark_fc_end.is_some_and(|fc_end| list_tables.row_mark_for_paragraph_end(fc_end));
+    if cell_terminated && !row_mark {
+        raw.push('\t');
+    }
     // A table paragraph keeps its trailing cell mark: the tab that a cell's
-    // ending `` normalizes to is the cell boundary, and trimming it away
+    // ending `` normalizes to is the cell boundary, and trimming it away
     // would merge every cell of a row.
     let content = if in_table || row_mark {
         let stripped = strip_doc_field_instructions(&raw);

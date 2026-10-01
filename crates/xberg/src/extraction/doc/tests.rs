@@ -491,3 +491,105 @@ fn fc_clx_is_read_at_ms_doc_pair_33_not_the_obsolete_pair_66() {
         result.content
     );
 }
+
+/// FIB pair index of `fcPlcfbtePapx`/`lcbPlcfBtePapx` (mirrors
+/// `papx::FIB_FC_LCB_IDX_PLCF_BTE_PAPX`, private to that module).
+const TEST_FIB_PAIR_PLCF_BTE_PAPX: usize = 13;
+
+/// A table whose every cell is a single paragraph carries no `\r` between its
+/// start and its end: cells end on `0x07` marks only. The split must recognize
+/// those marks, keep each cell as its own paragraph with the trailing tab the
+/// table assembly splits on, and resolve `sprmPFInTable`/`sprmPFTtp` from the
+/// cell paragraphs' own PAPX FKP entries.
+#[test]
+fn cell_mark_terminated_table_becomes_cell_paragraphs() {
+    const TEXT_FC: usize = 0x800;
+    const FKP_PAGE: usize = 0x400; // page number 2
+    // "Alpha" cell, row-mark cell, then a plain paragraph.
+    let text: Vec<u16> = "Alpha\u{7}Beta\u{7}\u{7}Tail\r".encode_utf16().collect();
+    // Paragraph end FCs (UTF-16: 2 bytes per char, one past the mark):
+    //   Alpha cell mark at CP5  -> 0x800 + 12 = 0x80C
+    //   Beta cell mark at CP10  -> 0x800 + 22 = 0x816
+    //   row mark at CP11        -> 0x800 + 24 = 0x818
+    //   Tail paragraph mark     -> 0x800 + 32 = 0x820
+    let mut word_doc = build_fib(TEXT_FC + text.len() * 2 + 16, text.len() as u32, 0, 0, 0);
+    for (i, unit) in text.iter().enumerate() {
+        write_u16(&mut word_doc, TEXT_FC + i * 2, *unit);
+    }
+
+    // PAPX FKP page: rgfc[0..=crun], then crun BxPap entries (13 bytes each).
+    let mut page = vec![0u8; 512];
+    let rgfc = [0x800u32, 0x80C, 0x816, 0x818, 0x820];
+    for (i, fc) in rgfc.iter().enumerate() {
+        write_u32(&mut page, i * 4, *fc);
+    }
+    let rgbx_at = (rgfc.len()) * 4; // 16
+    let crun = rgfc.len() - 1;
+    // PAPX blobs live later in the page at word offsets (byte offset / 2).
+    // b_offset 60 -> byte 120: istd=0 + sprmPFInTable.
+    let in_table_papx = [0x03u8, 0x00, 0x00, 0x16, 0x24, 0x01];
+    page[120..120 + in_table_papx.len()].copy_from_slice(&in_table_papx);
+    // b_offset 70 -> byte 140: istd=0 + sprmPFInTable + sprmPFTtp (+ pad byte
+    // so the 2-byte count covers both sprms).
+    let row_mark_papx = [0x05u8, 0x00, 0x00, 0x16, 0x24, 0x01, 0x17, 0x24, 0x01, 0x00];
+    page[140..140 + row_mark_papx.len()].copy_from_slice(&row_mark_papx);
+    page[rgbx_at] = 60; // Alpha cell paragraph -> in-table PAPX
+    page[rgbx_at + 13] = 60; // Beta cell paragraph -> the same in-table PAPX
+    page[rgbx_at + 26] = 70; // row-mark paragraph -> in-table + row-mark PAPX
+    page[rgbx_at + 39] = 0; // Tail paragraph -> no PAPX, not in a table
+    page[511] = crun as u8;
+    word_doc[FKP_PAGE..FKP_PAGE + 512].copy_from_slice(&page);
+
+    let plc_pcd = build_plc_pcd(&[TestPiece {
+        cp_start: 0,
+        cp_end: text.len() as u32,
+        fc_raw: TEXT_FC as u32,
+    }]);
+    let mut table_stream = build_table_stream(&mut word_doc, &plc_pcd);
+
+    // PlcfBtePapx after the CLX: (n+1) FCs then n page numbers.
+    let papx_plex_fc = table_stream.len() as u32;
+    let mut plex = Vec::new();
+    plex.extend_from_slice(&0u32.to_le_bytes());
+    plex.extend_from_slice(&(text.len() as u32 + 1).to_le_bytes());
+    plex.extend_from_slice(&((FKP_PAGE / 512) as u32).to_le_bytes());
+    table_stream.extend_from_slice(&plex);
+    let rg_fc_lcb_offset = test_rg_lw_offset() + TEST_CSLW * 4 + 2;
+    write_u32(
+        &mut word_doc,
+        rg_fc_lcb_offset + TEST_FIB_PAIR_PLCF_BTE_PAPX * 8,
+        papx_plex_fc,
+    );
+    write_u32(
+        &mut word_doc,
+        rg_fc_lcb_offset + TEST_FIB_PAIR_PLCF_BTE_PAPX * 8 + 4,
+        plex.len() as u32,
+    );
+
+    let doc_bytes = build_doc_ole(&word_doc, &table_stream);
+    let result = extract_doc_text(&doc_bytes).expect("DOC extraction should succeed");
+
+    let table_paragraphs: Vec<&DocParagraph> = result.paragraphs.iter().filter(|p| p.in_table).collect();
+    assert_eq!(
+        table_paragraphs.len(),
+        3,
+        "two cell paragraphs plus the row mark; got {:?}",
+        result.paragraphs
+    );
+    assert_eq!(
+        table_paragraphs[0].content, "Alpha\t",
+        "the cell mark stays as the boundary tab"
+    );
+    assert!(!table_paragraphs[0].row_mark);
+    assert_eq!(table_paragraphs[1].content, "Beta\t");
+    assert!(!table_paragraphs[1].row_mark);
+    let row_mark = table_paragraphs[2];
+    assert!(row_mark.row_mark, "the row-mark paragraph carries sprmPFTtp");
+    assert_eq!(row_mark.content, "", "a row mark carries no cell text");
+
+    assert!(
+        result.paragraphs.iter().any(|p| p.content == "Tail" && !p.in_table),
+        "the paragraph after the table stays plain: {:?}",
+        result.paragraphs
+    );
+}

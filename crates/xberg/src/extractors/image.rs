@@ -2779,9 +2779,11 @@ mod tests {
             document.elements[0].kind,
             crate::types::internal::ElementKind::ListItem { ordered: true }
         ));
+        // 本 fork 的渲染契约（FORK.md：渲染层 `\.` 反转义，人工金标准不保留
+        // 序号点的转义）：源序号以未转义的 "1." 保留在项目符号之后，未被吞掉。
         assert_eq!(
             crate::rendering::render_markdown(&document),
-            "- 1\\. Template for day 1\n"
+            "- 1. Template for day 1\n"
         );
     }
 

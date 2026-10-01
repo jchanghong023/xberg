@@ -8194,8 +8194,13 @@ mod tests {
         use crate::core::config::{OcrConfig, PageConfig};
 
         const FABRICATED_NATIVE_TEXT: &str = "synthetic fabricated text layer drawn invisibly over an inset scan so the page is routed by its unmapped characters";
+        // 编入 paddle-ocr 时本 fork 的默认后端是 PaddleOCR，而这里验证的自动
+        // block-mode 路由是 Tesseract PSM 逻辑：显式钉住 tesseract，保留原覆盖。
         let config = ExtractionConfig {
-            ocr: Some(OcrConfig::default()),
+            ocr: Some(OcrConfig {
+                backend: "tesseract".to_string(),
+                ..OcrConfig::default()
+            }),
             pages: Some(PageConfig {
                 extract_pages: true,
                 ..Default::default()

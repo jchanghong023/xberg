@@ -75,29 +75,40 @@ impl Run {
             };
         }
 
-        let mut result = self.text.clone();
-
-        // Bold/italic around a run with no visible characters only adds
+        // Emphasis/underline markers must never span the '\n' a run can carry:
+        // the paragraph-boundary newline `parse_paragraph` appends to the last
+        // run of a paragraph (or a literal newline inside `a:t`) becomes a
+        // paragraph break downstream, and the closing marker would land
+        // orphaned on the following line as literal `**` noise. Wrap each line
+        // segment separately and keep the separators verbatim.
+        //
+        // Bold/italic around a segment with no visible characters only adds
         // unpaired `**` noise (empty placeholder runs of a template, bold tabs
         // under an underline blank); emphasis is meaningless there. The
         // underline blank itself stays wrapped — `<u>&#9;&#9;</u>` is the
         // form-blank rendering the golden standard keeps.
-        if !self.text.is_empty() && !result.trim().is_empty() {
-            if self.formatting.bold {
-                result = format!("**{}**", result);
-            }
-            if self.formatting.italic {
-                result = format!("*{}*", result);
-            }
-            if self.formatting.strikethrough {
-                result = format!("~~{}~~", result);
-            }
-        }
-        if !result.is_empty() && self.formatting.underlined {
-            result = format!("<u>{}</u>", result);
-        }
-
-        result
+        self.text
+            .split('\n')
+            .map(|segment| {
+                let mut result = segment.to_string();
+                if !result.is_empty() && !result.trim().is_empty() {
+                    if self.formatting.bold {
+                        result = format!("**{}**", result);
+                    }
+                    if self.formatting.italic {
+                        result = format!("*{}*", result);
+                    }
+                    if self.formatting.strikethrough {
+                        result = format!("~~{}~~", result);
+                    }
+                }
+                if !result.is_empty() && self.formatting.underlined {
+                    result = format!("<u>{}</u>", result);
+                }
+                result
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 }
 

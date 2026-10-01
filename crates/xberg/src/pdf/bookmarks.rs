@@ -12,8 +12,13 @@ use lopdf::{Dictionary, Document, Object, ObjectId};
 const MAX_OUTLINE_DEPTH: usize = 50;
 const MAX_OUTLINE_ITEMS: usize = 500;
 const MAX_NAME_TREE_DEPTH: usize = 50;
-const MAX_NAME_TREE_NODES: usize = 500;
-const MAX_NAMED_DESTINATIONS: usize = 2_000;
+// A real-world manual (the Tessent cell-library corpus PDF) carries ~7k named
+// destinations across a names tree of well over a thousand nodes; a 500-node /
+// 2k-name budget stopped the walk mid-tree, and every outline entry whose name
+// sorted past the cut (G9.*) silently lost its page. Still bounded, just
+// past that document class with headroom.
+const MAX_NAME_TREE_NODES: usize = 4_000;
+const MAX_NAMED_DESTINATIONS: usize = 20_000;
 const MAX_DESTINATION_HOPS: usize = 50;
 
 type NamedDestinations = HashMap<Vec<u8>, Object>;

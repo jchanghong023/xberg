@@ -2181,6 +2181,10 @@ pub(super) async fn extract_with_ocr_for_page(
         allow(unused_mut)
     )]
     let mut retry_texts_outside_tables: Vec<Option<String>> = vec![None; total_pages];
+    // Pages whose flat text the retry wholesale replaced (`should_adopt_xobject_retry_text`):
+    // only these drop the retry's table-carried lines from their flat text, because only these
+    // have the retry's text as their flat text to begin with. ~keep
+    let mut pages_adopting_retry_text = vec![false; total_pages];
     #[allow(unused_mut)]
     let mut collected_tables: Vec<crate::types::Table> = Vec::new();
     let mut all_ocr_elements: Vec<crate::types::OcrElement> = Vec::new();
@@ -2789,6 +2793,7 @@ pub(super) async fn extract_with_ocr_for_page(
                     let recovered_payload = !text.trim().is_empty() || recovered_tables || !formulas.is_empty();
                     if should_adopt_xobject_retry_text(&ocr_result.content, &text) {
                         ocr_result.content = text;
+                        pages_adopting_retry_text[page_idx] = true;
                         retry_texts_outside_tables[page_idx] = Some(text_outside_tables);
                         // The page text is now the retry text, not the lines the tables of this
                         // pass claimed.
@@ -3230,20 +3235,6 @@ pub(super) async fn extract_with_ocr_for_page(
         _ => None,
     };
 
-    let page_marker_cfg = config.pages.as_ref().filter(|p| p.insert_page_markers);
-    let mut result = String::new();
-    for (i, text) in page_texts.iter().enumerate() {
-        if let Some(cfg) = page_marker_cfg {
-            let marker = cfg
-                .marker_format
-                .replace("{page_num}", &(page_index_offset + i + 1).to_string());
-            result.push_str(&marker);
-        } else if i > 0 {
-            result.push_str("\n\n");
-        }
-        result.push_str(text);
-    }
-
     // A page the quality gate rejected must not keep its structured paragraphs either.
     //
     // The paragraphs and the page text are two renderings of the same OCR output, built by
@@ -3272,16 +3263,49 @@ pub(super) async fn extract_with_ocr_for_page(
 
     // A page that adopted the retry text is refilled from the retry lines no recovered table
     // carries, and is claimed by its tables when they carry every line (#2014).
-    let mut refill_texts = std::borrow::Cow::Borrowed(page_texts.as_slice());
+    let mut refill_texts = page_texts.clone();
     for (page_idx, text_outside_tables) in retry_texts_outside_tables.into_iter().enumerate() {
         if let Some(text_outside_tables) = text_outside_tables
             && !rejected_pages[page_idx]
         {
             pages_text_claimed_by_tables[page_idx] = text_outside_tables.trim().is_empty();
-            refill_texts.to_mut()[page_idx] = text_outside_tables;
+            if pages_adopting_retry_text[page_idx] {
+                // The page's flat text is the retry text wholesale: a table-carrying retry must
+                // drop the lines its own tables claim here, or the composed document prints
+                // them twice -- once as flat text, once as the table (#2014).
+                page_texts[page_idx] = text_outside_tables.clone();
+            }
+            refill_texts[page_idx] = text_outside_tables;
         }
     }
     fill_unstructured_ocr_pages(&mut all_page_paragraphs, &refill_texts, &pages_text_claimed_by_tables);
+
+    // A page the retry wholesale adopted whose tables claim every recovered line also drops
+    // those lines' OCR elements: they are the tables' own words, and the tables print
+    // themselves -- keeping the elements prints the table a second time (#2014).
+    for (page_idx, claimed) in pages_text_claimed_by_tables.iter().enumerate() {
+        if *claimed && pages_adopting_retry_text[page_idx] {
+            let page_number = (page_index_offset + page_idx + 1) as u32;
+            all_ocr_elements.retain(|element| element.page_number != page_number);
+        }
+    }
+
+    // Composed only after the refill above: a page whose flat text the refill just trimmed
+    // (its lines are claimed by the retry's tables) must not carry them into the joined
+    // document text on top of the tables that print themselves.
+    let page_marker_cfg = config.pages.as_ref().filter(|p| p.insert_page_markers);
+    let mut result = String::new();
+    for (i, text) in page_texts.iter().enumerate() {
+        if let Some(cfg) = page_marker_cfg {
+            let marker = cfg
+                .marker_format
+                .replace("{page_num}", &(page_index_offset + i + 1).to_string());
+            result.push_str(&marker);
+        } else if i > 0 {
+            result.push_str("\n\n");
+        }
+        result.push_str(text);
+    }
 
     let (ocr_doc, raw_page_paragraphs) = {
         let has_structured =
@@ -3393,6 +3417,23 @@ pub(super) async fn extract_with_ocr_for_page(
             doc.metadata.additional.extend(additional);
         }
         if let Some(doc) = ocr_doc.as_mut() {
+            // Stamp the pages the embedded-image retry recovered so the pipeline's own
+            // embedded-image OCR skips their images: the retry already read those bytes
+            // (#2014).
+            let recovered_pages: Vec<serde_json::Value> = pages_with_recovered_xobject_payload
+                .iter()
+                .enumerate()
+                .filter(|(_, recovered)| **recovered)
+                .map(|(page_idx, _)| serde_json::json!(page_index_offset + page_idx + 1))
+                .collect();
+            if !recovered_pages.is_empty() {
+                doc.metadata.additional.insert(
+                    std::borrow::Cow::Borrowed(
+                        crate::ocr_metadata_keys::OCR_XOBJECT_RETRY_RECOVERED_PAGES_METADATA_KEY,
+                    ),
+                    serde_json::Value::Array(recovered_pages),
+                );
+            }
             let accepted_modes = page_segmentation_modes.into_iter().filter(|(page_number, _)| {
                 let local_index = (*page_number as usize).saturating_sub(page_index_offset + 1);
                 !rejected_pages.get(local_index).copied().unwrap_or(true)

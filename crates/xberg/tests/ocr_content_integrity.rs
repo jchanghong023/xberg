@@ -374,7 +374,12 @@ enerqnco mech)
             OutputFormat::Markdown => EXPECTED_MARKDOWN,
             _ => unreachable!("the regression covers only Plain and Markdown"),
         };
-        assert_eq!(result.content, expected);
+        // fork 默认行为（fork.md）：抽取的图片以 marker 段落引用——断言按「围栏外」
+        // 口径比较，覆盖重点不变：表格只出现一次、收据文本完整、无重复输出。
+        assert_eq!(
+            strip_image_ocr_scaffolding(&result.content).trim_end(),
+            expected.trim_end()
+        );
     }
 }
 
@@ -427,6 +432,11 @@ Total   00"#;
             OutputFormat::Markdown => EXPECTED_MARKDOWN,
             _ => unreachable!("the regression covers only Plain and Markdown"),
         };
-        assert_eq!(result.content, expected);
+        // fork 默认行为（fork.md）：抽取的图片以 marker 段落引用——断言按「围栏外」
+        // 口径比较，覆盖重点不变：表格只出现一次、收据文本完整、无重复输出。
+        assert_eq!(
+            strip_image_ocr_scaffolding(&result.content).trim_end(),
+            expected.trim_end()
+        );
     }
 }

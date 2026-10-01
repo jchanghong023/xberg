@@ -6136,131 +6136,21 @@ fn deduplicate_paragraphs(
     }
 }
 
+/// Outline depth 0 (the root of a bookmark tree) maps to `##` by convention:
+/// the pipeline reserves `#` for the document title it extracts separately.
 const DEFAULT_OUTLINE_HEADING_OFFSET: i64 = 2;
+/// Anchors needed before the per-document calibration below outvotes the
+/// default root-`##` convention.
 const MIN_OUTLINE_CALIBRATION_ANCHORS: usize = 2;
 const MIN_MARKDOWN_HEADING_LEVEL: i64 = 1;
 const MAX_MARKDOWN_HEADING_LEVEL: i64 = 6;
 
-#[derive(Debug, Clone, Copy)]
-struct OutlineParagraphMatch {
-    page_index: usize,
-    paragraph_index: usize,
-    depth: usize,
-}
-
-fn recover_headings_from_outline(
-    all_pages: &mut [Vec<PdfParagraph>],
-    page_heights: &[f32],
-    outline_entries: &[PdfOutlineEntry],
-) {
-    let matches = collect_unique_outline_matches(all_pages, page_heights, outline_entries);
-    let offset = calibrated_outline_heading_offset(all_pages, &matches);
-
-    for matched in matches {
-        let paragraph = &mut all_pages[matched.page_index][matched.paragraph_index];
-        if paragraph.heading_level.is_some() || !outline_layout_allows_heading(paragraph) {
-            continue;
-        }
-        let depth = i64::try_from(matched.depth).unwrap_or(i64::MAX);
-        let level = depth
-            .saturating_add(offset)
-            .clamp(MIN_MARKDOWN_HEADING_LEVEL, MAX_MARKDOWN_HEADING_LEVEL);
-        paragraph.heading_level = Some(level as u8);
-        paragraph.is_list_item = false;
-        paragraph.is_page_furniture = false;
-    }
-}
-
-fn collect_unique_outline_matches(
-    all_pages: &[Vec<PdfParagraph>],
-    page_heights: &[f32],
-    outline_entries: &[PdfOutlineEntry],
-) -> Vec<OutlineParagraphMatch> {
-    let mut outline_counts = ahash::AHashMap::<(usize, String), usize>::new();
-    for entry in outline_entries {
-        if let Some(key) = outline_match_key(entry, all_pages.len()) {
-            *outline_counts.entry(key).or_default() += 1;
-        }
-    }
-    let paragraph_matches = all_pages
-        .iter()
-        .map(|page| {
-            let mut matches: ahash::AHashMap<String, Vec<usize>> = ahash::AHashMap::new();
-            for (index, paragraph) in page.iter().enumerate() {
-                let title = normalize_outline_title(&paragraph_text_raw(paragraph));
-                matches.entry(title).or_default().push(index);
-            }
-            matches
-        })
-        .collect::<Vec<_>>();
-
-    outline_entries
-        .iter()
-        .filter_map(|entry| {
-            let (page_index, title) = outline_match_key(entry, all_pages.len())?;
-            if outline_counts.get(&(page_index, title.clone())) != Some(&1) {
-                return None;
-            }
-            let indices = paragraph_matches[page_index].get(&title)?;
-            let page_height = page_heights
-                .get(page_index)
-                .copied()
-                .unwrap_or(FALLBACK_PAGE_HEIGHT_PTS);
-            let paragraph_index = unique_outline_paragraph_index(&all_pages[page_index], indices, page_height)?;
-            Some(OutlineParagraphMatch {
-                page_index,
-                paragraph_index,
-                depth: entry.depth,
-            })
-        })
-        .collect()
-}
-
-/// Pick the paragraph an outline entry points at when the printed title occurs
-/// more than once on the target page.
-///
-/// Tessent-style manuals print the section's running-head tab at the top margin
-/// AND the genuine sidehead mid-page on the section's opening page ("How to
-/// Debug Models" twice on one page), so the former `count == 1` gate skipped
-/// every such title and the sidehead stayed a bold body line. Disambiguation is
-/// deliberately narrow: exactly one copy must sit OUTSIDE the top/bottom 10%
-/// margin bands, carry usable geometry, and not already be flagged furniture;
-/// anything else keeps the old ambiguity refusal. A copy without a bounding box
-/// cannot be placed and never wins disambiguation.
-fn unique_outline_paragraph_index(page: &[PdfParagraph], indices: &[usize], page_height: f32) -> Option<usize> {
-    let &single = indices.first()?;
-    if indices.len() == 1 {
-        return Some(single);
-    }
-    let top_margin_y = page_height * 0.9;
-    let bottom_margin_y = page_height * 0.1;
-    let mut body_candidate: Option<usize> = None;
-    for &index in indices {
-        let paragraph = page.get(index)?;
-        if paragraph.is_page_furniture || paragraph.block_bbox.is_none() {
-            continue;
-        }
-        let in_margin = paragraph
-            .block_bbox
-            .is_some_and(|(_, bottom, _, top)| top > top_margin_y || bottom < bottom_margin_y);
-        if in_margin {
-            continue;
-        }
-        if body_candidate.is_some() {
-            return None;
-        }
-        body_candidate = Some(index);
-    }
-    body_candidate
-}
-
-fn outline_match_key(entry: &PdfOutlineEntry, page_count: usize) -> Option<(usize, String)> {
-    let page_number = entry.page_number?;
-    let page_index = usize::try_from(page_number.checked_sub(1)?).ok()?;
-    let title = normalize_outline_title(&entry.title);
-    (page_index < page_count && !title.is_empty()).then_some((page_index, title))
-}
-
+/// Calibrate the bookmark-depth→heading-level offset against the document's own
+/// font-derived headings: when the outline titles and the existing levels agree
+/// (a round-tripped PDF re-reads its own `#`/`##` structure), the majority
+/// `level - depth` wins; otherwise the root-`##` convention applies. Anchors are
+/// the matched paragraphs that already carry a heading level *before* promotion,
+/// so a manual whose headings the font pass never classified keeps the default.
 fn calibrated_outline_heading_offset(all_pages: &[Vec<PdfParagraph>], matches: &[OutlineParagraphMatch]) -> i64 {
     let mut counts = ahash::AHashMap::<i64, usize>::new();
     for matched in matches {
@@ -6281,6 +6171,311 @@ fn calibrated_outline_heading_offset(all_pages: &[Vec<PdfParagraph>], matches: &
         (Some((offset, _)), None, count) if count >= MIN_OUTLINE_CALIBRATION_ANCHORS => offset,
         _ => DEFAULT_OUTLINE_HEADING_OFFSET,
     }
+}
+/// A running tab is a section title printed alone in a page margin band; body
+/// prose that merely cites a title runs longer than this.
+const MAX_RUNNING_TAB_WORDS: usize = 12;
+/// Share of the page height that counts as the top/bottom margin band, shared
+/// by heading disambiguation and the running-tab strip.
+const OUTLINE_MARGIN_BAND: f32 = 0.1;
+
+struct OutlineParagraphMatch {
+    page_index: usize,
+    paragraph_index: usize,
+    /// One past the last paragraph of a wrapped-title span; equals
+    /// `paragraph_index + 1` for a single-paragraph title.
+    span_end: usize,
+    depth: usize,
+}
+
+fn recover_headings_from_outline(
+    all_pages: &mut [Vec<PdfParagraph>],
+    page_heights: &[f32],
+    outline_entries: &[PdfOutlineEntry],
+) {
+    let matches = collect_unique_outline_matches(all_pages, page_heights, outline_entries);
+
+    // Calibrate before promotion mutates any heading level: the anchors are the
+    // font-derived levels the matched paragraphs still carry here.
+    let heading_offset = calibrated_outline_heading_offset(all_pages, &matches);
+
+    // Apply per page in descending paragraph order so removing a wrapped
+    // title's tail cannot shift another match's indices on the same page.
+    let mut by_page: ahash::AHashMap<usize, Vec<OutlineParagraphMatch>> = ahash::AHashMap::new();
+    for matched in matches {
+        by_page.entry(matched.page_index).or_default().push(matched);
+    }
+    // (page, normalized title) of every promoted occurrence, so the tab strip
+    // can keep a title's only in-body copy when promotion failed.
+    let mut promoted: Vec<(usize, String)> = Vec::new();
+    for (page_index, mut page_matches) in by_page {
+        page_matches.sort_by_key(|matched| std::cmp::Reverse(matched.paragraph_index));
+        let Some(page) = all_pages.get_mut(page_index) else {
+            continue;
+        };
+        for matched in page_matches {
+            if !page
+                .get(matched.paragraph_index)
+                .is_some_and(outline_layout_allows_heading)
+            {
+                continue;
+            }
+            // Weld a wrapped title's span into its opening paragraph: a
+            // chapter title the PDF prints on two lines must not survive as
+            // two stub headings that each miss the bookmark's full text.
+            for tail in ((matched.paragraph_index + 1)..matched.span_end).rev() {
+                let Some(tail_paragraph) = page.get_mut(tail) else {
+                    continue;
+                };
+                let tail_text = paragraph_text_raw(tail_paragraph).trim().to_string();
+                let tail_lines = std::mem::take(&mut tail_paragraph.lines);
+                if let Some(head) = page.get_mut(matched.paragraph_index) {
+                    // Two paragraph encodings meet here: the heuristic path
+                    // carries its text in `text` (append there), the structure
+                    // tree path in `lines` with `text` empty (append there and
+                    // leave `text` empty -- a non-empty `text` shadows the
+                    // lines everywhere downstream, and writing the tail alone
+                    // into it would erase the head's own words).
+                    if !head.text.is_empty() && !tail_text.is_empty() {
+                        head.text.push(' ');
+                        head.text.push_str(&tail_text);
+                    }
+                    head.lines.extend(tail_lines);
+                }
+                page.remove(tail);
+            }
+            let Some(paragraph) = page.get_mut(matched.paragraph_index) else {
+                continue;
+            };
+            // The outline is the document's own structural claim: a matched
+            // heading takes its level from the bookmark depth, offset by the
+            // per-document calibration above, so the rendered hierarchy and the
+            // outline agree even when font heuristics had assigned a different
+            // (or no) level.
+            let depth = i64::try_from(matched.depth).unwrap_or(i64::MAX);
+            let level = depth
+                .saturating_add(heading_offset)
+                .clamp(MIN_MARKDOWN_HEADING_LEVEL, MAX_MARKDOWN_HEADING_LEVEL);
+            paragraph.heading_level = Some(level as u8);
+            paragraph.is_list_item = false;
+            paragraph.is_page_furniture = false;
+            paragraph.word_count = PdfParagraph::compute_word_count(&paragraph.text, &paragraph.lines);
+            let title = normalize_outline_title(&paragraph_text_raw(paragraph));
+            promoted.push((page_index, title));
+        }
+    }
+
+    strip_outline_running_tabs(all_pages, page_heights, outline_entries, &promoted);
+}
+
+/// Remove the running tabs a Tessent-style manual prints in the page margins:
+/// a standalone short paragraph whose text is exactly an outline title and
+/// whose geometry sits in a margin band. Such a tab duplicates the section
+/// title the outline recovery just promoted at its opening position, so
+/// dropping it loses no content.
+///
+/// A title copy on its own opening page stays when promotion failed there --
+/// stripping it would delete the section's only in-body copy of the title.
+fn strip_outline_running_tabs(
+    all_pages: &mut [Vec<PdfParagraph>],
+    page_heights: &[f32],
+    outline_entries: &[PdfOutlineEntry],
+    promoted: &[(usize, String)],
+) {
+    let mut titles = ahash::AHashSet::new();
+    let mut target_page = ahash::AHashMap::new();
+    for entry in outline_entries {
+        let title = normalize_outline_title(&entry.title);
+        if title.is_empty() {
+            continue;
+        }
+        if let Some(page_index) = entry
+            .page_number
+            .and_then(|page| usize::try_from(page.checked_sub(1)?).ok())
+            .filter(|&index| index < all_pages.len())
+        {
+            target_page.entry(title.clone()).or_insert(page_index);
+        }
+        titles.insert(title);
+    }
+
+    for (page_index, paragraphs) in all_pages.iter_mut().enumerate() {
+        let height = page_heights
+            .get(page_index)
+            .copied()
+            .unwrap_or(FALLBACK_PAGE_HEIGHT_PTS);
+        let top_band = height * (1.0 - OUTLINE_MARGIN_BAND);
+        let bottom_band = height * OUTLINE_MARGIN_BAND;
+        paragraphs.retain(|paragraph| {
+            if paragraph.heading_level.is_some() || paragraph.word_count > MAX_RUNNING_TAB_WORDS {
+                return true;
+            }
+            let Some((_, bottom, _, top)) = paragraph.block_bbox else {
+                return true;
+            };
+            if top <= top_band && bottom >= bottom_band {
+                return true;
+            }
+            let title = normalize_outline_title(&paragraph_text_raw(paragraph));
+            if !titles.contains(&title) {
+                return true;
+            }
+            if target_page.get(&title) == Some(&page_index) && !promoted.contains(&(page_index, title.clone())) {
+                return true;
+            }
+            false
+        });
+    }
+}
+
+fn collect_unique_outline_matches(
+    all_pages: &[Vec<PdfParagraph>],
+    page_heights: &[f32],
+    outline_entries: &[PdfOutlineEntry],
+) -> Vec<OutlineParagraphMatch> {
+    // (page, title) -> (occurrences, all occurrences share one depth). A title
+    // the outline lists twice at the same page AND depth is one section the
+    // PDF's outline tree happens to walk twice (a revisited /Next chain), not
+    // two competing claims; only differing depths stay ambiguous.
+    let mut outline_meta = ahash::AHashMap::<(usize, String), (usize, usize, bool)>::new();
+    for entry in outline_entries {
+        if let Some(key) = outline_match_key(entry, all_pages.len()) {
+            let slot = outline_meta.entry(key).or_insert((0, entry.depth, true));
+            slot.0 += 1;
+            slot.2 = slot.2 && slot.1 == entry.depth;
+        }
+    }
+    let paragraph_titles: Vec<Vec<String>> = all_pages
+        .iter()
+        .map(|page| {
+            page.iter()
+                .map(|paragraph| normalize_outline_title(&paragraph_text_raw(paragraph)))
+                .collect()
+        })
+        .collect();
+
+    outline_entries
+        .iter()
+        .filter_map(|entry| {
+            let (page_index, title) = outline_match_key(entry, all_pages.len())?;
+            match outline_meta.get(&(page_index, title.clone())) {
+                Some((1, _, _)) | Some((_, _, true)) => {}
+                _ => return None,
+            }
+            let texts = &paragraph_titles[page_index];
+            // Candidate occurrences: a paragraph whose whole normalized text
+            // is the title, or the opening paragraph of a title the PDF wraps
+            // across two consecutive paragraphs (a chapter printed on two
+            // lines).
+            let mut candidates: Vec<(usize, usize)> = Vec::new();
+            for index in 0..texts.len() {
+                if texts[index] == title {
+                    candidates.push((index, index + 1));
+                } else if let Some(next) = texts.get(index + 1)
+                    && !texts[index].is_empty()
+                    && !next.is_empty()
+                    && format!("{} {}", texts[index], next) == title
+                {
+                    candidates.push((index, index + 2));
+                }
+            }
+            if candidates.is_empty() {
+                return None;
+            }
+            let page_height = page_heights
+                .get(page_index)
+                .copied()
+                .unwrap_or(FALLBACK_PAGE_HEIGHT_PTS);
+            let (paragraph_index, span_end) =
+                disambiguate_outline_occurrences(&all_pages[page_index], &candidates, page_height)?;
+            Some(OutlineParagraphMatch {
+                page_index,
+                paragraph_index,
+                span_end,
+                depth: entry.depth,
+            })
+        })
+        // A same-depth duplicate outline entry yields the same match twice;
+        // applying it once is the whole point.
+        .fold(Vec::<OutlineParagraphMatch>::new(), |mut unique, matched| {
+            if !unique.iter().any(|seen| {
+                seen.page_index == matched.page_index
+                    && seen.paragraph_index == matched.paragraph_index
+                    && seen.span_end == matched.span_end
+            }) {
+                unique.push(matched);
+            }
+            unique
+        })
+}
+
+/// Pick the occurrence an outline entry points at when the printed title
+/// occurs more than once on the target page.
+///
+/// Tessent-style manuals print the section's running-head tab at the top
+/// margin AND the genuine sidehead right below it -- on a letter page both
+/// can sit inside a 10% margin band, so the band filter alone returns
+/// nothing. Disambiguation therefore runs in two rounds: body-band
+/// survivors first, then the largest font among placeable copies (a section
+/// title dwarfs its 10pt tab). Exact ties and copies without geometry or
+/// font evidence keep the old ambiguity refusal.
+fn disambiguate_outline_occurrences(
+    page: &[PdfParagraph],
+    candidates: &[(usize, usize)],
+    page_height: f32,
+) -> Option<(usize, usize)> {
+    if let &[only] = candidates {
+        return Some(only);
+    }
+    let placeable: Vec<usize> = (0..candidates.len())
+        .filter(|&ordinal| {
+            page.get(candidates[ordinal].0)
+                .is_some_and(|paragraph| !paragraph.is_page_furniture && paragraph.block_bbox.is_some())
+        })
+        .collect();
+    let top_band = page_height * (1.0 - OUTLINE_MARGIN_BAND);
+    let bottom_band = page_height * OUTLINE_MARGIN_BAND;
+    let in_body = |paragraph: &PdfParagraph| {
+        paragraph
+            .block_bbox
+            .is_some_and(|(_, bottom, _, top)| top <= top_band && bottom >= bottom_band)
+    };
+    let body_survivors: Vec<usize> = placeable
+        .iter()
+        .copied()
+        .filter(|&ordinal| in_body(&page[candidates[ordinal].0]))
+        .collect();
+    if let [only] = body_survivors[..] {
+        return Some(candidates[only]);
+    }
+    let mut best: Option<(f32, usize)> = None;
+    let mut tie = false;
+    for &ordinal in &placeable {
+        let size = page[candidates[ordinal].0].dominant_font_size;
+        if size <= 0.0 {
+            continue;
+        }
+        match best {
+            Some((best_size, _)) if size > best_size => {
+                best = Some((size, ordinal));
+                tie = false;
+            }
+            Some((best_size, _)) if size == best_size => tie = true,
+            Some(_) => {}
+            None => best = Some((size, ordinal)),
+        }
+    }
+    match best {
+        Some((_, ordinal)) if !tie => Some(candidates[ordinal]),
+        _ => None,
+    }
+}
+
+fn outline_match_key(entry: &PdfOutlineEntry, page_count: usize) -> Option<(usize, String)> {
+    let page_number = entry.page_number?;
+    let page_index = usize::try_from(page_number.checked_sub(1)?).ok()?;
+    let title = normalize_outline_title(&entry.title);
+    (page_index < page_count && !title.is_empty()).then_some((page_index, title))
 }
 
 fn outline_layout_allows_heading(paragraph: &PdfParagraph) -> bool {

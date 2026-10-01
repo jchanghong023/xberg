@@ -339,7 +339,7 @@ impl ExcelExtractor {
                 }
                 let content = match name_opt.as_deref() {
                     Some(n) => format!(
-                        "## {}{hidden_suffix}\n\n{}",
+                        "## {}{hidden_suffix}\n\n{}\n\n",
                         Self::escape_sheet_name_for_heading(n),
                         EMPTY_SHEET_PLACEHOLDER
                     ),

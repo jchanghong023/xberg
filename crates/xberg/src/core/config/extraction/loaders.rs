@@ -242,7 +242,7 @@ mod tests {
             std::fs::write(&path, contents).unwrap();
             let path = ExtractionConfig::find_config_in_ancestors(&nested)
                 .unwrap_or_else(|| panic!("{basename} must be discovered in a project ancestor"));
-            let discovered = ExtractionConfig::from_file(path).unwrap();
+            let discovered = ExtractionConfig::from_file(&path).unwrap();
             assert!(
                 discovered.include_document_structure,
                 "{basename} must be parsed rather than replaced with the default config"

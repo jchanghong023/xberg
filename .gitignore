@@ -243,6 +243,8 @@ crates/xberg-pdfium-render/*.jpg
 .gemini/
 .xberg/
 .zcode/
+# ZCode indexer 的本地忽略配置（工具生成，与 .zcode/ 同类本地产物）
+.zcodeignore
 # Root-only: local Claude Code MCP config. NOT anchored with a bare pattern -- that
 # also matched plugin/.mcp.json, a generated, committed plugin bundle output (ai-rulez
 # `[[plugin.mcp]]`), which made CI's "Plugin bundle freshness" check fail on checkout.
