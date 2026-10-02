@@ -11,8 +11,10 @@
 //! libavutil/channel_layout.h），只镜像到被访问的字段为止；资产按摘要安装，
 //! 布局与 DLL 严格同版本。
 
+use std::collections::HashMap;
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 
 #[cfg(windows)]
 use super::DLL_SEARCH_FLAGS;
@@ -261,6 +263,39 @@ pub(crate) struct FfmpegLibs {
     swr_free: DynamicSymbol<SwrFree>,
     swr_convert: DynamicSymbol<SwrConvert>,
     swr_get_delay: DynamicSymbol<SwrGetDelay>,
+}
+
+/// 进程级加载缓存：`load` 泄漏的库句柄本就按「存活到进程退出」设计，这里
+/// 按目录再缓存解析结果——否则常驻进程（worker / serve）每次转写都会重复
+/// `LoadLibraryW` + 符号解析并再泄漏一组句柄，句柄随转写次数无界增长。
+/// 同目录的 DLL 集由打包/安装侧按字节摘要钉定，重复加载必然得到同一组库。
+static LOADED: LazyLock<Mutex<HashMap<PathBuf, Arc<FfmpegLibs>>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+// SAFETY：字段全部是进程生命周期内有效的函数指针与 `'static` 库引用，无内
+// 部可变性；FFmpeg 入口在本封装中只按每调用的独立上下文使用（解码上下文、
+// 包、帧都在调用栈上创建销毁），跨线程共享该解析结果与重复加载后各自解析
+// 在安全上等价。同会话的串行由 `SenseVoiceSession::run_lock` 额外保证。
+unsafe impl Send for FfmpegLibs {}
+unsafe impl Sync for FfmpegLibs {}
+
+impl FfmpegLibs {
+    /// [`FfmpegLibs::load`] 的进程级缓存版本：同一目录只加载一次，后续
+    /// 转写复用。加载失败不写缓存（与 `load` 的失败不污染语义一致）。
+    ///
+    /// # Safety
+    /// 与 [`FfmpegLibs::load`] 相同：`dir` 必须包含按摘要钉定安装的钉定
+    /// DLL 集；符号一经解析在进程生命周期内保持有效。
+    pub(crate) unsafe fn load_cached(dir: &Path) -> Result<Arc<Self>, String> {
+        let mut cache = LOADED.lock().map_err(|_| "FFmpeg 库缓存损坏".to_string())?;
+        if let Some(libs) = cache.get(dir) {
+            return Ok(Arc::clone(libs));
+        }
+        // SAFETY：目录约束由调用方保证，与 `load` 相同；锁在原生加载期间
+        // 短暂持有，DLL 加载不会回调本代码，无重入。
+        let libs = Arc::new(unsafe { Self::load(dir) }?);
+        cache.insert(dir.to_path_buf(), Arc::clone(&libs));
+        Ok(libs)
+    }
 }
 
 impl FfmpegLibs {

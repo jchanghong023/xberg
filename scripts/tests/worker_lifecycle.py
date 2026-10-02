@@ -16,12 +16,18 @@ Covers:
 """
 import json
 import os
+import queue
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
-REPO = r"E:\xberg"
+from pathlib import Path
+
+# scripts/tests/<this file> -> repo root; the worker and its fixtures are all
+# resolved relative to the checkout, so the script survives a moved clone.
+REPO = str(Path(__file__).resolve().parents[2])
 EXE = os.path.join(REPO, "target", "debug", "xberg.exe")
 WORKER_ARGS = ["worker", "--no-config-discovery"]
 ENV = dict(os.environ)
@@ -65,8 +71,24 @@ def send(proc, obj):
 
 
 def recv(proc, timeout=20.0):
-    line = proc.stdout.readline()
-    if not line:
+    # A hung worker is exactly what this E2E probes; a bare readline() would
+    # block forever and hide it, so lines are pumped by a daemon thread and
+    # consumed under a real deadline.
+    if not hasattr(proc, "_lines"):
+        lines = queue.Queue()
+
+        def _pump():
+            for line in iter(proc.stdout.readline, b""):
+                lines.put(line)
+            lines.put(None)  # EOF sentinel
+
+        threading.Thread(target=_pump, daemon=True).start()
+        proc._lines = lines
+    try:
+        line = proc._lines.get(timeout=timeout)
+    except queue.Empty:
+        raise AssertionError(f"worker did not answer within {timeout:.0f}s") from None
+    if line is None:
         raise AssertionError("worker closed stdout before answering")
     return json.loads(line.decode("utf-8"))
 
@@ -253,10 +275,14 @@ def test_f_timeout(sample_txt):
 
 def test_g_no_leaked_debug_workers():
     log("--- G: no leaked workers from this run ---")
-    out = subprocess.run(["powershell", "-NoProfile", "-Command",
-                          "(Get-Process xberg* -ErrorAction SilentlyContinue | "
-                          "Where-Object { $_.Path -eq 'E:\xberg\target\debug\xberg.exe' }).Count"],
-                         capture_output=True).stdout.decode("utf-8", errors="ignore").strip()
+    # EXE is interpolated (never a raw literal): a literal 'E:\xberg\...' inside
+    # a normal Python string silently corrupts (\x.. is a hex escape) and used
+    # to make this check compare against a nonexistent path -- always 0.
+    out = subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         "(Get-Process xberg* -ErrorAction SilentlyContinue | "
+         f"Where-Object {{ $_.Path -eq '{EXE}' }}).Count"],
+        capture_output=True).stdout.decode("utf-8", errors="ignore").strip()
     check("G.no debug-binary workers remain", out == "0", f"count={out}")
 
 

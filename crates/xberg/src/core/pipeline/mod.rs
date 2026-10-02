@@ -1296,10 +1296,12 @@ fn rewrite_snapshot_image_extensions(
 }
 
 /// Bring the preserved element tree onto the same extension state as the
-/// re-encode pass: rewrite `image_N.old` references in every element text and
-/// prebuilt page content, and swap the renamed formats in the tree's own
-/// `images` copy. Mirrors [`rewrite_snapshot_image_extensions`] for the tree
-/// the snapshots exist to keep alive.
+/// re-encode pass: rewrite `image_N.old` references in every element text,
+/// table cell, and prebuilt page content, and swap the renamed formats in the
+/// tree's own `images` copy. Mirrors [`rewrite_snapshot_image_extensions`] for
+/// the tree the snapshots exist to keep alive — the tables are included
+/// because the derive pass renders them from `tree.tables`, not from element
+/// text.
 #[cfg(feature = "image-encode")]
 fn rewrite_tree_image_extensions(
     tree: &mut crate::types::internal::InternalDocument,
@@ -1310,6 +1312,13 @@ fn rewrite_tree_image_extensions(
     }
     for element in tree.elements.iter_mut() {
         rewrite_content_image_extensions(&mut element.text, format_renames);
+    }
+    for table in tree.tables.iter_mut() {
+        for row in table.cells.iter_mut() {
+            for cell in row.iter_mut() {
+                rewrite_content_image_extensions(cell, format_renames);
+            }
+        }
     }
     if let Some(pages) = tree.prebuilt_pages.as_mut() {
         for page in pages.iter_mut() {

@@ -1595,8 +1595,19 @@ mod tests {
         let content = "- outer\n  - inner $x^{2}$\n  - $y$\n";
         let formulas = vec![("x^{2}".to_string(), false), ("y".to_string(), false)];
         let mut budget = SecurityBudget::with_defaults();
-        let doc = PptxExtractor::build_internal_document(&[(1, content.to_string())], 1, &formulas, false, &mut budget)
-            .unwrap();
+        let doc = PptxExtractor::build_internal_document(
+            &[crate::extraction::pptx::PptxInternalSlide {
+                slide_number: 1,
+                elements: vec![crate::extraction::pptx::PptxInternalSlideElement::Markdown(
+                    content.to_string(),
+                )],
+            }],
+            1,
+            &formulas,
+            false,
+            &mut budget,
+        )
+        .unwrap();
 
         let items: Vec<&str> = doc
             .elements
@@ -1641,8 +1652,19 @@ mod tests {
 
         let content = "# Real Title\n\n### Notes:\n# not a title\nsecond note line\n";
         let mut budget = SecurityBudget::with_defaults();
-        let doc =
-            PptxExtractor::build_internal_document(&[(1, content.to_string())], 1, &[], false, &mut budget).unwrap();
+        let doc = PptxExtractor::build_internal_document(
+            &[crate::extraction::pptx::PptxInternalSlide {
+                slide_number: 1,
+                elements: vec![crate::extraction::pptx::PptxInternalSlideElement::Markdown(
+                    content.to_string(),
+                )],
+            }],
+            1,
+            &[],
+            false,
+            &mut budget,
+        )
+        .unwrap();
 
         let headings: Vec<&str> = doc
             .elements
@@ -1673,11 +1695,18 @@ mod tests {
         use crate::types::internal::ElementKind;
 
         let slide_contents = vec![
-            (
-                1u32,
-                "# Slide One\n\n### Notes:\nfirst note\n\n# also note text\n".to_string(),
-            ),
-            (2u32, "# Slide Two\n".to_string()),
+            crate::extraction::pptx::PptxInternalSlide {
+                slide_number: 1,
+                elements: vec![crate::extraction::pptx::PptxInternalSlideElement::Markdown(
+                    "# Slide One\n\n### Notes:\nfirst note\n\n# also note text\n".to_string(),
+                )],
+            },
+            crate::extraction::pptx::PptxInternalSlide {
+                slide_number: 2,
+                elements: vec![crate::extraction::pptx::PptxInternalSlideElement::Markdown(
+                    "# Slide Two\n".to_string(),
+                )],
+            },
         ];
         let mut budget = SecurityBudget::with_defaults();
         let doc = PptxExtractor::build_internal_document(&slide_contents, 2, &[], false, &mut budget).unwrap();

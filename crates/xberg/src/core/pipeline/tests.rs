@@ -2999,6 +2999,7 @@ fn opted_out_images_are_dropped_before_derivation() {
             llm: Default::default(),
             prompt: None,
             min_image_area: crate::core::config::captioning::CaptioningConfig::default_min_image_area(),
+            alt_text: Default::default(),
         }),
         ..Default::default()
     };

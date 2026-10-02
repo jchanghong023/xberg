@@ -144,11 +144,16 @@ fn quad_dimensions(quad: &Quad) -> (f64, f64) {
 }
 
 /// 基线近似：取最高两顶点 y 的均值（geometry.py `quad_baseline`：降序排序
-/// 后前两项的中位数，即两项均值）。
+/// 后前两项的中位数，即两项均值）。与 geometry.rs 同口径用 `(a + b) / 2`
+/// 而非 `f64::midpoint`，保证与 Python oracle 逐位一致。
 fn quad_baseline(quad: &Quad) -> f64 {
     let mut ys: Vec<f64> = quad.iter().map(|point| point.1).collect();
     ys.sort_by(f64::total_cmp);
-    f64::midpoint(ys[ys.len() - 1], ys[ys.len() - 2])
+    let n = ys.len();
+    #[allow(clippy::manual_midpoint)] // 与 Python `(a + b) / 2` 逐位一致
+    {
+        (ys[n - 1] + ys[n - 2]) / 2.0
+    }
 }
 
 /// 参与行聚类的单框条目（Python `_LayoutItem`；span 以 quad 保留）。
@@ -189,9 +194,13 @@ impl TextLine {
     }
 
     fn center_y(&self) -> f64 {
-        // f64::midpoint 与 Python `(top + bottom) * 0.5` 逐位一致（除以 2
-        // 精确；仅当相加溢出为 inf 时不同，坐标域内不可达）。
-        f64::midpoint(self.top(), self.bottom())
+        // Python `_TextLine.center_y` 是 `(top + bottom) * 0.5`：先舍入相加再
+        // 除 2。`f64::midpoint` 在个别输入上与它差 1 ULP（正确舍入均值 vs
+        // 舍入和再折半），按逐位对齐 oracle 的口径选 Python 的写法。
+        #[allow(clippy::manual_midpoint)] // 与 Python `(top + bottom) * 0.5` 逐位一致
+        {
+            (self.top() + self.bottom()) * 0.5
+        }
     }
 
     fn collect_key(&self, key: impl Fn(&LayoutItem) -> f64) -> Vec<f64> {

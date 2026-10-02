@@ -88,8 +88,6 @@ fn is_emf(data: &[u8]) -> bool {
         && data.get(40..44) == Some(b" EMF")
         && total_bytes >= header_size
         && total_bytes <= data.len()
-        && data.get(8..24).is_some()
-        && data.get(24..40).is_some()
 }
 
 /// Detect image format from raw bytes using magic byte signatures.

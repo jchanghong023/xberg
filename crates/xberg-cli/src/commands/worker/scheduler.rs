@@ -458,6 +458,12 @@ where
             }
             Event::Response(response, screenshot) => {
                 active.0.retain(|(id, _, _)| *id != response.id);
+                // A completed request is traffic: restart the idle clock when
+                // work drains. Otherwise a request that simply outlasted
+                // `idle_timeout_ms` (legal — the timeout only bounds *idle*
+                // time) timed the worker out the instant it finished, killing
+                // the resident process the caller was about to reuse.
+                last_activity = Instant::now();
                 if !screenshot || !cancel.load(Ordering::Acquire) {
                     writer.send(&response);
                 }
@@ -1263,6 +1269,52 @@ mod tests {
         assert!(output.is_empty());
         assert!(started.elapsed() < Duration::from_secs(3));
         drop(stdin);
+    }
+
+    /// P4: the idle clock restarts when a request completes. A request that
+    /// runs longer than `idle_timeout_ms` is legal (idle time bounds quiet
+    /// periods, not work); timing out right after its response would kill the
+    /// resident worker the caller is about to reuse (WORKER.md: exit 87 needs
+    /// no in-flight requests AND no traffic for the whole window).
+    #[test]
+    fn idle_timeout_clock_restarts_when_a_long_request_completes() {
+        let (stdin, reader) = input();
+        let (responses, output) = channel();
+        let thread = thread::spawn(move || {
+            run_worker_loop(
+                reader,
+                &mut Output {
+                    responses,
+                    pending: Vec::new(),
+                },
+                Arc::new(AtomicBool::new(false)),
+                LoopOptions {
+                    idle_timeout: Some(Duration::from_millis(100)),
+                    ..LoopOptions::default()
+                },
+                move |request| {
+                    thread::sleep(Duration::from_millis(400));
+                    document_ok(request)
+                },
+                snapshot_ok,
+                state,
+            )
+        });
+        send(&stdin, json!({"id":1,"command":"extract","path":"slow.pdf"}));
+        let done = output.recv_timeout(DEADLINE).expect("long request finishes");
+        assert_eq!(done["id"], 1);
+        assert_eq!(done["ok"], true);
+        // With the stale pre-response clock this keepalive lands after the
+        // worker already exited with IdleTimeout and goes unanswered.
+        send(&stdin, json!({"id":2,"command":"keepalive"}));
+        let alive = output
+            .recv_timeout(DEADLINE)
+            .expect("worker still serving after a long request");
+        assert_eq!(alive["id"], 2);
+        assert_eq!(alive["ok"], true);
+        drop(stdin);
+        let exit = thread.join().unwrap().unwrap();
+        assert_eq!(exit, LoopExit::SessionEnded);
     }
 
     /// P1: a failed stdin read (host vanished mid-read) is a disconnect, not an

@@ -9,8 +9,9 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
-REPO = r"E:\xberg"
+REPO = str(Path(__file__).resolve().parents[2])
 EXE = os.path.join(REPO, "target", "debug", "xberg.exe")
 
 pid_file = sys.argv[1]

@@ -274,7 +274,9 @@ fn get_or_create_session(model_root: &Path) -> Result<Arc<SenseVoiceSession>, St
     let vad_path = sherpa::model_file(model_root, &VAD_MODEL_RELATIVE);
     // 模型存在性先于原生 DLL 解析：DLL 搜索依赖环境变量与安装位置（环境相关），
     // 而缺模型是确定性错误，必须以「媒体模型缺失」首先浮现，不被 DLL 错误遮蔽。
-    for path in [&model_path, &tokens_path] {
+    // VAD 模型同属固定资产，一并检查——否则它缺失时只会以更晚的摘要校验
+    // 错误（甚至 DLL 错误）浮现。
+    for path in [&model_path, &tokens_path, &vad_path] {
         if !path.is_file() {
             return Err(format!("媒体模型缺失: {}", path.display()));
         }
@@ -361,7 +363,7 @@ fn run_pipeline(
     // SAFETY：模型与 DLL 路径都来自摘要校验后的固定资产；FFI 指针在
     // 本函数栈上存活到全部 FFI 调用结束。
     unsafe {
-        let libs = ffmpeg_dll::FfmpegLibs::load(ffmpeg_dir)?;
+        let libs = ffmpeg_dll::FfmpegLibs::load_cached(ffmpeg_dir)?;
         let mut real_vad = sherpa::RealVad::new(&session.sherpa, session.vad);
         let mut transcriber = sherpa::SenseVoiceTranscriber::new(&session.sherpa, session.recognizer);
         let mut pipeline = VadPipeline::new(&mut real_vad, &mut transcriber).with_cancel(cancel.clone());

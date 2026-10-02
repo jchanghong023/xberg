@@ -187,6 +187,13 @@ fn jpeg_end(data: &[u8], start: usize) -> Option<usize> {
     let mut i = start + 2;
     let mut in_scan = false;
     while i + 1 < data.len() {
+        // Check at the loop top: the entropy-scan and fill-byte paths below
+        // `continue` past the marker handling, and those paths are exactly
+        // where a JPEG spends its bytes — a bottom-of-loop check never saw
+        // them, letting an oversized blob walk the whole stream.
+        if i.saturating_sub(start) > MAX_BLOB_BYTES {
+            return None;
+        }
         if data[i] != 0xFF {
             if in_scan {
                 i += 1;
@@ -232,9 +239,43 @@ fn jpeg_end(data: &[u8], start: usize) -> Option<usize> {
                 }
             }
         }
-        if i.saturating_sub(start) > MAX_BLOB_BYTES {
-            return None;
-        }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A JPEG whose entropy scan runs past the blob cap must be rejected, not
+    /// accepted by walking every entropy byte to a distant EOI. The cap used
+    /// to be unreachable on the entropy path (`continue` skipped it).
+    #[test]
+    fn jpeg_end_rejects_entropy_scan_beyond_the_blob_cap() {
+        let mut data = vec![0u8; MAX_BLOB_BYTES + 32];
+        // SOI, then a minimal SOS marker segment (len = 8) entering the scan.
+        data[0] = 0xFF;
+        data[1] = 0xD8;
+        data[2] = 0xFF;
+        data[3] = 0xDA;
+        data[4] = 0x00;
+        data[5] = 0x08;
+        // Everything in between is zero entropy data; EOI sits past the cap.
+        let eoi = data.len() - 2;
+        data[eoi] = 0xFF;
+        data[eoi + 1] = 0xD9;
+        assert!(jpeg_end(&data, 0).is_none());
+    }
+
+    #[test]
+    fn jpeg_end_accepts_a_small_scan_closing_with_eoi() {
+        // SOI + SOS header + a few entropy bytes + EOI.
+        let data = [
+            0xFF, 0xD8, // SOI
+            0xFF, 0xDA, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // SOS
+            0x12, 0x34, 0x56, // entropy
+            0xFF, 0xD9, // EOI
+        ];
+        assert_eq!(jpeg_end(&data, 0), Some(data.len()));
+    }
 }

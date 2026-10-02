@@ -1446,6 +1446,10 @@ pub fn __test_mini_boxes(points: &[(i32, i32)]) -> (Vec<(f32, f32)>, f32) {
 #[doc(hidden)]
 #[must_use]
 pub fn __test_unclip(points: &[(f32, f32)]) -> (f64, f64, f64, Vec<(i64, i64)>) {
+    // 与本体 `unclip` 的空输入守卫同口径：探针也可能收到空点列。
+    if points.is_empty() {
+        return (0.0, 0.0, 0.0, Vec::new());
+    }
     let n = points.len();
     let mut a00 = 0.0_f64;
     let mut prev = points[n - 1];

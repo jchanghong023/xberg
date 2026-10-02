@@ -732,7 +732,12 @@ try {
     else {
       $MonitorCsv
     }
-    $cpuSummary = Join-Path (Split-Path -Parent $script:CpuCsv) ([System.IO.Path]::GetFileNameWithoutExtension($script:CpuCsv) + "-summary.txt")
+    # A bare file name (-MonitorCsv report.csv) has no parent; Join-Path ""
+    # throws under StrictMode and would lose the CPU report after the zip is
+    # already built. Fall back to the working directory.
+    $csvParent = Split-Path -Parent $script:CpuCsv
+    if (-not $csvParent) { $csvParent = "." }
+    $cpuSummary = Join-Path $csvParent ([System.IO.Path]::GetFileNameWithoutExtension($script:CpuCsv) + "-summary.txt")
     $cpuJob = Start-CpuMonitor -IntervalSec $MonitorIntervalSec -CsvPath $script:CpuCsv
     Write-Host "cpu:    sampling every ${MonitorIntervalSec}s into $script:CpuCsv"
   }

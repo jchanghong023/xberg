@@ -227,8 +227,15 @@ fn page_number_marker(sp_node: &Node, slide_number: u32) -> Option<String> {
                 return None;
             }
         } else if node.has_tag_name((DRAWINGML_NAMESPACE, "r"))
-            && let Some(text) = node.text()
+            && let Some(text) = node
+                .children()
+                .find(|child| child.has_tag_name((DRAWINGML_NAMESPACE, "t")))
+                .and_then(|t| t.text())
         {
+            // A literal run's text lives in its nested `a:t`; the run element
+            // itself has no direct text child. Reading only run text (never the
+            // `a:fld` cached value) is what separates "Page" furniture from a
+            // shape carrying real content.
             literals.push(text);
         }
     }
@@ -1046,6 +1053,53 @@ pub(super) fn parse_presentation_rels(rels_data: &[u8]) -> Result<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use roxmltree::Document;
+
+    fn sp_node(xml: &str) -> Document {
+        Document::parse(xml).expect("test slide XML parses")
+    }
+
+    #[test]
+    fn page_number_marker_reads_the_literal_run_text() {
+        // The run's `Page ` text sits inside its nested `a:t`, and the
+        // slidenum field carries its own stale cached value that must not
+        // count as literal text.
+        let doc = sp_node(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                <p:nvSpPr><p:nvPr><p:ph type="dt"/></p:nvPr></p:nvSpPr>
+                <p:txBody><a:p>
+                    <a:r><a:t>Page </a:t></a:r>
+                    <a:fld id="{...}" type="slidenum"><a:t>7</a:t></a:fld>
+                </a:p></p:txBody></p:sp>"#,
+        );
+        assert_eq!(page_number_marker(&doc.root_element(), 4).as_deref(), Some("Page 4"));
+    }
+
+    #[test]
+    fn page_number_marker_rejects_other_literal_text() {
+        let doc = sp_node(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                <p:txBody><a:p>
+                    <a:r><a:t>Confidential</a:t></a:r>
+                    <a:fld id="{...}" type="slidenum"><a:t>7</a:t></a:fld>
+                </a:p></p:txBody></p:sp>"#,
+        );
+        assert_eq!(page_number_marker(&doc.root_element(), 4), None);
+    }
+
+    #[test]
+    fn page_number_marker_requires_a_slidenum_field() {
+        let doc = sp_node(
+            r#"<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"
+                    xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
+                <p:txBody><a:p><a:r><a:t>Page </a:t></a:r></a:p></p:txBody></p:sp>"#,
+        );
+        assert_eq!(page_number_marker(&doc.root_element(), 4), None);
+    }
+
     #[test]
     fn test_slide_paths_sorted_numerically() {
         let mut paths = vec![

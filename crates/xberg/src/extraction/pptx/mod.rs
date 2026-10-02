@@ -175,17 +175,27 @@ fn join_runs(runs: &[Run], extract: impl Fn(&Run) -> String) -> String {
 /// [`join_runs`] for the Markdown path: adjacent runs with the same bold
 /// formatting each wrap their own `**`, and the closing marker of one glued to
 /// the opener of the next (`**DFT****新员工…**`) re-parses as broken emphasis.
-/// Removing the empty `****` junction merges them into one span, the shape the
-/// source's own formatting (one bold phrase split across runs) meant.
+/// Dropping that boundary pair merges them into one span, the shape the
+/// source's own formatting (one bold phrase split across runs) meant — without
+/// touching literal `****` sequences inside a run's own text.
 /// Private: the child `elements` module can still see it, and the narrower
 /// visibility keeps the signature's own-private `Run` from leaking.
 fn join_runs_md(runs: &[Run]) -> String {
-    let joined = join_runs(runs, Run::render_as_md);
-    if joined.contains("****") {
-        joined.replace("****", "")
-    } else {
-        joined
+    let mut joined = String::new();
+    for run in runs {
+        let text = run.render_as_md();
+        if joined.ends_with("**") && text.starts_with("**") {
+            // Both halves of the `****` junction go: the previous run's closer
+            // and this run's opener, leaving the outermost pair as one span.
+            // Both ends are ASCII `**`, so the slicing stays on char
+            // boundaries; runs without visible text render bare and skip this.
+            joined.truncate(joined.len() - 2);
+            joined.push_str(&text[2..]);
+        } else {
+            joined.push_str(&text);
+        }
     }
+    joined
 }
 
 /// Extract PPTX content from a file path.
@@ -910,3 +920,43 @@ fn runs_to_text_and_math(runs: &[Run]) -> (String, Vec<String>) {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod join_runs_md_tests {
+    use super::elements::Formatting;
+    use super::*;
+
+    fn bold(text: &str) -> Run {
+        Run {
+            text: text.to_string(),
+            formatting: Formatting {
+                bold: true,
+                ..Formatting::default()
+            },
+            hyperlink_id: None,
+            math_latex: None,
+        }
+    }
+
+    fn plain(text: &str) -> Run {
+        Run::plain(text.to_string())
+    }
+
+    /// Adjacent bold runs each carry their own `**`; the boundary pair merges
+    /// into one span instead of leaving a broken `****` junction.
+    #[test]
+    fn adjacent_bold_runs_merge_their_boundary_markers() {
+        let runs = [bold("DFT"), bold("新员工培训")];
+        assert_eq!(join_runs_md(&runs), "**DFT新员工培训**");
+    }
+
+    /// A literal `****` inside one run's text is content, not a junction, and
+    /// must survive verbatim.
+    #[test]
+    fn literal_asterisks_inside_a_run_survive() {
+        let runs = [bold("a****b"), bold("c")];
+        assert_eq!(join_runs_md(&runs), "**a****bc**");
+        let solo = [plain("lit **** eral")];
+        assert_eq!(join_runs_md(&solo), "lit **** eral");
+    }
+}

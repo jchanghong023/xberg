@@ -588,29 +588,34 @@ fn has_url_scheme(dest: &str) -> bool {
 
 /// Percent-decode a link destination. Saved-page converters keep the source
 /// HTML's URL encoding (`%E8%80%83` for CJK bytes, `%20` for spaces), and no
-/// filesystem lookup resolves those bytes as-is.
+/// filesystem lookup resolves those bytes as-is. The escapes are UTF-8 byte
+/// sequences, so decoding must assemble bytes and decode them as UTF-8 —
+/// mapping each `%XX` to a char would turn `考` into three Latin-1 noise
+/// characters that never match the file on disk.
 fn percent_decode_target(target: &str) -> Cow<'_, str> {
-    let mut out = String::with_capacity(target.len());
+    let mut out = Vec::with_capacity(target.len());
     let mut rest = target;
     let mut changed = false;
     while let Some(pos) = rest.find('%') {
-        out.push_str(&rest[..pos]);
+        out.extend_from_slice(&rest.as_bytes()[..pos]);
         let hex = rest[pos + 1..].chars().take(2).collect::<String>();
         if hex.len() == 2
             && hex.chars().all(|c| c.is_ascii_hexdigit())
             && let Ok(byte) = u8::from_str_radix(&hex, 16)
         {
-            out.push(byte as char);
+            out.push(byte);
             rest = &rest[pos + 3..];
             changed = true;
         } else {
-            out.push('%');
+            out.push(b'%');
             rest = &rest[pos + 1..];
         }
     }
-    out.push_str(rest);
+    out.extend_from_slice(rest.as_bytes());
     if changed {
-        Cow::Owned(out)
+        // Invalid UTF-8 after decoding (a mangled escape) degrades to the
+        // replacement char: the lookup then fails exactly as it did before.
+        Cow::Owned(String::from_utf8_lossy(&out).into_owned())
     } else {
         Cow::Borrowed(target)
     }
@@ -622,6 +627,13 @@ fn percent_decode_target(target: &str) -> Cow<'_, str> {
 /// `image_N.ext` refs produced by this same rewrite).
 fn local_image_target(dest: &str, source_dir: &Path) -> Option<PathBuf> {
     if dest.is_empty() || dest.starts_with('/') || dest.starts_with('#') {
+        return None;
+    }
+    // A cache-busting query or fragment (`img.png?v=2`) is not part of the
+    // file name; the file next to the source is `img.png`, and `?` cannot
+    // occur in a Windows file name, so stripping is unambiguous here.
+    let dest = dest.split(['?', '#']).next().unwrap_or(dest);
+    if dest.is_empty() {
         return None;
     }
     let decoded = percent_decode_target(dest);
@@ -1079,6 +1091,35 @@ impl InternalDocumentExtractor for HtmlExtractor {
 mod tests {
     use super::*;
     use crate::extractors::security::SecurityLimits;
+
+    /// CJK escapes are UTF-8 byte sequences: decoding must assemble the bytes
+    /// and decode them as UTF-8, or the file next to the source never matches.
+    #[test]
+    fn percent_decode_assembles_utf8_bytes() {
+        assert_eq!(percent_decode_target("%E8%80%83%E8%AF%95.png"), "考试.png");
+        assert_eq!(percent_decode_target("a%20b.png"), "a b.png");
+        assert_eq!(percent_decode_target("%E8%80%83%20.png"), "考 .png");
+    }
+
+    #[test]
+    fn percent_decode_leaves_unescaped_and_malformed_input_alone() {
+        let plain = "images/pic 1.png";
+        assert!(matches!(percent_decode_target(plain), Cow::Borrowed(s) if s == plain));
+        assert_eq!(percent_decode_target("100%+.png"), "100%+.png");
+        assert_eq!(percent_decode_target("trunc%2.png"), "trunc%2.png");
+    }
+
+    #[test]
+    fn local_image_target_strips_cache_busting_suffixes() {
+        let dir = Path::new("E:/saved");
+        assert_eq!(
+            local_image_target("img/%E8%80%83.png?v=2", dir),
+            Some(dir.join("img/考.png"))
+        );
+        assert_eq!(local_image_target("./pic.png#bottom", dir), Some(dir.join("pic.png")));
+        // A bare query/fragment after stripping resolves to nothing.
+        assert_eq!(local_image_target("?v=2", dir), None);
+    }
 
     /// Helper to extract tables from HTML using the unified converter.
     fn extract_tables(html: &str) -> Vec<Table> {

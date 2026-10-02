@@ -298,12 +298,17 @@ pub fn rasterize(
 
     match kind {
         MetafileKind::Emf => {
+            // Length gate first: a short input is a malformed EMF, not a
+            // generic truncation — reading the header fields of a buffer that
+            // cannot hold them would misreport the failure mode.
+            if data.len() < 88 {
+                return Err(MetafileError::new("invalid EMF header"));
+            }
             let header_size =
                 usize::try_from(read_u32(data, 4)?).map_err(|_| MetafileError::new("EMF header size overflow"))?;
             let total_bytes =
                 usize::try_from(read_u32(data, 48)?).map_err(|_| MetafileError::new("EMF byte count overflow"))?;
-            if data.len() < 88
-                || read_u32(data, 0)? != 1
+            if read_u32(data, 0)? != 1
                 || header_size < 88
                 || header_size > data.len()
                 || total_bytes < header_size
