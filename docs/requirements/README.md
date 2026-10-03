@@ -27,4 +27,4 @@
 
 实现状态、历史验证证据和未满足项分别维护在所属需求文档，索引不复制各域规格或开发日志：转换行为见 [FORK.md](FORK.md)，文档 OCR 见 [OCR.md](OCR.md)，截图 OCR 见 [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md)，转写见 [TRANSCRIPTION.md](TRANSCRIPTION.md)，worker 见 [WORKER.md](WORKER.md)，测试门与发布记录见 [DELIVERY.md](DELIVERY.md)。截图通道原有条目级追认状态继续保留，本次整理不代替用户裁决；2026-09-29 用户新明确的同进程常驻与双场景并发要求已直接更新 [WORKER.md](WORKER.md)，取代旧的全请求串行约束。
 
-2026-09-29 文档核对基于本地 HEAD `d28cbeb6ff`，与本地 `upstream/main` 的共同基线为 `1409e7be4bf23042f6d18d7405e2a7f560215109`。这是本地 Git 证据，未查询远程最新状态，也不代表本轮逐项功能验收。历史通过记录只适用于记录中的提交、模型和覆盖范围，不能外推到后续合并后的工作树。
+2026-10-03 文档核对基于本地 HEAD `a4ce6ab9db`，与本地 `upstream/main` 的共同基线为 `df10b52e315758a467b20a1b36e2d1373925dce7`（自上次核对 `d28cbeb6ff` 起经历两次 upstream merge、一轮 fork 行为恢复与一轮 fork review 修复）。这是本地 Git 证据，未查询远程最新状态，也不代表本轮逐项功能验收。历史通过记录只适用于记录中的提交、模型和覆盖范围，不能外推到后续合并后的工作树。

@@ -56,7 +56,7 @@
 
 - 截图 OCR 的独立 UT 入口为 `cargo test -p xberg-snapshot-ocr`（同样须用户点名）。`tests/snapshot_models_gated.rs` 的真实模型用例需 `XBERG_SNAPSHOT_TEST_MODELS` 指向固定字节模型目录，可选 `XBERG_SNAPSHOT_TINY_DICT` 指向错配字典；动态 ORT 构建还需 `ORT_DYLIB_PATH`。缺资产时用例提前返回，须报告未验证。当前三 crate 门不包含该 crate 自身的 fmt / UT / clippy；新增命令说明不扩大自主运行权限。
 - 文档 OCR 同行对齐的真实 CLI 用例为 `commands_test::document_ocr_corpus_keeps_table_cells_on_one_line`（默认 ignore）。用户点名运行时，设置 `XBERG_OCR_ALIGNMENT_IMAGE` 指向标准语料 `测试识别.png`，准备 PaddleOCR 模型，然后用标准 fork feature 集执行 `cargo test -p xberg-cli --no-default-features --features formats-no-heic,core-cli,analysis,ocr,paddle-ocr,transcription,api --test commands_test document_ocr_corpus_keeps_table_cells_on_one_line -- --ignored`。用例强制离线、不下载，缺图/模型即失败；未显式运行不能计作同行对齐已验收。
-- xberg 的 test/clippy 用 `FEATURES_LIB = formats-no-heic,analysis,ocr,paddle-ocr,transcription,layout-detection,api`，保留上游 layout 专属测试与配置校验；CLI 用标准 fork 集且 `--no-default-features`。测试 feature 集不等于出厂能力。test 阶段 `CARGO_BUILD_JOBS=8`，防止 Windows 页面文件耗尽（os error 1455），不缩减覆盖。
+- xberg 的 test/clippy 用 `FEATURES_LIB = formats-no-heic,analysis,ocr,paddle-ocr,transcription,layout-detection,api`，保留上游 layout 专属测试与配置校验；CLI 用标准 fork 集且 `--no-default-features`。测试 feature 集不等于出厂能力。test 阶段 `CARGO_BUILD_JOBS=8`（防止 Windows 页面文件耗尽，os error 1455）与 `RUST_MIN_STACK=16MiB`（深递归路径防测试线程栈溢出，与 CLI 工作线程栈同预算），不缩减覆盖。
 - 远程发布有真实公开副作用：只有用户明确授权发布目标并显式加 `--with-release-ci` 才能触发；要求工作区干净、HEAD 已推到 origin。workflow 为 `.github/workflows/build-windows-cli.yml`，需轮询最终结果。不得将未授权跳过的远程阶段描述为通过，不执行 WSL/跨平台验证。
 - 消歧：点名 `fulltest.py` / `slowtest.py`＝仅脚本；点名“fulltest / slowtest 门”“完整本地验证”“testgate xxx”＝对应门；口语“跑 fulltest”默认指 fulltest.py。
 - 门的跳过状态、超时和质量报告语义见 [DELIVERY.md](docs/requirements/DELIVERY.md)，不得把门退出成功等同于转换质量全绿。
@@ -121,7 +121,7 @@ workspace 还含 `packages/dart/rust`、`packages/swift/rust`、`tools/benchmark
 - worker 并发 E2E 入口为 `python scripts/tests/worker_concurrency.py --cli <已编译xberg.exe> --config <JSON配置> --document <耗时足够的真实OCR文档> --snapshot <PNG> --document-text <文档OCR必含文本> --snapshot-text <截图必含文本> --media <真实语音文件> --media-text <转录必含文本>`，**仅在用户明确要求测试时运行**。配置须显式包含独立的 `snapshot_ocr` 块，文档通道使用 PaddleOCR；准备对应模型与 ORT DLL（可用 `ORT_DYLIB_PATH`），脚本不编译、不下载，关闭结果缓存但保留模型缓存。默认报告 `.tmp/worker-concurrency/report.json`；实测两通道同 PID 重叠、跨批次模型/VAD 复用、错误隔离、逐请求取消/超时后复用、fast/normal 切换、进程内查询及 EOF，未观察到重叠即失败；报告包含二进制与语料 SHA-256。调度 UT 在 `worker/scheduler.rs`，普通 CLI crate 测试入口会包含它们。该 E2E 不在现有 fulltest/slowtest 门内，不能据门通过推断它已运行。
 - worker 生命周期 E2E（无需模型）为 `python scripts/tests/worker_lifecycle.py`，**同样仅在用户明确要求测试时运行**：capabilities 身份/owner 回报、keepalive/version/未知命令 wire、真实 extract、shutdown 空闲立即退、关 stdin ≤5s 码 0、关 stdout 读端 ≤5s 码 86、杀宿主 ≤5s 消失、idle_timeout_ms 码 87、超时后存活。配套宿主模拟脚本 `scripts/tests/worker_lifecycle_host.py`。不在 fulltest/slowtest 门内。
 - OOXML 内嵌对象入口目前为 `extraction/ooxml_embedded/mod.rs`；测试可能外移到同名目录的 `tests.rs`，查找时同时检查 inline tests 与外置测试模块。
-- workspace member 变化时检查上游 `docker/` 与 `.dockerignore` 的构建上下文，保留 `xberg-windows-metafile` 的对应登记；这属于同步已有资产，不扩展本 fork 的支持平台。
+- workspace member 变化时检查上游 `docker/` 与 `.dockerignore` 的构建上下文，保留 `xberg-windows-metafile` 与 `xberg-snapshot-ocr` 的对应登记；这属于同步已有资产，不扩展本 fork 的支持平台。
 
 ## 构建、打包与调试入口
 
