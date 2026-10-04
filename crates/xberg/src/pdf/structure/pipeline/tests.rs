@@ -3606,6 +3606,42 @@ fn outline_recovery_relevels_a_misclassified_heading() {
 }
 
 #[test]
+fn outline_recovery_never_calibrates_a_hierarchy_collapsing_offset() {
+    // tessent 形态：字体启发式把章与节都标成 level 1，而节条目更多，多数
+    // 投票会选出 level-depth = 0 的偏移；offset 0 让 depth 0 在 clamp 后与
+    // depth 1 同为 `#`，整份手册的节标题塌平到章层级（实测 86/101 条 L2
+    // 书签渲染成 `#`）。校准下限 1 保证子书签严格深于父书签。
+    let mut chapter = outline_para("Chapter 1 About Tessent Libraries");
+    chapter.heading_level = Some(1);
+    let mut section = outline_para("Overview");
+    section.heading_level = Some(1);
+    let mut subsection = outline_para("Buffer");
+    subsection.heading_level = Some(1);
+    let mut pages = vec![vec![chapter, section, subsection, outline_para("Cell Model")]];
+    let entries = vec![
+        PdfOutlineEntry::test_entry("Chapter 1 About Tessent Libraries", 0, 1),
+        PdfOutlineEntry::test_entry("Overview", 1, 1),
+        PdfOutlineEntry::test_entry("Buffer", 1, 1),
+        PdfOutlineEntry::test_entry("Cell Model", 2, 1),
+    ];
+
+    recover_headings_from_outline(&mut pages, &[], &entries);
+
+    assert_eq!(
+        pages[0][0].heading_level,
+        Some(1),
+        "clamped offset 1 keeps a depth-0 root at level 1"
+    );
+    assert_eq!(
+        pages[0][1].heading_level,
+        Some(2),
+        "a depth-1 child must sit strictly deeper than its parent"
+    );
+    assert_eq!(pages[0][2].heading_level, Some(2));
+    assert_eq!(pages[0][3].heading_level, Some(3));
+}
+
+#[test]
 fn outline_recovery_rejects_ambiguous_titles() {
     let mut pages = vec![vec![
         outline_para("Duplicate outline"),

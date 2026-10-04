@@ -6,7 +6,10 @@
 
 - 库 API 默认输出 Markdown；CLI `xberg extract` 不指定内容格式时仍输出纯文本。配置文件只覆盖提供的键，省略 `output_format` 时保留 CLI 的纯文本基准，不因库默认值而改变。
 - `--config-json` 按顶层字段替换后整体反序列化和校验；未提供的顶层字段保留原基准。未编译能力对应的配置字段必须明确报错，不能静默忽略。（该接口边界从原 AGENTS.md 迁入。）
-- 验收：库默认结果有 Markdown 结构；CLI 缺省及加载未含 `output_format` 的配置后仍是纯文本；显式格式覆盖生效；出厂二进制不接受未编译的 `layout` 配置及依赖该能力的 `pdf_options.reading_order`。
+- **零配置模型定位（2026-10-04，承接 JchTools 下沉）**：调用方不带配置与环境变量即获得全部已编译能力。截图 OCR 沿用既有回退链（`--models` → `snapshot_ocr.models_dir` → `XBERG_SNAPSHOT_MODEL_DIR` → exe 旁 `models/snapshot-ocr`）；文档 OCR 与转写模型新增 exe 旁 `models/`（HF hub 布局）作为 `HF_HUB_CACHE`/`HF_HOME` 均未设置时的缓存根回退；onnxruntime 在 `ORT_DYLIB_PATH` 未设置时新增 exe 旁 DLL 回退（Windows `onnxruntime.dll`）。显式环境变量与显式配置始终优先。打包版 exe 与 models/DLL 同包，天然命中。
+- **大文档自动降级（2026-10-04）**：引擎在抽取前做轻量页数探测（PDF 读结构页数；docx 读 `docProps/app.xml` 的 `<Pages>`；pptx 数 `ppt/slides/` 条目；xlsx 数 `xl/worksheets/` 条目），页数超过 `auto_fast_pages`（默认 500）时该请求副本自动走快速档（关 OCR；本 fork 未编译 Layout，无此项）。阈值默认值依据标准语料实测最大 358 页（tessent，取自 fulltest 质量报告），保证常规文档零触发、转换质量不变；`0` 禁用。探测失败或页数未知一律回常规模式，探测本身不产生错误或告警。降级必须在 `processing_warnings` 记录页数与阈值（`auto_mode` 来源），供 fulltest 与调用方观测。worker 请求显式 `mode:"normal"` 等价禁用该请求的自动降级。阈值与降级内容属引擎默认值：任何调整以实测效果为依据（fulltest 0 错误 0 告警为底线），不继承调用方历史数值。
+- 嵌入文档与媒体引用的现状即为效果验收口径：嵌入内容以原样 Markdown 合入宿主正文（文件名不冒充宿主标题）、媒体 `image_{index}.{format}` 引用与内联字节一一对应、正文不内联 Base64、围栏与行内代码内的字面量不改写。fulltest 的嵌入语料与 IMG 系列判定全绿即视为满足；JchTools 侧应删除其重复实现（OCR 布局渲染、图片命名、Base64 处理），落盘采用「引用名 + 字节 + 调用方目录前缀」三步（fulltest `write_images_from_json`/`save_markdown` 为参考实现），不再由引擎改写输出形态。
+- 验收：库默认结果有 Markdown 结构；CLI 缺省及加载未含 `output_format` 的配置后仍是纯文本；显式格式覆盖生效；出厂二进制不接受未编译的 `layout` 配置及依赖该能力的 `pdf_options.reading_order`；零 env 零 config 的裸启动完成含 OCR 的 extract 且 `version` 报告模型 `exists:true`；合成超过阈值的文档自动降级并带 `auto_mode` warning、`auto_fast_pages=0` 与显式 `mode:"normal"` 均不降级、探测失败回常规；fulltest 保持 0 错误 0 告警。
 
 ## CLI 图片输出与 Windows 运行
 

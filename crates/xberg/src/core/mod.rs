@@ -28,6 +28,8 @@
 //! # }
 //! ```
 
+/// (fork) Engine-level large-document auto-downgrade (light page probe + threshold).
+pub(crate) mod auto_mode;
 #[cfg(feature = "tokio-runtime")]
 pub(crate) mod batch_mode;
 pub mod config;

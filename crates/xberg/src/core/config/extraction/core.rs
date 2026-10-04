@@ -212,6 +212,15 @@ pub struct ExtractionConfig {
     #[serde(default = "ExtractionConfig::default_extraction_timeout")]
     pub extraction_timeout_secs: Option<u64>,
 
+    /// (fork) Page count above which extraction automatically downgrades to the
+    /// fast profile (OCR disabled) so very large documents still finish in
+    /// reasonable time. `0` disables the auto-downgrade. The threshold is an
+    /// engine default measured against the standard corpus (largest document:
+    /// 358 pages), not a value inherited from any caller, so ordinary documents
+    /// never downgrade and conversion quality is unchanged.
+    #[serde(default = "ExtractionConfig::default_auto_fast_pages")]
+    pub auto_fast_pages: u32,
+
     /// Maximum concurrent document extractions in batch operations.
     ///
     /// This is a ceiling within the configured total thread budget, not an
@@ -592,6 +601,16 @@ impl ExtractionConfig {
     pub fn default_extraction_timeout() -> Option<u64> {
         Some(600)
     }
+
+    /// Default for [`Self::auto_fast_pages`]: above the largest standard-corpus
+    /// document (358 pages, measured from the fulltest quality report), so the
+    /// auto-downgrade only engages for genuinely huge documents.
+    ///
+    /// Public for the same reason as [`Self::default_extraction_timeout`]:
+    /// generated bindings must reproduce the default.
+    pub fn default_auto_fast_pages() -> u32 {
+        500
+    }
 }
 
 impl Default for ExtractionConfig {
@@ -624,6 +643,7 @@ impl Default for ExtractionConfig {
             #[cfg(feature = "html")]
             html_output: None,
             extraction_timeout_secs: ExtractionConfig::default_extraction_timeout(),
+            auto_fast_pages: ExtractionConfig::default_auto_fast_pages(),
             max_concurrent_extractions: None,
             security_limits: None,
             max_embedded_file_bytes: ExtractionConfig::default_max_embedded_file_bytes(),

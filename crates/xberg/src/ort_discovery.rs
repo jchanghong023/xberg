@@ -69,6 +69,24 @@ fn try_discover_ort() -> Result<(), &'static str> {
         return Ok(());
     }
 
+    // (fork) Zero-config workers: a runtime DLL shipped next to the executable —
+    // the packaged layout — wins over system-wide guesses, so a bare `xberg
+    // worker` spawned without any environment still finds it. The explicit env
+    // above still wins over both.
+    if let Some(path) = exe_dir_dylib()
+        && path.exists()
+    {
+        #[allow(unsafe_code)]
+        unsafe {
+            std::env::set_var("ORT_DYLIB_PATH", &path);
+        }
+        tracing::debug!(
+            "Auto-discovered ONNX Runtime next to the executable at {}",
+            path.display()
+        );
+        return Ok(());
+    }
+
     let candidates: &[&str] = platform_candidates();
 
     for path in candidates {
@@ -83,6 +101,35 @@ fn try_discover_ort() -> Result<(), &'static str> {
     }
 
     Err("ONNX Runtime library not found in common installation paths")
+}
+
+#[cfg(all(not(feature = "ort-bundled"), target_os = "windows"))]
+fn exe_dir_dylib() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("onnxruntime.dll")))
+}
+
+#[cfg(all(not(feature = "ort-bundled"), target_os = "linux"))]
+fn exe_dir_dylib() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("libonnxruntime.so")))
+}
+
+#[cfg(all(not(feature = "ort-bundled"), target_os = "macos"))]
+fn exe_dir_dylib() -> Option<std::path::PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("libonnxruntime.dylib")))
+}
+
+#[cfg(all(
+    not(feature = "ort-bundled"),
+    not(any(target_os = "macos", target_os = "linux", target_os = "windows"))
+))]
+fn exe_dir_dylib() -> Option<std::path::PathBuf> {
+    None
 }
 
 #[cfg(all(not(feature = "ort-bundled"), target_os = "macos"))]

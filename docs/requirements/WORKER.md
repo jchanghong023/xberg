@@ -12,7 +12,7 @@ Xberg 通过一个本地 `worker` 进程同时提供文档转换与截图 OCR，
 
 共享 worker 的新增协议与职责边界：
 
-- `extract.mode` 支持 `normal` / `fast`，缺省 normal。fast 仅在该请求配置副本上关闭 Layout、图片 OCR（包括扫描页 OCR），保留原生文本、表格与图片提取；不会修改截图配置，也不会卸载模型。是否超过 200 页及逐文件模式选择由 JchTools 决定。
+- `extract.mode` 支持 `normal` / `fast`，缺省为引擎自动。fast 仅在该请求配置副本上关闭 Layout、图片 OCR（包括扫描页 OCR），保留原生文本、表格与图片提取；不会修改截图配置，也不会卸载模型。**2026-10-04 变更：页数分流决策权从 JchTools 移入引擎**——缺省 mode 时引擎自行轻量探测页数，超过 `auto_fast_pages`（默认 500）自动走 fast 并在 `processing_warnings` 记录（`auto_mode` 来源，含页数与阈值）；显式 `mode:"normal"` 表示该请求不降级（等价禁用自动分流），显式 `fast` 行为不变。阈值语义与探测口径见 [FORK.md](FORK.md)「大文档自动降级」。
 - 工作请求可带正整数 `timeout_ms`，从接收入队起计时；未指定时使用启动配置的 `extraction_timeout_secs`。`cancel` 请求带 `target_id`，仅取消对应在途请求；响应中的 `accepted` 表示收到取消请求，不等于已停止。被取消/超时任务实际返回后才产生唯一终态，`error_kind` 为 `cancelled` / `timeout`，不再发送成功结果。
 - 取消是协作式：排队任务不进入处理器；运行任务在解析、解码或推理检查点停止，当前不可中断原生调用需先返回，不能承诺严格毫秒级终止。若原生库永久挂起，无法在安全保留同一进程的同时强制终止该线程；该边界必须在发布报告披露。
 - `formats` 返回当前二进制注册的格式；`capabilities` 返回协议版本、命令、模式与取消语义；`model_state` 返回模型状态。查询走已有连接，不启动其他 Xberg 进程。
@@ -20,7 +20,7 @@ Xberg 通过一个本地 `worker` 进程同时提供文档转换与截图 OCR，
 - SQLite、保存目录、重启恢复、界面配置、应用级确保仅启动一个 Xberg 均属于 JchTools；Xberg 不实现这些调用方职责。
 - 交付必须区分源码实现、类型检查、真实模型 E2E 与发布包验证。新增接口须覆盖取消运行/排队任务、超时后复用、模式隔离、进程内查询及 ID 关联；未运行发布包验收不得声称实际发布版本已满足。
 
-- 启动：`xberg worker --config-json <固定配置>`（同时支持 `--config` / `--config-json-base64` / `--no-config-discovery`，语义与 `extract` 相同）。启动配置同时包含文档转换配置和独立的 `snapshot_ocr` 截图配置，两者分别固定；请求仅通过 mode 选择文档处理方式，不接受任意配置覆盖。两场景的模型集、模型路径、推理参数与会话分别生效；截图配置不覆盖文档 OCR 配置，文档设置也不覆盖截图配置，不为共用进程而强制两套模型或参数相同。
+- 启动：`xberg worker --config-json <固定配置>`（同时支持 `--config` / `--config-json-base64` / `--no-config-discovery`，语义与 `extract` 相同）。**2026-10-04 起零配置启动为一等公民**：`--config-json` 可整体省略，全部行为用引擎内置默认（含图片 PNG 重编码、OCR 默认后端、大文档自动降级），模型与 onnxruntime DLL 按 exe 相对定位解析（见 [FORK.md](FORK.md)「零配置模型定位」），调用方无需设置任何环境变量；显式配置仅用于覆盖默认。启动配置同时包含文档转换配置和独立的 `snapshot_ocr` 截图配置，两者分别固定；请求仅通过 mode 选择文档处理方式，不接受任意配置覆盖。两场景的模型集、模型路径、推理参数与会话分别生效；截图配置不覆盖文档 OCR 配置，文档设置也不覆盖截图配置，不为共用进程而强制两套模型或参数相同。
 - `--config-json` 还接受两个 worker 专属顶层键（在合并前被剥离，`ExtractionConfig` 的 `deny_unknown_fields` 不会看到；其余未知顶层字段仍按原样拒绝，保留拼写错误防护）：
   - `owner_token`（字符串，P2）：调用方属主标识，原样回报在 `capabilities.owner`，用于认领/区分同一台机器上的多个 xberg 进程；缺省时该键不出现；
   - `idle_timeout_ms`（正整数毫秒，P4）：无在途请求且无任何请求流量持续该时长后引擎自行退出，退出码 87；缺省不启用。

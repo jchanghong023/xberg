@@ -2603,10 +2603,11 @@ def resolve_media_assets(base):
 
 # ---------------------------------------------------------------- 单文件转换
 def build_cmd(cli: Path, src_file: Path, img_dir: Path, transcription: bool):
-    """验收命令不携带业务定制配置，只依赖引擎默认行为：默认 Markdown 输出、默认抽图、
-    图片默认 PNG 重编码（2026-10-04 起 images.output_format 默认即 Png，此前由本函数显式
-    覆盖）。仅有条件注入音视频转写与 expectations 声明的 OCR/layout 差异；普通文档零配置，
-    与 worker 默认启动的行为天然一致。"""
+    """验收命令不携带引擎转换配置，只依赖引擎默认行为：图片默认 PNG 重编码
+    （2026-10-04 起 images.output_format 默认即 Png）、默认抽图。唯一显式项是
+    `--content-format markdown`——那是输出封装选择而非引擎配置（CLI wire 缺省是
+    plain text，与库默认 Markdown 不同；worker/HTTP 协议的 content 天生是
+    markdown）。仅条件注入音视频转写与 expectations 声明的 OCR/layout 差异。"""
     cfg = {}
     if transcription:
         cfg["transcription"] = TRANSCRIPTION_CFG
@@ -2617,6 +2618,7 @@ def build_cmd(cli: Path, src_file: Path, img_dir: Path, transcription: bool):
     cmd = [
         str(cli), "extract", str(src_file),
         "--no-config-discovery",
+        "--content-format", "markdown",
         "--format", "json",
         "--output-dir", str(img_dir),
     ]

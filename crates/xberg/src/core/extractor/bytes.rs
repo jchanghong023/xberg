@@ -81,6 +81,28 @@ pub(crate) async fn extract_bytes(
     mime_type: &str,
     config: &ExtractionConfig,
 ) -> Result<ExtractedDocument> {
+    // (fork) Large-document auto-downgrade: when the light page probe exceeds
+    // `auto_fast_pages`, this request-local copy drops to the fast profile so a
+    // zero-config caller still gets huge documents back in reasonable time. The
+    // downgrade is observable through a processing warning, and `auto_fast_pages=0`
+    // turns the whole mechanism off. Sits before the cancel-token block so the
+    // downgraded config is the one the timeout/token machinery sees.
+    let auto_downgrade_storage;
+    let auto_config_storage;
+    let config: &ExtractionConfig = match crate::core::auto_mode::evaluate(content, config) {
+        Some(decision) => {
+            let mut owned = config.clone();
+            owned.disable_expensive_document_processing();
+            auto_downgrade_storage = Some(decision);
+            auto_config_storage = owned;
+            &auto_config_storage
+        }
+        None => {
+            auto_downgrade_storage = None;
+            config
+        }
+    };
+
     // `token.cancel()` below needs a token to signal, but `config.cancel_token` is
     // `None` on every binding-driven and CLI-driven call (see
     // `ExtractionConfig::ensure_cancel_token`) — install an internal fallback so a
@@ -108,7 +130,7 @@ pub(crate) async fn extract_bytes(
     // (e.g. by `layout-tract` inside `wasm-target`), so gating on the feature alone is
     // not enough — explicitly exclude wasm32 here, matching `run_timed_extraction` in
     #[cfg(all(feature = "tokio-runtime", not(target_arch = "wasm32")))]
-    let result = if let Some(secs) = config.extraction_timeout_secs {
+    let mut result = if let Some(secs) = config.extraction_timeout_secs {
         let start = std::time::Instant::now();
         match tokio::time::timeout(std::time::Duration::from_secs(secs), extraction_future).await {
             Ok(inner) => inner,
@@ -127,7 +149,7 @@ pub(crate) async fn extract_bytes(
     };
 
     #[cfg(any(not(feature = "tokio-runtime"), target_arch = "wasm32"))]
-    let result = {
+    let mut result = {
         // Without a usable tokio timer (no 'tokio-runtime' feature, or the WASM build,
         // where `std::time::Instant::now()` panics) there is no timer to enforce a
         // timeout, but the default ExtractionConfig sets extraction_timeout_secs, so
@@ -144,6 +166,15 @@ pub(crate) async fn extract_bytes(
     #[cfg(feature = "otel")]
     if let Err(ref e) = result {
         crate::telemetry::spans::record_error_on_current_span(e);
+    }
+
+    // (fork) The auto-downgrade must be observable on the document, not just in
+    // logs: partial extractions report degraded stages the same way.
+    if let (Some(decision), Some(document)) = (auto_downgrade_storage.as_ref(), result.as_mut().ok()) {
+        document.processing_warnings.push(crate::types::ProcessingWarning {
+            source: "auto_mode".into(),
+            message: decision.warning_message().into(),
+        });
     }
 
     result

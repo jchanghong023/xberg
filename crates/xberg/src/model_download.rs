@@ -640,9 +640,7 @@ fn hf_artifact_lock_path(repo_id: &str, cache_dir: Option<&Path>, expected_sha25
     if !is_sha256_hex(expected_sha256) {
         return Err("Cannot construct Hugging Face artifact lock for an invalid SHA-256".to_string());
     }
-    Ok(cache_dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(hf_hub::resolve_cache_dir)
+    Ok(resolve_effective_hf_cache_dir(cache_dir)
         .join(format!("models--{}", repo_id.replace('/', "--")))
         .join(format!(".xberg-{}.lock", expected_sha256.to_ascii_lowercase())))
 }
@@ -660,6 +658,31 @@ fn hf_artifact_lock_path(repo_id: &str, cache_dir: Option<&Path>, expected_sha25
 ))]
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// (fork) Zero-config model resolution: `models/` next to the executable — the
+/// packaged layout — serves as the HF cache root when the caller supplied no
+/// explicit dir and no HF environment pin exists. A bare-spawned worker (or
+/// CLI) therefore finds its models without any environment setup.
+fn resolve_effective_hf_cache_dir(configured: Option<&Path>) -> PathBuf {
+    if let Some(dir) = configured {
+        return dir.to_path_buf();
+    }
+    if hf_env_configured() {
+        return hf_hub::resolve_cache_dir();
+    }
+    exe_relative_models_dir().unwrap_or_else(hf_hub::resolve_cache_dir)
+}
+
+fn hf_env_configured() -> bool {
+    std::env::var_os("HF_HUB_CACHE").is_some() || std::env::var_os("HF_HOME").is_some()
+}
+
+fn exe_relative_models_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("models")))
+        .filter(|dir| dir.is_dir())
 }
 
 /// Build an hf-hub client using its standard cache resolution unless the caller
@@ -684,7 +707,17 @@ pub(crate) fn hf_client(cache_dir: Option<&Path>) -> Result<hf_hub::HFClientSync
     let builder = hf_client_builder();
     let builder = match cache_dir {
         Some(path) => builder.cache_dir(path.to_path_buf()),
-        None => builder,
+        None => {
+            // (fork) Mirror `resolve_effective_hf_cache_dir`: the exe-relative
+            // `models/` layout only applies without an explicit dir or HF env pin.
+            if !hf_env_configured()
+                && let Some(dir) = exe_relative_models_dir()
+            {
+                builder.cache_dir(dir)
+            } else {
+                builder
+            }
+        }
     };
     builder
         .build_sync()
@@ -701,11 +734,7 @@ pub(crate) fn hf_client(cache_dir: Option<&Path>) -> Result<hf_hub::HFClientSync
     all(feature = "static-embeddings", not(target_arch = "wasm32"))
 ))]
 pub(crate) fn hf_cache_key(cache_dir: Option<&Path>) -> String {
-    cache_dir
-        .map(Path::to_path_buf)
-        .unwrap_or_else(hf_hub::resolve_cache_dir)
-        .display()
-        .to_string()
+    resolve_effective_hf_cache_dir(cache_dir).display().to_string()
 }
 
 /// Minimum wall-clock gap between rendered progress lines. hf-hub emits a progress event per

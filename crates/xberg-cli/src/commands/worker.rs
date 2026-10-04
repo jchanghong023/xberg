@@ -547,8 +547,12 @@ fn request_config(startup: &ExtractionConfig, request: &WorkerRequest) -> Extrac
     if let Some(transcription) = &mut config.transcription {
         transcription.timeout_ms = None;
     }
-    if request.mode.as_deref() == Some(MODE_FAST) {
-        config.disable_expensive_document_processing();
+    match request.mode.as_deref() {
+        Some(MODE_FAST) => config.disable_expensive_document_processing(),
+        // An explicit `normal` opts out of the engine's large-document
+        // auto-downgrade: the caller demanded full quality for this request.
+        Some(MODE_NORMAL) => config.auto_fast_pages = 0,
+        _ => {}
     }
     config
 }
@@ -1086,6 +1090,23 @@ mod tests {
         assert!(normal.force_ocr);
         #[cfg(feature = "ocr")]
         assert!(normal.runs_ocr_on_embedded_images());
+    }
+
+    #[test]
+    fn explicit_normal_opts_out_of_auto_downgrade_and_omitted_mode_keeps_it() {
+        let startup = ExtractionConfig::default();
+        let mut normal = request(json!(1), "large.pdf");
+        normal.mode = Some(MODE_NORMAL.into());
+        assert_eq!(
+            request_config(&startup, &normal).auto_fast_pages,
+            0,
+            "explicit normal must disable the engine's large-document auto-downgrade"
+        );
+        assert_eq!(
+            request_config(&startup, &request(json!(2), "large.pdf")).auto_fast_pages,
+            ExtractionConfig::default_auto_fast_pages(),
+            "omitted mode keeps the engine default"
+        );
     }
 
     #[test]

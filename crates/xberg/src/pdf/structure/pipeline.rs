@@ -6142,6 +6142,13 @@ const DEFAULT_OUTLINE_HEADING_OFFSET: i64 = 2;
 /// Anchors needed before the per-document calibration below outvotes the
 /// default root-`##` convention.
 const MIN_OUTLINE_CALIBRATION_ANCHORS: usize = 2;
+/// A calibrated offset below 1 collapses the outline's own hierarchy: with
+/// offset 0, a depth-0 root clamps to level 1 and its depth-1 children land on
+/// level 1 too, flattening every section to its parent's rank (measured on the
+/// tessent manual: 86/101 level-2 bookmarks rendered as `#`). One markdown
+/// level per outline step is the minimum faithful mapping, so the vote only
+/// chooses among offsets that keep a child strictly deeper than its parent.
+const MIN_OUTLINE_HEADING_OFFSET: i64 = 1;
 const MIN_MARKDOWN_HEADING_LEVEL: i64 = 1;
 const MAX_MARKDOWN_HEADING_LEVEL: i64 = 6;
 
@@ -6168,7 +6175,9 @@ fn calibrated_outline_heading_offset(all_pages: &[Vec<PdfParagraph>], matches: &
     let mut winners = counts.into_iter().filter(|(_, count)| *count == max_count);
     let winner = winners.next();
     match (winner, winners.next(), max_count) {
-        (Some((offset, _)), None, count) if count >= MIN_OUTLINE_CALIBRATION_ANCHORS => offset,
+        (Some((offset, _)), None, count) if count >= MIN_OUTLINE_CALIBRATION_ANCHORS => {
+            offset.max(MIN_OUTLINE_HEADING_OFFSET)
+        }
         _ => DEFAULT_OUTLINE_HEADING_OFFSET,
     }
 }
