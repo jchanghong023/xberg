@@ -229,6 +229,13 @@ impl EpubExtractor {
 
         let mut builder = InternalDocumentBuilder::new("epub");
 
+        // Mirror of the builder's image-table length: `InternalDocumentBuilder::
+        // push_image` returns the pushed *element*'s index (like every push_*
+        // method), not the image index, so the delivery-name rewrite below
+        // tracks the real count itself. Every `builder.push_image` call in this
+        // function must increment it in lockstep.
+        let mut pushed_image_count: u32 = 0;
+
         let wants_markup = matches!(
             config.output_format,
             OutputFormat::Markdown | OutputFormat::Djot | OutputFormat::DocTags
@@ -292,10 +299,19 @@ impl EpubExtractor {
                     data_base64: None,
                 };
                 builder.push_image(Some("Cover"), image, None, None);
+                pushed_image_count += 1;
             }
         }
 
         for (index, spine_doc) in spine_documents.iter().enumerate() {
+            // (source reference -> delivered `image_N.ext` name) for the images
+            // this chapter's walker pushed onto the image table. The markup
+            // fragment below was rendered from the raw XHTML, so its `![](...)`
+            // references still name the EPUB-internal path (or data URI) the
+            // caller cannot resolve against the delivered image files; they are
+            // rewritten to the engine's delivery names once the walker run
+            // assigns the indices.
+            let mut image_ref_rewrites: Vec<(String, String)> = Vec::new();
             if budget.step().is_err() {
                 warnings.push(ProcessingWarning {
                     source: Cow::Borrowed(EPUB_WARNING_SOURCE),
@@ -442,34 +458,46 @@ impl EpubExtractor {
                                     kind: UriKind::Image,
                                 });
                             }
-                            let xhtml_dir = file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
-                            let image_data = src.as_ref().and_then(|img_src| {
-                                let resolved = resolve_path(xhtml_dir, img_src).ok()?;
-                                let mut buf = Vec::new();
-                                archive
-                                    .by_name(&resolved.path)
-                                    .ok()?
-                                    .take(MAX_EPUB_MEMBER_SIZE)
-                                    .read_to_end(&mut buf)
-                                    .ok()?;
-                                if buf.is_empty() {
-                                    return None;
-                                }
-                                let fmt = img_src
-                                    .rsplit('.')
-                                    .next()
-                                    .map(|ext| match ext.to_lowercase().as_str() {
-                                        "jpg" | "jpeg" => "jpeg",
-                                        "png" => "png",
-                                        "gif" => "gif",
-                                        "webp" => "webp",
-                                        "svg" => "svg",
-                                        "bmp" => "bmp",
-                                        _ => "png",
-                                    })
-                                    .unwrap_or("png");
-                                Some((buf, fmt.to_string()))
-                            });
+                            // A `data:image/...` reference carries its own bytes
+                            // (same delivery contract as HTML extraction:
+                            // decode to a file, never leave the giant URI in
+                            // the body); anything else resolves against the
+                            // archive under the referencing document's dir.
+                            let image_data = if let Some(img_src) =
+                                src.as_deref().filter(|candidate| candidate.starts_with("data:image/"))
+                            {
+                                crate::extractors::markdown_utils::decode_data_uri_image(img_src, 0)
+                                    .map(|image| (image.data.to_vec(), image.format.to_string()))
+                            } else {
+                                let xhtml_dir = file_path.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
+                                src.as_ref().and_then(|img_src| {
+                                    let resolved = resolve_path(xhtml_dir, img_src).ok()?;
+                                    let mut buf = Vec::new();
+                                    archive
+                                        .by_name(&resolved.path)
+                                        .ok()?
+                                        .take(MAX_EPUB_MEMBER_SIZE)
+                                        .read_to_end(&mut buf)
+                                        .ok()?;
+                                    if buf.is_empty() {
+                                        return None;
+                                    }
+                                    let fmt = img_src
+                                        .rsplit('.')
+                                        .next()
+                                        .map(|ext| match ext.to_lowercase().as_str() {
+                                            "jpg" | "jpeg" => "jpeg",
+                                            "png" => "png",
+                                            "gif" => "gif",
+                                            "webp" => "webp",
+                                            "svg" => "svg",
+                                            "bmp" => "bmp",
+                                            _ => "png",
+                                        })
+                                        .unwrap_or("png");
+                                    Some((buf, fmt.to_string()))
+                                })
+                            };
 
                             if let Some((data, format)) = image_data {
                                 let (image_kind, kind_confidence) = crate::extraction::image_kind::classify(
@@ -486,7 +514,7 @@ impl EpubExtractor {
 
                                 let image = crate::types::ExtractedImage {
                                     data: bytes::Bytes::from(data),
-                                    format: Cow::Owned(format),
+                                    format: Cow::Owned(format.clone()),
                                     image_index: 0,
                                     page_number: Some((index + 1) as u32),
                                     width: None,
@@ -506,6 +534,11 @@ impl EpubExtractor {
                                     data_base64: None,
                                 };
                                 builder.push_image(description.as_deref(), image, None, None);
+                                let delivered = format!("image_{pushed_image_count}.{format}");
+                                pushed_image_count += 1;
+                                if let Some(img_src) = src.as_deref().filter(|candidate| !candidate.is_empty()) {
+                                    image_ref_rewrites.push((img_src.to_string(), delivered));
+                                }
                             } else {
                                 let text_val = description.as_deref().unwrap_or("");
                                 let elem =
@@ -556,6 +589,16 @@ impl EpubExtractor {
                 }
 
                 let _ = first_heading_idx;
+            }
+
+            // Rewrite this chapter's markup fragment onto the delivery image
+            // names the walker just assigned. The reference form is
+            // `![alt](src)` / `[alt](src)`, so matching the parenthesised
+            // source exactly cannot hit a longer path that merely ends with it.
+            if let Some(fragment) = pre_rendered_fragments.last_mut() {
+                for (source, delivered) in &image_ref_rewrites {
+                    *fragment = fragment.replace(&format!("({source})"), &format!("({delivered})"));
+                }
             }
         }
 
@@ -885,6 +928,73 @@ mod tests {
             &documents,
             "OEBPS/images/other.jpg"
         ));
+    }
+
+    /// R4 delivery-name contract: the markup fragment's image references must
+    /// name the delivered `image_N.ext` files (not the EPUB-internal path the
+    /// caller cannot resolve), and a `data:image/...` reference must decode to
+    /// an image instead of surviving as a giant inline URI.
+    #[tokio::test]
+    async fn image_references_rewrite_to_delivery_names_and_decode_data_uris() {
+        use base64::Engine;
+        use std::io::Write;
+        let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+            .unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
+        let container = r#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"#;
+        let opf = r#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier id="uid">urn:uid:1</dc:identifier><dc:title>T</dc:title><dc:language>zh</dc:language></metadata>
+  <manifest>
+    <item id="ch1" href="ch1.xhtml" media-type="application/xhtml+xml"/>
+    <item id="pic" href="images/pic.png" media-type="image/png"/>
+  </manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#;
+        let xhtml = format!(
+            r#"<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>章</h1><p><img src="images/pic.png" alt="流程图"/></p><p><img src="data:image/png;base64,{encoded}" alt="内联图"/></p></body></html>"#
+        );
+
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut zip = zip::ZipWriter::new(&mut cursor);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("mimetype", options).unwrap();
+            zip.write_all(b"application/epub+zip").unwrap();
+            zip.start_file("META-INF/container.xml", options).unwrap();
+            zip.write_all(container.as_bytes()).unwrap();
+            zip.start_file("OEBPS/content.opf", options).unwrap();
+            zip.write_all(opf.as_bytes()).unwrap();
+            zip.start_file("OEBPS/ch1.xhtml", options).unwrap();
+            zip.write_all(xhtml.as_bytes()).unwrap();
+            zip.start_file("OEBPS/images/pic.png", options).unwrap();
+            zip.write_all(&png).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let config = ExtractionConfig::default();
+        let extractor = EpubExtractor;
+        let doc = extractor
+            .extract_content(&cursor.into_inner(), "application/epub+zip", &config)
+            .await
+            .unwrap();
+
+        assert_eq!(doc.images.len(), 2, "archive member and data URI both decode");
+        let rendered = doc.pre_rendered_content.as_deref().expect("markup fragments rendered");
+        assert!(rendered.contains("![流程图](image_0.png)"), "got: {rendered}");
+        assert!(rendered.contains("![内联图](image_1.png)"), "got: {rendered}");
+        assert!(
+            !rendered.contains("images/pic.png"),
+            "internal path must not survive: {rendered}"
+        );
+        assert!(
+            !rendered.contains("data:image/"),
+            "data URI must not survive: {rendered}"
+        );
     }
 
     #[test]

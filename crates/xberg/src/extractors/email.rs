@@ -53,12 +53,15 @@ impl EmailExtractor {
 impl EmailExtractor {
     /// Build an `InternalDocument` from extracted email content.
     ///
-    /// Pushes email headers as a metadata block, body content as paragraphs, and
-    /// successful nonblank attachment content under level-two headings.
-    fn build_internal_document(
-        email_result: &crate::types::EmailExtractionResult,
-        extracted_attachments: &[ArchiveEntry],
-    ) -> InternalDocument {
+    /// Pushes email headers as a metadata block and body content as paragraphs.
+    /// Attachment bodies are merged separately by
+    /// [`build_extracted_document`](Self::build_extracted_document) through
+    /// [`crate::extraction::ooxml_embedded::merge_children_into_body`], which
+    /// also carries the attachment's image bytes onto the host image table —
+    /// the old inline here pushed only the child's text, so an image
+    /// attachment's `image_0.png` reference dangled and its Markdown markers
+    /// got escaped into literal text.
+    fn build_internal_document(email_result: &crate::types::EmailExtractionResult) -> InternalDocument {
         let mut builder = InternalDocumentBuilder::new("email");
 
         let mut header_entries = Vec::new();
@@ -135,15 +138,6 @@ impl EmailExtractor {
             }
         }
 
-        for attachment in extracted_attachments {
-            let content = attachment.result.content.trim();
-            if content.is_empty() {
-                continue;
-            }
-            builder.push_heading(2, &attachment.path, None, None);
-            builder.push_paragraph(content, vec![], None, None);
-        }
-
         builder.build()
     }
 
@@ -168,9 +162,23 @@ impl EmailExtractor {
         config: &ExtractionConfig,
         extracted_attachments: &[ArchiveEntry],
     ) -> Result<InternalDocument> {
-        let mut doc = Self::build_internal_document(email_result, extracted_attachments);
+        let mut doc = Self::build_internal_document(email_result);
         doc.mime_type = mime_type.to_string();
         doc.metadata = Self::build_document_metadata(email_result);
+
+        // Attachment bodies merge through the shared embed-completeness path:
+        // caption + verbatim raw block, with the attachment's images renumbered
+        // onto the host table. `None` keeps the "inline every attachment,
+        // security budget trims" contract — `retain_budgeted_attachment_content`
+        // below still splits the trailing per-attachment element pairs
+        // (caption + raw block, 2 per attachment) and accounts each against
+        // the budget, exactly as it did for the old heading + paragraph pair.
+        crate::extraction::ooxml_embedded::merge_children_into_body(
+            &mut doc,
+            extracted_attachments,
+            None,
+            "email_attachments",
+        );
 
         let mut budget = SecurityBudget::from_config(config);
         retain_budgeted_attachment_content(&mut doc, extracted_attachments, &mut budget)?;
@@ -780,6 +788,60 @@ Content-Disposition: attachment; filename=note.txt\r\n\
 Attachment body\r\n\
 --part--\r\n";
 
+    /// A mixed email whose attachment is a PNG: the shared embed merge must
+    /// carry the attachment's image bytes onto the host image table and keep
+    /// the reference a real Markdown image (the old inline escaped it into
+    /// literal `\![](image_0.PNG)` text pointing at the child's own table).
+    #[cfg(feature = "tokio-runtime")]
+    #[tokio::test]
+    async fn test_async_email_image_attachment_lands_on_the_host_image_table() {
+        use base64::Engine;
+        let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+            .unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&png);
+        let eml = format!(
+            "From: Alice <alice@example.com>\r\n\
+             Subject: pic\r\n\
+             MIME-Version: 1.0\r\n\
+             Content-Type: multipart/mixed; boundary=part\r\n\
+             \r\n\
+             --part\r\n\
+             Content-Type: text/plain\r\n\
+             \r\n\
+             Parent body\r\n\
+             --part\r\n\
+             Content-Type: image/png\r\n\
+             Content-Disposition: attachment; filename=diagram.png\r\n\
+             Content-Transfer-Encoding: base64\r\n\
+             \r\n\
+             {encoded}\r\n\
+             --part--\r\n"
+        );
+
+        let config = ExtractionConfig {
+            max_archive_depth: 1,
+            ..Default::default()
+        };
+        let doc = EmailExtractor::new()
+            .extract_content(eml.as_bytes(), "message/rfc822", &config)
+            .await
+            .unwrap();
+
+        let markdown = crate::rendering::render_markdown(&doc);
+        let images = &doc.images;
+        assert!(!images.is_empty(), "attachment bytes must reach the host image table");
+        let delivered = format!("image_{}.{format}", images[0].image_index, images[0].format);
+        assert!(
+            markdown.contains(&format!("]({delivered})")),
+            "the reference must name the delivered file, got: {markdown}"
+        );
+        assert!(
+            !markdown.contains("\\![]("),
+            "no escaped literal image references: {markdown}"
+        );
+    }
+
     #[test]
     fn test_email_extractor_plugin_interface() {
         let extractor = EmailExtractor::new();
@@ -882,7 +944,11 @@ Attachment body\r\n\
         assert_eq!(children.len(), 1);
         assert_eq!(children[0].path, "note.txt");
         assert!(children[0].result.content.contains("Attachment body"));
-        assert!(markdown.contains("## note.txt"));
+        // The shared embed merge replaced the old `## note.txt` heading + escaped
+        // paragraph pair: a plain caption keeps the filename out of the host
+        // outline and the raw block keeps the attachment's own Markdown intact.
+        assert!(markdown.contains("Embedded object: note.txt"));
+        assert!(markdown.contains("Attachment body"));
         assert!(plain.contains(children[0].result.content.trim()));
     }
 
