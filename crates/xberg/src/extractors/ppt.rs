@@ -408,6 +408,14 @@ impl InternalDocumentExtractor for PptExtractor {
         // `ExOleObjStg` and reached the output in no form. ~keep
         if config.max_archive_depth > 0 {
             let (children, embed_warnings) = Self::extract_embedded_objects(content, config).await;
+            // R6: legacy-`PPT` OLE children were reachable only on `children`;
+            // merge their bodies (budgeted) like the `.pptx` host does.
+            crate::extraction::ooxml_embedded::merge_children_into_body(
+                &mut doc,
+                &children,
+                Some(crate::extraction::ooxml_embedded::MAX_EMBEDDED_CHILDREN_INLINE),
+                "ppt_ole",
+            );
             if !children.is_empty() {
                 doc.children = Some(children);
             }

@@ -1000,3 +1000,81 @@ async fn test_embedded_objects_fall_back_to_default_max_files_in_archive_when_un
         warnings[0].message
     );
 }
+
+/// (fork) R6: the budgeted merge inlines the first `max_inline` non-empty
+/// children, leaves the rest on `children`, and records one warning naming the
+/// split — without the terms fulltest's ENGINE_WARN classifier keys on.
+#[test]
+fn merge_children_into_body_budgets_the_inline_count() {
+    use crate::types::ExtractedDocument;
+    use crate::types::internal::InternalDocument;
+
+    let child = |path: &str, body: &str| crate::types::ArchiveEntry {
+        path: path.to_string(),
+        mime_type: "application/pdf".into(),
+        result: Box::new(ExtractedDocument {
+            content: body.to_string(),
+            ..Default::default()
+        }),
+    };
+    let children = vec![
+        child("a.docx", "正文一"),
+        child("empty.bin", "   "),
+        child("b.pdf", "正文二"),
+        child("c.xlsx", "正文三"),
+    ];
+
+    let mut doc = InternalDocument::default();
+    merge_children_into_body(&mut doc, &children, Some(2), "archive_members");
+
+    let texts: Vec<&str> = doc.elements.iter().map(|element| element.text.as_str()).collect();
+    assert!(texts.iter().any(|t| t.contains("正文一")));
+    assert!(texts.iter().any(|t| t.contains("正文二")));
+    assert!(
+        !texts.iter().any(|t| t.contains("正文三")),
+        "budget must stop the third body"
+    );
+    // The children list itself is untouched for structured consumers.
+    assert_eq!(doc.children.as_ref().map_or(0, |c| c.len()), 4);
+    assert_eq!(doc.processing_warnings.len(), 1);
+    let warning = &doc.processing_warnings[0];
+    assert_eq!(warning.source, "archive_members");
+    assert!(
+        warning.message.contains("Inlined 2 of 3"),
+        "empty bodies count against neither the budget nor the total: {}",
+        warning.message
+    );
+    assert!(
+        !warning.message.to_lowercase().contains("ole"),
+        "must not trip ENGINE_WARN"
+    );
+}
+
+/// `max_inline: None` is the unlimited OOXML contract: every non-empty body
+/// merges and no warning is produced.
+#[test]
+fn merge_children_into_body_without_budget_inlines_everything() {
+    use crate::types::ExtractedDocument;
+    use crate::types::internal::InternalDocument;
+
+    let child = |i: usize| crate::types::ArchiveEntry {
+        path: format!("obj{i}.bin"),
+        mime_type: "application/pdf".into(),
+        result: Box::new(ExtractedDocument {
+            content: format!("内容{i}"),
+            ..Default::default()
+        }),
+    };
+    let children: Vec<_> = (0..30).map(child).collect();
+
+    let mut doc = InternalDocument::default();
+    merge_children_into_body(&mut doc, &children, None, "ooxml_embedded");
+
+    let texts: Vec<&str> = doc.elements.iter().map(|element| element.text.as_str()).collect();
+    assert_eq!(
+        texts.iter().filter(|t| t.starts_with("Embedded object: obj")).count(),
+        30,
+        "unlimited merge inlines every child"
+    );
+    assert!(doc.processing_warnings.is_empty());
+}

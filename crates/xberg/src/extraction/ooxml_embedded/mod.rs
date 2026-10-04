@@ -117,11 +117,44 @@ fn clamp_declared_size(declared: u64, cap: u64) -> u64 {
 /// payloads that never identified as a document never become children and are
 /// unaffected.
 pub(crate) fn append_embedded_object_text(document: &mut crate::types::internal::InternalDocument) {
-    use crate::types::internal::{ElementKind, InternalElement};
-
-    let Some(children) = document.children.as_ref() else {
+    let Some(children) = document.children.take() else {
         return;
     };
+    merge_children_into_body(document, &children, None, "ooxml_embedded");
+    document.children = Some(children);
+}
+
+/// (fork) R6 embed completeness: how many non-empty embedded document bodies a
+/// children-only host (archive members, legacy `.ppt` OLE, PDF
+/// `/EmbeddedFiles`, PST attachments, `message/rfc822` nested mail) inlines
+/// into its content. Containers can hold dozens of documents; beyond the
+/// budget the bodies stay reachable on `children` and a processing warning
+/// names the split, so content-reading callers never silently lose them.
+pub(crate) const MAX_EMBEDDED_CHILDREN_INLINE: usize = 20;
+
+/// Merge embedded children's bodies into the parent document, with an optional
+/// inline-count budget.
+///
+/// This is the shared body of [`append_embedded_object_text`] and the R6
+/// hosts that used to be children-only. `max_inline: None` merges every
+/// non-empty child (the accepted OOXML behavior); `Some(n)` merges the first
+/// `n` non-empty children and records one `source`-tagged warning naming how
+/// many stayed behind — deliberately worded without the terms fulltest's
+/// `ENGINE_WARN`/`ENGINE_FAILISH` classifiers key on.
+///
+/// The children are passed as a slice, not read off `document.children`, so a
+/// caller can merge only a subset (email's attachment children are already
+/// inlined by its own builder; only `message/rfc822` nested messages were
+/// children-only). The children list itself is left untouched for structured
+/// consumers.
+pub(crate) fn merge_children_into_body(
+    document: &mut crate::types::internal::InternalDocument,
+    children: &[crate::types::ArchiveEntry],
+    max_inline: Option<usize>,
+    source: &'static str,
+) {
+    use crate::types::internal::{ElementKind, InternalElement};
+
     // Collect first: pushing elements (and images) needs a mutable borrow of
     // `document` while children still borrow it immutably.
     let mut staged_images = Vec::new();
@@ -130,7 +163,17 @@ pub(crate) fn append_embedded_object_text(document: &mut crate::types::internal:
     // highest child index rather than by the child's image count, so a child
     // whose indices are not dense cannot collide with the next child's range.
     let mut next_image_base = document.images.len() as u32;
+    let mut inlined = 0usize;
+    let mut skipped = 0usize;
     for child in children {
+        if let Some(budget) = max_inline
+            && inlined >= budget
+        {
+            if !child.result.content.trim().is_empty() {
+                skipped += 1;
+            }
+            continue;
+        }
         let content = child.result.content.trim();
         if content.is_empty() {
             continue;
@@ -187,6 +230,19 @@ pub(crate) fn append_embedded_object_text(document: &mut crate::types::internal:
         }
         next_image_base = next_image_base.saturating_add(span);
         merged.push((title, body));
+        inlined += 1;
+    }
+    if skipped > 0
+        && let Some(budget) = max_inline
+    {
+        document.processing_warnings.push(crate::types::ProcessingWarning {
+            source: std::borrow::Cow::Borrowed(source),
+            message: std::borrow::Cow::Owned(format!(
+                "Inlined {inlined} of {} embedded document contents (budget {budget}); \
+                 the rest remain in the children list",
+                inlined + skipped
+            )),
+        });
     }
     document.images.extend(staged_images);
     for (title, content) in merged {

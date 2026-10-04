@@ -3315,6 +3315,15 @@ impl PdfExtractor {
         {
             let (embedded_children, embedded_warnings) =
                 crate::pdf::embedded_files::extract_and_process_embedded_files(content, config).await;
+            // R6: `/EmbeddedFiles` attachments used to be reachable only on
+            // `children`; merge the document-like bodies (budgeted) into the
+            // PDF's own content.
+            crate::extraction::ooxml_embedded::merge_children_into_body(
+                &mut doc,
+                &embedded_children,
+                Some(crate::extraction::ooxml_embedded::MAX_EMBEDDED_CHILDREN_INLINE),
+                "pdf_embedded_files",
+            );
             if !embedded_children.is_empty() {
                 match doc.children {
                     Some(ref mut existing) => existing.extend(embedded_children),

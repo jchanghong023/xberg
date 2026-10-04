@@ -106,6 +106,16 @@ fn build_archive_doc_inner(
         idx += 1;
     }
 
+    // R6 embed completeness: a zip/7z/tar/gz member that is itself a document
+    // used to be reachable only on `children`; content-reading callers saw just
+    // the `Files:` listing. Inline the bodies (budgeted) exactly like the
+    // OOXML hosts do, and keep `children` for structured consumers.
+    crate::extraction::ooxml_embedded::merge_children_into_body(
+        &mut doc,
+        &children,
+        Some(crate::extraction::ooxml_embedded::MAX_EMBEDDED_CHILDREN_INLINE),
+        "archive_members",
+    );
     doc.children = if children.is_empty() { None } else { Some(children) };
     doc.processing_warnings = processing_warnings;
 
@@ -996,5 +1006,111 @@ mod tests {
             .extract_content(&[0, 1, 2, 3], "application/gzip", &config)
             .await;
         assert!(result.is_err());
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    /// R6: document members a zip/7z/tar/gz carries used to be reachable only
+    /// on `children`; `build_archive_doc_inner` now merges their bodies into
+    /// the host content under `Embedded object:` captions, budgeted, with
+    /// `children` kept for structured consumers.
+    #[test]
+    fn archive_doc_merges_document_children_into_the_body() {
+        let child = |path: &str, body: &str| crate::types::ArchiveEntry {
+            path: path.to_string(),
+            mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
+            result: Box::new(crate::types::ExtractedDocument {
+                content: body.to_string(),
+                ..Default::default()
+            }),
+        };
+        let children = vec![
+            child("docs/report.docx", "报告正文"),
+            child("docs/table.xlsx", "表格数据"),
+        ];
+        let metadata = crate::extraction::archive::ArchiveMetadata {
+            format: "ZIP".to_string(),
+            file_list: Vec::new(),
+            file_count: 2,
+            total_size: 100,
+        };
+
+        let doc = build_archive_doc_inner(
+            metadata,
+            AHashMap::new(),
+            "zip",
+            "application/zip",
+            children,
+            Vec::new(),
+        );
+
+        let texts: Vec<&str> = doc.elements.iter().map(|element| element.text.as_str()).collect();
+        assert!(
+            texts.iter().any(|t| t.contains("Embedded object: report.docx")),
+            "got {texts:?}"
+        );
+        assert!(texts.iter().any(|t| t.contains("报告正文")));
+        assert!(texts.iter().any(|t| t.contains("表格数据")));
+        assert_eq!(
+            doc.children.as_ref().map_or(0, |c| c.len()),
+            2,
+            "children stay for structured consumers"
+        );
+        assert!(doc.processing_warnings.is_empty(), "two bodies fit the default budget");
+    }
+
+    /// Past `MAX_EMBEDDED_CHILDREN_INLINE` the merge stops inlining and warns;
+    /// the warning text must not contain the substrings fulltest's
+    /// ENGINE_WARN/ENGINE_FAILISH classifiers key on.
+    #[test]
+    fn archive_doc_budget_stops_inlining_with_a_warning() {
+        let child = |i: usize| crate::types::ArchiveEntry {
+            path: format!("obj{i}.docx"),
+            mime_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document".into(),
+            result: Box::new(crate::types::ExtractedDocument {
+                content: format!("内容{i}"),
+                ..Default::default()
+            }),
+        };
+        let children: Vec<_> = (0..crate::extraction::ooxml_embedded::MAX_EMBEDDED_CHILDREN_INLINE + 5)
+            .map(child)
+            .collect();
+        let metadata = crate::extraction::archive::ArchiveMetadata {
+            format: "ZIP".to_string(),
+            file_list: Vec::new(),
+            file_count: children.len(),
+            total_size: 100,
+        };
+
+        let doc = build_archive_doc_inner(
+            metadata,
+            AHashMap::new(),
+            "zip",
+            "application/zip",
+            children,
+            Vec::new(),
+        );
+
+        let texts: Vec<&str> = doc.elements.iter().map(|element| element.text.as_str()).collect();
+        assert_eq!(
+            texts.iter().filter(|t| t.starts_with("Embedded object: obj")).count(),
+            crate::extraction::ooxml_embedded::MAX_EMBEDDED_CHILDREN_INLINE
+        );
+        assert_eq!(doc.processing_warnings.len(), 1);
+        let message = doc.processing_warnings[0].message.to_lowercase();
+        assert!(
+            message.contains("inlined"),
+            "got {}",
+            doc.processing_warnings[0].message
+        );
+        for banned in ["ole", "not supported", "panic", "corrupt", "fatal"] {
+            assert!(
+                !message.contains(banned),
+                "warning must not trip the classifiers: {message}"
+            );
+        }
     }
 }

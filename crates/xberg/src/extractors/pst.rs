@@ -150,6 +150,14 @@ impl InternalDocumentExtractor for PstExtractor {
             let all_attachments: Vec<_> = messages.iter().flat_map(|m| m.attachments.iter()).cloned().collect();
             let (children, attachment_warnings) =
                 crate::extractors::email::extract_attachment_children(&all_attachments, config).await;
+            // R6: attachment bodies used to be reachable only on `children`;
+            // content-reading callers saw just the message list.
+            crate::extraction::ooxml_embedded::merge_children_into_body(
+                &mut doc,
+                &children,
+                Some(crate::extraction::ooxml_embedded::MAX_EMBEDDED_CHILDREN_INLINE),
+                "pst_attachments",
+            );
             if !children.is_empty() {
                 doc.children = Some(children);
             }
@@ -202,6 +210,14 @@ impl InternalDocumentExtractor for PstExtractor {
             let all_attachments: Vec<_> = messages.iter().flat_map(|m| m.attachments.iter()).cloned().collect();
             let (children, attachment_warnings) =
                 crate::extractors::email::extract_attachment_children(&all_attachments, config).await;
+            // R6: attachment bodies used to be reachable only on `children`;
+            // content-reading callers saw just the message list.
+            crate::extraction::ooxml_embedded::merge_children_into_body(
+                &mut doc,
+                &children,
+                Some(crate::extraction::ooxml_embedded::MAX_EMBEDDED_CHILDREN_INLINE),
+                "pst_attachments",
+            );
             if !children.is_empty() {
                 doc.children = Some(children);
             }

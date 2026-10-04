@@ -443,10 +443,23 @@ impl InternalDocumentExtractor for EmailExtractor {
 
         // MIME `message/rfc822` sub-parts are a body structure, not an
         // attachment, so they stay children-only and are deliberately not
-        // inlined into the parent's elements.
+        // inlined into the parent's elements. R6: their bodies ARE merged into
+        // the parent content through the shared embed-completeness merge — the
+        // distinction kept here is that only `nested` children go through it:
+        // the attachment children above were already inlined by
+        // `build_extracted_document`, and merging them again would duplicate
+        // them. An rfc822 nested message therefore appears once under its
+        // `Embedded object:` caption while remaining on `children` for
+        // structured consumers.
         if config.max_archive_depth > 0 && mime_type == "message/rfc822" {
             let (nested_children, nested_warnings) =
                 extract_nested_message_children(&parsed.nested_messages, config).await;
+            crate::extraction::ooxml_embedded::merge_children_into_body(
+                &mut doc,
+                &nested_children,
+                Some(crate::extraction::ooxml_embedded::MAX_EMBEDDED_CHILDREN_INLINE),
+                "email_nested_messages",
+            );
             children.extend(nested_children);
             warnings.extend(nested_warnings);
         }
