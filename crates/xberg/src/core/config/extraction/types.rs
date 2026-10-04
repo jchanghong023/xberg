@@ -33,8 +33,9 @@ pub enum MimeDetectionPolicy {
 ///
 /// Controls whether and how extracted images are normalised to a uniform
 /// container format before being returned in `ExtractedDocument.images`.
-/// The default (`Native`) preserves the format produced by each extractor
-/// without any additional encode pass.
+/// The default (`Png`) re-encodes every image losslessly so `image_N.png`
+/// references always resolve to a previewable file; `Native` opts back into
+/// the extractor-produced bytes with no encode pass.
 ///
 /// Callers that need uniform output — e.g. cloud pipelines that always store
 /// WebP thumbnails — set this once on `ImageExtractionConfig.output_format`
@@ -48,15 +49,19 @@ pub enum MimeDetectionPolicy {
 #[cfg_attr(feature = "api", derive(utoipa::ToSchema))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ImageOutputFormat {
-    /// Preserve whatever format the extractor produced (default).
+    /// Preserve whatever format the extractor produced.
     ///
     /// No re-encode pass is performed. `ExtractedImage.format` reflects the
     /// source format: JPEG for embedded PDF images, PNG for rasterised content,
     /// or the native container format from office documents.
-    #[default]
     Native,
 
-    /// Re-encode all extracted images as PNG (lossless).
+    /// Re-encode all extracted images as PNG (lossless, default).
+    ///
+    /// The default exists so every consumer — CLI, `worker`, HTTP — receives
+    /// uniform, previewable `image_N.png` bytes without carrying the override
+    /// in each caller's startup config.
+    #[default]
     Png,
 
     /// Re-encode all extracted images as JPEG at the given quality level.
@@ -506,8 +511,9 @@ pub struct ImageExtractionConfig {
     /// callers receive uniform output without duplicating encode logic
     /// downstream.
     ///
-    /// Defaults to `Native` — no re-encode pass is performed and
-    /// `ExtractedImage.format` reflects the source extractor's output.
+    /// Defaults to `Png` — every extracted image is re-encoded losslessly, so
+    /// `image_N.png` references always resolve to a previewable file. Select
+    /// `Native` to keep the source extractor's bytes and format instead.
     #[serde(default)]
     pub output_format: ImageOutputFormat,
 
@@ -575,7 +581,7 @@ impl Default for ImageExtractionConfig {
             run_ocr_on_images: true,
             ocr_text_only: false,
             append_ocr_text: true,
-            output_format: ImageOutputFormat::Native,
+            output_format: ImageOutputFormat::Png,
             #[cfg(feature = "svg")]
             svg: SvgOptions::default(),
             include_data_base64: false,
@@ -754,20 +760,20 @@ mod tests {
     }
 
     #[test]
-    fn test_image_output_format_default_is_native() {
-        assert_eq!(ImageOutputFormat::default(), ImageOutputFormat::Native);
+    fn test_image_output_format_default_is_png() {
+        assert_eq!(ImageOutputFormat::default(), ImageOutputFormat::Png);
     }
 
     #[test]
-    fn test_image_extraction_config_default_output_format_is_native() {
+    fn test_image_extraction_config_default_output_format_is_png() {
         let cfg = ImageExtractionConfig::default();
-        assert_eq!(cfg.output_format, ImageOutputFormat::Native);
+        assert_eq!(cfg.output_format, ImageOutputFormat::Png);
     }
 
     #[test]
-    fn test_image_extraction_config_empty_json_gives_native_output_format() {
+    fn test_image_extraction_config_empty_json_gives_png_output_format() {
         let cfg: ImageExtractionConfig = serde_json::from_str("{}").unwrap();
-        assert_eq!(cfg.output_format, ImageOutputFormat::Native);
+        assert_eq!(cfg.output_format, ImageOutputFormat::Png);
     }
 
     #[test]

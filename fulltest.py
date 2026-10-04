@@ -2603,22 +2603,26 @@ def resolve_media_assets(base):
 
 # ---------------------------------------------------------------- 单文件转换
 def build_cmd(cli: Path, src_file: Path, img_dir: Path, transcription: bool):
-    cfg = {"images": {"output_format": {"type": "png"}}}
+    """验收命令不携带业务定制配置，只依赖引擎默认行为：默认 Markdown 输出、默认抽图、
+    图片默认 PNG 重编码（2026-10-04 起 images.output_format 默认即 Png，此前由本函数显式
+    覆盖）。仅有条件注入音视频转写与 expectations 声明的 OCR/layout 差异；普通文档零配置，
+    与 worker 默认启动的行为天然一致。"""
+    cfg = {}
     if transcription:
         cfg["transcription"] = TRANSCRIPTION_CFG
     if OCR_CONFIG:
         cfg["ocr"] = OCR_CONFIG
     if LAYOUT_CONFIG is not None:
         cfg["layout"] = LAYOUT_CONFIG
-    return [
+    cmd = [
         str(cli), "extract", str(src_file),
         "--no-config-discovery",
-        "--content-format", "markdown",
         "--format", "json",
-        "--extract-images", "true",
         "--output-dir", str(img_dir),
-        "--config-json", json.dumps(cfg, ensure_ascii=False),
     ]
+    if cfg:
+        cmd += ["--config-json", json.dumps(cfg, ensure_ascii=False)]
+    return cmd
 
 
 def parse_envelope(stdout_bytes):
