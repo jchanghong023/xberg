@@ -11,6 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed (Windows fork)
 
+- Archive extraction no longer drops the embedded-children inline-budget warning: the caller-supplied archive warnings join the merge's warning instead of replacing it. The OOXML merge and archive budget tests now assert the documented contract (the merge function itself leaves `document.children` untouched; callers preserve the list), and the archive budget test covers caller-level preservation.
+- PPTX slides whose authored text names a picture's rel target (`![forged](...)`) no longer consume that picture's identity: `promote_baked_image_references` pre-marks images the builder already placed as direct elements, restoring upstream's authored-text protection on the fork's direct-element architecture.
+- The auto-mode cache regression test warms the lazily registered pipeline post-processors first: the first extraction in a process bumps the plugin lifecycle generations, and the extraction cache deliberately skips writes while they move.
 - Independent JBIG2 files now use the bounded JBIG2 decoder for metadata and PNG output, not the unsupported generic image decoder. A synthesized single-page fixture was checked pixel-for-pixel against an independent MuPDF render; malformed headers still fail.
 - Public file extraction now applies automatic large-document mode before extraction and preserves its `auto_mode` warning. Explicit normal mode remains isolated, and pre-cutover extraction-cache entries cannot bypass the corrected mode selection.
 - Image format registration now follows compiled decoder capabilities: a `formats-no-heic` binary does not advertise the HEIF/HEIC/AVIF family.

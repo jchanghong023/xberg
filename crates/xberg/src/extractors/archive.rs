@@ -117,7 +117,9 @@ fn build_archive_doc_inner(
         "archive_members",
     );
     doc.children = if children.is_empty() { None } else { Some(children) };
-    doc.processing_warnings = processing_warnings;
+    // The R6 merge above records its inline-budget warning on the document;
+    // the caller-supplied warnings join them instead of replacing them.
+    doc.processing_warnings.extend(processing_warnings);
 
     doc
 }
@@ -1098,6 +1100,11 @@ mod merge_tests {
         assert_eq!(
             texts.iter().filter(|t| t.starts_with("Embedded object: obj")).count(),
             crate::extraction::ooxml_embedded::MAX_EMBEDDED_CHILDREN_INLINE
+        );
+        assert_eq!(
+            doc.children.as_ref().map_or(0, |c| c.len()),
+            crate::extraction::ooxml_embedded::MAX_EMBEDDED_CHILDREN_INLINE + 5,
+            "children stay for structured consumers past the budget"
         );
         assert_eq!(doc.processing_warnings.len(), 1);
         let message = doc.processing_warnings[0].message.to_lowercase();

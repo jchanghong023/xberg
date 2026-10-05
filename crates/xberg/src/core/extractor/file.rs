@@ -870,6 +870,19 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("large.pdf");
         write_auto_mode_pdf(&path, 501);
+        // The pipeline registers its post-processors lazily on the first
+        // extraction, which bumps the plugin lifecycle generations; while they
+        // move, the extraction-cache write is deliberately skipped so a
+        // mixed-lifecycle result is never stored. Warm the registries with a
+        // throwaway uncached extraction first, the way every long-lived caller
+        // settles after its first document, so the cached flow below observes
+        // stable generations.
+        let warmup = ExtractionConfig {
+            use_cache: false,
+            ..Default::default()
+        };
+        let warmed = public_file_extract(&path, &warmup).await.unwrap();
+        assert!(warmed.content.contains("AUTO MODE native document text"));
         let namespace = format!("auto-mode-{}", dir.path().file_name().unwrap().to_string_lossy());
         let config = ExtractionConfig {
             force_ocr: true,

@@ -677,6 +677,17 @@ fn promote_baked_image_references(doc: &mut InternalDocument) {
     use crate::types::internal::ElementKind;
 
     let mut used = vec![false; doc.images.len()];
+    // Readable pictures are already placed as direct image elements by the
+    // builder. Mark their slots so a slide's own text that merely names the
+    // same rel target (`![forged](../media/image1.png)`) cannot claim the
+    // picture's identity — only a still-unplaced placeholder paragraph may.
+    for elem in &doc.elements {
+        if let ElementKind::Image { image_index } = elem.kind
+            && let Some(slot) = used.get_mut(image_index as usize)
+        {
+            *slot = true;
+        }
+    }
     let elements = std::mem::take(&mut doc.elements);
     let mut promoted = Vec::with_capacity(elements.len());
 

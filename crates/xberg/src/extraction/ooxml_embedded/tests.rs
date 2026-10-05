@@ -1034,8 +1034,10 @@ fn merge_children_into_body_budgets_the_inline_count() {
         !texts.iter().any(|t| t.contains("正文三")),
         "budget must stop the third body"
     );
-    // The children list itself is untouched for structured consumers.
-    assert_eq!(doc.children.as_ref().map_or(0, |c| c.len()), 4);
+    // The merge takes `children` as a borrowed slice and never touches
+    // `document.children` (see `merge_children_into_body`'s contract): callers
+    // preserve the list for structured consumers, e.g. `build_archive_doc_inner`.
+    assert!(doc.children.is_none(), "the merge itself must not populate children");
     assert_eq!(doc.processing_warnings.len(), 1);
     let warning = &doc.processing_warnings[0];
     assert_eq!(warning.source, "archive_members");
