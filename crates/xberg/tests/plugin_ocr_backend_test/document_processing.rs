@@ -96,6 +96,7 @@ fn test_ocr_backend_document_processing_fallback() {
     };
 
     let config = ExtractionConfig {
+        use_cache: false,
         ocr: Some(ocr_config),
         force_ocr: true,
         ..Default::default()
@@ -168,6 +169,7 @@ fn test_ocr_backend_document_processing_override() {
     // `should_use_per_page_ocr_only_when_effective_margins_are_nonzero`. Opt out explicitly so
     // this test exercises the document override it is named for. ~keep
     let config = ExtractionConfig {
+        use_cache: false,
         ocr: Some(ocr_config),
         force_ocr: true,
         pdf_options: Some(PdfConfig {
@@ -235,6 +237,7 @@ fn test_ocr_backend_document_processing_missing_path_fallback() {
     };
 
     let config = ExtractionConfig {
+        use_cache: false,
         ocr: Some(ocr_config),
         force_ocr: true,
         ..Default::default()

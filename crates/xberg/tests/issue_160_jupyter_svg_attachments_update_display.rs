@@ -27,8 +27,9 @@ const PNG_1X1_BASE64: &str =
 const SVG_MARKUP: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\"><rect width=\"1\" height=\"1\"/></svg>";
 
 /// A `display_data` output whose only representation is `image/svg+xml` must
-/// be turned into an `ExtractedImage` with `format == "svg"` carrying the raw
-/// SVG markup as its bytes, not silently dropped.
+/// be turned into an `ExtractedImage`, not silently dropped. Under the fork
+/// default (FORK.md 2026-10-04) the SVG is re-encoded to a previewable PNG;
+/// an explicit `native` output format preserves the raw SVG markup bytes.
 #[test]
 fn should_extract_svg_output_as_image() {
     let config = ExtractionConfig::default();
@@ -61,18 +62,40 @@ fn should_extract_svg_output_as_image() {
         .expect("notebook extraction should succeed");
 
     let images = result.images.as_ref().expect("images must be populated");
-    let svg_images: Vec<_> = images.iter().filter(|img| img.format == "svg").collect();
-
     assert_eq!(
-        svg_images.len(),
+        images.len(),
         1,
-        "expected exactly one svg image, got images: {:?}",
-        images
+        "the SVG output must survive as an image, got images: {images:?}"
     );
     assert_eq!(
-        svg_images[0].data.as_ref(),
-        SVG_MARKUP.as_bytes(),
-        "svg image bytes must match the raw markup exactly"
+        images[0].format.as_ref(),
+        "png",
+        "the fork default delivers PNG previews"
+    );
+    assert!(
+        images[0].data.starts_with(PNG_MAGIC),
+        "default-run bytes must carry the PNG signature"
+    );
+
+    let native = ExtractionConfig {
+        images: Some(xberg::core::config::extraction::ImageExtractionConfig {
+            output_format: xberg::core::config::extraction::ImageOutputFormat::Native,
+            ..Default::default()
+        }),
+        ..ExtractionConfig::default()
+    };
+    let result = extract_bytes_document_blocking(notebook.as_bytes(), "application/x-ipynb+json", &native)
+        .expect("native notebook extraction should succeed");
+    let images = result.images.as_ref().expect("images must be populated");
+    assert_eq!(images.len(), 1, "{images:?}");
+    assert_eq!(images[0].format.as_ref(), "svg");
+    // The engine parses and re-serializes SVG (attribute order and shapes are
+    // normalized, e.g. `rect` becomes an equivalent `path`), so assert a
+    // well-formed SVG document rather than byte-exact markup.
+    let svg = std::str::from_utf8(&images[0].data).expect("svg output stays valid UTF-8");
+    assert!(
+        svg.starts_with("<svg") && svg.trim_end().ends_with("</svg>"),
+        "native must keep a well-formed SVG document, got: {svg}"
     );
 }
 

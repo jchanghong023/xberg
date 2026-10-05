@@ -90,6 +90,36 @@ fn canonical_wire_path(path: &str) -> &str {
     }
 }
 
+/// Whether every entry the fixture requests survives in `got`, which may carry
+/// more entries.
+///
+/// Nested config blocks with `#[serde(default)]` materialize omitted fields on
+/// the way out (a staged `ocr.pipeline.stages[0].tesseract_config.psm` comes
+/// back as the full tesseract config), so the audit's contract is that
+/// *requested* keys survive, not that the wire form is verbatim. Arrays must
+/// keep their length: silently growing or shrinking a staged list changes
+/// behavior. Unknown-key typos stay a hard deserialization error
+/// (`nested_config_typos_are_rejected`), independent of this check.
+fn requested_survives(wanted: &serde_json::Value, got: &serde_json::Value) -> bool {
+    match (wanted, got) {
+        (serde_json::Value::Object(want_map), serde_json::Value::Object(got_map)) => {
+            want_map.iter().all(|(key, child)| {
+                got_map
+                    .get(key)
+                    .is_some_and(|present| requested_survives(child, present))
+            })
+        }
+        (serde_json::Value::Array(want_items), serde_json::Value::Array(got_items)) => {
+            want_items.len() == got_items.len()
+                && want_items
+                    .iter()
+                    .zip(got_items)
+                    .all(|(child, present)| requested_survives(child, present))
+        }
+        _ => wanted == got,
+    }
+}
+
 #[test]
 fn nested_config_typos_are_rejected() {
     let cases = [
@@ -169,7 +199,7 @@ fn every_fixture_config_key_survives_a_round_trip() {
 
         for (leaf_path, wanted) in requested {
             match lookup(&round_tripped, canonical_wire_path(&leaf_path)) {
-                Some(got) if got == &wanted => {}
+                Some(got) if requested_survives(&wanted, got) => {}
                 Some(got) => failures.push(format!(
                     "{}: `{leaf_path}` round-tripped to {got} instead of {wanted}",
                     path.display()

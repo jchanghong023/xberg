@@ -918,16 +918,28 @@ mod tests {
             crate::cache::blake3_hash_file(&path).unwrap(),
             hash_extraction_config(normalized.as_ref(), "application/pdf")
         );
-        let stored = get_extraction_cache()
-            .unwrap()
-            .get(
-                &cache_key,
-                path.to_str(),
-                config.cache_namespace.as_deref(),
-                config.cache_ttl_secs,
-            )
-            .unwrap()
-            .expect("the downgraded result must be cached under the original request");
+        // Concurrent tests register plugins while this extraction runs; the
+        // cache write is deliberately skipped while lifecycle generations move.
+        // Retry until a stable-lifecycle window caches the entry, which is the
+        // production norm for any long-lived caller.
+        let cache = get_extraction_cache().unwrap();
+        let mut stored = None;
+        for _ in 0..10 {
+            stored = cache
+                .get(
+                    &cache_key,
+                    path.to_str(),
+                    config.cache_namespace.as_deref(),
+                    config.cache_ttl_secs,
+                )
+                .unwrap();
+            if stored.is_some() {
+                break;
+            }
+            let _ = public_file_extract(&path, &config).await.unwrap();
+        }
+        let stored =
+            stored.expect("the downgraded result must be cached under the original request once generations settle");
         assert_auto_mode_count(&deserialize_extraction_cache_entry(&stored).unwrap().result, 1);
         let cached = public_file_extract(&path, &config).await.unwrap();
         assert_auto_mode_count(&cached, 1);

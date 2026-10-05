@@ -41,7 +41,9 @@ async fn issue_135_block_level_raw_html_captured() {
 }
 
 /// #145: an inline SVG data URI is decoded into an extracted image instead of being
-/// silently dropped.
+/// silently dropped. Under the fork default (FORK.md 2026-10-04) the decoded SVG is
+/// then re-encoded to a previewable PNG, so the delivered image reports `png` and
+/// carries the PNG signature.
 #[tokio::test]
 async fn issue_145_inline_svg_data_uri_decoded() {
     let svg = r#"<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" height="1"/></svg>"#;
@@ -56,7 +58,11 @@ async fn issue_145_inline_svg_data_uri_decoded() {
         .images
         .expect("SVG data URI should decode into an extracted image");
     assert_eq!(images.len(), 1, "expected exactly one decoded image: {images:?}");
-    assert_eq!(images[0].format.as_ref(), "svg");
+    assert_eq!(images[0].format.as_ref(), "png");
+    assert!(
+        images[0].data.starts_with(b"\x89PNG\r\n\x1a\n"),
+        "the decoded SVG must be delivered as PNG bytes under the fork default"
+    );
 }
 
 /// #225: TOML frontmatter (`+++`) is recognized and its `title` field reaches document

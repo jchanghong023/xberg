@@ -67,14 +67,16 @@ fn config_with_output_format(output_format: ImageOutputFormat) -> ExtractionConf
     }
 }
 
-/// Native passthrough: without specifying an output format (or by explicitly
-/// choosing `Native`), the images returned reflect whatever format the extractor
-/// produced from the PDF. No re-encode pass is applied, so the format field must
-/// be consistent with a raw PDF embedded image (typically "jpeg" or "png").
+/// Native passthrough vs the fork default: explicitly choosing `Native` keeps
+/// whatever format the extractor produced from the PDF (typically "jpeg"), while
+/// the fork default re-encodes every extracted image to PNG unless native is
+/// requested explicitly (FORK.md 2026-10-04: omitted `images.output_format` is
+/// `png`, a deliberate divergence from upstream's native default). Both runs
+/// must still extract the same number of images.
 ///
-/// Verify this is stable by extracting twice — once with `Native` (explicit) and
-/// once without an `ImageExtractionConfig.output_format` field — and confirming
-/// both runs produce the same set of format strings.
+/// Verify this by extracting twice — once with `Native` (explicit) and once with
+/// the default `ImageExtractionConfig` — and confirming the native run keeps the
+/// source format while the default run delivers PNG.
 #[cfg(feature = "pdf")]
 #[test]
 fn pdf_native_passthrough() {
@@ -123,9 +125,20 @@ fn pdf_native_passthrough() {
     let formats_native: Vec<&str> = images_native.iter().map(|i| i.format.as_ref()).collect();
     let formats_default: Vec<&str> = images_default.iter().map(|i| i.format.as_ref()).collect();
     assert_eq!(
-        formats_native, formats_default,
-        "Native explicit and Default must produce identical format strings per image"
+        formats_native,
+        vec!["jpeg"],
+        "explicit Native must keep this fixture's embedded JPEG source format"
     );
+    assert!(
+        formats_default.iter().all(|format| *format == "png"),
+        "the fork default must deliver PNG, got {formats_default:?}"
+    );
+    for image in images_default {
+        assert!(
+            image.data.starts_with(PNG_MAGIC),
+            "default-run bytes must carry the PNG signature"
+        );
+    }
 }
 
 /// Force PNG: every extracted image must report `format == "png"` and its raw

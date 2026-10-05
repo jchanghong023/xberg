@@ -265,6 +265,8 @@ fn test_extraction_config_no_unknown_fields_in_default() {
         "layout",
         "max_archive_depth",
         "max_embedded_file_bytes",
+        // (fork) Large-document auto-downgrade threshold; see core/auto_mode.rs.
+        "auto_fast_pages",
         "mime_detection_policy",
         "extraction_timeout_secs",
         "tree_sitter",

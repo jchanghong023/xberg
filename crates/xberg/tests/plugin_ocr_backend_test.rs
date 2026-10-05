@@ -312,6 +312,7 @@ fn test_ocr_backend_used_for_image_extraction() {
     };
 
     let config = ExtractionConfig {
+        use_cache: false,
         ocr: Some(ocr_config),
         force_ocr: true,
         ..Default::default()
@@ -377,6 +378,7 @@ fn test_ocr_backend_receives_correct_parameters() {
     };
 
     let config = ExtractionConfig {
+        use_cache: false,
         ocr: Some(ocr_config),
         force_ocr: true,
         ..Default::default()
@@ -430,6 +432,7 @@ fn test_ocr_backend_returns_correct_format() {
     };
 
     let config = ExtractionConfig {
+        use_cache: false,
         ocr: Some(ocr_config),
         force_ocr: true,
         ..Default::default()
@@ -481,6 +484,7 @@ fn test_ocr_backend_error_handling() {
     };
 
     let config = ExtractionConfig {
+        use_cache: false,
         ocr: Some(ocr_config),
         force_ocr: true,
         ..Default::default()
@@ -532,6 +536,7 @@ fn test_ocr_backend_validation_error() {
     };
 
     let config = ExtractionConfig {
+        use_cache: false,
         ocr: Some(ocr_config),
         force_ocr: true,
         ..Default::default()
@@ -597,6 +602,7 @@ fn test_switching_between_ocr_backends() {
     };
 
     let config1 = ExtractionConfig {
+        use_cache: false,
         ocr: Some(ocr_config1),
         force_ocr: false,
         ..Default::default()
@@ -621,6 +627,7 @@ fn test_switching_between_ocr_backends() {
     };
 
     let config2 = ExtractionConfig {
+        use_cache: false,
         ocr: Some(ocr_config2),
         force_ocr: false,
         ..Default::default()
