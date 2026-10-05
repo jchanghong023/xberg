@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (Windows fork)
+
+- Independent JBIG2 files now use the bounded JBIG2 decoder for metadata and PNG output, not the unsupported generic image decoder. A synthesized single-page fixture was checked pixel-for-pixel against an independent MuPDF render; malformed headers still fail.
+- Public file extraction now applies automatic large-document mode before extraction and preserves its `auto_mode` warning. Explicit normal mode remains isolated, and pre-cutover extraction-cache entries cannot bypass the corrected mode selection.
+- Image format registration now follows compiled decoder capabilities: a `formats-no-heic` binary does not advertise the HEIF/HEIC/AVIF family.
+- Omitted image configuration now applies default PNG output in both pipelines; explicit native output preserves source bytes. A zero-config worker uses engine Markdown defaults rather than the interactive extract command's plain-text display defaults.
+- EXIF absence and unsupported EXIF containers are no longer classified as corrupt metadata. Malformed EXIF, truncation and I/O failures remain warnings.
+- JPEG 2000 PNG output now reaches the existing bounded specialized decoder for JP2/J2K magic and supported aliases instead of reporting a missing decoder. Lossless independent RGB fixtures cover PNG pixels, native preservation, malformed input and all encoding/decoding budget failure paths.
+
 ## [1.3.2] - 2026-10-01
 
 ### Added

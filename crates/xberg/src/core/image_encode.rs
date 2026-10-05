@@ -310,13 +310,19 @@ fn target_matches_format(target: ImageOutputFormat, format: &str) -> bool {
 fn is_untranslatable(format: &str) -> bool {
     let lc = format.to_ascii_lowercase();
     let s = lc.as_str();
+    // The bounded JPEG 2000 decoder is available with the standard build's OCR
+    // feature. Builds without it must still report the missing decoder.
+    #[cfg(not(feature = "ocr"))]
+    if matches!(s, "jpeg2000" | "jp2" | "j2k" | "jpg2" | "jpc") {
+        return true;
+    }
     #[cfg(not(feature = "svg"))]
     {
-        matches!(s, "svg" | "emf" | "wmf" | "jpeg2000" | "jp2" | "j2k")
+        matches!(s, "svg" | "emf" | "wmf")
     }
     #[cfg(feature = "svg")]
     {
-        matches!(s, "emf" | "wmf" | "jpeg2000" | "jp2" | "j2k")
+        matches!(s, "emf" | "wmf")
     }
 }
 
@@ -524,11 +530,27 @@ pub(crate) fn rasterize_svg(
 /// Decode the source bytes inside `image` to a [`DynamicImage`].
 ///
 /// The dispatch order is:
-/// 1. Known format strings → the format-specific `image` decoder
-/// 2. `"heic"` / `"heif"` / `"HEIC"` / `"HEIF"` → `xberg-libheif` (feature `heic`)
-/// 3. `"unknown"` or anything else → magic-byte auto-detect
+/// 1. JPEG 2000 / JBIG2 signatures or names → budget-limited hayro decoders (`ocr`)
+/// 2. `"heic"` / `"heif"` → `xberg-libheif` (feature `heic`)
+/// 3. Known standard format strings → format-specific `image` decoder; otherwise magic bytes
 fn decode_source(image: &ExtractedImage, limits: &SecurityLimits) -> Result<DynamicImage, EncodeWarning> {
     let format_lc = image.format.to_ascii_lowercase();
+
+    #[cfg(feature = "ocr")]
+    if matches!(
+        format_lc.as_str(),
+        "jpeg2000" | "jp2" | "j2k" | "jpg2" | "jpc" | "jbig2" | "jb2"
+    ) || crate::extraction::image::is_jp2(&image.data)
+        || crate::extraction::image::is_j2k(&image.data)
+        || crate::extraction::image::is_jbig2(&image.data)
+    {
+        return crate::extraction::image::decode_image_with_security_limits(&image.data, limits).map_err(|error| {
+            EncodeWarning::DecodeFailed {
+                source_format: image.format.to_string(),
+                message: error.to_string(),
+            }
+        });
+    }
 
     #[cfg(feature = "heic")]
     if matches!(format_lc.as_str(), "heic" | "heif") {

@@ -474,13 +474,47 @@ async fn extract_file_uncached(path: &Path, mime_type: &str, config: &Extraction
 
     crate::extractors::ensure_initialized()?;
 
+    // Probe only cache misses, inside the existing timeout/cancellation scope.
+    // The caller's config remains the cache identity; the effective fast config
+    // is request-local and reaches both extract_path and the processing pipeline.
+    let threshold = config.auto_fast_pages;
+    #[cfg(all(feature = "tokio-runtime", not(target_arch = "wasm32")))]
+    let auto_downgrade = if threshold == 0 {
+        None
+    } else {
+        let owned_path = path.to_path_buf();
+        tokio::task::spawn_blocking(move || crate::core::auto_mode::evaluate_file(&owned_path, threshold))
+            .await
+            .ok()
+            .flatten()
+    };
+    #[cfg(any(not(feature = "tokio-runtime"), target_arch = "wasm32"))]
+    let auto_downgrade = crate::core::auto_mode::evaluate_file(path, threshold);
+    let auto_config;
+    let config = if auto_downgrade.is_some() {
+        let mut owned = config.clone();
+        owned.disable_expensive_document_processing();
+        auto_config = owned;
+        &auto_config
+    } else {
+        config
+    };
+
     let candidates = {
         let registry = crate::plugins::registry::get_document_extractor_registry();
         let registry_read = registry.read();
         registry_read.get_candidates(path, mime_type)
     };
 
-    extract_with_candidates(path, mime_type, config, candidates).await
+    let mut result = extract_with_candidates(path, mime_type, config, candidates).await?;
+    if let Some(decision) = auto_downgrade {
+        crate::core::diagnostics::push_warning(
+            &mut result.processing_warnings,
+            "auto_mode",
+            decision.warning_message(),
+        );
+    }
+    Ok(result)
 }
 
 /// Tries every extractor `candidates` in order (highest priority first,
@@ -708,6 +742,52 @@ mod tests {
         ));
     }
 
+    // FORK.md：省略 images 仍须交付可预览 PNG，显式 native 保留源字节。
+    #[cfg(all(feature = "ocr", feature = "image-encode"))]
+    #[tokio::test]
+    async fn public_image_defaults_encode_png_and_preserve_explicit_native() {
+        use crate::core::config::extraction::{ImageExtractionConfig, ImageOutputFormat};
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("image.jb2");
+        let source = include_bytes!("../../extraction/image/fixtures/synthetic-valid.jb2");
+        std::fs::write(&path, source).unwrap();
+        let config = ExtractionConfig {
+            disable_ocr: true,
+            use_cache: false,
+            ..Default::default()
+        };
+        let output = crate::extract(crate::ExtractInput::from_uri(path.to_string_lossy()), &config)
+            .await
+            .unwrap();
+        let document = &output.results[0];
+        let image = &document.images.as_ref().unwrap()[0];
+        assert_eq!(image.format.as_ref(), "png");
+        assert!(document.content.contains("](image_0.png)"), "{}", document.content);
+        let expected = image::load_from_memory(include_bytes!("../../extraction/image/fixtures/synthetic-valid.png"))
+            .unwrap()
+            .to_luma8();
+        assert_eq!(image::load_from_memory(&image.data).unwrap().to_luma8(), expected);
+        assert!(
+            document.processing_warnings.is_empty(),
+            "{:?}",
+            document.processing_warnings
+        );
+
+        let native = ExtractionConfig {
+            images: Some(ImageExtractionConfig {
+                output_format: ImageOutputFormat::Native,
+                ..Default::default()
+            }),
+            ..config
+        };
+        let output = crate::extract(crate::ExtractInput::from_uri(path.to_string_lossy()), &native)
+            .await
+            .unwrap();
+        let image = &output.results[0].images.as_ref().unwrap()[0];
+        assert_eq!(image.data.as_ref(), source);
+        assert!(output.results[0].content.contains("](image_0.JBIG2)"));
+    }
+
     #[tokio::test]
     async fn should_report_missing_file_before_invalid_ocr_configuration() {
         let directory = tempdir().unwrap();
@@ -726,6 +806,214 @@ mod tests {
             error,
             XbergError::Io(source) if source.kind() == std::io::ErrorKind::NotFound
         ));
+    }
+
+    #[cfg(any(feature = "pdf", feature = "office"))]
+    async fn public_file_extract(path: &Path, config: &ExtractionConfig) -> Result<ExtractedDocument> {
+        let output = crate::extract(crate::ExtractInput::from_uri(path.to_string_lossy()), config).await?;
+        assert_eq!(output.results.len(), 1);
+        Ok(output.results.into_iter().next().unwrap())
+    }
+
+    #[cfg(any(feature = "pdf", feature = "office"))]
+    fn assert_auto_mode_count(document: &ExtractedDocument, expected: usize) {
+        assert_eq!(
+            document
+                .processing_warnings
+                .iter()
+                .filter(|warning| warning.source == "auto_mode")
+                .count(),
+            expected,
+            "{:?}",
+            document.processing_warnings
+        );
+    }
+
+    #[cfg(feature = "pdf")]
+    fn write_auto_mode_pdf(path: &Path, count: u32) {
+        use lopdf::{Document, Object, Stream, dictionary};
+        let mut pdf = Document::with_version("1.4");
+        let pages_id = pdf.new_object_id();
+        let font_id = pdf.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+        });
+        let content_id = pdf.add_object(Stream::new(
+            dictionary! {},
+            b"BT /F1 12 Tf 20 100 Td (AUTO MODE native document text remains readable without any OCR model or network dependency.) Tj ET".to_vec(),
+        ));
+        let kids: Vec<Object> = (0..count)
+            .map(|_| {
+                pdf.add_object(dictionary! {
+                    "Type" => "Page",
+                    "Parent" => pages_id,
+                    "MediaBox" => vec![0.into(), 0.into(), 600.into(), 200.into()],
+                    "Resources" => dictionary! { "Font" => dictionary! { "F1" => font_id } },
+                    "Contents" => content_id,
+                })
+                .into()
+            })
+            .collect();
+        pdf.objects.insert(
+            pages_id,
+            dictionary! { "Type" => "Pages", "Kids" => kids, "Count" => count }.into(),
+        );
+        let catalog_id = pdf.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
+        pdf.trailer.set("Root", catalog_id);
+        pdf.save(path).unwrap();
+    }
+
+    #[cfg(all(feature = "pdf", feature = "ocr", not(sceptre_ocr)))]
+    #[tokio::test]
+    async fn public_file_auto_mode_disables_ocr_caches_one_warning_and_preserves_config() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("large.pdf");
+        write_auto_mode_pdf(&path, 501);
+        let namespace = format!("auto-mode-{}", dir.path().file_name().unwrap().to_string_lossy());
+        let config = ExtractionConfig {
+            force_ocr: true,
+            ocr: Some(crate::core::config::OcrConfig {
+                // A valid backend name, deliberately not compiled into this
+                // feature set: validation passes, real OCR resolution must fail.
+                backend: "sceptre".to_string(),
+                ..Default::default()
+            }),
+            cache_namespace: Some(namespace),
+            ..Default::default()
+        };
+        let first = public_file_extract(&path, &config).await.unwrap();
+        assert!(first.content.contains("AUTO MODE native document text"));
+        assert_auto_mode_count(&first, 1);
+        assert!(first.processing_warnings.iter().any(
+            |warning| warning.source == "auto_mode" && warning.message.contains("501 pages > auto_fast_pages=500")
+        ));
+        assert_eq!(
+            first
+                .metadata
+                .additional
+                .get("extraction_method")
+                .and_then(serde_json::Value::as_str),
+            Some("native")
+        );
+
+        // Inspect the real disk cache before the second public call, so equal
+        // results alone cannot disguise two uncached extractions.
+        let normalized = fill_source_name_from_path(config.normalized(), &path);
+        let cache_key = format!(
+            "{}_{}",
+            crate::cache::blake3_hash_file(&path).unwrap(),
+            hash_extraction_config(normalized.as_ref(), "application/pdf")
+        );
+        let stored = get_extraction_cache()
+            .unwrap()
+            .get(
+                &cache_key,
+                path.to_str(),
+                config.cache_namespace.as_deref(),
+                config.cache_ttl_secs,
+            )
+            .unwrap()
+            .expect("the downgraded result must be cached under the original request");
+        assert_auto_mode_count(&deserialize_extraction_cache_entry(&stored).unwrap().result, 1);
+        let cached = public_file_extract(&path, &config).await.unwrap();
+        assert_auto_mode_count(&cached, 1);
+        assert_eq!(cached.content, first.content);
+        assert!(config.force_ocr);
+        assert!(!config.disable_ocr);
+        assert!(config.ocr.as_ref().unwrap().enabled);
+        assert_eq!(config.auto_fast_pages, 500);
+
+        let small = dir.path().join("small.pdf");
+        write_auto_mode_pdf(&small, 1);
+        let error = public_file_extract(&small, &config)
+            .await
+            .expect_err("the next request must still invoke the deliberately unavailable OCR backend");
+        assert!(error.to_string().contains("sceptre"), "{error}");
+    }
+
+    #[cfg(feature = "pdf")]
+    #[tokio::test]
+    async fn public_file_auto_mode_keeps_threshold_and_explicit_normal_requests_normal() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("threshold.pdf");
+        write_auto_mode_pdf(&path, 500);
+        let config = ExtractionConfig {
+            use_cache: false,
+            ..Default::default()
+        };
+        let threshold = public_file_extract(&path, &config).await.unwrap();
+        assert!(threshold.content.contains("AUTO MODE native document text"));
+        assert_auto_mode_count(&threshold, 0);
+
+        write_auto_mode_pdf(&path, 501);
+        let normal = ExtractionConfig {
+            auto_fast_pages: 0,
+            ..config
+        };
+        let explicit = public_file_extract(&path, &normal).await.unwrap();
+        assert!(explicit.content.contains("AUTO MODE native document text"));
+        assert_auto_mode_count(&explicit, 0);
+    }
+
+    #[cfg(feature = "pdf")]
+    #[tokio::test]
+    async fn public_file_auto_mode_leaves_broken_pdf_probe_to_native_recovery() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("recoverable.pdf");
+        write_auto_mode_pdf(&path, 3);
+        let mut broken = std::fs::read(&path).unwrap();
+        let startxref = broken.windows(9).position(|bytes| bytes == b"startxref").unwrap();
+        broken.truncate(startxref);
+        std::fs::write(&path, broken).unwrap();
+        let config = ExtractionConfig {
+            auto_fast_pages: 1,
+            use_cache: false,
+            ..Default::default()
+        };
+        let document = public_file_extract(&path, &config).await.unwrap();
+        assert!(document.content.contains("AUTO MODE native document text"));
+        assert_auto_mode_count(&document, 0);
+    }
+
+    #[cfg(feature = "office")]
+    #[tokio::test]
+    async fn public_file_auto_mode_keeps_unknown_and_bad_ooxml_page_probes_normal() {
+        use std::io::Write;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("unknown.docx");
+        let config = ExtractionConfig {
+            use_cache: false,
+            auto_fast_pages: 1,
+            ..Default::default()
+        };
+        for properties in ["<Properties/>", "<Properties><Pages>not-a-number</Pages></Properties>"] {
+            let mut zip = zip::ZipWriter::new(std::fs::File::create(&path).unwrap());
+            let options = zip::write::SimpleFileOptions::default();
+            for (name, body) in [
+                (
+                    "[Content_Types].xml",
+                    r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>"#,
+                ),
+                (
+                    "word/document.xml",
+                    r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>OOXML native content survives an unknown page count.</w:t></w:r></w:p></w:body></w:document>"#,
+                ),
+                ("docProps/app.xml", properties),
+            ] {
+                zip.start_file(name, options).unwrap();
+                zip.write_all(body.as_bytes()).unwrap();
+            }
+            zip.finish().unwrap();
+            let document = public_file_extract(&path, &config).await.unwrap();
+            assert!(document.content.contains("OOXML native content survives"));
+            assert_auto_mode_count(&document, 0);
+        }
+        let text = dir.path().join("unknown.txt");
+        std::fs::write(&text, "Plain text survives without a page-count probe.").unwrap();
+        let document = public_file_extract(&text, &config).await.unwrap();
+        assert!(document.content.contains("Plain text survives"));
+        assert_auto_mode_count(&document, 0);
     }
 }
 
@@ -840,6 +1128,9 @@ fn hash_extraction_config(config: &ExtractionConfig, mime_type: &str) -> String 
 
     let mut hasher = blake3::Hasher::new();
     hasher.update(mime_type.as_bytes());
+    // The file auto-mode warning is now part of the cached result. Do not reuse
+    // pre-cutover entries produced by the same original request configuration.
+    hasher.update(b"\x00file-auto-mode-v1\x00");
     if let Ok(bytes) = rmp_serde::to_vec(&normalized) {
         hasher.update(&bytes);
     }

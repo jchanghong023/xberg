@@ -215,11 +215,10 @@ pub(crate) fn extract_exif_data(bytes: &[u8]) -> HashMap<String, String> {
 /// Diagnose why [`extract_exif_data`] returned no usable data, without redoing
 /// the full per-tag extraction.
 ///
-/// Returns `None` when the container was read and the EXIF block (if any)
-/// parsed cleanly — including the common, non-degraded case where the image
-/// simply carries no EXIF block at all. Returns `Some(reason)` when the media
-/// source or the EXIF block itself could not be read, which is the case
-/// [`extract_exif_data`] silently swallows into an empty map.
+/// Returns `None` when the EXIF block parsed cleanly, the container cannot carry
+/// EXIF supported by this parser, or there is no EXIF block. UnsupportedFormat
+/// and ExifNotFound are absence classifications, not damaged metadata. Malformed
+/// blocks, truncated input and I/O errors remain observable warnings.
 #[cfg(any(feature = "ocr", feature = "ocr-wasm", feature = "heic"))]
 fn exif_parse_failure_reason(bytes: &[u8]) -> Option<String> {
     use nom_exif::{MediaParser, MediaSource};
@@ -227,15 +226,15 @@ fn exif_parse_failure_reason(bytes: &[u8]) -> Option<String> {
     let bytes_owned = bytes::Bytes::copy_from_slice(bytes);
     let ms = match MediaSource::from_memory(bytes_owned) {
         Ok(ms) => ms,
+        Err(nom_exif::Error::UnsupportedFormat | nom_exif::Error::ExifNotFound) => return None,
         Err(error) => return Some(format!("failed to read media source: {error}")),
     };
 
     let mut parser = MediaParser::new();
-    if let Err(error) = parser.parse_exif(ms) {
-        return Some(format!("failed to parse EXIF block: {error}"));
+    match parser.parse_exif(ms) {
+        Ok(_) | Err(nom_exif::Error::ExifNotFound) => None,
+        Err(error) => Some(format!("failed to parse EXIF block: {error}")),
     }
-
-    None
 }
 
 /// Build a [`crate::types::ProcessingWarning`] describing degraded EXIF/image
@@ -382,5 +381,23 @@ mod tests {
     fn returns_empty_map_for_non_image_bytes() {
         assert!(extract_exif_data(b"hello world").is_empty());
         assert!(extract_exif_data(&[]).is_empty());
+    }
+
+    #[cfg(feature = "ocr")]
+    #[test]
+    fn absent_exif_is_not_degradation_but_corrupt_exif_is_reported() {
+        let mut jpeg = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(2, 2, image::Rgb([255, 255, 255])))
+            .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+            .unwrap();
+        let jpeg = jpeg.into_inner();
+        assert!(extract_exif_warning(&jpeg).is_none());
+        let payload = b"Exif\0\0invalid TIFF header";
+        let mut damaged = jpeg[..2].to_vec();
+        damaged.extend_from_slice(&[0xff, 0xe1]);
+        damaged.extend_from_slice(&u16::try_from(payload.len() + 2).unwrap().to_be_bytes());
+        damaged.extend_from_slice(payload);
+        damaged.extend_from_slice(&jpeg[2..]);
+        assert_eq!(extract_exif_warning(&damaged).unwrap().source.as_ref(), "exif");
     }
 }

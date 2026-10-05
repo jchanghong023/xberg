@@ -975,7 +975,7 @@ fn run_cli() -> Result<()> {
             // sees them; every other unknown key still fails the merge.
             let (startup, sanitized) =
                 WorkerStartup::strip_worker_keys(config_json.as_deref(), config_json_base64.as_deref())?;
-            let mut config = load_config(config_path, !no_config_discovery)?;
+            let mut config = commands::config::load_worker_config(config_path, !no_config_discovery)?;
             apply_json_overrides(&mut config, sanitized, None)?;
             worker_command(config, startup)?;
         }

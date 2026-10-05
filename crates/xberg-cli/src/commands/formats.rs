@@ -26,9 +26,9 @@ use xberg::{SupportedFormat, list_supported_formats};
 /// Return the formats this binary can actually extract.
 ///
 /// The static catalogue is filtered down to entries whose MIME type resolves to a registered
-/// extractor, so a format is reported only when the feature providing its extractor was compiled
-/// in. Wildcard registrations (for example `image/*`) resolve through the registry's own
-/// fallback, so families are handled without special-casing here.
+/// extractor, so a format is reported only when its extractor and decoder support were compiled
+/// in. Image decoder feature gates live in the image extractor's MIME declarations, not in a
+/// second CLI-side capability table. Custom wildcard registrations use the registry's fallback.
 ///
 /// The returned entries keep the catalogue's ordering (sorted by extension) and its
 /// [`SupportedFormat`] shape, so the `--format json` and `--format toon` output shapes are

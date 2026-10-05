@@ -32,7 +32,15 @@ use xberg::ExtractionConfig;
 /// - Config file cannot be read or parsed
 /// - Config file contains invalid extraction settings
 pub fn load_config(config_path: Option<PathBuf>, discover: bool) -> Result<ExtractionConfig> {
-    let base = cli_default_config();
+    load_config_over(config_path, discover, cli_default_config())
+}
+
+/// worker 交付引擎的 Markdown 文档，不继承交互式 extract 的纯文本展示缺省值。
+pub fn load_worker_config(config_path: Option<PathBuf>, discover: bool) -> Result<ExtractionConfig> {
+    load_config_over(config_path, discover, ExtractionConfig::default())
+}
+
+fn load_config_over(config_path: Option<PathBuf>, discover: bool, base: ExtractionConfig) -> Result<ExtractionConfig> {
     if let Some(path) = config_path {
         ExtractionConfig::from_file_over(&base, &path).with_context(|| format!("Failed to load configuration from '{}'. Ensure the file exists, is readable, and contains valid configuration.", path.display()))
     } else if discover {

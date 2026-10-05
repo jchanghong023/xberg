@@ -378,13 +378,25 @@ pub(crate) fn is_jbig2(bytes: &[u8]) -> bool {
     bytes.len() >= JBIG2_MAGIC.len() && bytes[..JBIG2_MAGIC.len()] == *JBIG2_MAGIC
 }
 
+/// Parse segment headers and page information without allocating decoded pixels.
+#[cfg(feature = "ocr")]
+fn parse_jbig2_with_security_limits<'a>(bytes: &'a [u8], limits: &SecurityLimits) -> Result<hayro_jbig2::Image<'a>> {
+    validate_encoded_image_input(bytes, limits)?;
+    let image = hayro_jbig2::Image::new(bytes)
+        .map_err(|error| XbergError::parsing(format!("JBIG2 header parse failed: {error}")))?;
+    let (width, height) = (image.width(), image.height());
+    let peak_live_bytes = jbig2_gray_peak_live_bytes(width, height, bytes.len())?;
+    ImageDecodeBudget::from_security_limits(limits).validate(width, height, peak_live_bytes)?;
+    Ok(image)
+}
+
 /// Decode JBIG2 image bytes to a grayscale image using hayro-jbig2.
 ///
 /// JBIG2 is a bi-level (1-bit) image compression format commonly used in scanned PDFs.
 /// The decoder converts black/white pixels to grayscale (0/255) for OCR processing.
 #[cfg(feature = "ocr")]
 fn decode_jbig2_to_gray_with_security_limits(bytes: &[u8], limits: &SecurityLimits) -> Result<image::GrayImage> {
-    use hayro_jbig2::{Decoder, Image};
+    use hayro_jbig2::Decoder;
 
     struct GrayDecoder {
         pixels: Vec<u8>,
@@ -421,13 +433,10 @@ fn decode_jbig2_to_gray_with_security_limits(bytes: &[u8], limits: &SecurityLimi
         fn next_line(&mut self) {}
     }
 
-    validate_encoded_image_input(bytes, limits)?;
-    let jbig2_image = Image::new(bytes).map_err(|e| XbergError::parsing(format!("JBIG2 decode failed: {e}")))?;
+    let jbig2_image = parse_jbig2_with_security_limits(bytes, limits)?;
     let width = jbig2_image.width();
     let height = jbig2_image.height();
     let decoded_bytes = decoded_byte_count(width, height, u64::from(image::ColorType::L8.bytes_per_pixel()))?;
-    let peak_live_bytes = jbig2_gray_peak_live_bytes(width, height, bytes.len())?;
-    ImageDecodeBudget::from_security_limits(limits).validate(width, height, peak_live_bytes)?;
 
     let max_pixels = usize::try_from(decoded_bytes)
         .map_err(|_| image_dimension_error(width, height, decoded_bytes, decoded_bytes))?;
@@ -442,7 +451,7 @@ fn decode_jbig2_to_gray_with_security_limits(bytes: &[u8], limits: &SecurityLimi
     };
     jbig2_image
         .decode(&mut decoder)
-        .map_err(|e| XbergError::parsing(format!("JBIG2 decode failed: {e}")))?;
+        .map_err(|e| XbergError::parsing(format!("JBIG2 pixel decode failed: {e}")))?;
     if decoder.exceeded_dimensions {
         return Err(XbergError::Validation {
             message: format!("JBIG2 decompressed beyond its declared {width}x{height} image dimensions"),
@@ -665,10 +674,8 @@ pub(crate) fn decode_image_to_rgb8_with_security_limits(
     decode_standard_rgb8_with_security_limits(image_bytes, limits)
 }
 
-// Both callers are `#[cfg(feature = "ocr")]` tests in this file's `tests` module, so a
-// bare `cfg(test)` leaves it dead in any test build without `ocr` (the
-// `formula-recognition,pdf` CI leg). ~keep
-#[cfg(all(test, feature = "ocr"))]
+/// Decode an image for output conversion, preserving JBIG2's grayscale pixels.
+#[cfg(feature = "ocr")]
 pub(crate) fn decode_image_with_security_limits(
     image_bytes: &[u8],
     limits: &SecurityLimits,
@@ -688,9 +695,9 @@ pub(crate) fn decode_image_with_security_limits(
 /// Extract metadata from image bytes.
 ///
 /// Extracts dimensions, format, and EXIF data from the image.
-/// Standard formats are header-probed without allocating their pixel buffers; JPEG 2000
-/// dimensions come from JP2/J2K headers, and HEIF-family dimensions come from the primary
-/// image handle when the `heic` feature is enabled. EXIF is read from the original bytes.
+/// JBIG2 dimensions come from parsed segment headers without decoding pixels.
+/// HEIF-family dimensions come from the primary image handle when the `heic`
+/// feature is enabled. EXIF is read from the original bytes where supported.
 #[cfg(test)]
 pub(crate) fn extract_image_metadata(bytes: &[u8]) -> Result<ExtractedImageMetadata> {
     let limits = SecurityLimits::default();
@@ -702,6 +709,17 @@ pub(crate) fn extract_image_metadata_with_security_limits(
     limits: &SecurityLimits,
 ) -> Result<ExtractedImageMetadata> {
     let budget = ImageDecodeBudget::from_security_limits(limits);
+    #[cfg(feature = "ocr")]
+    if is_jbig2(bytes) {
+        let image = parse_jbig2_with_security_limits(bytes, limits)?;
+        return Ok(ExtractedImageMetadata {
+            width: image.width(),
+            height: image.height(),
+            format: "JBIG2".to_string(),
+            exif_data: HashMap::new(),
+        });
+    }
+
     if (is_jp2(bytes) || (bytes.len() >= 2 && bytes[0] == 0xFF && bytes[1] == 0x4F))
         && let Ok(metadata) = decode_jp2_metadata(bytes)
     {

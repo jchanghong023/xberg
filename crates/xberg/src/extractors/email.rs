@@ -831,7 +831,7 @@ Attachment body\r\n\
         let markdown = crate::rendering::render_markdown(&doc);
         let images = &doc.images;
         assert!(!images.is_empty(), "attachment bytes must reach the host image table");
-        let delivered = format!("image_{}.{format}", images[0].image_index, images[0].format);
+        let delivered = format!("image_{}.{}", images[0].image_index, images[0].format);
         assert!(
             markdown.contains(&format!("]({delivered})")),
             "the reference must name the delivered file, got: {markdown}"

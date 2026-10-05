@@ -598,12 +598,14 @@ fn approved_decoder_guard(relative: &str, function: &str, path: &str) -> Option<
         }
         ("extraction/image_decode.rs", "standard_image_is_single_frame", _) => Some("header-only"),
         ("extraction/image.rs", "decode_jp2_to_rgb_with_security_limits", "hayro_jpeg2000::Image::new")
-        | ("extraction/image.rs", "decode_jbig2_to_gray_with_security_limits", "hayro_jbig2::Image::new") => {
+        | ("extraction/image.rs", "parse_jbig2_with_security_limits", "hayro_jbig2::Image::new") => {
             Some("validate_encoded_image_input")
         }
-        ("extraction/image.rs", "decode_jp2_to_rgb_with_security_limits", "decoder::decode")
-        | ("extraction/image.rs", "decode_jbig2_to_gray_with_security_limits", "decoder::decode") => {
+        ("extraction/image.rs", "decode_jp2_to_rgb_with_security_limits", "decoder::decode") => {
             Some("method::validate")
+        }
+        ("extraction/image.rs", "decode_jbig2_to_gray_with_security_limits", "decoder::decode") => {
+            Some("parse_jbig2_with_security_limits")
         }
         ("extraction/image.rs", "extract_image_metadata_with_security_limits", _) => Some("method::validate"),
         ("extraction/image.rs", "detect_tiff_frame_count", _) => Some("header-only"),

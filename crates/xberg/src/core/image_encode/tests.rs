@@ -66,6 +66,199 @@ fn make_image(data: Bytes, format: &'static str) -> ExtractedImage {
     }
 }
 
+#[cfg(feature = "ocr")]
+#[test]
+fn jbig2_to_png_preserves_pixels_and_output_format() {
+    let source = include_bytes!("../../extraction/image/fixtures/synthetic-valid.jb2");
+    let expected = image::load_from_memory(include_bytes!("../../extraction/image/fixtures/synthetic-valid.png"))
+        .expect("independent MuPDF render")
+        .to_luma8();
+    for source_format in ["JBIG2", "jb2", "unknown"] {
+        let mut image = make_image(Bytes::from_static(source), source_format);
+        assert!(re_encode_default(&mut image, ImageOutputFormat::Png).expect("JBIG2 to PNG re-encode"));
+        assert_eq!(image.format.as_ref(), "png");
+        assert_eq!(image::guess_format(&image.data).expect("PNG magic"), ImageFormat::Png);
+        let actual = image::load_from_memory(&image.data)
+            .expect("previewable PNG")
+            .to_luma8();
+        assert_eq!(actual.dimensions(), (320, 96));
+        assert_eq!(
+            actual, expected,
+            "re-encoding must retain every independently rendered pixel"
+        );
+    }
+}
+
+#[cfg(feature = "ocr")]
+#[test]
+fn jbig2_to_png_budget_failure_preserves_source() {
+    let source = Bytes::from_static(include_bytes!("../../extraction/image/fixtures/synthetic-valid.jb2"));
+    let mut image = make_image(source.clone(), "jb2");
+    let limits = SecurityLimits {
+        max_content_size: 320 * 96,
+        ..Default::default()
+    };
+    let result = re_encode(
+        &mut image,
+        ImageOutputFormat::Png,
+        &limits,
+        &crate::core::config::extraction::ImageExtractionConfig::default(),
+        #[cfg(feature = "svg")]
+        &SvgOptions::default(),
+    );
+    assert!(
+        matches!(result, Err(EncodeWarning::DecodeFailed { ref message, .. })
+            if message.contains("security_limits.max_content_size")),
+        "the request's live-byte budget must stop decoding: {result:?}"
+    );
+    assert_eq!(image.data, source);
+    assert_eq!(image.format.as_ref(), "jb2");
+}
+
+#[cfg(feature = "ocr")]
+#[test]
+fn truncated_jbig2_to_png_preserves_decoder_error_and_source() {
+    let source = include_bytes!("../../extraction/image/fixtures/synthetic-valid.jb2");
+    let truncated = Bytes::copy_from_slice(&source[..source.len() - 1]);
+    let mut image = make_image(truncated.clone(), "jb2");
+    let result = re_encode_default(&mut image, ImageOutputFormat::Png);
+    assert!(
+        matches!(result, Err(EncodeWarning::DecodeFailed { ref message, .. })
+            if message.contains("JBIG2 header parse failed")),
+        "truncation must retain the real parser error, not become Undecodable: {result:?}"
+    );
+    assert_eq!(image.data, truncated);
+    assert_eq!(image.format.as_ref(), "jb2");
+}
+
+#[cfg(feature = "ocr")]
+const LOSSLESS_RGB_JP2: &[u8] = include_bytes!("fixtures/lossless-rgb.jp2");
+#[cfg(feature = "ocr")]
+const LOSSLESS_RGB_J2K: &[u8] = include_bytes!("fixtures/lossless-rgb.j2k");
+
+#[cfg(feature = "ocr")]
+#[test]
+fn jpeg2000_images_to_png_preserve_independent_pixels_and_metadata_without_warnings() {
+    // Both fixtures were encoded losslessly by Pillow/OpenJPEG from this exact
+    // 4x3 RGB grid. Expected pixels do not come from Xberg's JPEG 2000 decoder.
+    let expected = image::RgbImage::from_raw(
+        4,
+        3,
+        vec![
+            255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 17, 83, 149, 201, 37, 109, 255, 128, 0, 0, 128,
+            255, 64, 32, 16, 127, 127, 127, 240, 224, 208,
+        ],
+    )
+    .expect("independent 4x3 RGB grid");
+    for source in [LOSSLESS_RGB_JP2, LOSSLESS_RGB_J2K] {
+        for source_format in ["JPEG2000", "jp2", "j2k", "jpg2", "jpc", "unknown"] {
+            let mut original = make_image(Bytes::from_static(source), source_format);
+            original.image_index = 7;
+            original.width = Some(4);
+            original.height = Some(3);
+            let (images, renames, warnings) = re_encode_images(
+                vec![original],
+                ImageOutputFormat::Png,
+                &SecurityLimits::default(),
+                &crate::core::config::extraction::ImageExtractionConfig::default(),
+            );
+            assert!(warnings.is_empty(), "{source_format}: {warnings:?}");
+            assert_eq!(renames, vec![(7, source_format.to_string(), "png".to_string())]);
+            assert_eq!(images.len(), 1);
+            let converted = &images[0];
+            assert_eq!(converted.format.as_ref(), "png");
+            assert_eq!(converted.image_index, 7);
+            assert_eq!((converted.width, converted.height), (Some(4), Some(3)));
+            assert_eq!(
+                image::guess_format(&converted.data).expect("PNG magic"),
+                ImageFormat::Png
+            );
+            let actual = image::load_from_memory(&converted.data)
+                .expect("consumer-previewable PNG")
+                .to_rgb8();
+            assert_eq!(actual, expected, "{source_format}: every pixel must survive");
+        }
+    }
+}
+
+#[cfg(feature = "ocr")]
+#[test]
+fn jpeg2000_images_native_preserve_source_without_warnings() {
+    for source in [LOSSLESS_RGB_JP2, LOSSLESS_RGB_J2K] {
+        let (images, renames, warnings) = re_encode_images(
+            vec![make_image(Bytes::from_static(source), "JPEG2000")],
+            ImageOutputFormat::Native,
+            &SecurityLimits::default(),
+            &crate::core::config::extraction::ImageExtractionConfig::default(),
+        );
+        assert!(warnings.is_empty());
+        assert!(renames.is_empty());
+        assert_eq!(images[0].data.as_ref(), source);
+        assert_eq!(images[0].format.as_ref(), "JPEG2000");
+    }
+}
+
+#[cfg(feature = "ocr")]
+#[test]
+fn malformed_jpeg2000_images_to_png_warn_and_preserve_source() {
+    for source in [&LOSSLESS_RGB_JP2[..12], &LOSSLESS_RGB_J2K[..4]] {
+        for source_format in ["JPEG2000", "jpg2", "jpc", "unknown"] {
+            let (images, renames, warnings) = re_encode_images(
+                vec![make_image(Bytes::from_static(source), source_format)],
+                ImageOutputFormat::Png,
+                &SecurityLimits::default(),
+                &crate::core::config::extraction::ImageExtractionConfig::default(),
+            );
+            assert!(renames.is_empty());
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(warnings[0].source.as_ref(), "image_encoder");
+            assert!(
+                warnings[0].message.contains("failed to decode"),
+                "retain the real decode failure: {:?}",
+                warnings[0]
+            );
+            assert_eq!(images[0].data.as_ref(), source);
+            assert_eq!(images[0].format.as_ref(), source_format);
+        }
+    }
+}
+
+#[cfg(feature = "ocr")]
+#[test]
+fn jpeg2000_images_to_png_security_budget_failures_warn_and_preserve_source() {
+    for source in [LOSSLESS_RGB_JP2, LOSSLESS_RGB_J2K] {
+        // Reject encoded input, then encoded + decoded RGB pixels, then encoding
+        // peak memory. A successful header probe must not bypass any budget.
+        for (max_content_size, failure) in [
+            (source.len() - 1, "failed to decode"),
+            (source.len() + 4 * 3 * 3 - 1, "failed to decode"),
+            (source.len() + 4 * 3 * 3, "failed to encode"),
+        ] {
+            let limits = SecurityLimits {
+                max_content_size,
+                ..Default::default()
+            };
+            let (images, renames, warnings) = re_encode_images(
+                vec![make_image(Bytes::from_static(source), "JPEG2000")],
+                ImageOutputFormat::Png,
+                &limits,
+                &crate::core::config::extraction::ImageExtractionConfig::default(),
+            );
+            assert!(renames.is_empty());
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(warnings[0].source.as_ref(), "image_encoder");
+            assert!(warnings[0].message.contains(failure), "{:?}", warnings[0]);
+            assert!(
+                warnings[0].message.contains("security_limits.max_content_size"),
+                "{:?}",
+                warnings[0]
+            );
+            assert_eq!(images[0].data.as_ref(), source);
+            assert_eq!(images[0].format.as_ref(), "JPEG2000");
+        }
+    }
+}
+
 #[test]
 fn native_target_no_op() {
     let original_data = make_png_bytes();

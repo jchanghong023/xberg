@@ -26,6 +26,77 @@ fn image_decode_limits(max_content_size: usize) -> crate::extractors::security::
     }
 }
 
+// Standalone PageInfo + MMR generic-region + EndPage + EndFile fixture (325 bytes).
+// The companion PNG was rendered independently by MuPDF, not by hayro-jbig2.
+#[cfg(feature = "ocr")]
+const SYNTHETIC_JBIG2: &[u8] = include_bytes!("fixtures/synthetic-valid.jb2");
+
+#[cfg(feature = "ocr")]
+#[test]
+fn metadata_jbig2_reads_page_dimensions() {
+    let metadata = extract_image_metadata(SYNTHETIC_JBIG2).expect("valid standalone JBIG2 metadata");
+    assert_eq!((metadata.width, metadata.height), (320, 96));
+    assert_eq!(metadata.format, "JBIG2");
+}
+
+#[cfg(feature = "ocr")]
+#[test]
+fn metadata_jbig2_does_not_decode_region_pixels() {
+    // Preserve valid segment framing and PageInfo, but omit the generic-region
+    // flags byte and its pixel stream. Only the pixel decoder should reject it.
+    let mut bytes = SYNTHETIC_JBIG2[..71].to_vec();
+    bytes[50..54].copy_from_slice(&17u32.to_be_bytes());
+    bytes.extend_from_slice(&SYNTHETIC_JBIG2[303..]);
+    let metadata = extract_image_metadata(&bytes).expect("metadata must only parse segment headers");
+    assert_eq!((metadata.width, metadata.height), (320, 96));
+    let error = decode_image_with_security_limits(&bytes, &SecurityLimits::default())
+        .expect_err("a missing region flags byte must fail in the real pixel decoder");
+    assert!(matches!(error, XbergError::Parsing { .. }));
+    assert!(error.to_string().contains("JBIG2 pixel decode failed"));
+}
+
+#[cfg(feature = "ocr")]
+#[test]
+fn jbig2_pixels_match_independent_mupdf_render() {
+    let decoded = decode_image_with_security_limits(SYNTHETIC_JBIG2, &SecurityLimits::default())
+        .expect("valid standalone JBIG2 pixel decode");
+    let expected =
+        image::load_from_memory(include_bytes!("fixtures/synthetic-valid.png")).expect("independent MuPDF PNG");
+    assert_eq!((decoded.width(), decoded.height()), (320, 96));
+    assert_eq!(decoded.to_luma8(), expected.to_luma8());
+}
+
+#[cfg(feature = "ocr")]
+#[test]
+fn jbig2_metadata_and_decode_enforce_security_budget() {
+    for ceiling in [SYNTHETIC_JBIG2.len() - 1, SYNTHETIC_JBIG2.len() + 320 * 96 - 1] {
+        let limits = image_decode_limits(ceiling);
+        let metadata_error = extract_image_metadata_with_security_limits(SYNTHETIC_JBIG2, &limits)
+            .expect_err("metadata must reject encoded or declared decoded bytes beyond the budget");
+        let decode_error = decode_image_with_security_limits(SYNTHETIC_JBIG2, &limits)
+            .expect_err("pixel decode must enforce the same request budget");
+        for error in [metadata_error, decode_error] {
+            assert!(matches!(error, XbergError::Validation { .. }));
+            assert!(error.to_string().contains("security_limits.max_content_size"));
+        }
+    }
+}
+
+#[cfg(feature = "ocr")]
+#[test]
+fn jbig2_truncated_segments_preserve_header_parse_error() {
+    for end in [8, 12, 53, 302, SYNTHETIC_JBIG2.len() - 1] {
+        let bytes = &SYNTHETIC_JBIG2[..end];
+        let metadata_error = extract_image_metadata(bytes).expect_err("truncated JBIG2 metadata must fail");
+        let decode_error = decode_image_with_security_limits(bytes, &SecurityLimits::default())
+            .expect_err("truncated JBIG2 decode must fail");
+        for error in [metadata_error, decode_error] {
+            assert!(matches!(error, XbergError::Parsing { .. }));
+            assert!(error.to_string().contains("JBIG2 header parse failed"));
+        }
+    }
+}
+
 #[cfg(feature = "ocr")]
 #[test]
 fn should_reject_oversized_declared_dimensions_before_ocr_decode() {

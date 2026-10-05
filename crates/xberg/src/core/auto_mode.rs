@@ -10,6 +10,8 @@
 //! profile — never errors, never upgrades.
 
 use crate::core::config::extraction::ExtractionConfig;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
 
 /// What the auto-downgrade decided, for the observable warning.
 pub(crate) struct AutoDowngrade {
@@ -55,25 +57,43 @@ fn probe_pdf_pages(_content: &[u8]) -> Option<u32> {
 }
 
 fn probe_ooxml_pages(content: &[u8]) -> Option<u32> {
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(content)).ok()?;
-    let names: Vec<String> = zip.file_names().map(str::to_string).collect();
-    let count_entries = |prefix: &str| {
-        names
-            .iter()
-            .filter(|name| name.starts_with(prefix) && name.ends_with(".xml"))
-            .count()
-    };
-    if names.iter().any(|name| name.starts_with("word/")) {
+    probe_ooxml_reader(std::io::Cursor::new(content))
+}
+
+fn probe_ooxml_reader(reader: impl Read + Seek) -> Option<u32> {
+    let mut zip = zip::ZipArchive::new(reader).ok()?;
+    if zip.file_names().any(|name| name.starts_with("word/")) {
         let mut entry = zip.by_name("docProps/app.xml").ok()?;
+        // App properties are small metadata, not document content. An oversized
+        // or dishonest ZIP entry must not turn this probe into an unbounded read.
+        const MAX_APP_PROPERTIES_BYTES: u64 = 64 * 1024;
+        if entry.size() > MAX_APP_PROPERTIES_BYTES {
+            return None;
+        }
         let mut xml = String::new();
-        std::io::Read::read_to_string(&mut entry, &mut xml).ok()?;
+        entry
+            .by_ref()
+            .take(MAX_APP_PROPERTIES_BYTES + 1)
+            .read_to_string(&mut xml)
+            .ok()?;
+        if xml.len() as u64 > MAX_APP_PROPERTIES_BYTES {
+            return None;
+        }
         extract_pages_tag(&xml)
-    } else if names.iter().any(|name| name.starts_with("ppt/slides/")) {
-        u32::try_from(count_entries("ppt/slides/")).ok()
-    } else if names.iter().any(|name| name.starts_with("xl/worksheets/")) {
-        u32::try_from(count_entries("xl/worksheets/")).ok()
     } else {
-        None
+        let prefix = if zip.file_names().any(|name| name.starts_with("ppt/slides/")) {
+            "ppt/slides/"
+        } else if zip.file_names().any(|name| name.starts_with("xl/worksheets/")) {
+            "xl/worksheets/"
+        } else {
+            return None;
+        };
+        u32::try_from(
+            zip.file_names()
+                .filter(|name| name.starts_with(prefix) && name.ends_with(".xml"))
+                .count(),
+        )
+        .ok()
     }
 }
 
@@ -97,9 +117,95 @@ pub(crate) fn evaluate(content: &[u8], config: &ExtractionConfig) -> Option<Auto
     (pages > threshold).then_some(AutoDowngrade { pages, threshold })
 }
 
+/// File probe without a document-sized byte buffer. ZIP seeks straight to its
+/// central directory; PDF maps the input and resolves only structural objects.
+/// Probe errors never replace the selected extractor's normal error handling.
+pub(crate) fn evaluate_file(path: &Path, threshold: u32) -> Option<AutoDowngrade> {
+    if threshold == 0 {
+        return None;
+    }
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut magic = [0; 4];
+    file.read_exact(&mut magic).ok()?;
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let pages = match &magic {
+        b"%PDF" => probe_pdf_file(&file)?,
+        b"PK\x03\x04" => probe_ooxml_reader(file)?,
+        _ => return None,
+    };
+    (pages > threshold).then_some(AutoDowngrade { pages, threshold })
+}
+
+#[cfg(all(feature = "pdf", not(target_arch = "wasm32")))]
+#[allow(unsafe_code)]
+fn probe_pdf_file(file: &std::fs::File) -> Option<u32> {
+    // PdfDocument::open and lopdf::load_metadata(path) both read the entire
+    // input into a Vec. Mapping uses the same immutable-file assumption as
+    // core::io, but avoids that copy and a second full read before extract_path.
+    // SAFETY: the handle remains live and the mapping is read-only; callers must
+    // not mutate an extraction input while it is being processed.
+    let mapped = unsafe { memmap2::Mmap::map(file) }.ok()?;
+    // Reject broken/remote-tail xrefs rather than invoke lopdf's whole-file
+    // reconstruction scan. The native xref API parses tables/streams without
+    // loading page content. Only the xref metadata is parsed twice.
+    let tail = &mapped[mapped.len().saturating_sub(64 * 1024)..];
+    let offset = xberg_native_pdf::xref::find_xref_offset(&mut std::io::Cursor::new(tail)).ok()?;
+    xberg_native_pdf::xref::parse_xref(&mut std::io::Cursor::new(&mapped[..]), offset).ok()?;
+    let pages = lopdf::Document::load_metadata_mem(&mapped).ok()?.page_count;
+    (pages > 0).then_some(pages)
+}
+
+#[cfg(any(not(feature = "pdf"), target_arch = "wasm32"))]
+fn probe_pdf_file(_file: &std::fs::File) -> Option<u32> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_probe_reads_zip_metadata_and_keeps_unknown_or_broken_inputs_normal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("probe.docx");
+        std::fs::write(&path, docx_zip_with_pages(Some(501))).unwrap();
+        assert_eq!(evaluate_file(&path, 500).unwrap().pages, 501);
+        assert!(evaluate_file(&path, 501).is_none());
+        assert!(evaluate_file(&path, 0).is_none());
+        std::fs::write(&path, docx_zip_with_pages(None)).unwrap();
+        assert!(evaluate_file(&path, 1).is_none());
+        std::fs::write(&path, b"PK\x03\x04broken archive").unwrap();
+        assert!(evaluate_file(&path, 1).is_none());
+        std::fs::write(&path, b"ordinary unknown input").unwrap();
+        assert!(evaluate_file(&path, 1).is_none());
+    }
+
+    #[test]
+    fn file_probe_counts_presentation_and_workbook_central_directory_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("probe.zip");
+        for content in [pptx_zip_with_slides(501), xlsx_zip_with_sheets(501)] {
+            std::fs::write(&path, content).unwrap();
+            assert_eq!(evaluate_file(&path, 500).unwrap().pages, 501);
+            assert!(evaluate_file(&path, 501).is_none());
+        }
+    }
+
+    #[cfg(all(feature = "pdf", not(target_arch = "wasm32")))]
+    #[test]
+    fn file_probe_reads_pdf_structure_and_rejects_broken_xrefs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("probe.pdf");
+        std::fs::write(&path, build_minimal_pdf_with_n_pages(501)).unwrap();
+        assert_eq!(evaluate_file(&path, 500).unwrap().pages, 501);
+        assert!(evaluate_file(&path, 501).is_none());
+        assert!(evaluate_file(&path, 0).is_none());
+        let mut broken = build_minimal_pdf_with_n_pages(501);
+        let offset = broken.windows(9).position(|bytes| bytes == b"startxref").unwrap();
+        broken.truncate(offset);
+        std::fs::write(&path, broken).unwrap();
+        assert!(evaluate_file(&path, 500).is_none());
+    }
 
     fn docx_zip_with_pages(pages: Option<u32>) -> Vec<u8> {
         let body = match pages {

@@ -645,9 +645,18 @@ async fn run_pipeline_impl(
     captioning_carry_over.apply(&mut result);
 
     #[cfg(feature = "image-encode")]
-    let mut image_format_renames: Vec<(u32, String, String)> = Vec::new();
+    let image_format_renames;
     #[cfg(feature = "image-encode")]
-    if let Some(ref image_cfg) = config.images {
+    {
+        // 省略 images 与显式空配置使用相同的 PNG 缺省值；native 仍由调用方显式选择。
+        let default_image_config;
+        let image_cfg = match config.images.as_ref() {
+            Some(config) => config,
+            None => {
+                default_image_config = crate::core::config::extraction::ImageExtractionConfig::default();
+                &default_image_config
+            }
+        };
         #[cfg(feature = "tokio-runtime")]
         {
             // The re-encode loop is CPU/GDI-bound; on the async pipeline it runs on the
@@ -949,10 +958,16 @@ pub fn run_pipeline_sync(mut doc: InternalDocument, config: &ExtractionConfig) -
         .map(|formatted| (result.content.clone(), formatted.clone()));
 
     #[cfg(feature = "image-encode")]
-    let image_format_renames = if let Some(ref image_cfg) = config.images {
+    let image_format_renames = {
+        let default_image_config;
+        let image_cfg = match config.images.as_ref() {
+            Some(config) => config,
+            None => {
+                default_image_config = crate::core::config::extraction::ImageExtractionConfig::default();
+                &default_image_config
+            }
+        };
         apply_output_format_pass_with_security_limits(&mut result, image_cfg, config.security_limits.as_ref())
-    } else {
-        Vec::new()
     };
 
     // Mirrors `run_pipeline`: the pass rewrote `image_N.ext` references in

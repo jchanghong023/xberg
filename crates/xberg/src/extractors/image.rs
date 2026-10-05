@@ -2733,11 +2733,18 @@ impl InternalDocumentExtractor for ImageExtractor {
             "image/x-portable-bitmap",
             "image/x-portable-graymap",
             "image/x-portable-pixmap",
+            // Match the decoder gate, rather than registering unsupported HEIF containers.
+            #[cfg(feature = "heic")]
             "image/heic",
+            #[cfg(feature = "heic")]
             "image/heic-sequence",
+            #[cfg(feature = "heic")]
             "image/heif",
+            #[cfg(feature = "heic")]
             "image/heif-sequence",
+            #[cfg(feature = "heic")]
             "image/avif",
+            #[cfg(feature = "heic")]
             "image/avcs",
         ]
     }
@@ -5188,6 +5195,56 @@ mod tests {
         assert!(supported.contains(&"image/x-ms-bmp"));
         assert!(supported.contains(&"image/x-tiff"));
         assert!(supported.contains(&"image/x-portable-anymap"));
+    }
+
+    #[test]
+    fn image_registry_tracks_compiled_heif_decoder_support() {
+        use crate::plugins::registry::DocumentExtractorRegistry;
+        use std::sync::Arc;
+
+        let extractor = ImageExtractor::new();
+        let supported = extractor.supported_mime_types();
+        let mut registry = DocumentExtractorRegistry::new();
+        registry
+            .register_internal(Arc::new(ImageExtractor::new()))
+            .expect("registering the image extractor must succeed");
+
+        for mime_type in [
+            "image/heic",
+            "image/heic-sequence",
+            "image/heif",
+            "image/heif-sequence",
+            "image/avif",
+            "image/avcs",
+        ] {
+            assert_eq!(
+                supported.contains(&mime_type),
+                cfg!(feature = "heic"),
+                "{mime_type} must follow the HEIF decoder feature"
+            );
+            assert_eq!(
+                registry.get(mime_type).is_ok(),
+                cfg!(feature = "heic"),
+                "{mime_type} must not bypass the decoder gate through a wildcard registration"
+            );
+        }
+
+        for mime_type in [
+            "image/png",
+            "image/jpeg",
+            "image/pjpeg",
+            "image/webp",
+            "image/tiff",
+            "image/jp2",
+            "image/j2c",
+            "image/x-jbig2",
+        ] {
+            assert_eq!(
+                registry.get(mime_type).expect("supported image must resolve").name(),
+                "image-extractor",
+                "{mime_type} must retain its image extractor registration"
+            );
+        }
     }
 
     /// Regression test for #732: when captioning is configured and OCR runs,
