@@ -13,6 +13,14 @@
 - 打包必须验证干净 PATH 下的 `--version`、DLL 导入闭包以及带 OCR 配置的离线转换。正向 smoke 要求转换成功、出现 `PaddleOCR engine initialized successfully` 且无离线缺模型诊断，并追加截图 OCR（对内置样图出非空文本）与媒体转写（对内置样音出段结构或明确「无音频轨道/未检测到语音」）各一项；有必需模型时必须追加空缓存负向探测，并出现 HF 离线缺模型诊断（覆盖文档 OCR、截图 OCR 与转写资产）。负向要求是诊断，不保证进程必须非零退出。
 - 验收：离线包不依赖用户机器偶然已有的 DLL/模型缓存，抽取、文档 OCR、截图 OCR 与媒体转写可用；远程与本地使用同一打包脚本。
 
+### 按功能独立下载（2026-10-14）
+
+- **PKG-01** 同一 Windows 正式发布除完整离线 ZIP 外，提供恰好三类独立功能包：`xberg-document-x86_64-pc-windows-msvc.zip`（其他文档）、`xberg-snapshot-x86_64-pc-windows-msvc.zip`（截图）、`xberg-media-x86_64-pc-windows-msvc.zip`（音视频），以及 `xberg-components-x86_64-pc-windows-msvc.json`。全部组件来自同一已验证 staging 树，不按功能另编译引擎；不存在第四个公共运行时下载包。
+- **PKG-02** 每个功能包包含相同的 `xberg.exe`、公共 ONNX Runtime/MSVC CRT、启动器和共同许可，另包含本功能资产：document 为文档/图片 OCR 模型，snapshot 为 TextSnap 固定模型和字典，media 为 SenseVoice/VAD、sherpa-onnx、FFmpeg 与许可。每包均可独立解压使用，不依赖另一个包；仅下载 snapshot 即可截图，不含文档模型、媒体 DLL 或转写模型。共同文件大小与摘要必须一致，专属模型不混用，许可不缺失。
+- **PKG-03** 组件清单 schema_version=1、target 为对应 Windows target，components 逐项记录 id（document/snapshot/media）、archive、空 requires、size_bytes、sha256 和 members（path、size_bytes、sha256）；成员路径相对运行目录。归档均以原 `xberg-cli-<target>/` 为单一顶层目录，同发布多个功能包可合并到同一目录，共同成员必须同字节；发布上传全部三包与清单，可独立获取并校验。不能以整包下载后删文件替代独立包。生成与组合校验入口为 `scripts/publish/cli/package-cli-components.ps1`，由完整打包验证之后调用。
+- **PKG-04** 完整离线包的既有 smoke、DLL 闭包、正负模型检查和转换质量验收不削弱；新增组件划分与 ZIP 重组验证，至少断言截图组合不含文档/媒体资产、文档加截图不含媒体资产、全部组件重组与完整树逐成员一致。缺少真实组件组合推理或未运行完整打包验收时必须明确标记未验证，不以脚本语法或合成 ZIP 烟测替代真实 OCR/转写结果。
+
+
 ## 发布与测试门结果
 
 - fork 自有 Windows 发布 workflow 仅手动触发，调用统一打包入口并创建带时间戳 tag 的公开 Release。是否发布由用户根据报告决定，具体操作授权见 AGENTS.md。

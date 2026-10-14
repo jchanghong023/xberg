@@ -152,7 +152,7 @@ pwsh -NoProfile -File scripts/publish/cli/package-cli-windows.ps1
 ```
 
 - 需要 PowerShell ≥7.4；本地 Jobs 默认 min(30, 逻辑核数)，CI 默认 6，可用 `-Jobs N` 覆盖。CI 调用同一脚本，不能另建不同打包路径。
-- 输出 `xberg-cli-x86_64-pc-windows-msvc/` 和同名 zip。模型组成、离线正负 smoke 和 DLL 验收要求见 DELIVERY.md；实现入口为 `$Features` 与 `$RequiredModels`（截图 OCR 三成员与 SenseVoice/VAD 资产的固定字节清单，逐项校验大小+SHA-256），Paddle 模型从 `xberg.exe cache manifest` 取大小/sha256；模型正则必须恰好匹配一条。
+- 输出完整 `xberg-cli-x86_64-pc-windows-msvc/` 和同名 ZIP，并在原离线检查通过后调用 `scripts/publish/cli/package-cli-components.ps1` 生成 document / snapshot / media 三个独立功能 ZIP 与组件摘要清单；每包包含同字节公共运行时，无第四个 base 包。可用 `python scripts/tests/test_cli_components.py` 对合成暂存树验证真实 ZIP 划分与重组。模型组成、离线正负 smoke 和 DLL 验收见 DELIVERY.md；固定资产逐项校验大小及 SHA-256，Paddle 模型来自 `xberg.exe cache manifest`，模型正则恰好匹配一条。
 - `target/package-models-<target>` 是跨次复用缓存，不随临时清理删除。包内执行时 `HF_HUB_CACHE` 指向 `<包>/models`，PATH 前置包目录；不要用会追加 `/hub` 的 `HF_HOME` 代替。fulltest.py 已处理这两项。
 - `python slowtest.py` 执行打包及打包版 E2E，`--skip-package` 可复用已有 zip，`--keep-tmp` 保留解压目录；脚本固定使用 `target/slowtest-tmp/`，成功即清理，否则保留。该脚本管理的目录按其固定入口处理，agent 自建一次性文件仍必须放 `.tmp/`。
 - Rust UT、`task test:quick`、`cargo clippy` 及 task runner 的其他编译入口仍须明确授权。`Taskfile.yml` / `.task/languages/rust.yml` 是入口依据，Windows 上不使用只声明 linux/darwin 的 `task test` / `task test:ci`。

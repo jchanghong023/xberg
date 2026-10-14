@@ -2,7 +2,8 @@
 <#
 .SYNOPSIS
 Builds the Windows CLI release bundle: xberg.exe + sibling DLLs + the default
-model set + a launcher, zipped as xberg-cli-<target>.zip.
+model set + a launcher, zipped as xberg-cli-<target>.zip, plus independent
+document/snapshot/media ZIPs (each with the shared runtime) and their integrity manifest.
 
 .DESCRIPTION
 Single source of truth for "build + package" on Windows. Used locally and by
@@ -1147,6 +1148,11 @@ try {
   else {
     Write-Host "  skipped 7z t (-SkipZipTest)"
   }
+
+  # Split only after the complete staged runtime passed the original probes.
+  # The helper reads the same tree without changing the full offline ZIP.
+  Write-Phase "Components"
+  & (Join-Path $PSScriptRoot "package-cli-components.ps1") -Stage $Stage -OutputDirectory $RepoRoot -Target $Target
 
   Write-Phase "Done"
   Write-Host "staging dir: $Stage"

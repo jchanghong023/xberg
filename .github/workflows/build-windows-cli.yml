@@ -75,11 +75,16 @@ jobs:
           $version = ($raw -split '\s+')[-1]
           "version=$version" >> $env:GITHUB_OUTPUT
 
-      - name: Upload Windows CLI artifact
+      - name: Upload Windows CLI and component artifacts
         uses: actions/upload-artifact@v7
         with:
           name: xberg-cli-x86_64-pc-windows-msvc
-          path: xberg-cli-x86_64-pc-windows-msvc.zip
+          path: |
+            xberg-cli-x86_64-pc-windows-msvc.zip
+            xberg-document-x86_64-pc-windows-msvc.zip
+            xberg-snapshot-x86_64-pc-windows-msvc.zip
+            xberg-media-x86_64-pc-windows-msvc.zip
+            xberg-components-x86_64-pc-windows-msvc.json
           if-no-files-found: error
           retention-days: 14
 
@@ -93,7 +98,7 @@ jobs:
       TARGET: x86_64-pc-windows-msvc
       XBERG_VERSION: ${{ needs.build-windows-cli.outputs.xberg-version }}
     steps:
-      - name: Download Windows CLI artifact
+      - name: Download Windows CLI and component artifacts
         uses: actions/download-artifact@v8
         with:
           name: xberg-cli-x86_64-pc-windows-msvc
@@ -124,7 +129,16 @@ jobs:
           RELEASE_TIME: ${{ steps.release.outputs.release_time }}
         run: |
           set -euo pipefail
-          ASSET="xberg-cli-${TARGET}.zip"
+          ASSETS=(
+            "xberg-cli-${TARGET}.zip#Xberg Windows CLI full offline (${TARGET})"
+            "xberg-document-${TARGET}.zip#Xberg document conversion standalone (${TARGET})"
+            "xberg-snapshot-${TARGET}.zip#Xberg screenshot OCR standalone (${TARGET})"
+            "xberg-media-${TARGET}.zip#Xberg audio-video transcription standalone (${TARGET})"
+            "xberg-components-${TARGET}.json#Xberg component integrity manifest (${TARGET})"
+          )
+          for asset in "${ASSETS[@]}"; do
+            test -f "${asset%%#*}"
+          done
           STATIC_HEAD=$(cat <<'EOF'
           ## 这是什么
 
@@ -137,6 +151,25 @@ jobs:
           New-Item -ItemType Directory -Force .\imgs | Out-Null
           xberg.exe extract document.docx --content-format markdown --format text --extract-images true --output-dir .\imgs --config-json '{"images":{"output_format":{"type":"png"}}}'
           ```
+
+          ## 按需下载组件
+
+          同一发布同时提供完整离线包和三个可单独使用的功能包；所有组件来自同一次验证过的暂存目录，**不是三次重编译**。
+          以下文件名中的 `<target>` 为 `x86_64-pc-windows-msvc`：
+
+          | 资产 | 内容 |
+          |------|------|
+          | `xberg-document-<target>.zip` | 公共运行时 + 文档 PaddleOCR HF 缓存模型 |
+          | `xberg-snapshot-<target>.zip` | 公共运行时 + 独立截图 OCR 模型，不含文档或音视频模型 / DLL |
+          | `xberg-media-<target>.zip` | 公共运行时 + SenseVoice / Silero VAD、FFmpeg / sherpa-onnx DLL 与许可、音频样例 |
+          | `xberg-components-<target>.json` | 三个 ZIP 及每个成员的实际大小与 SHA-256；运行时相对路径与空依赖 |
+          | `xberg-cli-<target>.zip` | 保留原有全部能力的完整离线包 |
+
+          仅截图 OCR 下载 **snapshot + 清单**，不需要 document 或 media，也没有单独的 base 下载包。
+          公共运行时（`xberg.exe`、根目录 ONNX Runtime / CRT DLL、启动器与公共许可）在三个包中保持字节一致。
+          JchTools 按功能勾选自动下载，不需要手工配置路径，不回退完整离线包；手动使用时将**同一发布**
+          所需组件解压到同一目录，所有 ZIP 都保留相同 `xberg-cli-<target>/` 根目录，共享文件可安全覆盖。
+          合并三个组件即为完整暂存运行时。
 
           ## 相对上游的改动（本 fork）
 
@@ -167,14 +200,14 @@ jobs:
           ## 注意
 
           - 与上游 [xberg-io/xberg](https://github.com/xberg-io/xberg) 无关的第三方 fork；上游更新请自行 merge。
-          - 默认 OCR 使用包内 PaddleOCR pp-ocrv6 tiny 模型（约 13 MiB），可离线；如需 Tesseract 后备请自行安装。音视频转写使用包内 SenseVoice INT8 + Silero VAD（CPU 离线，FFmpeg 解码），可离线。
+          - 文档 OCR 使用 document 包的 PaddleOCR pp-ocrv6 tiny 模型（约 13 MiB）；如需 Tesseract 后备请自行安装。音视频转写使用 media 包的 SenseVoice INT8 + Silero VAD 与 FFmpeg；截图 OCR 只需 snapshot 包。三个功能包均含公共运行时，无其他组件依赖；完整离线包已包含所有组件。
           - 本包来自自动化流水线，未做人工全量回归；破坏性整理/清理不在本 CLI 默认路径中。
           EOF
           )
           NOTES="${STATIC_HEAD}"$'\n\n'"${BUILD_INFO}"$'\n\n'"${STATIC_TAIL}"
 
           gh release create "$RELEASE_TAG" \
-            "$ASSET#Xberg Windows CLI (${TARGET})" \
+            "${ASSETS[@]}" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "$RELEASE_TAG (fork: EMF→PNG + Markdown 图文)" \

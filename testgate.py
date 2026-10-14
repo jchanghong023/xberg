@@ -54,6 +54,7 @@ FMT_FASTCHECK_CRATES = ["xberg", "xberg-cli", "xberg-windows-metafile"]
 
 PS1_PARSE_TARGETS = [
     "scripts/publish/cli/package-cli-windows.ps1",
+    "scripts/publish/cli/package-cli-components.ps1",
     "scripts/publish/cli/offline-smoke.ps1",
     "scripts/ci/verify-windows-dll-closure.ps1",
     "scripts/ci/actions/provision-media-assets.ps1",
@@ -184,7 +185,7 @@ def gate_fastcheck():
                   time.monotonic() - ts)
 
     # 1) 仓库自有测试脚本语法（含本文件自身）
-    bad = check_py_syntax(["fulltest.py", "slowtest.py", "testgate.py"])
+    bad = check_py_syntax(["fulltest.py", "slowtest.py", "testgate.py", "scripts/tests/test_cli_components.py"])
     stage("py-syntax", FAIL if bad else PASS, "; ".join(bad))
 
     # 2) fulltest.py 判定器自测（AGENTS.md 允许 agent 主动运行）
@@ -211,6 +212,7 @@ FULLTEST_STAGES = [
     ("fmt-xberg", ["cargo", "fmt", "--check", "-p", "xberg"], []),
     ("fmt-xberg-cli", ["cargo", "fmt", "--check", "-p", "xberg-cli"], []),
     ("fmt-xberg-windows-metafile", ["cargo", "fmt", "--check", "-p", "xberg-windows-metafile"], []),
+    ("test-cli-components", [sys.executable, REPO / "scripts/tests/test_cli_components.py"], []),
     ("build-cli", ["cargo", "build", "-p", "xberg-cli", "--no-default-features",
                    "--features", FEATURES_FORK], []),
     ("e2e-fulltest.py", [sys.executable, REPO / "fulltest.py", "--keep-going"], ["build-cli"]),
