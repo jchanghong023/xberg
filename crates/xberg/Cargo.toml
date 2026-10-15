@@ -170,6 +170,7 @@ ocr = [
     "tokio-runtime",
     "dep:xberg-tesseract",
     "dep:image",
+    "dep:png",
     "dep:tiff",
     "dep:fast_image_resize",
     "dep:nom-exif",
@@ -1308,6 +1309,7 @@ image = { workspace = true, default-features = false, features = [
     "pnm",
     "rayon",
 ], optional = true }
+png = { version = "=0.18.1", optional = true }
 include_dir = { version = "0.7", optional = true }
 indexmap = "2.14.2"
 infer = "0.22.0"
@@ -1705,7 +1707,6 @@ serial_test = "3.5.0"
 # Test-only: pins a bundled fixture's bytes by SHA256 so a regression test provably
 # exercises the exact reported sample rather than a substitute. ~keep
 sha2 = { workspace = true }
-syn = { version = "3", features = ["full", "visit"] }
 tar = "^0.4"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "time"] }

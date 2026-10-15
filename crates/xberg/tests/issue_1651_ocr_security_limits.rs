@@ -184,6 +184,49 @@ async fn should_ocr_a_large_image_when_the_caller_raises_the_limit_above_the_def
     }
 }
 
+/// Keep the general image/metadata budget unconstrained: only the OCR decode uses
+/// the smaller budget, so this exercises the RGBA row path through the real PNG
+/// extraction entry rather than failing at an earlier full-frame metadata decode.
+#[tokio::test]
+async fn should_ocr_rgba_png_when_rgb_and_row_scratch_fit_but_full_conversion_does_not() {
+    const WIDTH: u32 = 1_024;
+    const HEIGHT: u32 = 512;
+    const OCR_BUDGET: usize = 3 * 1024 * 1024;
+    let image = image::RgbaImage::from_pixel(WIDTH, HEIGHT, image::Rgba([255, 255, 255, 255]));
+    let mut bytes = Vec::new();
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .expect("encode RGBA PNG");
+    let pixels = WIDTH as usize * HEIGHT as usize;
+    assert!(pixels * 3 + (WIDTH as usize * 4 + 1) * 16 + 1024 * 1024 + bytes.len() < OCR_BUDGET);
+    assert!(pixels * 7 + bytes.len() > OCR_BUDGET);
+    let config = ExtractionConfig {
+        ocr: Some(OcrConfig {
+            security_limits: Some(SecurityLimits {
+                max_content_size: OCR_BUDGET,
+                ..Default::default()
+            }),
+            ..ocr_config()
+        }),
+        images: None,
+        use_cache: false,
+        ..Default::default()
+    };
+    let output = xberg::extract(
+        ExtractInput::from_bytes(bytes, "image/png", Some("rgba_row_budget.png".to_string())),
+        &config,
+    )
+    .await
+    .expect("the OCR RGB buffer and bounded row scratch fit");
+    assert!(output.errors.is_empty(), "RGBA OCR failed: {:?}", output.errors);
+    let document = output.results.first().expect("one OCR document");
+    assert_eq!(
+        document.extraction_method,
+        Some(xberg::types::ExtractionMethod::Ocr),
+        "the real OCR decode must run, not only PNG metadata extraction"
+    );
+}
+
 fn pdf_fixture(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/ocr")

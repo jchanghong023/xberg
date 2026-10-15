@@ -16,6 +16,8 @@ use crate::extractors::security::SecurityLimits;
 use std::collections::HashMap;
 #[cfg(feature = "ocr")]
 use std::io::Cursor;
+#[cfg(feature = "ocr")]
+mod ocr_decode;
 
 /// JP2 file signature: 12-byte box starting with length 0x0000000C and type "jP  "
 const JP2_MAGIC: &[u8] = &[0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50, 0x20, 0x20];
@@ -463,14 +465,16 @@ fn decode_jbig2_to_gray_with_security_limits(bytes: &[u8], limits: &SecurityLimi
         .ok_or_else(|| XbergError::parsing("Failed to construct grayscale image from JBIG2 data".to_string()))
 }
 
-/// Load image bytes for OCR, with JPEG 2000 and JBIG2 fallback support.
+/// Load OCR pixels, including headerless DIB, JPEG 2000 and JBIG2 inputs.
 ///
-/// The standard `image` crate does not support JPEG 2000 or JBIG2 formats.
-/// This function detects these formats by magic bytes and uses `hayro-jpeg2000`
-/// / `hayro-jbig2` for decoding, falling back to the standard `image` crate
-/// for all other formats.
+/// OCR-only DIB decoding and bounded row-wise RGBA8 PNG conversion are handled
+/// before the existing JPEG 2000/JBIG2 and standard-image fallback. This does not
+/// change the separate metadata or image-export decoders.
 #[cfg(feature = "ocr")]
 pub(crate) fn load_image_for_ocr(image_bytes: &[u8], limits: &SecurityLimits) -> Result<image::DynamicImage> {
+    if let Some(decoded) = ocr_decode::decode_ocr_input(image_bytes, limits) {
+        return decoded.map(image::DynamicImage::ImageRgb8);
+    }
     decode_image_to_rgb8_with_security_limits(image_bytes, limits).map(image::DynamicImage::ImageRgb8)
 }
 
