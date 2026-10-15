@@ -307,6 +307,12 @@ scratch/
 # weigh ~1 GB combined, so they stay out of the index.
 /xberg-cli-*/
 /xberg-cli-*.zip
+# Component/audio archives and their integrity manifest come from the same packaging run.
+/xberg-document-*.zip
+/xberg-snapshot-*.zip
+/xberg-media-*.zip
+/xberg-audio-assets-*.zip
+/xberg-components-*.json
 /scratch*/
 # AGENTS.md rule: every throwaway script / dir / file lives in ./.tmp. Already covered by
 # the unanchored `.tmp/` in CI / Tools; repeated root-anchored so the rule reads in place.
