@@ -6,8 +6,9 @@ Splits an already validated Windows CLI staging tree into independently download
 .DESCRIPTION
 No compilation, provisioning or runtime probes. The full offline package remains the responsibility
 of package-cli-windows.ps1. Each of the three feature ZIPs includes the identical common runtime,
-preserves the xberg-cli-<target>/ archive root and can be used independently. The manifest records
-hashes read back from the actual ZIPs; shared paths must always have the same bytes.
+preserves the xberg-cli-<target>/ archive root and can be used independently. A separate audio-assets
+ZIP contains only FFmpeg and speech assets, without samples or the common runtime; it is not standalone.
+The manifest records hashes read back from the actual ZIPs; shared paths must have the same bytes.
 .EXAMPLE
 pwsh -NoProfile -File scripts/publish/cli/package-cli-components.ps1 -Stage ./xberg-cli-x86_64-pc-windows-msvc -OutputDirectory .
 .EXAMPLE
@@ -49,7 +50,6 @@ function Get-ComponentOwner([string]$Path) {
   if ($Path.StartsWith('models/sense_voice_zh_en_ja_ko_yue_2024_07_17/', [StringComparison]::Ordinal) -or
       $Path.StartsWith('models/vad/', [StringComparison]::Ordinal) -or
       $Path.StartsWith('ffmpeg/', [StringComparison]::Ordinal) -or
-      $Path.StartsWith('sherpa-onnx/', [StringComparison]::Ordinal) -or
       $Path.StartsWith('samples/', [StringComparison]::Ordinal)) { return 'media' }
   # Both document and snapshot OCR need this license; include it with every common runtime.
   if ($Path -ceq 'models/paddleocr-onnx-models-LICENSE.txt') { return 'common' }
@@ -93,10 +93,18 @@ foreach ($required in @('xberg.exe', 'LICENSE', 'THIRD_PARTY_LICENSES.md',
 }
 
 $components = [System.Collections.Generic.List[object]]::new()
-foreach ($id in $componentIds) {
+$audioAssets = $null
+foreach ($id in ($componentIds + @('audio-assets'))) {
   $archiveName = "xberg-$id-$Target.zip"
   $archivePath = Join-Path $outputRoot $archiveName
-  $files = @(@($owned['common'].ToArray()) + @($owned[$id].ToArray()) | Sort-Object -Property path -CaseSensitive)
+  $files = if ($id -ceq 'audio-assets') {
+    @($owned['media'].ToArray() | Where-Object {
+        -not $_.path.StartsWith('samples/', [StringComparison]::Ordinal)
+      } | Sort-Object -Property path -CaseSensitive)
+  }
+  else {
+    @(@($owned['common'].ToArray()) + @($owned[$id].ToArray()) | Sort-Object -Property path -CaseSensitive)
+  }
   $stream = [System.IO.File]::Open($archivePath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
   try {
     $zip = [System.IO.Compression.ZipArchive]::new($stream, [System.IO.Compression.ZipArchiveMode]::Create, $true)
@@ -129,16 +137,23 @@ foreach ($id in $componentIds) {
     }
   }
   finally { $zip.Dispose() }
-  $components.Add([ordered]@{
+  $record = [ordered]@{
       id = $id
       archive = $archiveName
       requires = @()
       size_bytes = [long](Get-Item -LiteralPath $archivePath).Length
       sha256 = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
       members = @($members.ToArray())
-    })
+    }
+  if ($id -ceq 'audio-assets') { $audioAssets = $record }
+  else { $components.Add($record) }
   Write-Host ("component: {0} ({1:N1} MB, {2} members)" -f $archiveName, ((Get-Item -LiteralPath $archivePath).Length / 1MB), $members.Count)
 }
-$manifest = [ordered]@{ schema_version = 1; target = $Target; components = @($components.ToArray()) }
+$manifest = [ordered]@{
+  schema_version = 1
+  target = $Target
+  components = @($components.ToArray())
+  audio_assets = $audioAssets
+}
 [System.IO.File]::WriteAllText($manifestPath, ($manifest | ConvertTo-Json -Depth 8) + "`n", [System.Text.UTF8Encoding]::new($false))
 Write-Host "manifest: $manifestPath"

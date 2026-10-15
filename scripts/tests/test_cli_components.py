@@ -40,6 +40,11 @@ class CliComponentPackagingTests(unittest.TestCase):
                 "onnxruntime.dll": b"shared runtime",
                 "onnxruntime_providers_shared.dll": b"shared providers",
                 "vcruntime140.dll": b"shared CRT",
+                "sherpa-onnx/sherpa-onnx-c-api.dll": b"sherpa API",
+                "sherpa-onnx/sherpa-onnx-cxx-api.dll": b"sherpa C++ API",
+                "sherpa-onnx/onnxruntime.dll": b"shared runtime",
+                "sherpa-onnx/onnxruntime_providers_shared.dll": b"shared providers",
+                "sherpa-onnx/LICENSE": b"sherpa license",
                 "LICENSE": b"project license",
                 "THIRD_PARTY_LICENSES.md": b"third party notices",
                 "models/paddleocr-onnx-models-LICENSE.txt": b"shared OCR license",
@@ -59,12 +64,11 @@ class CliComponentPackagingTests(unittest.TestCase):
             "media": {
                 "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx": b"sensevoice",
                 "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/tokens.txt": b"tokens",
+                "models/sense_voice_zh_en_ja_ko_yue_2024_07_17/LICENSE": b"speech model license",
                 "models/vad/silero_vad.onnx": b"vad",
+                "models/vad/LICENSE": b"vad model license",
                 "ffmpeg/avcodec-63.dll": b"ffmpeg codec",
                 "ffmpeg/LICENSE.txt": b"ffmpeg license",
-                "sherpa-onnx/sherpa-onnx-c-api.dll": b"sherpa API",
-                "sherpa-onnx/onnxruntime.dll": b"shared runtime",
-                "sherpa-onnx/LICENSE": b"sherpa license",
                 "samples/silence-1s.wav": b"audio fixture",
             },
         }
@@ -91,10 +95,11 @@ class CliComponentPackagingTests(unittest.TestCase):
         self.assertEqual([c["id"] for c in manifest["components"]], ["document", "snapshot", "media"])
         self.assertEqual(
             {p.name for p in self.output.iterdir()},
-            {MANIFEST_NAME, *(f"xberg-{name}-{TARGET}.zip" for name in ("document", "snapshot", "media"))},
+            {MANIFEST_NAME, *(f"xberg-{name}-{TARGET}.zip" for name in ("document", "snapshot", "media", "audio-assets"))},
         )
         combined = {}
         common_metadata = {}
+        component_paths = {}
         for component in manifest["components"]:
             feature = component["id"]
             self.assertEqual(component["requires"], [])
@@ -108,6 +113,7 @@ class CliComponentPackagingTests(unittest.TestCase):
             expected = self.groups["common"] | self.groups[feature]
             self.assertEqual(len(paths), len(set(paths)), "duplicate archive ownership")
             self.assertEqual(set(paths), set(expected))
+            component_paths[feature] = set(paths)
             with zipfile.ZipFile(archive_path) as archive:
                 self.assertEqual(set(archive.namelist()), {f"{STAGE_NAME}/{path}" for path in expected})
                 for member in members:
@@ -124,6 +130,41 @@ class CliComponentPackagingTests(unittest.TestCase):
                     combined[relative] = content
         staged = {p.relative_to(self.stage).as_posix(): p.read_bytes() for p in self.stage.rglob("*") if p.is_file()}
         self.assertEqual(combined, staged)
+        base_paths = component_paths["document"] | component_paths["snapshot"]
+        self.assertTrue(base_paths.isdisjoint(self.groups["media"]))
+        for feature in ("document", "snapshot", "media"):
+            self.assertTrue(set(self.groups["common"]) <= component_paths[feature])
+        for name in ("onnxruntime.dll", "onnxruntime_providers_shared.dll"):
+            self.assertEqual(combined[name], combined[f"sherpa-onnx/{name}"])
+
+        audio_assets = manifest["audio_assets"]
+        self.assertEqual(audio_assets["id"], "audio-assets")
+        self.assertEqual(audio_assets["requires"], [])
+        self.assertEqual(audio_assets["archive"], f"xberg-audio-assets-{TARGET}.zip")
+        archive_path = self.output / audio_assets["archive"]
+        archive_bytes = archive_path.read_bytes()
+        self.assertEqual(audio_assets["size_bytes"], len(archive_bytes))
+        self.assertEqual(audio_assets["sha256"], hashlib.sha256(archive_bytes).hexdigest())
+        expected_audio = {
+            path: content for path, content in self.groups["media"].items()
+            if not path.startswith("samples/")
+        }
+        audio_paths = [member["path"] for member in audio_assets["members"]]
+        self.assertEqual(len(audio_paths), len(set(audio_paths)))
+        self.assertEqual(set(audio_paths), set(expected_audio))
+        self.assertTrue(base_paths.isdisjoint(audio_paths))
+        with zipfile.ZipFile(archive_path) as archive:
+            self.assertEqual(set(archive.namelist()), {f"{STAGE_NAME}/{path}" for path in expected_audio})
+            for member in audio_assets["members"]:
+                relative = member["path"]
+                content = archive.read(f"{STAGE_NAME}/{relative}")
+                self.assertEqual(content, expected_audio[relative])
+                self.assertEqual(member["size_bytes"], len(content))
+                self.assertEqual(member["sha256"], hashlib.sha256(content).hexdigest())
+                media_member = next(
+                    entry for entry in manifest["components"][2]["members"] if entry["path"] == relative
+                )
+                self.assertEqual(member, media_member, "audio assets must match the standalone media package")
 
     def test_unknown_model_fails_without_leaving_stale_manifest(self):
         self.output.mkdir()
@@ -144,12 +185,20 @@ class CliComponentPackagingTests(unittest.TestCase):
         self.assertIn("Component 'snapshot' has no staged files", result.stderr)
         self.assertFalse((self.output / MANIFEST_NAME).exists())
 
-    def test_missing_component_license_fails(self):
-        (self.stage / "ffmpeg/LICENSE.txt").unlink()
-        result = self.package()
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn("Required staged runtime/license file missing", result.stderr)
-        self.assertFalse((self.output / MANIFEST_NAME).exists())
+    def test_missing_required_runtime_or_license_fails(self):
+        for relative in ("ffmpeg/LICENSE.txt", "sherpa-onnx/LICENSE", "xberg.exe"):
+            with self.subTest(path=relative):
+                path = self.stage / relative
+                content = path.read_bytes()
+                path.unlink()
+                try:
+                    result = self.package()
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("Required staged runtime/license file missing", result.stderr)
+                    self.assertIn(relative, result.stderr)
+                    self.assertFalse((self.output / MANIFEST_NAME).exists())
+                finally:
+                    path.write_bytes(content)
 
     def test_archive_source_root_is_not_silently_renamed(self):
         wrong_stage = self.stage.rename(self.root / "wrong-root")

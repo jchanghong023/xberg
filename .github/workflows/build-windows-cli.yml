@@ -75,7 +75,7 @@ jobs:
           $version = ($raw -split '\s+')[-1]
           "version=$version" >> $env:GITHUB_OUTPUT
 
-      - name: Upload Windows CLI and component artifacts
+      - name: Upload Windows CLI, components and audio asset artifacts
         uses: actions/upload-artifact@v7
         with:
           name: xberg-cli-x86_64-pc-windows-msvc
@@ -84,6 +84,7 @@ jobs:
             xberg-document-x86_64-pc-windows-msvc.zip
             xberg-snapshot-x86_64-pc-windows-msvc.zip
             xberg-media-x86_64-pc-windows-msvc.zip
+            xberg-audio-assets-x86_64-pc-windows-msvc.zip
             xberg-components-x86_64-pc-windows-msvc.json
           if-no-files-found: error
           retention-days: 14
@@ -98,7 +99,7 @@ jobs:
       TARGET: x86_64-pc-windows-msvc
       XBERG_VERSION: ${{ needs.build-windows-cli.outputs.xberg-version }}
     steps:
-      - name: Download Windows CLI and component artifacts
+      - name: Download Windows CLI, components and audio asset artifacts
         uses: actions/download-artifact@v8
         with:
           name: xberg-cli-x86_64-pc-windows-msvc
@@ -134,6 +135,7 @@ jobs:
             "xberg-document-${TARGET}.zip#Xberg document conversion standalone (${TARGET})"
             "xberg-snapshot-${TARGET}.zip#Xberg screenshot OCR standalone (${TARGET})"
             "xberg-media-${TARGET}.zip#Xberg audio-video transcription standalone (${TARGET})"
+            "xberg-audio-assets-${TARGET}.zip#Xberg optional audio assets, not standalone (${TARGET})"
             "xberg-components-${TARGET}.json#Xberg component integrity manifest (${TARGET})"
           )
           for asset in "${ASSETS[@]}"; do
@@ -154,22 +156,23 @@ jobs:
 
           ## 按需下载组件
 
-          同一发布同时提供完整离线包和三个可单独使用的功能包；所有组件来自同一次验证过的暂存目录，**不是三次重编译**。
+          同一发布同时提供完整离线包、三个可单独使用的功能包和一个非独立运行的音频资产增量包；所有归档来自同一次验证过的暂存目录，**不是按功能重编译**。
           以下文件名中的 `<target>` 为 `x86_64-pc-windows-msvc`：
 
           | 资产 | 内容 |
           |------|------|
           | `xberg-document-<target>.zip` | 公共运行时 + 文档 PaddleOCR HF 缓存模型 |
-          | `xberg-snapshot-<target>.zip` | 公共运行时 + 独立截图 OCR 模型，不含文档或音视频模型 / DLL |
-          | `xberg-media-<target>.zip` | 公共运行时 + SenseVoice / Silero VAD、FFmpeg / sherpa-onnx DLL 与许可、音频样例 |
-          | `xberg-components-<target>.json` | 三个 ZIP 及每个成员的实际大小与 SHA-256；运行时相对路径与空依赖 |
+          | `xberg-snapshot-<target>.zip` | 公共运行时 + 独立截图 OCR 模型，不含文档模型、FFmpeg 或转写模型 / 样例 |
+          | `xberg-media-<target>.zip` | 公共运行时 + SenseVoice / Silero VAD、FFmpeg 与许可、音频样例 |
+          | `xberg-audio-assets-<target>.zip` | 仅 FFmpeg 与 SenseVoice / Silero VAD 资产及许可，无引擎 / 公共 DLL / 样例；不是独立运行包 |
+          | `xberg-components-<target>.json` | `components` 为三个独立包，顶层 `audio_assets` 为音频增量包；各 ZIP 及成员实际大小与 SHA-256、运行时相对路径与空依赖 |
           | `xberg-cli-<target>.zip` | 保留原有全部能力的完整离线包 |
 
           仅截图 OCR 下载 **snapshot + 清单**，不需要 document 或 media，也没有单独的 base 下载包。
-          公共运行时（`xberg.exe`、根目录 ONNX Runtime / CRT DLL、启动器与公共许可）在三个包中保持字节一致。
-          JchTools 按功能勾选自动下载，不需要手工配置路径，不回退完整离线包；手动使用时将**同一发布**
-          所需组件解压到同一目录，所有 ZIP 都保留相同 `xberg-cli-<target>/` 根目录，共享文件可安全覆盖。
-          合并三个组件即为完整暂存运行时。
+          公共运行时（`xberg.exe`、ONNX Runtime / CRT DLL、完整 `sherpa-onnx/` 及其同字节 ORT/providers 和许可、启动器与公共许可）在三个包中保持字节一致。
+          JchTools 发行包内置 document + snapshot，设置页仅按需下载与内置引擎同一发布的 audio-assets，不重新下载引擎或覆盖公共 DLL。
+          手动使用时将**同一发布**所需组件解压到同一目录，所有 ZIP 都保留相同 `xberg-cli-<target>/` 根目录，共享文件可安全覆盖。
+          合并三个独立组件即为完整暂存运行时；audio-assets 仅向已有的同版运行时补充音频资产，不替代独立 media 包，也不是任何独立包的新依赖。
 
           ## 相对上游的改动（本 fork）
 
@@ -200,7 +203,7 @@ jobs:
           ## 注意
 
           - 与上游 [xberg-io/xberg](https://github.com/xberg-io/xberg) 无关的第三方 fork；上游更新请自行 merge。
-          - 文档 OCR 使用 document 包的 PaddleOCR pp-ocrv6 tiny 模型（约 13 MiB）；如需 Tesseract 后备请自行安装。音视频转写使用 media 包的 SenseVoice INT8 + Silero VAD 与 FFmpeg；截图 OCR 只需 snapshot 包。三个功能包均含公共运行时，无其他组件依赖；完整离线包已包含所有组件。
+          - 文档 OCR 使用 document 包的 PaddleOCR pp-ocrv6 tiny 模型（约 13 MiB）；如需 Tesseract 后备请自行安装。音视频转写使用 media 包的 SenseVoice INT8 + Silero VAD 与 FFmpeg；截图 OCR 只需 snapshot 包。三个功能包均含公共运行时，无其他组件依赖；完整离线包已包含所有组件。audio-assets 只供已有同版运行时按需增加音频能力，不包含引擎或公共 DLL，不能单独运行。
           - 本包来自自动化流水线，未做人工全量回归；破坏性整理/清理不在本 CLI 默认路径中。
           EOF
           )

@@ -15,10 +15,10 @@
 
 ### 按功能独立下载（2026-10-14）
 
-- **PKG-01** 同一 Windows 正式发布除完整离线 ZIP 外，提供恰好三类独立功能包：`xberg-document-x86_64-pc-windows-msvc.zip`（其他文档）、`xberg-snapshot-x86_64-pc-windows-msvc.zip`（截图）、`xberg-media-x86_64-pc-windows-msvc.zip`（音视频），以及 `xberg-components-x86_64-pc-windows-msvc.json`。全部组件来自同一已验证 staging 树，不按功能另编译引擎；不存在第四个公共运行时下载包。
-- **PKG-02** 每个功能包包含相同的 `xberg.exe`、公共 ONNX Runtime/MSVC CRT、启动器和共同许可，另包含本功能资产：document 为文档/图片 OCR 模型，snapshot 为 TextSnap 固定模型和字典，media 为 SenseVoice/VAD、sherpa-onnx、FFmpeg 与许可。每包均可独立解压使用，不依赖另一个包；仅下载 snapshot 即可截图，不含文档模型、媒体 DLL 或转写模型。共同文件大小与摘要必须一致，专属模型不混用，许可不缺失。
-- **PKG-03** 组件清单 schema_version=1、target 为对应 Windows target，components 逐项记录 id（document/snapshot/media）、archive、空 requires、size_bytes、sha256 和 members（path、size_bytes、sha256）；成员路径相对运行目录。归档均以原 `xberg-cli-<target>/` 为单一顶层目录，同发布多个功能包可合并到同一目录，共同成员必须同字节；发布上传全部三包与清单，可独立获取并校验。不能以整包下载后删文件替代独立包。生成与组合校验入口为 `scripts/publish/cli/package-cli-components.ps1`，由完整打包验证之后调用。
-- **PKG-04** 完整离线包的既有 smoke、DLL 闭包、正负模型检查和转换质量验收不削弱；新增组件划分与 ZIP 重组验证，至少断言截图组合不含文档/媒体资产、文档加截图不含媒体资产、全部组件重组与完整树逐成员一致。缺少真实组件组合推理或未运行完整打包验收时必须明确标记未验证，不以脚本语法或合成 ZIP 烟测替代真实 OCR/转写结果。
+- **PKG-01** 同一 Windows 正式发布除完整离线 ZIP 外，提供恰好三类独立功能包：`xberg-document-x86_64-pc-windows-msvc.zip`（其他文档）、`xberg-snapshot-x86_64-pc-windows-msvc.zip`（截图）、`xberg-media-x86_64-pc-windows-msvc.zip`（音视频），另提供非独立运行的 `xberg-audio-assets-x86_64-pc-windows-msvc.zip` 音频资产增量包，以及 `xberg-components-x86_64-pc-windows-msvc.json`。全部归档来自同一已验证 staging 树，不按功能另编译引擎；独立功能包仍恰好三个，不存在第四个公共运行时下载包。
+- **PKG-02** 每个功能包包含相同的 `xberg.exe`、公共 ONNX Runtime/MSVC CRT、完整 `sherpa-onnx/`（含配套同字节 ORT/providers DLL 与许可）、启动器和共同许可，另包含本功能资产：document 为文档/图片 OCR 模型，snapshot 为 TextSnap 固定模型和字典，media 为 SenseVoice/VAD、FFmpeg 与许可及音频样例。每包均可独立解压使用，不依赖另一个包；仅下载 snapshot 即可截图，不含文档模型、FFmpeg、转写模型或音频样例。共同文件大小与摘要必须一致，专属模型不混用，许可不缺失。
+- **PKG-03** 组件清单 schema_version=1、target 为对应 Windows target，components 保持且仅包含 document/snapshot/media，逐项记录 id、archive、空 requires、size_bytes、sha256 和 members（path、size_bytes、sha256）；成员路径相对运行目录。新增顶层 audio_assets，使用相同记录结构，id 固定为 audio-assets、archive 为 `xberg-audio-assets-x86_64-pc-windows-msvc.zip`、requires 为空；其成员恰为 `ffmpeg/` 与 `models/sense_voice_*/`、`models/vad/` 下的媒体专属文件及许可，不含 samples、引擎、公共 DLL、sherpa、文档或截图资产。它只用于向同一发布的已有运行时补充音频资产，不是独立功能包或三组件的新依赖。全部 ZIP 和成员的大小与 SHA-256 必须从实际写出后重新读取的归档测量并与 staging 字节核对。归档均以原 `xberg-cli-<target>/` 为单一顶层目录，同发布多个功能包可合并到同一目录，共同成员必须同字节；发布上传完整包、三功能包、音频增量包和清单，可独立获取并校验。不能以整包下载后删文件替代独立包。生成与组合校验入口为 `scripts/publish/cli/package-cli-components.ps1`，由完整打包验证之后调用。
+- **PKG-04** 完整离线包的既有 smoke、DLL 闭包、正负模型检查和转换质量验收不削弱；新增组件划分与 ZIP 重组验证，至少断言截图组合不含文档模型、FFmpeg、转写模型或音频样例，文档加截图不含后三类音频资产，sherpa 与 ORT/providers 在三包中共享且同字节，全部组件重组与完整树逐成员一致。音频增量包必须精确覆盖音频资产、排除全部公共运行时和样例，清单摘要与实际 ZIP/成员一致；非法输入必须失败，不能留下指向失效归档的清单。缺少真实组件组合推理或未运行完整打包验收时必须明确标记未验证，不以脚本语法或合成 ZIP 烟测替代真实 OCR/转写结果。
 
 
 ## 发布与测试门结果
