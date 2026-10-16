@@ -39,6 +39,14 @@ pub const WIDE_TEXT_HORIZONTAL_SCALE_FACTOR: f64 = 1.5;
 /// 密集代码重试替换初次结果所允许的分数容差（新分 ≥ 初分 − 0.02）。
 pub const CODE_STRETCH_SCORE_TOLERANCE: f64 = 0.02;
 
+/// 定稿识别分数下限：选中尝试分数低于该值的非空文本整条丢弃（2026-10-16
+/// 用户授权，SNAP-10 第三次增补）。实测依据：16 样本全部真值文本的识别分
+/// 最低为 0.780（line_detect 合成破折号行，承重必须保留）、真实 UI 截图
+/// 真值最低 0.95；低于 0.60 的全部为图标形似噪声（窗口钮/工具栏图标读成
+/// 单字）。阈值取 0.60 与最低真值保持 ≥ 0.18 边际。形似图标中识别分 ≥ 0.6
+/// 的（如放大镜读成 `Q`）无法用通用信号安全剔除，不在本阈值射程内。
+pub const MIN_TEXT_SCORE: f64 = 0.6;
+
 /// 注入的推理与图像操作后端。
 ///
 /// 所有图像处理（增强、拉伸、旋转）与真实推理由实现方完成；管线只按
@@ -606,7 +614,8 @@ pub fn assemble_spans<I>(
     let mut spans: Vec<RecognizedSpan> = Vec::new();
     for record in records {
         let attempt = select_best(&record.attempts);
-        if attempt.text.is_empty() {
+        // 空串丢弃（O-26 既有语义）+ 低分噪声丢弃（SNAP-10 第三次增补）。
+        if attempt.text.is_empty() || attempt.score < MIN_TEXT_SCORE {
             continue;
         }
         spans.push(RecognizedSpan::new(
@@ -1006,6 +1015,35 @@ mod tests {
         recognize_records(&backend, &mut records, None).expect("识别应成功");
         let spans = assemble_spans(&records, None).expect("组装应成功");
         assert_eq!(span_texts(&spans), vec![" ".to_string()]);
+    }
+
+    // SNAP-10 第三次增补：选中尝试分数低于 MIN_TEXT_SCORE 的非空文本整条
+    // 丢弃；阈值本身（含）以上保留；空串检查独立于分数。
+    #[test]
+    fn low_score_text_is_dropped_by_min_text_score() {
+        let mut records = vec![
+            crop_record(quad(0.0, 0.0, 20.0, 20.0), 0.9, 20, 20),
+            crop_record(quad(40.0, 0.0, 60.0, 20.0), 0.9, 20, 20),
+            crop_record(quad(80.0, 0.0, 100.0, 20.0), 0.9, 20, 20),
+        ];
+        let backend = FakeBackend::new().with_recognize(|batch| {
+            Ok(batch
+                .iter()
+                .enumerate()
+                .map(|(index, _)| match index {
+                    // 0.59 < 0.60：图标形似噪声，整条丢弃。
+                    0 => ("X".to_string(), 0.59),
+                    // 恰为阈值：保留。
+                    1 => ("口".to_string(), 0.6),
+                    // 高分真值：保留。
+                    _ => ("正文".to_string(), 0.95),
+                })
+                .collect())
+        });
+        recognize_records(&backend, &mut records, None).expect("识别应成功");
+        let spans = assemble_spans(&records, None).expect("组装应成功");
+        assert_eq!(span_texts(&spans), vec!["口".to_string(), "正文".to_string()]);
+        assert!((spans[0].recognition_score() - 0.6).abs() < 1e-9);
     }
 
     // 覆盖 O-26（test_visible_text_keeps_internal_whitespace）：

@@ -182,7 +182,7 @@ jobs:
           | **图片 URL 同步** | re-encode 后重写 `content` 与 `formatted_content` 里的 `image_N.emf` → `.png`（含中文内容，UTF-8 安全） |
           | **alt 路径清洗** | 去掉 `C:\Users\...` 这类文件系统路径型 alt 文本，避免泄露本机路径 |
           | **Markdown 图片独立成段** | 图片标记作为独立段落写出，便于预览器渲染；OCR 文字在后续 `text` 围栏中保留版式 |
-          | **精简 OCR / 转写** | 打包版默认 OCR 为 PaddleOCR pp-ocrv6 tiny（模型随包离线可用）；Tesseract 仍编入作后备；另含截图 OCR 模型集（TextSnap PP-OCRv6 small，供 JchTools 截图 OCR 推理组件使用）；音视频离线转写由 SenseVoice INT8 + Silero VAD + FFmpeg 完成（不再附带 Whisper） |
+          | **精简 OCR / 转写** | 打包版默认 OCR 为 PaddleOCR pp-ocrv6 tiny（模型随包离线可用）；Tesseract 仍编入作后备；另含截图 OCR 模型集（PP-OCRv6 medium 检测 + PP-OCRv6 small 识别与字典，供截图 OCR 推理使用）；音视频离线转写由 SenseVoice INT8 + Silero VAD + FFmpeg 完成（不再附带 Whisper） |
           | **批处理图片分目录** | batch 文本/Toon 输出把各文档图片写入 `doc_<N>/`，避免同名 `image_N` 互相覆盖 |
           EOF
           )

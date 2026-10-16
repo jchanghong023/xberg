@@ -28,7 +28,7 @@ offline.
 Beyond the HF-cached PaddleOCR models, the bundle stages the media capability
 assets from -MediaAssetRoot (never downloaded by this script, every file
 verified against a pinned size + SHA-256):
-  models/snapshot-ocr/{det.onnx,rec.onnx,dict/dict.txt}      screenshot OCR (TextSnap PP-OCRv6 small)
+  models/snapshot-ocr/{det.onnx,rec.onnx,dict/dict.txt}      screenshot OCR (PP-OCRv6 medium det + small rec)
   models/sense_voice_zh_en_ja_ko_yue_2024_07_17/{model.int8.onnx,tokens.txt}
   models/vad/silero_vad.onnx                                 Silero VAD
   sherpa-onnx/{sherpa-onnx-c-api,sherpa-onnx-cxx-api,onnxruntime,
@@ -198,7 +198,7 @@ $RequiredModels = @(
 $PinnedAssets = @(
   # Screenshot OCR model set (TextSnap PP-OCRv6 small conversions, SNAP-03).
   # The dict lives under dict/ because the loader resolves <root>/dict/dict.txt.
-  @{ Label = "snapshot det"; Source = "snapshot-models/det.onnx"; Target = "models/snapshot-ocr/det.onnx"; SizeBytes = 9891707; Sha256 = "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940" }
+  @{ Label = "snapshot det"; Source = "snapshot-models/det.onnx"; Target = "models/snapshot-ocr/det.onnx"; SizeBytes = 62119454; Sha256 = "92078b7355007ccfffcd4c8cd441a3afd4538904d06881b29a155e1e679907c2" }
   @{ Label = "snapshot rec"; Source = "snapshot-models/rec.onnx"; Target = "models/snapshot-ocr/rec.onnx"; SizeBytes = 21148338; Sha256 = "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed" }
   @{ Label = "snapshot dict"; Source = "snapshot-models/dict/dict.txt"; Target = "models/snapshot-ocr/dict/dict.txt"; SizeBytes = 74947; Sha256 = "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d" }
   # SenseVoice INT8 + tokens + Silero VAD (the transcription model set the

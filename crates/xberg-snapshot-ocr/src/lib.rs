@@ -20,7 +20,7 @@
 //! backend modules (`backend::{det, rec, image_ops, pipeline_backend,
 //! sha256}`) are byte-identical to their JchTools sources except import paths.
 //!
-//! # Model set: `snapshot-pp-ocrv6-small-textsnap`
+//! # Model set: `snapshot-pp-ocrv6-medium-det-textsnap`
 //!
 //! [`SnapshotOcrModels::load`] verifies all three members against pinned
 //! sizes and SHA-256 digests before building any session and refuses to fall
@@ -72,12 +72,12 @@ use crate::pipeline::{assemble_spans, detect_candidates, recognize_records, OcrB
 use crate::types::Quad;
 
 /// Snapshot model set name (SNAP-02).
-pub const SNAPSHOT_MODEL_SET: &str = "snapshot-pp-ocrv6-small-textsnap";
+pub const SNAPSHOT_MODEL_SET: &str = "snapshot-pp-ocrv6-medium-det-textsnap";
 
-/// Pinned det model digest: `PP-OCRv6_small_det/inference.onnx` (SNAP-03).
-pub const DET_MODEL_SHA256: &str = "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940";
+/// Pinned det model digest: RapidAI ONNX export of `PP-OCRv6_det_medium` (SNAP-03).
+pub const DET_MODEL_SHA256: &str = "92078b7355007ccfffcd4c8cd441a3afd4538904d06881b29a155e1e679907c2";
 /// Pinned det model size in bytes (SNAP-03).
-pub const DET_MODEL_BYTES: u64 = 9_891_707;
+pub const DET_MODEL_BYTES: u64 = 62_119_454;
 
 /// Pinned rec model digest: `PP-OCRv6_small_rec/inference.onnx` (SNAP-03).
 pub const REC_MODEL_SHA256: &str = "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed";
@@ -273,7 +273,7 @@ pub struct SnapshotOcrOutput {
     pub records: Vec<SnapshotOcrRecord>,
 }
 
-/// Byte-pinned, ready-to-use snapshot OCR model set (`snapshot-pp-ocrv6-small-textsnap`).
+/// Byte-pinned, ready-to-use snapshot OCR model set (`snapshot-pp-ocrv6-medium-det-textsnap`).
 ///
 /// Wraps the resident det/rec ort sessions. Load via [`SnapshotOcrModels::load`];
 /// recognize via [`SnapshotOcrModels::recognize`]. The load path mirrors the

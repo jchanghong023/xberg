@@ -68,7 +68,7 @@ fn locate_by_digest(dir: &Path) -> Result<ModelPaths, String> {
     let mut dict = None;
     scan_recursive(dir, 0, &mut det, &mut rec, &mut dict)?;
     let missing: Vec<&str> = [
-        ("det (SHA-256 3914f972…)", det.is_none()),
+        ("det (SHA-256 92078b73…)", det.is_none()),
         ("rec (SHA-256 3e3def68…)", rec.is_none()),
         ("dict (SHA-256 b5f2bfe2…)", dict.is_none()),
     ]

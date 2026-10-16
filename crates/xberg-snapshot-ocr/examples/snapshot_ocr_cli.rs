@@ -10,7 +10,7 @@
 //! Environment: for `load-dynamic` ort builds, `ORT_DYLIB_PATH` must point at
 //! the onnxruntime shared library and is pinned BEFORE any session is built
 //! (anti-preemption); the default statically linked build needs nothing.
-//! Model files are verified against the pinned `snapshot-pp-ocrv6-small-textsnap`
+//! Model files are verified against the pinned `snapshot-pp-ocrv6-medium-det-textsnap`
 //! digests at load; mismatch aborts.
 //!
 //! Output: layout text on stdout (or a JSON report with `--json`), timings on

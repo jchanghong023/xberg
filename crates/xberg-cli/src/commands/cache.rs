@@ -190,18 +190,33 @@ fn collect_manifest_entries() -> Vec<CacheManifestEntry> {
     // OCR HF cache. Use the same pins as the loader; do not query or load local assets.
     #[allow(unused_mut, reason = "additional model sources depend on CLI features")]
     let mut entries: Vec<CacheManifestEntry> = [
-        ("det.onnx", DET_MODEL_SHA256, DET_MODEL_BYTES, "snap-det.onnx"),
-        ("rec.onnx", REC_MODEL_SHA256, REC_MODEL_BYTES, "snap-rec.onnx"),
-        ("dict/dict.txt", DICT_SHA256, DICT_BYTES, "snap-dict.txt"),
+        (
+            "det.onnx",
+            DET_MODEL_SHA256,
+            DET_MODEL_BYTES,
+            "https://modelscope.cn/models/RapidAI/RapidOCR/resolve/master/onnx/PP-OCRv6/det/PP-OCRv6_det_medium.onnx",
+        ),
+        (
+            "rec.onnx",
+            REC_MODEL_SHA256,
+            REC_MODEL_BYTES,
+            "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/snap-rec.onnx",
+        ),
+        (
+            "dict/dict.txt",
+            DICT_SHA256,
+            DICT_BYTES,
+            "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/snap-dict.txt",
+        ),
     ]
     .into_iter()
-    .map(|(path, sha256, size_bytes, asset)| CacheManifestEntry {
+    .map(|(path, sha256, size_bytes, source_url)| CacheManifestEntry {
         model_set: Some(SNAPSHOT_MODEL_SET),
         ..CacheManifestEntry::new(
             format!("snapshot-ocr/{path}"),
             sha256.to_string(),
             size_bytes,
-            format!("https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/{asset}"),
+            source_url.to_string(),
         )
     })
     .collect();

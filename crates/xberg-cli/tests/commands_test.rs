@@ -28,39 +28,36 @@ fn cache_manifest_includes_the_complete_pinned_snapshot_model_set() {
     let models = manifest["models"].as_array().expect("models array");
     let snapshots: Vec<_> = models
         .iter()
-        .filter(|entry| entry["model_set"] == "snapshot-pp-ocrv6-small-textsnap")
+        .filter(|entry| entry["model_set"] == "snapshot-pp-ocrv6-medium-det-textsnap")
         .collect();
     assert_eq!(snapshots.len(), 3, "all three pinned members, each exactly once");
     for (path, size, sha, asset) in [
         (
             "snapshot-ocr/det.onnx",
-            9_891_707_u64,
-            "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940",
-            "snap-det.onnx",
+            62_119_454_u64,
+            "92078b7355007ccfffcd4c8cd441a3afd4538904d06881b29a155e1e679907c2",
+            "https://modelscope.cn/models/RapidAI/RapidOCR/resolve/master/onnx/PP-OCRv6/det/PP-OCRv6_det_medium.onnx",
         ),
         (
             "snapshot-ocr/rec.onnx",
             21_148_338,
             "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed",
-            "snap-rec.onnx",
+            "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/snap-rec.onnx",
         ),
         (
             "snapshot-ocr/dict/dict.txt",
             74_947,
             "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d",
-            "snap-dict.txt",
+            "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/snap-dict.txt",
         ),
     ] {
         let matches: Vec<_> = models.iter().filter(|entry| entry["relative_path"] == path).collect();
         assert_eq!(matches.len(), 1, "unique manifest path {path}");
         let entry = matches[0];
-        assert_eq!(entry["model_set"], "snapshot-pp-ocrv6-small-textsnap");
+        assert_eq!(entry["model_set"], "snapshot-pp-ocrv6-medium-det-textsnap");
         assert_eq!(entry["size_bytes"], size);
         assert_eq!(entry["sha256"], sha);
-        assert_eq!(
-            entry["source_url"],
-            format!("https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/{asset}")
-        );
+        assert_eq!(entry["source_url"], asset);
     }
     assert_eq!(manifest["model_count"], models.len());
     assert_eq!(

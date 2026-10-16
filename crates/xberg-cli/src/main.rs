@@ -312,7 +312,7 @@ enum Commands {
     /// Recognize one screenshot through the snapshot OCR channel (JchTools TextSnap port)
     ///
     /// Standalone second OCR capability (docs/requirements/OCR-SNAPSHOT.md, SNAP-18):
-    /// decodes `--image` (PNG), runs the byte-pinned `snapshot-pp-ocrv6-small-textsnap`
+    /// decodes `--image` (PNG), runs the byte-pinned `snapshot-pp-ocrv6-medium-det-textsnap`
     /// det/rec set, and prints the grid-layout text (`--json` for a structured report
     /// with records and timings). Model root resolution: `--models` → `snapshot_ocr`
     /// config block → XBERG_SNAPSHOT_MODEL_DIR → <exe dir>/models/snapshot-ocr.

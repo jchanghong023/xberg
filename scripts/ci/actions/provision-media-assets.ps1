@@ -33,7 +33,7 @@ New-Item -ItemType Directory -Path $MediaAssetRoot -Force | Out-Null
 
 # Direct-file assets: label, url, destination under the asset root, pinned size/sha.
 $DirectAssets = @(
-  @{ Label = "snapshot det";  Url = "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/snap-det.onnx";  Dest = "snapshot-models/det.onnx"; SizeBytes = 9891707;  Sha256 = "3914f972d833af87d23bb2338bd09238f978a48f3c4dbb8e1a4ee26a93869940" }
+  @{ Label = "snapshot det";  Url = "https://modelscope.cn/models/RapidAI/RapidOCR/resolve/master/onnx/PP-OCRv6/det/PP-OCRv6_det_medium.onnx"; Dest = "snapshot-models/det.onnx"; SizeBytes = 62119454; Sha256 = "92078b7355007ccfffcd4c8cd441a3afd4538904d06881b29a155e1e679907c2" }
   @{ Label = "snapshot rec";  Url = "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/snap-rec.onnx";  Dest = "snapshot-models/rec.onnx"; SizeBytes = 21148338; Sha256 = "3e3def686ac9a1676b59bc9749ad896263d8f68b53f352060774de359a2e23ed" }
   @{ Label = "snapshot dict"; Url = "https://github.com/jchanghong023/JchTools/releases/download/optional-components-v0.1.0/snap-dict.txt"; Dest = "snapshot-models/dict/dict.txt"; SizeBytes = 74947; Sha256 = "b5f2bfe2bdd9448429e3e82b51c789775d9b42f2403d082b00662eb77e401c5d" }
   @{ Label = "sensevoice model"; Url = "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/2365baeacb507f821a0c8120fcee3d484dba7a07/model.int8.onnx"; Dest = "media-models/models/sense_voice_zh_en_ja_ko_yue_2024_07_17/model.int8.onnx"; SizeBytes = 239233841; Sha256 = "c71f0ce00bec95b07744e116345e33d8cbbe08cef896382cf907bf4b51a2cd51" }

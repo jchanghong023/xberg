@@ -30,7 +30,7 @@ pub const DEFAULT_INTRA_THREADS: usize = 10;
 #[serde(deny_unknown_fields)]
 pub struct SnapshotOcrConfig {
     /// Model root directory holding the pinned
-    /// `snapshot-pp-ocrv6-small-textsnap` set: `det.onnx`, `rec.onnx`, and
+    /// `snapshot-pp-ocrv6-medium-det-textsnap` set: `det.onnx`, `rec.onnx`, and
     /// `dict/dict.txt`. When `None`, `XBERG_SNAPSHOT_MODEL_DIR` and
     /// `<exe directory>/models/snapshot-ocr` are tried, in that order.
     #[serde(default, skip_serializing_if = "Option::is_none")]

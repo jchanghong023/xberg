@@ -521,7 +521,7 @@ pub struct ExtractionConfig {
     /// Configures the standalone screenshot OCR channel
     /// (`docs/requirements/OCR-SNAPSHOT.md`, SNAP-01/SNAP-02): model root and
     /// intra-op thread count for the byte-pinned
-    /// `snapshot-pp-ocrv6-small-textsnap` set. Deliberately separate from
+    /// `snapshot-pp-ocrv6-medium-det-textsnap` set. Deliberately separate from
     /// [`Self::ocr`] (document OCR): the two channels never share models,
     /// sessions, or backend selection (SNAP-04). Presence of the block alone
     /// triggers nothing — the channel only runs on an explicit `ocr_snapshot`
