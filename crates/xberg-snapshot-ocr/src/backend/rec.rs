@@ -41,7 +41,7 @@ const REC_IMAGE_HEIGHT: usize = 48;
 /// 基线宽高比 `imgW/imgH = 320/48`。
 const BASE_WH_RATIO: f64 = 320.0 / 48.0;
 /// paddlex `OCRReisizeNormImg.max_imgW`。
-const MAX_IMG_W: i64 = 3200;
+pub(crate) const MAX_IMG_W: usize = 3200;
 /// TextSnap `RECOGNITION_BATCH_SIZE`（O-26）。
 pub const RECOGNITION_BATCH_SIZE: usize = 8;
 
@@ -119,16 +119,32 @@ fn map_builder_err<S>(e: ort::Error<S>) -> RecError {
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss
 )]
-pub(crate) fn rec_resize_geometry(width: usize, height: usize) -> (usize, usize) {
+/// 未钳制的 paddlex imgW（`int(48 × max(320/48, w/h))` 截断）。
+///
+/// `rec_resize_geometry` 的钳制分支与超宽裁剪的分段判定共用同一几何，
+/// 避免公式漂移。
+pub(crate) fn unclamped_img_w(width: usize, height: usize) -> usize {
     let ratio = width as f64 / height as f64; // paddlex: w * 1.0 / h
     let max_wh_ratio = if ratio > BASE_WH_RATIO { ratio } else { BASE_WH_RATIO };
     let img_w = (REC_IMAGE_HEIGHT as f64 * max_wh_ratio) as i64; // python int() 截断
+    usize::try_from(img_w).unwrap_or(usize::MAX)
+}
+
+#[allow(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss
+)]
+pub(crate) fn rec_resize_geometry(width: usize, height: usize) -> (usize, usize) {
+    let img_w = unclamped_img_w(width, height);
     if img_w > MAX_IMG_W {
-        (MAX_IMG_W as usize, MAX_IMG_W as usize)
+        (MAX_IMG_W, MAX_IMG_W)
     } else {
-        let ceil = (REC_IMAGE_HEIGHT as f64 * ratio).ceil() as i64;
-        let resized_w = if ceil > img_w { img_w } else { ceil };
-        (img_w as usize, resized_w as usize)
+        let ratio = width as f64 / height as f64;
+        // 该分支 img_w ≤ 3200，ceil 至多比 img_w 大 1，usize 域取最小值与
+        // python `min(ceil, imgW)` 等价。
+        let ceil = (REC_IMAGE_HEIGHT as f64 * ratio).ceil() as usize;
+        (img_w, ceil.min(img_w))
     }
 }
 

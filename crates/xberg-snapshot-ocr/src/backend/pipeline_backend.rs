@@ -10,7 +10,9 @@
 //! - `stretch_recognition_crop`：宽 ×1.5（半偶取整）INTER_LANCZOS4；
 //! - `rotate_90s`：`numpy.rot90`；
 //! - `recognize`：整批透传 [`RecPaddlex::recognize_crops`]（管线已按 8 切批，
-//!   内部再按 8 幂等分批不改变批构成）；
+//!   内部再按 8 幂等分批不改变批构成）；超宽裁剪（识别 imgW 钳制分支、横向
+//!   压缩系数 < 0.5）先按 [`split_segment_count`] 等分拆段识别再拼接——
+//!   压扁单次前向实测会整行丢失行内细笔画（如表格/代码行中的 `|`）。
 //! - `detect`：透传 [`DetPaddlex::detect_tile_detached`]（瓦片局部坐标）。
 //!
 //! oracle 验收入口可按 `oracle_dump.py` 的 `_DetRecorder`/`_RecRecorder`
@@ -27,7 +29,7 @@ use crate::types::TileRegion;
 
 use super::det::DetPaddlex;
 use super::image_ops::{self, BgrImage};
-use super::rec::RecPaddlex;
+use super::rec::{unclamped_img_w, RecPaddlex, MAX_IMG_W};
 use super::sha256::sha256_hex;
 
 /// 一次 det 调用的记录（`oracle_dump.py` det_calls 条目）。
@@ -128,6 +130,90 @@ impl WorkerOcrBackend {
             .drain(..)
             .collect()
     }
+
+    /// 识别一批已就绪的裁剪（无拆段；调试转储与调用记录以此为口径）。
+    fn recognize_flat(&self, batch: &[BgrImage]) -> Result<Vec<(String, f64)>, PipelineError> {
+        let results = self
+            .rec
+            .recognize_crops(batch)
+            .map_err(|e| PipelineError::Backend(e.to_string()))?;
+        Self::debug_dump_crops(batch, &results);
+        if self.record_calls {
+            let log = RecCallLog {
+                batch: batch.len(),
+                crops: batch
+                    .iter()
+                    .map(|crop| CropDigest {
+                        width: crop.width(),
+                        height: crop.height(),
+                        sha256: sha256_hex(crop.data()),
+                    })
+                    .collect(),
+                texts: results.iter().map(|(t, _)| t.clone()).collect(),
+                scores: results.iter().map(|(_, s)| *s).collect(),
+            };
+            self.rec_log
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(log);
+        }
+        Ok(results)
+    }
+}
+
+/// 超宽裁剪的分段数：unclamped imgW 整除 3200，≥2 才拆段。
+fn split_segment_count(width: usize, height: usize) -> usize {
+    if height == 0 {
+        return 1; // 零高裁剪由 rec 侧 InvalidCrop 拒绝，这里不拆段
+    }
+    (unclamped_img_w(width, height) / MAX_IMG_W).max(1)
+}
+
+/// 等分横向切片（前 `width % count` 段各多 1 像素）；段宽 ≥ 1 由分段数
+/// 上界（≤ 48·w/h/3200）保证。
+fn split_wide_crop(image: &BgrImage, count: usize) -> Result<Vec<BgrImage>, PipelineError> {
+    let width = image.width();
+    let height = image.height();
+    let base = width / count;
+    let extra = width % count;
+    let mut segments = Vec::with_capacity(count);
+    let mut x0 = 0;
+    for index in 0..count {
+        let seg_w = base + usize::from(index < extra);
+        let mut data = Vec::with_capacity(seg_w * height * 3);
+        for row in 0..height {
+            let row_base = (row * width + x0) * 3;
+            data.extend_from_slice(&image.data()[row_base..row_base + seg_w * 3]);
+        }
+        segments.push(
+            BgrImage::from_vec(seg_w, height, data)
+                .map_err(|_| PipelineError::Backend("wide-crop segment allocation failed".into()))?,
+        );
+        x0 += seg_w;
+    }
+    Ok(segments)
+}
+
+/// 分段结果归并：文本按段序拼接，分数按段文本长度（空段计 1）加权平均；
+/// 全空段的分数仍为 0（与空串尝试语义一致，`select_best` 天然弃用）。
+#[allow(clippy::cast_precision_loss)] // 权重为段内字符数，量级远小于 2^53。
+fn merge_segment_results(groups: &[(usize, usize)], results: &[(String, f64)]) -> Vec<(String, f64)> {
+    groups
+        .iter()
+        .map(|&(start, len)| {
+            let segments = &results[start..start + len];
+            let text: String = segments.iter().map(|(t, _)| t.as_str()).collect();
+            let mut weight_sum = 0.0;
+            let mut score_sum = 0.0;
+            for (segment_text, segment_score) in segments {
+                let weight = segment_text.chars().count().max(1) as f64;
+                weight_sum += weight;
+                score_sum += segment_score * weight;
+            }
+            let score = if weight_sum > 0.0 { score_sum / weight_sum } else { 0.0 };
+            (text, score)
+        })
+        .collect()
 }
 
 impl OcrBackend for WorkerOcrBackend {
@@ -160,31 +246,29 @@ impl OcrBackend for WorkerOcrBackend {
     }
 
     fn recognize(&self, batch: &[Self::Image]) -> Result<Vec<(String, f64)>, PipelineError> {
-        let results = self
-            .rec
-            .recognize_crops(batch)
-            .map_err(|e| PipelineError::Backend(e.to_string()))?;
-        Self::debug_dump_crops(batch, &results);
-        if self.record_calls {
-            let log = RecCallLog {
-                batch: batch.len(),
-                crops: batch
-                    .iter()
-                    .map(|crop| CropDigest {
-                        width: crop.width(),
-                        height: crop.height(),
-                        sha256: sha256_hex(crop.data()),
-                    })
-                    .collect(),
-                texts: results.iter().map(|(t, _)| t.clone()).collect(),
-                scores: results.iter().map(|(_, s)| *s).collect(),
-            };
-            self.rec_log
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(log);
+        // 超宽裁剪按钳制几何等分拆段：单次压扁前向（横向压缩系数 < 0.5）实测
+        // 会整行丢失行内细笔画；段数取 unclamped imgW / 3200（≥2 才拆），使每
+        // 段落回钳制分支时的压缩系数保持在 (0.5, 1]，无超宽裁剪时零开销透传。
+        let counts: Vec<usize> = batch
+            .iter()
+            .map(|image| split_segment_count(image.width(), image.height()))
+            .collect();
+        if counts.iter().all(|&k| k == 1) {
+            return self.recognize_flat(batch);
         }
-        Ok(results)
+        let mut flat: Vec<BgrImage> = Vec::with_capacity(batch.len());
+        let mut groups: Vec<(usize, usize)> = Vec::with_capacity(batch.len());
+        for (image, &count) in batch.iter().zip(&counts) {
+            let start = flat.len();
+            if count == 1 {
+                flat.push(image.clone());
+            } else {
+                flat.extend(split_wide_crop(image, count)?);
+            }
+            groups.push((start, flat.len() - start));
+        }
+        let results = self.recognize_flat(&flat)?;
+        Ok(merge_segment_results(&groups, &results))
     }
 
     fn tile(&self, image: &Self::Image, tile: &TileRegion) -> Result<Self::Image, PipelineError> {
@@ -355,5 +439,59 @@ mod tests {
         assert_eq!(record.source_height, 2);
         assert!(record.attempts.is_empty());
         assert_eq!(record.crop, img);
+    }
+
+    #[test]
+    fn split_segment_count_follows_clamp_geometry() {
+        // 3842×23：unclamped imgW = int(48×167.04) = 8017 → k = 2（long_line 语料）。
+        assert_eq!(split_segment_count(3842, 23), 2);
+        // 2008×22：imgW = 4381 → k = 1，不拆（现有压扁读取正确，保持不变）。
+        assert_eq!(split_segment_count(2008, 22), 1);
+        // imgW 恰为 2×3200 → k = 2；差 1 像素 → k = 1。
+        assert_eq!(split_segment_count(6400, 48), 2);
+        assert_eq!(split_segment_count(6399, 48), 1);
+        // imgW 未超上限 → k = 1。
+        assert_eq!(split_segment_count(1000, 100), 1);
+        assert_eq!(split_segment_count(100, 1000), 1);
+        // 防御分支：零高不拆（rec 侧 InvalidCrop 拒绝）。
+        assert_eq!(split_segment_count(100, 0), 1);
+    }
+
+    #[test]
+    fn split_wide_crop_preserves_pixels_and_order() {
+        // 5×2 三段（base=1、extra=2 → 段宽 2/2/1），逐像素还原原图。
+        let width = 5;
+        let height = 2;
+        let data: Vec<u8> = (0..width * height * 3)
+            .map(|v| u8::try_from(v % 251).unwrap())
+            .collect();
+        let img = BgrImage::from_vec(width, height, data.clone()).unwrap();
+        let segments = split_wide_crop(&img, 3).unwrap();
+        assert_eq!(segments.iter().map(BgrImage::width).collect::<Vec<_>>(), vec![2, 2, 1]);
+        let mut rebuilt = vec![0u8; data.len()];
+        let mut x0 = 0;
+        for segment in &segments {
+            for row in 0..height {
+                let src = row * segment.width() * 3;
+                let dst = (row * width + x0) * 3;
+                rebuilt[dst..dst + segment.width() * 3]
+                    .copy_from_slice(&segment.data()[src..src + segment.width() * 3]);
+            }
+            x0 += segment.width();
+        }
+        assert_eq!(rebuilt, data);
+    }
+
+    #[test]
+    fn merge_segment_results_weights_by_text_length() {
+        let groups = [(0, 2), (2, 1)];
+        let results = vec![("abc".to_string(), 0.9), ("de".to_string(), 0.6), (String::new(), 0.0)];
+        let merged = merge_segment_results(&groups, &results);
+        // 第一组：(0.9×3 + 0.6×2) / 5 = 0.78。
+        assert!((merged[0].1 - 0.78).abs() < 1e-9);
+        assert_eq!(merged[0].0, "abcde");
+        // 第二组：单段空文本 → 空串、分数 0（权重和为正、分数和恰为 0.0）。
+        assert_eq!(merged[1].0, "");
+        assert!(merged[1].1.abs() < 1e-12);
     }
 }
