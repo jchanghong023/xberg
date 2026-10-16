@@ -391,12 +391,21 @@ pub fn build_layout(spans: &[RecognizedSpan]) -> LayoutResult {
 
     let mut output_rows: Vec<String> = Vec::new();
     let mut previous_row: Option<usize> = None;
-    let first_baseline = lines[0].baseline();
+    // 逐间隙推进（2026-10-16 用户授权的布局优化；替代全局累积网格）：
+    // 行号按「上一行号 + max(1, round(相邻基线差 / row_step))」推进。相对
+    // 中位行距的离群间隙（段落间空隙）按比例产生空行；均匀行距文档——包括
+    // 整体偏松或偏紧的——因 row_step 本身取自相邻行距中位数而不受影响。
+    // 全局累积网格的缺陷：段落间隙的舍入误差沿行号累积，round(4.2)=4 会把
+    // 视觉上明确的段落空行吞掉（实测 web_light 两处段落空行全部丢失）。
+    let mut previous_baseline: Option<f64> = None;
     for line in &lines {
-        let estimated_row = round_nonnegative_half_up((line.baseline() - first_baseline).max(0.0) / row_step);
-        let row = match previous_row {
-            Some(prev) => estimated_row.max(prev + 1),
-            None => estimated_row,
+        let row = match (previous_row, previous_baseline) {
+            (Some(prev), Some(prev_baseline)) => {
+                let gap = (line.baseline() - prev_baseline).max(0.0);
+                prev + round_nonnegative_half_up(gap / row_step).max(1)
+            }
+            // 首行与全局网格原点一致：行号 0。
+            _ => 0,
         };
         let blanks = match previous_row {
             Some(prev) => row - prev - 1,
@@ -406,6 +415,7 @@ pub fn build_layout(spans: &[RecognizedSpan]) -> LayoutResult {
         output_rows.extend(std::iter::repeat_n(String::new(), blanks));
         output_rows.push(render_line(line, left_origin, grid_width));
         previous_row = Some(row);
+        previous_baseline = Some(line.baseline());
     }
 
     LayoutResult {

@@ -164,6 +164,7 @@ impl OcrBackend for WorkerOcrBackend {
             .rec
             .recognize_crops(batch)
             .map_err(|e| PipelineError::Backend(e.to_string()))?;
+        Self::debug_dump_crops(batch, &results);
         if self.record_calls {
             let log = RecCallLog {
                 batch: batch.len(),
@@ -203,11 +204,24 @@ impl OcrBackend for WorkerOcrBackend {
     // The detector interface takes u32 dimensions; retain the original narrowing.
     #[allow(clippy::cast_possible_truncation)]
     fn detect(&self, tile_image: &Self::Image) -> Result<(Vec<Quad>, Vec<f64>), PipelineError> {
-        let (polys, scores) = self
+        let (mut raw_polys, mut scores) = self
             .det
             .detect_tile_detached(tile_image.data(), tile_image.width() as u32, tile_image.height() as u32)
             .map_err(|e| PipelineError::Backend(e.to_string()))?;
-        let polys = polys
+        // 辅助细线合成（line_detect 模块文档）：补齐 DBNet 漏检的水平分隔线。
+        let extra = super::line_detect::synthesize_thin_line_boxes(
+            tile_image.data(),
+            tile_image.width() as u32,
+            tile_image.height() as u32,
+            &raw_polys,
+        );
+        if !extra.is_empty() {
+            for quad in extra {
+                raw_polys.push(quad);
+                scores.push(super::line_detect::THIN_LINE_SCORE);
+            }
+        }
+        let polys = raw_polys
             .into_iter()
             .map(|poly| {
                 [
@@ -252,6 +266,33 @@ pub fn build_record(candidate: crate::types::DetectionCandidate, crop: BgrImage)
 // ─────────────────── Xberg glue: assembly from validated parts ───────────────────
 
 impl WorkerOcrBackend {
+    /// 调试转储（环境变量 `XBERG_SNAPSHOT_DEBUG_CROPS` 指向输出目录时启用）：
+    /// 每张进入识别的裁剪存为 `{序号}_{宽}x{高}_{分数}.ppm`（P6/RGB），同名
+    /// `.txt` 存识别文本。仅服务于离线调参，正常路径（未设环境变量）零开销。
+    fn debug_dump_crops(batch: &[BgrImage], results: &[(String, f64)]) {
+        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let Some(dir) = std::env::var_os("XBERG_SNAPSHOT_DEBUG_CROPS") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        for (crop, (text, score)) in batch.iter().zip(results) {
+            let seq = SEQ.fetch_add(1, AtomicOrdering::Relaxed);
+            let (width, height) = (crop.width(), crop.height());
+            let mut ppm = Vec::with_capacity(width * height * 3 + 32);
+            ppm.extend_from_slice(format!("P6\n{width} {height}\n255\n").as_bytes());
+            for pixel in crop.data().chunks_exact(3) {
+                ppm.extend_from_slice(&[pixel[2], pixel[1], pixel[0]]);
+            }
+            let stem = format!("{seq:04}_{width}x{height}_{score}");
+            let _ = std::fs::write(dir.join(format!("{stem}.ppm")), &ppm);
+            let _ = std::fs::write(dir.join(format!("{stem}.txt")), text.as_bytes());
+        }
+    }
+
     /// Assemble a backend from already-constructed det/rec sessions
     /// (Xberg `SnapshotOcrModels::load` glue; call logging stays disabled so
     /// the resident service path keeps no crop fingerprints, mirroring

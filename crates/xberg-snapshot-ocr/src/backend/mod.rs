@@ -18,6 +18,9 @@
 //!   `numpy.rot90`).
 //! - [`pipeline_backend`]: the [`crate::pipeline::OcrBackend`] implementation
 //!   combining resident det/rec ort sessions.
+//! - [`line_detect`]: fork-specific auxiliary thin-separator-line detection
+//!   (user-authorized quality optimization, 2026-10-16; NOT part of the
+//!   paddlex oracle semantics the other submodules replicate).
 //! - [`sha256`]: dependency-free SHA-256 (model pinning + crop digests).
 //!
 //! The vendored `xberg-paddle-ocr` crate in the JchTools tree is NOT used by
@@ -27,6 +30,7 @@
 
 pub mod det;
 pub mod image_ops;
+pub(crate) mod line_detect;
 pub mod pipeline_backend;
 pub mod rec;
 pub mod sha256;
