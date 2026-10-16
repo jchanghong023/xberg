@@ -40,12 +40,15 @@ pub const WIDE_TEXT_HORIZONTAL_SCALE_FACTOR: f64 = 1.5;
 pub const CODE_STRETCH_SCORE_TOLERANCE: f64 = 0.02;
 
 /// 定稿识别分数下限：选中尝试分数低于该值的非空文本整条丢弃（2026-10-16
-/// 用户授权，SNAP-10 第三次增补）。实测依据：16 样本全部真值文本的识别分
-/// 最低为 0.780（line_detect 合成破折号行，承重必须保留）、真实 UI 截图
-/// 真值最低 0.95；低于 0.60 的全部为图标形似噪声（窗口钮/工具栏图标读成
-/// 单字）。阈值取 0.60 与最低真值保持 ≥ 0.18 边际。形似图标中识别分 ≥ 0.6
-/// 的（如放大镜读成 `Q`）无法用通用信号安全剔除，不在本阈值射程内。
-pub const MIN_TEXT_SCORE: f64 = 0.6;
+/// 用户授权，SNAP-10 第三次增补；2026-10-17 第四次增补上调 0.60→0.70）。
+/// 实测依据：16 样本全部真值文本的识别分最低为 0.780（line_detect 合成破折
+/// 号行，承重必须保留，0.78 阈值实测立即丢弃该行、table 回退 16%）；真实
+/// UI 截图真值最低 0.946。0.70 在 16 样本基准上净加权 1.282%（0.60 为
+/// 1.340%），剔除 real_ui 中识别分 0.62–0.68 的图标形似噪声（`②-□×`、
+/// `φAi`）；0.75 起开始误伤 0.70–0.75 区间真值（净加权回升至 1.296%）。
+/// 图标形似噪声中识别分 ≥ 0.7 的（如箭头/加号读成单字符、分数达 1.0）无法
+/// 用通用信号安全剔除，不在本阈值射程内。
+pub const MIN_TEXT_SCORE: f64 = 0.7;
 
 /// 注入的推理与图像操作后端。
 ///
@@ -1017,24 +1020,28 @@ mod tests {
         assert_eq!(span_texts(&spans), vec![" ".to_string()]);
     }
 
-    // SNAP-10 第三次增补：选中尝试分数低于 MIN_TEXT_SCORE 的非空文本整条
-    // 丢弃；阈值本身（含）以上保留；空串检查独立于分数。
+    // SNAP-10 第三次增补 + 第四次增补（0.60→0.70）：选中尝试分数低于
+    // MIN_TEXT_SCORE 的非空文本整条丢弃；阈值本身（含）以上保留；空串检查
+    // 独立于分数。
     #[test]
     fn low_score_text_is_dropped_by_min_text_score() {
         let mut records = vec![
             crop_record(quad(0.0, 0.0, 20.0, 20.0), 0.9, 20, 20),
             crop_record(quad(40.0, 0.0, 60.0, 20.0), 0.9, 20, 20),
             crop_record(quad(80.0, 0.0, 100.0, 20.0), 0.9, 20, 20),
+            crop_record(quad(120.0, 0.0, 140.0, 20.0), 0.9, 20, 20),
         ];
         let backend = FakeBackend::new().with_recognize(|batch| {
             Ok(batch
                 .iter()
                 .enumerate()
                 .map(|(index, _)| match index {
-                    // 0.59 < 0.60：图标形似噪声，整条丢弃。
-                    0 => ("X".to_string(), 0.59),
-                    // 恰为阈值：保留。
+                    // 0.69 < 0.70：图标形似噪声，整条丢弃。
+                    0 => ("X".to_string(), 0.69),
+                    // 旧阈值 0.60 在第四次增补后同样低于 0.70：丢弃。
                     1 => ("口".to_string(), 0.6),
+                    // 恰为新阈值：保留。
+                    2 => ("界".to_string(), 0.7),
                     // 高分真值：保留。
                     _ => ("正文".to_string(), 0.95),
                 })
@@ -1042,8 +1049,8 @@ mod tests {
         });
         recognize_records(&backend, &mut records, None).expect("识别应成功");
         let spans = assemble_spans(&records, None).expect("组装应成功");
-        assert_eq!(span_texts(&spans), vec!["口".to_string(), "正文".to_string()]);
-        assert!((spans[0].recognition_score() - 0.6).abs() < 1e-9);
+        assert_eq!(span_texts(&spans), vec!["界".to_string(), "正文".to_string()]);
+        assert!((spans[0].recognition_score() - 0.7).abs() < 1e-9);
     }
 
     // 覆盖 O-26（test_visible_text_keeps_internal_whitespace）：

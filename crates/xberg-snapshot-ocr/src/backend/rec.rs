@@ -38,6 +38,10 @@ use crate::backend::image_ops::{resize_inter_linear, BgrImage};
 
 /// rec_image_shape 的输入高度（yml `[3, 48, 320]`）。
 const REC_IMAGE_HEIGHT: usize = 48;
+/// 压扁为放大路径时启用 INTER_CUBIC 的源高上限（2026-10-17 实测：32 与 30
+/// 同为基准最优 1.237%，28 起 real_ui 回退、24 起 dpi150 回退，取边界余量
+/// 更大的 32；> 32 的裁剪 cubic 丢细笔画，保持 INTER_LINEAR）。
+const UPSCALE_CUBIC_MAX_HEIGHT: usize = 32;
 /// 基线宽高比 `imgW/imgH = 320/48`。
 const BASE_WH_RATIO: f64 = 320.0 / 48.0;
 /// paddlex `OCRReisizeNormImg.max_imgW`。
@@ -156,7 +160,17 @@ pub(crate) fn rec_resize_geometry(width: usize, height: usize) -> (usize, usize)
 fn resize_norm_img(crop: &BgrImage) -> (usize, Vec<f32>) {
     let (img_w, resized_w) = rec_resize_geometry(crop.width(), crop.height());
     let _ = img_w; // 批内统一补零到 max(imgW)，由调用方处理
-    let resized = resize_inter_linear(crop, resized_w, REC_IMAGE_HEIGHT);
+    let resized = if crop.height() <= UPSCALE_CUBIC_MAX_HEIGHT {
+        // 2026-10-17 用户授权的识别质量优化（SNAP-10 第四次增补配套）：矮裁剪
+        // 经 48 高压扁是放大路径，INTER_CUBIC 对小字形的边缘保持显著优于
+        // INTER_LINEAR（16 样本基准：ide_light 1.24%→0.41%、real_ui
+        // 2.65%→2.06%、dpi150 2.31%→1.54%）；高度 > 32 的裁剪在竖直方向已是
+        // 缩小或恒等，cubic 会在 4K 小字与表格竖线上丢失细笔画
+        // （existing_4k 0.81%→1.30%），保持 INTER_LINEAR。
+        crate::backend::image_ops::resize_inter_cubic(crop, resized_w, REC_IMAGE_HEIGHT)
+    } else {
+        resize_inter_linear(crop, resized_w, REC_IMAGE_HEIGHT)
+    };
     let mut buf = vec![0f32; 3 * REC_IMAGE_HEIGHT * resized_w];
     let plane = REC_IMAGE_HEIGHT * resized_w;
     for y in 0..REC_IMAGE_HEIGHT {

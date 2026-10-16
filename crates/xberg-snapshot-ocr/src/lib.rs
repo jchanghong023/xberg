@@ -68,7 +68,9 @@ use crate::backend::pipeline_backend::{build_record, WorkerOcrBackend};
 use crate::backend::rec::{RecError, RecPaddlex};
 use crate::backend::sha256::sha256_hex;
 use crate::layout::build_layout;
-use crate::pipeline::{assemble_spans, detect_candidates, recognize_records, OcrBackend, PipelineError};
+use crate::pipeline::{
+    assemble_spans, detect_candidates, recognize_records, CropRecord, OcrBackend, PipelineError, RECOGNITION_BATCH_SIZE,
+};
 use crate::types::Quad;
 
 /// Snapshot model set name (SNAP-02).
@@ -408,6 +410,7 @@ impl SnapshotOcrModels {
             }
         }
         recognize_records(&self.backend, &mut records, Some(cancel))?;
+        punct_extension_retry(&self.backend, &image, &mut records, Some(cancel))?;
         let spans = assemble_spans(&records, Some(cancel))?;
         let layout_text = if spans.is_empty() {
             String::new()
@@ -459,4 +462,199 @@ fn verify_member(
         });
     }
     Ok(())
+}
+
+/// 行首标点扩展重试的接受判定（纯逻辑，供单测）。
+///
+/// 门控（全部满足才接受扩展结果）：新文本非空且严格更长；原文本作为整体
+/// 出现在新文本端部（前缀或后缀，中间插入一律拒绝）；新增非空白字符全部
+/// 属于标点/线条/连接符类且至少 2 个（单字符扩展无法与图标边缘读出的
+/// `+`/`-` 区分）；新分不低于原分减 [`crate::pipeline::CODE_STRETCH_SCORE_TOLERANCE`]。
+#[must_use]
+fn punct_extension_allowed(old_text: &str, new_text: &str, old_score: f64, new_score: f64) -> bool {
+    fn is_connector(c: char) -> bool {
+        c.is_whitespace()
+            || c.is_ascii_punctuation()
+            || matches!(
+                c,
+                '·' | '—' | '–' | '「' | '」' | '『' | '』' | '，' | '。' | '：' | '；' | '、'
+            )
+    }
+    if new_text.is_empty() || new_text.chars().count() <= old_text.chars().count() {
+        return false;
+    }
+    if new_score < old_score - crate::pipeline::CODE_STRETCH_SCORE_TOLERANCE {
+        return false;
+    }
+    let added: String = if new_text.ends_with(old_text) {
+        new_text[..new_text.len() - old_text.len()].to_string()
+    } else if new_text.starts_with(old_text) {
+        new_text[old_text.len()..].to_string()
+    } else {
+        return false;
+    };
+    added.chars().filter(|c| !c.is_whitespace()).count() >= 2 && added.chars().all(is_connector)
+}
+
+/// 行首标点扩展重试（2026-10-17 用户授权，SNAP-10 第四次增补配套）。
+///
+/// DBNet 对紧贴正文左侧的短破折号/连字符（如 `-- flag` 的 `--`）概率响应
+/// 接近零（与表格分隔线同类盲区），这些字形从检测框中消失；而识别模型在
+/// 包含左侧破折号的更宽裁剪上可正常读出（ide_dark 实测：合并框
+/// `-- dark theme console` 识别分 0.998，独立碎框读空）。本重试对同行最左
+/// 的文本框向左扩展 1.5×框高重新识别，几何门控依次为：
+/// 1. 框宽高比 ≤ 20（超宽长行的扩展探测无产出且代价高）；
+/// 2. 同行没有更靠左的框（行首标点只可能出现在行首；聊天气泡的作者列等
+///    左侧已有框时本框不可能是行首）；
+/// 3. 扩展区未被其他检测框覆盖（真实 UI 图标都会被 det 独立检出成框）。
+/// 内容门控见 [`punct_extension_allowed`]；接受时替换 0° 首试（与密集代码
+/// 拉伸重试同一替换位）。
+///
+/// # Errors
+/// 后端识别失败或用户取消时透传 [`PipelineError`]。
+fn punct_extension_retry(
+    backend: &WorkerOcrBackend,
+    image: &BgrImage,
+    records: &mut [CropRecord<BgrImage>],
+    cancel: Option<&AtomicBool>,
+) -> Result<(), PipelineError> {
+    struct Job {
+        index: usize,
+        old_text: String,
+        old_score: f64,
+    }
+    let mut jobs: Vec<Job> = Vec::new();
+    let mut crops: Vec<BgrImage> = Vec::new();
+    for (index, record) in records.iter().enumerate() {
+        let best = crate::orientation::select_best(&record.attempts);
+        if best.text.is_empty() || best.rotation_degrees != 0 {
+            continue;
+        }
+        let quad = *record.candidate.quad();
+        let (left, top, right, bottom) = crate::geometry::quad_bounds(&quad);
+        let height = bottom - top;
+        let width = right - left;
+        if !height.is_finite() || height <= 1.0 || !(width / height).is_finite() || width / height > 20.0 {
+            continue;
+        }
+        // 行首先验：同行（y 范围 ± 半个框高容差）已有更靠左的框时跳过。
+        let leftmost_in_row = !records.iter().enumerate().any(|(other, record)| {
+            other != index && {
+                let (other_left, other_top, _, other_bottom) = crate::geometry::quad_bounds(record.candidate.quad());
+                other_left < left - 2.0 && other_top < bottom + height * 0.5 && other_bottom > top - height * 0.5
+            }
+        });
+        if !leftmost_in_row {
+            continue;
+        }
+        let ext = height * 1.5;
+        // det 已有框覆盖扩展区时不必重读（真实 UI 图标都会被 det 独立检出）。
+        let zone_blocked = records.iter().enumerate().any(|(other, record)| {
+            other != index && {
+                let (other_left, other_top, other_right, other_bottom) =
+                    crate::geometry::quad_bounds(record.candidate.quad());
+                let intersect_x = (other_right.min(left) - other_left.max(left - ext)).max(0.0);
+                let intersect_y = (other_bottom.min(bottom) - other_top.max(top)).max(0.0);
+                intersect_x > 2.0 && intersect_y > 2.0
+            }
+        });
+        if zone_blocked {
+            continue;
+        }
+        let extended = [(left - ext, top), (right, top), (right, bottom), (left - ext, bottom)];
+        let Ok(crop) = image_ops::warp_perspective_cubic_replicate(image, &extended) else {
+            continue;
+        };
+        jobs.push(Job {
+            index,
+            old_text: best.text.clone(),
+            old_score: best.score,
+        });
+        crops.push(crop);
+    }
+    if jobs.is_empty() {
+        return Ok(());
+    }
+    let mut results: Vec<(String, f64)> = Vec::with_capacity(jobs.len());
+    for chunk in crops.chunks(RECOGNITION_BATCH_SIZE) {
+        if cancel.is_some_and(|flag| flag.load(Ordering::SeqCst)) {
+            return Err(PipelineError::Cancelled);
+        }
+        results.extend(backend.recognize(chunk)?);
+    }
+    for (job, (text, score)) in jobs.into_iter().zip(results) {
+        if !punct_extension_allowed(&job.old_text, &text, job.old_score, score) {
+            continue;
+        }
+        records[job.index].attempts[0] = crate::orientation::RecognitionAttempt {
+            text,
+            score,
+            rotation_degrees: 0,
+        };
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod punct_extension_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
+
+    use super::punct_extension_allowed;
+
+    // ide_dark 实测：`--` 碎框死亡、合并框识别分 0.998 ≥ 0.999 − 0.02，接受。
+    #[test]
+    fn accepts_leading_dash_run_with_equal_score() {
+        assert!(punct_extension_allowed(
+            "dark theme console",
+            "-- dark theme console",
+            0.999,
+            0.998,
+        ));
+    }
+
+    // 前缀扩展同样成立（行尾破折号/省略号场景）。
+    #[test]
+    fn accepts_trailing_dash_run() {
+        assert!(punct_extension_allowed("row 1", "row 1 --", 0.95, 0.95));
+    }
+
+    // 单字符扩展拒绝：real_ui 实测图标边缘读出的 `-→`、`+新建任务` 损伤。
+    #[test]
+    fn rejects_single_character_extension() {
+        assert!(!punct_extension_allowed("→", "-→", 0.754, 0.9));
+        assert!(!punct_extension_allowed("新建任务", "+新建任务", 1.0, 1.0));
+    }
+
+    // 中间插入（原文本不是新文本端部）拒绝。
+    #[test]
+    fn rejects_middle_insertion() {
+        assert!(!punct_extension_allowed("abc", "a--bc", 0.9, 0.95));
+    }
+
+    // 非连接符字符（字母/数字/CJK 正文）拒绝。
+    #[test]
+    fn rejects_non_connector_added_characters() {
+        assert!(!punct_extension_allowed("abc", "x abc", 0.9, 0.95));
+        assert!(!punct_extension_allowed("搜索", "Q搜索", 0.9, 0.95));
+    }
+
+    // 分数跌出容差拒绝。
+    #[test]
+    fn rejects_score_drop_beyond_tolerance() {
+        assert!(!punct_extension_allowed("abc", "-- abc", 0.99, 0.9));
+        assert!(punct_extension_allowed("abc", "-- abc", 0.99, 0.97 + 1e-9));
+    }
+
+    // 更短或等长的“扩展”拒绝。
+    #[test]
+    fn rejects_shorter_or_equal_length() {
+        assert!(!punct_extension_allowed("-- abc", "abc", 0.9, 0.95));
+        assert!(!punct_extension_allowed("-- abc", "-- abc", 0.9, 0.95));
+    }
+
+    // 全空白扩展拒绝（无新增非空白连接符）。
+    #[test]
+    fn rejects_whitespace_only_extension() {
+        assert!(!punct_extension_allowed("abc", "   abc", 0.9, 0.95));
+    }
 }
