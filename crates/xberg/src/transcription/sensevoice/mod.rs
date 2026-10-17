@@ -135,18 +135,51 @@ pub fn transcribe_bytes_cancellable(
     max_duration_ms: Option<u64>,
     cancel: &crate::cancellation::CancellationToken,
 ) -> Result<SenseVoiceResult, String> {
-    check_cancel(cancel)?;
-    let model_root = resolve_model_dir(model_dir)?;
-
-    let session = get_or_create_session(&model_root)?;
-    check_cancel(cancel)?;
-
-    let ffmpeg_dir = resolve_ffmpeg_dir(&model_root)?;
+    let (session, ffmpeg_dir) = prepare_pipeline(model_dir, cancel)?;
 
     // 字节先落临时文件（FFmpeg 按路径打开输入），用完即删。
     let staged = stage_input(content, mime_type)?;
 
     run_pipeline(&session, &ffmpeg_dir, &staged.path, name, max_duration_ms, cancel)
+}
+
+/// Transcribe the original local media path without reading or staging a full
+/// copy. FFmpeg feeds the same incremental VAD/recognition pipeline used by
+/// [`transcribe_bytes_cancellable`], with the same cached sessions and reset
+/// semantics. `name` is used verbatim in the Markdown header.
+///
+/// Blocking: callers must use a blocking thread. Cancellation is cooperative
+/// between native calls; a terminal return means this pipeline has stopped.
+/// `max_duration_ms` is enforced on decoded samples. Byte-size limits belong
+/// to the caller's file metadata preflight (the worker uses `max_bytes`).
+pub fn transcribe_path_cancellable(
+    path: &Path,
+    name: &str,
+    model_dir: Option<&Path>,
+    max_duration_ms: Option<u64>,
+    cancel: &crate::cancellation::CancellationToken,
+) -> Result<SenseVoiceResult, String> {
+    check_cancel(cancel)?;
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("failed to inspect media input '{}': {error}", path.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("media input is not a file: {}", path.display()));
+    }
+    let (session, ffmpeg_dir) = prepare_pipeline(model_dir, cancel)?;
+    run_pipeline(&session, &ffmpeg_dir, path, name, max_duration_ms, cancel)
+}
+
+/// Resolve assets and acquire the resident native session once per input.
+fn prepare_pipeline(
+    model_dir: Option<&Path>,
+    cancel: &crate::cancellation::CancellationToken,
+) -> Result<(Arc<SenseVoiceSession>, PathBuf), String> {
+    check_cancel(cancel)?;
+    let model_root = resolve_model_dir(model_dir)?;
+    let session = get_or_create_session(&model_root)?;
+    check_cancel(cancel)?;
+    let ffmpeg_dir = resolve_ffmpeg_dir(&model_root)?;
+    Ok((session, ffmpeg_dir))
 }
 
 fn check_cancel(cancel: &crate::cancellation::CancellationToken) -> Result<(), String> {
@@ -786,6 +819,38 @@ mod tests {
         assert_eq!(err, "transcription cancelled");
     }
 
+    #[test]
+    fn cancelled_path_stops_before_input_and_asset_resolution() {
+        let cancel = crate::cancellation::CancellationToken::new();
+        cancel.cancel();
+        let error = transcribe_path_cancellable(
+            Path::new("Z:/definitely/not/a/media.mp4"),
+            "media.mp4",
+            Some(Path::new("Z:/definitely/not/a/model-dir")),
+            None,
+            &cancel,
+        )
+        .expect_err("cancel must precede input and model resolution");
+        assert_eq!(error, "transcription cancelled");
+    }
+
+    #[test]
+    fn path_input_errors_precede_model_resolution() {
+        let directory = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cancel = crate::cancellation::CancellationToken::new();
+        let model_dir = Some(Path::new("Z:/definitely/not/a/model-dir"));
+        let error = transcribe_path_cancellable(directory, "directory.mp4", model_dir, None, &cancel)
+            .expect_err("a directory is not a media file");
+        assert_eq!(error, format!("media input is not a file: {}", directory.display()));
+        let missing = directory.join("Cargo.toml").join("missing.mp4");
+        let error = transcribe_path_cancellable(&missing, "missing.mp4", model_dir, None, &cancel)
+            .expect_err("a nonexistent media path must fail before model resolution");
+        assert!(
+            error.starts_with(&format!("failed to inspect media input '{}':", missing.display())),
+            "unexpected: {error}"
+        );
+    }
+
     // 覆盖进程级会话缓存：键对相同输入稳定、对路径与线程配置区分。
     #[test]
     fn session_cache_key_is_stable_and_discriminating() {
@@ -949,17 +1014,21 @@ mod tests {
                 return;
             };
             let _env_guard = set_env(&env);
-            let result = transcribe_bytes(
-                &std::fs::read(&media).expect("读取测试媒体"),
+            let result = transcribe_path_cancellable(
+                &media,
                 "sample.m4a",
-                "audio/x-m4a",
                 None,
                 None,
+                &crate::cancellation::CancellationToken::new(),
             )
             .expect("真实 M4A 转录不应失败");
             assert!(result.has_audio);
             assert!(!result.segments.is_empty(), "M4A 必须有语音片段");
             assert!(result.segments.iter().all(|(_, _, t)| !t.trim().is_empty()));
+            assert!(result.markdown.starts_with("# sample.m4a\n"));
+            assert!(result.duration_ms > 0);
+            assert!(result.segments.iter().all(|(start, end, _)| end > start));
+            assert!(result.segments.windows(2).all(|pair| pair[0].0 <= pair[1].0));
             println!("M4A 转录文本：{:#?}", result.segments);
         }
 
@@ -1059,7 +1128,7 @@ mod tests {
             let _ = std::fs::remove_dir_all(&temp_root);
         }
 
-        // 覆盖超预算拒绝：max_duration_ms 小于实际时长时报错（不再进入推理）。
+        // 覆盖原路径入口：max_duration_ms 小于实际时长时在增量解码中拒绝超限输入。
         #[test]
         fn duration_limit_is_enforced() {
             let (Some(env), Some(media)) = (Env::load(), media("XBERG_TEST_MEDIA_MP4")) else {
@@ -1067,12 +1136,12 @@ mod tests {
                 return;
             };
             let _env_guard = set_env(&env);
-            let err = transcribe_bytes(
-                &std::fs::read(&media).expect("读取测试媒体"),
+            let err = transcribe_path_cancellable(
+                &media,
                 "sample.mp4",
-                "video/mp4",
                 None,
                 Some(1),
+                &crate::cancellation::CancellationToken::new(),
             )
             .expect_err("时长超限必须报错");
             assert!(err.contains("max_duration_ms"), "unexpected: {err}");

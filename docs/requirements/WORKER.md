@@ -33,6 +33,7 @@ Xberg 通过一个本地 `worker` 进程同时提供文档转换与截图 OCR，
   - `id`：任意 JSON 值，响应原样回显，用于关联；调用方须为同时在途的请求使用可区分的 id。
   - `command`：支持 `extract`、`ocr_snapshot`、`snapshot_state`、`transcribe`、`cancel`、`formats`、`capabilities`、`model_state`、`keepalive`、`shutdown`、`version`。
   - `path`：本地文件路径（`extract` / `transcribe` 使用）。
+  - `transcribe` 按原始 `path` 流式调用 FFmpeg → VAD → SenseVoice，不整文件 `read`、不制作完整临时副本；名称保留完整文件扩展名。启动配置中显式的 `transcription.max_bytes` 仍在模型工作前按文件元数据检查，`max_duration_ms` 仍按解码样本增量检查；不隐式增加 512 MiB / 30 分钟上限，也不修改独立 Xberg 的默认限额。模型会话/VAD 复用、每流 reset、原生调用间协作取消与实际 pipeline 返回后才发取消/超时终态的语义不变。
   - `image_base64`：图像字节（PNG 或等价无损编码；`ocr_snapshot` 使用，字节只驻内存）。
   - `mode`：可省略；`normal` 按启动配置处理，`extract` 还支持 `fast`；其他命令不接受 fast。
   - `grace_ms`（`shutdown` 专用，正整数毫秒，可省略）：停机宽限上限；缺省用引擎内置默认（4 秒）。
@@ -50,6 +51,7 @@ Xberg 通过一个本地 `worker` 进程同时提供文档转换与截图 OCR，
   - 失败：`{"id":..,"ok":false,"error":"一行错误描述",...}`，无载荷字段；`ocr_snapshot` 失败额外带 `error_kind`（`model_not_ready|asset_invalid|input_invalid|cancelled|internal`，SNAP-15 类别），消息不含图像内容。协议级错误 `duplicate_id`（在途 `id` 重复被调度层拒绝）与 `unsupported_command`（未知命令，附结构化 `command` 键）不属于 SNAP-15 引擎类别，任意命令均可能携带。未知命令的 `error` 文案必须保留 `unsupported command '<name>'` 前缀——run49.1 旧版直通（capabilities 失败文案含该前缀即放行）依赖它，两侧不得删。冷启动期间后续截图的即时响应与重试语义见 [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md) SNAP-15。
   - 请求行无法解析为 JSON 时：`id` 回 `null`，`ok:false`；有效 JSON 的字段校验失败仍回显可解析的 id。
   - 能力握手（`capabilities`）除既有能力键外回报进程身份（P2，全部可选、缺任一调用方按旧语义处理）：`instance_id`（进程生命周期内稳定的 UUID 形态标识）、`started_at`（RFC3339 启动时刻）、`config_digest`（生效配置序列化后的 sha256）、`owner`（仅当启动配置带 `owner_token` 时出现，原样回报）。`commands` 数组增量列出全部命令（含 keepalive/shutdown/version）；`protocol_version` 保持 2——本轮均为向后兼容增量，不升版本。
+  - 路径流式转写握手：顶层 `transcription_streaming_path` 为布尔值，仅编译了 `transcription` feature 时为 `true`，表示 `transcribe.path` 按上述原路径增量链路执行；未编译时为 `false`。保留既有顶层 `transcription` 布尔字段及 `protocol_version:2`。调用方需要无整文件暂存的长媒体支持时须检查此信号，缺失或非 `true` 不代表支持。
 
 - 退出（2026-09-30 P1 起的完整语义）：
   - **正常会话结束**（调用方关 stdin 或 `shutdown`）：在途文档请求收尾后退出，退出码 0；但收尾有硬上限——从触发点起引擎内置 4 秒（合同 ≤5 秒，留拆除余量），到点取消一切在途请求并由进程退出回收卡在原生调用中的线程，不再等待、不再补发结果。EOF 后截图在途取消遵循 [OCR-SNAPSHOT.md](OCR-SNAPSHOT.md) SNAP-16。
@@ -82,6 +84,7 @@ Xberg 通过一个本地 `worker` 进程同时提供文档转换与截图 OCR，
 ## 实现与验证状态
 
 - **共享协议扩展已实施，尚未发布验收**：新增 cancel / timeout_ms、extract fast、formats / capabilities / model_state；媒体解码/VAD 检查取消，SenseVoice 与 VAD 均保留模型会话，VAD 每流重置。新增 UT 与扩展真实模型 E2E，当前只运行标准 cargo check、fastcheck 和脚本语法检查，不代表 UT、真实模型或发布包通过。
+- **2026-10-18 长媒体路径入口已验证（开发构建，非发布包）**：worker 转写使用公开 `transcribe_path_cancellable`，能力握手新增 `transcription_streaming_path`，独立 Xberg 默认配置与显式限额不变。本次标准 fork 集开发构建、5 项 CLI 转录边界 UT 和能力发现 UT 通过；固定字节真实模型完成 00:30:10.297 音频、536870913 字节合法 MP4、取消与 1 ms 请求超时的真实终态，并以同一 OS PID、未变的常驻会话键和后续短语音的完整相同片段确认复用。JchTools 真实公开媒体入口另外完成超过 30 分钟的 M4A 与上述超 512 MiB MP4，核对正文、时间结构及源文件不变。证据为 JchTools 本轮 `candidate-fixes` 的独占报告与日志，由主代理归档；未运行发布包转换验收，不将本次开发构建结果外推到已发布版本或小时级内存曲线。
 - `model_state.models`：snapshot 返回完整加载状态；document 返回所选后端及可观测的 resident_sessions（Paddle，包含版本/模型/slot 键，其他后端显式 not_reported）；transcription 返回 SenseVoice/VAD 缓存状态与会话键。查询不触发模型加载。
 - 取消不能安全强杀原生调用；终态只在处理器返回后发送，现有第三方阻塞路径仍需真实 E2E 覆盖。源码、类型检查和历史版本 smoke 均不能替代本次发布包验收。
 

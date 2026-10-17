@@ -592,28 +592,7 @@ fn snapshot_state_request(status: &SnapshotState) -> RequestOutcome {
     RequestOutcome::State { state, error }
 }
 
-/// Map a media file extension onto the MIME the sensevoice stager understands
-/// (its probe does not require a hint, so unknown extensions are benign).
-#[cfg(feature = "transcription")]
-fn mime_for_media(path: &std::path::Path) -> &'static str {
-    match path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .map(str::to_ascii_lowercase)
-        .as_deref()
-    {
-        Some("mp4") => "video/mp4",
-        Some("m4a") => "audio/x-m4a",
-        Some("mp3") | Some("mpeg") => "audio/mpeg",
-        Some("wav") => "audio/wav",
-        Some("webm") => "audio/webm",
-        Some("wmv") => "video/x-ms-wmv",
-        Some("asf") => "video/x-ms-asf",
-        _ => "application/octet-stream",
-    }
-}
-
-/// Handle one `transcribe` request (SV-12): read the local media file and run it
+/// Handle one `transcribe` request (SV-12): stream the original local media path
 /// through the startup config's fixed transcription configuration. Requests carry no
 /// configuration (WORKER.md semantic) — a missing/disabled block or a backend other
 /// than `sensevoice` is a failure for this request only.
@@ -649,20 +628,13 @@ fn transcribe_media(
             return Err(format!("Input size {size} exceeds transcription.max_bytes {max_bytes}"));
         }
     }
-    let bytes = std::fs::read(&path).map_err(|error| format!("failed to read '{}': {error}", path.display()))?;
     // SV-06 header name: the input file's complete name including its extension,
     // exactly the JchTools media worker's `markdown()` name source (`file_name()`),
     // so callers can map each response back to its input file.
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("media")
-        .to_string();
-    let mime_type = mime_for_media(&path);
-    let result = xberg::transcription::sensevoice::transcribe_bytes_cancellable(
-        &bytes,
-        &name,
-        mime_type,
+    let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("media");
+    let result = xberg::transcription::sensevoice::transcribe_path_cancellable(
+        &path,
+        name,
         tcfg.model_dir.as_deref(),
         tcfg.max_duration_ms,
         &request.control.token,
@@ -846,6 +818,7 @@ fn capabilities_payload(identity: &WorkerIdentity, owner_token: Option<&str>) ->
         "timeout_ms": true,
         "document_snapshot_concurrent": true,
         "transcription": cfg!(feature = "transcription"),
+        "transcription_streaming_path": cfg!(feature = "transcription"),
         "layout": cfg!(feature = "layout-detection"),
         "paddle_ocr": cfg!(feature = "paddle-ocr"),
         "instance_id": identity.instance_id,
@@ -1546,6 +1519,46 @@ mod tests {
         );
     }
 
+    #[test]
+    #[cfg(feature = "transcription")]
+    fn transcribe_enforces_explicit_size_limit_before_model_resolution() {
+        use xberg::core::config::transcription::TranscriptionConfig;
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let size = std::fs::metadata(&path).expect("real input metadata").len();
+        assert!(size > 1);
+        let config = ExtractionConfig {
+            transcription: Some(TranscriptionConfig {
+                enabled: true,
+                max_bytes: Some(1),
+                model_dir: Some(PathBuf::from("Z:/definitely/not/a/model-dir")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let error = transcribe_media(&config, transcribe_req(json!("limit"), &path.to_string_lossy()))
+            .expect_err("explicit size limit must reject before asset resolution");
+        assert_eq!(error, format!("Input size {size} exceeds transcription.max_bytes 1"));
+    }
+
+    #[test]
+    #[cfg(feature = "transcription")]
+    fn transcribe_cancelled_input_does_not_resolve_models() {
+        use xberg::core::config::transcription::TranscriptionConfig;
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let config = ExtractionConfig {
+            transcription: Some(TranscriptionConfig {
+                enabled: true,
+                model_dir: Some(PathBuf::from("Z:/definitely/not/a/model-dir")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let request = transcribe_req(json!("cancelled"), &path.to_string_lossy());
+        request.control.token.cancel();
+        let error = transcribe_media(&config, request).expect_err("cancel before model resolution");
+        assert_eq!(error, "transcription cancelled");
+    }
+
     /// P2: capabilities carries the identity block and lists every command,
     /// including the new keepalive/shutdown/version surface.
     #[test]
@@ -1553,6 +1566,11 @@ mod tests {
         let identity = WorkerIdentity::new(&ExtractionConfig::default());
         let payload = capabilities_payload(&identity, None);
         assert_eq!(payload["protocol_version"], json!(2));
+        assert_eq!(payload["transcription"], json!(cfg!(feature = "transcription")));
+        assert_eq!(
+            payload["transcription_streaming_path"],
+            json!(cfg!(feature = "transcription"))
+        );
         for command in [
             "extract",
             "ocr_snapshot",
