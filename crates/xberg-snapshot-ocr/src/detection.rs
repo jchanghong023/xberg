@@ -36,6 +36,12 @@ pub const DEFAULT_SEAM_HEIGHT_SIMILARITY: f64 = 0.65;
 /// 接缝边缘基础容差（像素；Python `merge_seam_fragments` 的 `edge_tolerance`
 /// 默认值）。
 pub const DEFAULT_SEAM_EDGE_TOLERANCE: f64 = 4.0;
+/// 同线探入合并：水平重叠宽度上限，相对两框较小宽度（2026-10-18 第五轮
+/// 新增）。超过该比例的重叠属于去重（`deduplicate_candidates`）的管辖范围。
+pub const DEFAULT_POKE_MAX_OVERLAP_WIDTH_RATIO: f64 = 0.25;
+/// 同线探入合并：水平重叠宽度下限，相对较大字高，避免把仅擦边的独立
+/// 短框并进长行（2026-10-18 第五轮新增）。
+pub const DEFAULT_POKE_MIN_OVERLAP_HEIGHT_RATIO: f64 = 0.3;
 
 /// 并查集（对应 Python `_DisjointSet`）：查找带路径压缩；合并时固定把第二
 /// 个根挂到第一个根下，保证分组结果与 Python 完全一致。
@@ -168,17 +174,21 @@ fn is_seam_pair(
     if larger_height <= 0.0 || first_height.min(second_height) / larger_height < height_similarity {
         return false;
     }
-    // 检测模型可能在重叠瓦片中漏掉被接缝裁掉一半的边缘字形，导致检测框
-    // 整体内缩约半个字高，固定 4 像素容差无法重新连接两段。把尺度感知
-    // 余量限制在观测字高的一半以内，使其只作用于接缝附近，不桥接普通
-    // 栏间距。（与 Python 内注释一致。）
+    // 检测模型可能在重叠瓦片中漏掉被接缝裁掉的边缘字形，导致检测框整体
+    // 内缩；固定 4 像素容差无法重新连接两段。尺度感知余量最初观测为半个
+    // 字高（与 Python 内注释一致），2026-10-18 第五轮真实截图实测内缩可达
+    // 约 0.8×字高（2559×1365 UI 截图：行尾独立框左缘距瓦片左缘 21px、字高
+    // 27px，半字高容差下该行跨三瓦片的片段在去重中整行丢失），故放宽到
+    // 1×字高；垂直重叠、高度相似与水平间距护栏不变，余量仍只作用于接缝
+    // 附近，不桥接普通栏间距。该表达式自本轮起有意偏离 Python 参考实现
+    // （SNAP-13 修订：识别质量优先）。
     // Python max(edge_tolerance, h*0.5) 在首参为 NaN 时返回 NaN（比较恒 False
     // 保留首个参数），使后续 `<= NaN` 恒 False、永不合并；Rust f64::max 会丢弃
     // NaN，须显式传播以对齐。
     let effective_edge_tolerance = if edge_tolerance.is_nan() {
         f64::NAN
     } else {
-        edge_tolerance.max(larger_height * 0.5)
+        edge_tolerance.max(larger_height)
     };
     if !touches_right_edge(left_tile_candidate, effective_edge_tolerance) {
         return false;
@@ -378,13 +388,91 @@ pub fn deduplicate_candidates_with(
     decorated.into_iter().map(|(_, _, _, candidate)| candidate).collect()
 }
 
-/// 完整整理：先合并接缝片段、后重叠去重（Python `consolidate_candidates`）。
+/// 判定两个候选是否为同一文字行被 DBNet 拆出的「探入式」碎片
+/// （2026-10-18 第五轮新增，非 Python 参考实现行为）。
+///
+/// 真实 UI 截图里行内样式切换（等宽/着色/加粗）常把一行拆成两框，后框
+/// 左缘带 unclip 外扩探入前框末字，识别时末字的半个字形被重读为无关
+/// 字符（实测：`旧版 d44b119a` 读出 `旧版反d44b119a`——`版` 的右半正是
+/// `反`；`…841f1fe8d8 (https://…` 的版本号尾部被后框整体重读一遍）。此类
+/// 碎片对的特征：同行（高度相近、垂直重叠达标）、水平范围互越（阶梯状，
+/// 排除相互包含——那是去重的职责）、水平重叠既不超过较小宽度的四分之一
+/// （重叠更大应交给去重），也不小于三分之一字高（擦边不算探入）。
+fn is_poke_pair(first: &DetectionCandidate, second: &DetectionCandidate) -> bool {
+    let first_bounds = quad_bounds(first.quad());
+    let second_bounds = quad_bounds(second.quad());
+    let (first_width, first_height) = quad_dimensions(first.quad());
+    let (second_width, second_height) = quad_dimensions(second.quad());
+    let larger_height = first_height.max(second_height);
+    if larger_height <= 0.0 || first_height.min(second_height) / larger_height < DEFAULT_SEAM_HEIGHT_SIMILARITY {
+        return false;
+    }
+    if vertical_overlap_ratio(first.quad(), second.quad()) < DEFAULT_SEAM_VERTICAL_OVERLAP {
+        return false;
+    }
+    let overlap = first_bounds.2.min(second_bounds.2) - first_bounds.0.max(second_bounds.0);
+    if overlap <= 0.0 {
+        return false;
+    }
+    let min_width = first_width.min(second_width);
+    let max_overlap = DEFAULT_POKE_MAX_OVERLAP_WIDTH_RATIO * min_width;
+    if overlap > max_overlap || overlap < DEFAULT_POKE_MIN_OVERLAP_HEIGHT_RATIO * larger_height {
+        return false;
+    }
+    (first_bounds.0 < second_bounds.0 && first_bounds.2 < second_bounds.2)
+        || (second_bounds.0 < first_bounds.0 && second_bounds.2 < first_bounds.2)
+}
+
+/// 合并同一行内互相探入的碎片（`is_poke_pair` 判定，并查集组件复用
+/// [`merge_component`]；2026-10-18 第五轮新增，非 Python 参考实现行为）。
+///
+/// 输出按 (顶部, 左边) 稳定排序，与 [`merge_seam_fragments`] 一致。
+#[must_use]
+pub fn merge_poking_line_fragments(candidates: &[DetectionCandidate]) -> Vec<DetectionCandidate> {
+    let mut groups = DisjointSet::new(candidates.len());
+    for (first_index, first) in candidates.iter().enumerate() {
+        for (second_index, second) in candidates.iter().enumerate().skip(first_index + 1) {
+            if is_poke_pair(first, second) {
+                groups.union(first_index, second_index);
+            }
+        }
+    }
+
+    let components = component_groups(candidates.len(), &mut groups);
+    let mut merged: Vec<DetectionCandidate> = Vec::with_capacity(components.len());
+    for component in &components {
+        if component.len() == 1 {
+            merged.push(candidates[component[0]].clone());
+        } else {
+            match merge_component(candidates, component) {
+                Ok(candidate) => merged.push(candidate),
+                Err(error) => {
+                    unreachable!("组件成员均已通过构造校验且共享同一图像尺寸，并集瓦片与合并候选必然合法：{error}")
+                }
+            }
+        }
+    }
+
+    let mut decorated: Vec<(f64, f64, DetectionCandidate)> = merged
+        .into_iter()
+        .map(|candidate| {
+            let bounds = quad_bounds(candidate.quad());
+            (bounds.1, bounds.0, candidate)
+        })
+        .collect();
+    decorated.sort_by(|left, right| left.0.total_cmp(&right.0).then_with(|| left.1.total_cmp(&right.1)));
+    decorated.into_iter().map(|(_, _, candidate)| candidate).collect()
+}
+
+/// 完整整理：先合并接缝片段、再合并同线探入碎片、后重叠去重。
 ///
 /// 跨接缝的长行可能自身满足重复阈值；先合并可保住两端外缘，再去重清除
-/// 残余的整框重复。
+/// 残余的整框重复。探入合并置于两者之间：接缝合并统一被切割的长行后，
+/// 行内样式边界拆出的探入碎片并入整行，避免去重把碎片与整行判为重复时
+/// 保留碎片、丢失整行文本（第五轮实测教训）。
 #[must_use]
 pub fn consolidate_candidates(candidates: &[DetectionCandidate]) -> Vec<DetectionCandidate> {
-    deduplicate_candidates(&merge_seam_fragments(candidates))
+    deduplicate_candidates(&merge_poking_line_fragments(&merge_seam_fragments(candidates)))
 }
 
 #[cfg(test)]
@@ -393,7 +481,7 @@ mod tests {
     // tests/test_detection.py，期望值与断言不增不减。
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::float_cmp)]
 
-    use super::{consolidate_candidates, deduplicate_candidates, merge_seam_fragments};
+    use super::{consolidate_candidates, deduplicate_candidates, merge_poking_line_fragments, merge_seam_fragments};
     use crate::types::{DetectionCandidate, Quad, TileRegion};
 
     /// 对应 Python `_quad(left, top, right, bottom)`。
@@ -589,5 +677,76 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert!(result.contains(&duplicate2));
         assert!(result.contains(&unrelated));
+    }
+
+    // ===== 2026-10-18 第五轮（真实截图质量优化）新增用例，非冻结 oracle 用例 =====
+
+    /// 第五轮实测几何复现（2559×1365 UI 截图实测验证段）：一行文字横跨三个
+    /// 瓦片，行尾独立框左缘距瓦片左缘 21px——大于旧半字高容差 13.5px、小于
+    /// 新 1×字高容差 27px。旧实现中瓦片 1+2 的接缝合并框与行尾框按交集/较小
+    /// 面积（0.69 ≥ 0.6）归入同一去重组，「不触内部接缝」的行尾框胜出，
+    /// 整行文本丢失；新容差下三片段先并成整行再去重，行文本完整保留。
+    #[test]
+    fn tail_fragment_beyond_half_height_tolerance_merges_into_seam_line() {
+        let tiles = [
+            TileRegion::new(0, 0, 0, 1216, 1216, 2559, 1365).unwrap(),
+            TileRegion::new(1, 1088, 0, 1216, 1216, 2559, 1365).unwrap(),
+            TileRegion::new(2, 2176, 0, 383, 1216, 2559, 1365).unwrap(),
+        ];
+        let left = candidate(rect_quad(475.0, 1041.0, 1213.0, 1067.0), 0.88, tiles[0], 0.0, true);
+        let middle = candidate(rect_quad(1097.0, 1041.0, 2302.0, 1067.0), 0.97, tiles[1], 0.0, true);
+        let tail = candidate(rect_quad(2197.0, 1039.0, 2337.0, 1066.0), 0.90, tiles[2], 21.0, false);
+        let consolidated = consolidate_candidates(&[left, middle, tail]);
+        assert_eq!(consolidated.len(), 1);
+        assert_eq!(consolidated[0].quad(), &rect_quad(475.0, 1039.0, 2337.0, 1067.0));
+        assert_eq!(consolidated[0].source_tile_indices(), &[0_usize, 1, 2]);
+    }
+
+    /// 第五轮实测几何复现（表格行 `两份资源清单仍记录旧版 d44b119a`）：同行
+    /// 两框在样式边界互相探入（重叠 15px），旧实现各自识别，后框左缘把前框
+    /// 末字 `版` 的右半重读成 `反`；探入合并后整行只识别一次。
+    #[test]
+    fn poking_style_boundary_fragments_merge_into_one_line() {
+        let (tile0, _, _) = base_tiles();
+        let head = candidate(rect_quad(717.0, 865.0, 1017.0, 892.0), 0.88, tile0, 50.0, false);
+        let tail = candidate(rect_quad(1002.0, 863.0, 1902.0, 892.0), 0.98, tile0, 60.0, false);
+        let merged = merge_poking_line_fragments(&[head, tail]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].quad(), &rect_quad(717.0, 863.0, 1902.0, 892.0));
+    }
+
+    /// 第五轮实测几何复现（发布链接行）：绿色版本号框与链接框互相探入
+    /// （重叠 93px），旧实现把版本号尾部 `f1fe8d8` 在链接框里重读一遍。
+    #[test]
+    fn version_tail_poke_into_link_box_merges() {
+        let (tile0, _, _) = base_tiles();
+        let version = candidate(rect_quad(697.0, 603.0, 1181.0, 626.0), 0.91, tile0, 40.0, false);
+        let link = candidate(rect_quad(1088.0, 602.0, 2400.0, 627.0), 0.89, tile0, 45.0, false);
+        let merged = merge_poking_line_fragments(&[version, link]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].quad(), &rect_quad(697.0, 602.0, 2400.0, 627.0));
+    }
+
+    /// 重叠超过较小宽度 1/4 的同线框对不属探入合并（那是去重的管辖范围）；
+    /// 该几何也不满足去重阈值（IoU 0.25、交集占较小面积 0.4），两框都保留。
+    #[test]
+    fn overlapping_pairs_beyond_poke_ratio_are_left_to_dedup() {
+        let (tile0, tile1, _) = base_tiles();
+        let first = candidate(rect_quad(0.0, 0.0, 100.0, 20.0), 0.6, tile0, 5.0, false);
+        let second = candidate(rect_quad(60.0, 0.0, 160.0, 20.0), 0.8, tile1, 7.0, false);
+        let merged = merge_poking_line_fragments(&[first, second.clone()]);
+        assert_eq!(merged.len(), 2);
+        assert!(merged.contains(&second));
+    }
+
+    /// 擦边（重叠 1px < 0.3×字高）不算探入：相邻独立短框不被并进长行。
+    #[test]
+    fn grazing_overlap_is_not_treated_as_poke() {
+        let (tile0, _, _) = base_tiles();
+        let line = candidate(rect_quad(0.0, 0.0, 1000.0, 27.0), 0.9, tile0, 5.0, false);
+        let label = candidate(rect_quad(999.0, 0.0, 1019.0, 27.0), 0.9, tile0, 6.0, false);
+        let merged = merge_poking_line_fragments(&[line, label.clone()]);
+        assert_eq!(merged.len(), 2);
+        assert!(merged.contains(&label));
     }
 }

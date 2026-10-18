@@ -2,7 +2,9 @@
 //!
 //! 从 `ocr.py` 精读移植的编排语义：初始批 8 张 flush、小裁剪 2× 增强、
 //! 密集代码 1.5× 横向拉伸重试（含 0.02 分数容差与替换规则）、方向重试、
-//! 瓦片检测（夹取→全局映射→内部边缘度量→先合并后去重）、span 只丢空串，
+//! 瓦片检测（夹取→全局映射→内部边缘度量→先接缝合并、再同线探入合并、
+//! 后去重；探入合并与 1×字高接缝容差为 2026-10-18 第五轮质量增补，有意
+//! 偏离参考实现）、span 只丢空串，
 //! 以及每个 flush 前后的用户取消检查点。真实推理与图像操作经
 //! [`OcrBackend`] 注入，本模块保持纯逻辑、可离线构造测试。
 //!
@@ -293,7 +295,7 @@ pub fn validate_perspective(quad: &Quad) -> Result<(f64, f64), PipelineError> {
 /// 再对裁剪图调用 [`OcrBackend::detect`]（batch=1）→ 四边形夹取到瓦片范围 →
 /// [`map_quad_to_global`] 映射回全局 → [`internal_edge_metrics`] 内部边缘
 /// 度量 → [`DetectionCandidate`] → 全部瓦片完成后
-/// [`consolidate_candidates`]（先接缝合并后去重）。
+/// [`consolidate_candidates`]（先接缝合并、再同线探入合并、后去重）。
 ///
 /// 取消检查点与 Python 一致：每个瓦片检测前与候选收集后各检查一次。
 ///
